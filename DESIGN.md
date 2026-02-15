@@ -81,6 +81,61 @@ Haskell Source
   runtime assumptions.
 - **Cmm** — replaced by GRIN, which talks directly to backends.
 
+## Memory Management
+
+GHC uses a generational copying GC with a nursery and older generations, plus a
+concurrent non-moving collector (Ben Gamari, GHC 8.10) for latency-sensitive
+workloads and pinned object fragmentation. For Rusholme we take a different,
+phased approach.
+
+### Strategy: phased, from simple to ambitious
+
+| Phase | Approach | Description |
+|-------|----------|-------------|
+| **Phase 1** | Arena / Region allocator | Use Zig's built-in `std.heap.ArenaAllocator` to get something working fast. Regions are freed in bulk — natural fit with Zig and sufficient for early milestones |
+| **Phase 2** | Immix (mark-region GC) | Implement an Immix-style collector as a custom `std.mem.Allocator`. Immix allocates in 32KB blocks / 128B lines, with opportunistic defragmentation. Best balance of performance and complexity. Simon Marlow noted GHC's allocator is "quite similar to Immix" |
+| **Phase 3** | ASAP-style static deallocation | Leverage GRIN's whole-program analysis to insert compile-time deallocation where provably safe. Goal: eliminate runtime GC for as much of the program as possible, falling back to Immix for the rest |
+
+### Why Immix?
+
+- 7–25% faster than canonical GCs in benchmarks (Blackburn & McKinley, PLDI 2008)
+- Space efficiency of mark-compact with speed of mark-sweep
+- Opportunistic defragmentation avoids the "all-or-nothing" copying cost
+- LLVM-based implementation exists; GRIN targets LLVM
+- Can be implemented as a Zig custom allocator
+
+### Why ASAP?
+
+- No runtime GC overhead for statically-deallocatable values
+- GRIN's explicit `store`/`fetch`/`update` make static deallocation insertion
+  natural
+- Whole-program analysis (required by ASAP) is already part of the GRIN pipeline
+- Could be Rusholme's differentiating feature among toy compilers
+
+### Key references
+
+- **Immix**: Blackburn & McKinley, *"Immix: A Mark-Region Garbage Collector
+  with Space Efficiency, Fast Collection, and Mutator Performance"*, PLDI 2008.
+  PDF: https://users.cecs.anu.edu.au/~steveb/pubs/papers/immix-pldi-2008.pdf
+- **ASAP**: Proust, *"ASAP: As Static As Possible memory management"*,
+  Cambridge TR-908, 2017.
+  PDF: https://www.cl.cam.ac.uk/techreports/UCAM-CL-TR-908.pdf
+- **Cloaca**: Hardware-assisted concurrent GC for non-strict functional
+  languages, Haskell Symposium 2024.
+  DOI: https://doi.org/10.1145/3677999.3678277
+- **Liveness-based GC**: Kumar et al., *"Liveness-Based Garbage Collection
+  for Lazy Languages"*, arXiv 2016.
+  PDF: https://arxiv.org/pdf/1604.05841
+
+### What we skip (and why)
+
+- **GHC's generational copying GC** — well-proven but complex to implement;
+  Immix achieves better performance with simpler design.
+- **Non-moving concurrent GC** — solves latency issues we don't yet have; adds
+  significant complexity.
+- **Hardware GC (Cloaca)** — fascinating research but requires FPGA; not
+  applicable to a software runtime.
+
 ## Decisions Log
 
 *Decisions will be recorded here as the project evolves.*
@@ -94,3 +149,7 @@ Haskell Source
 | 5 | Use GRIN instead of STG+Cmm | GRIN explicitly models laziness and memory ops in a single IR, supports whole-program optimisation, and is backend-agnostic — simpler pipeline with more flexibility | 2026-02-15 |
 | 6 | Keep a simplified Core (à la System F) | Small typed IR for optimisation and as a safety firewall between frontend and GRIN | 2026-02-15 |
 | 7 | Target multiple backends (C, JS, LLVM) | Explore code generation to different platforms from a single IR | 2026-02-15 |
+| 8 | Phased GC strategy: Arena → Immix → ASAP | Start simple (arena/regions), graduate to Immix for real GC, explore ASAP for compile-time deallocation | 2026-02-15 |
+| 9 | Immix as primary runtime GC | Best balance of performance, simplicity, and compatibility with GRIN/LLVM; Marlow-endorsed for Haskell | 2026-02-15 |
+| 10 | Explore ASAP-style static deallocation | Leverage GRIN's whole-program analysis to eliminate runtime GC where possible — differentiating feature | 2026-02-15 |
+| 11 | Implement GC as Zig custom allocator | Zig's `std.mem.Allocator` interface allows swapping GC strategies cleanly | 2026-02-15 |
