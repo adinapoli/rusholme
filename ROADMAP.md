@@ -1,7 +1,16 @@
 # Rusholme Roadmap
 
 > Auto-generated from GitHub issues. Each issue links to its tracker.
-> **Starting points** (zero dependencies): #1, #2, #17, #22, #24, #27, #53, #58, #62, #66, #68
+> **Starting points** (zero dependencies): #1✓, #2✓, #17✓, #22✓, #24✓, #27✓, #53✓, #58, #62, #66, #68
+
+**Recent Progress (2026-02-15):**
+- ✓ #1: GitHub Actions CI set up
+- ✓ #2: Modular project layout established
+- ✓ #17: SourceSpan and SourcePos types implemented
+- ✓ #22: Parser technique researched (hand-written recursive descent chosen)
+- ✓ #24: Unicode character classification implemented
+- ✓ #27: Full Haskell AST types defined
+- ✓ #53: LLVM C API bindings created
 
 ---
 
@@ -11,14 +20,14 @@
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#1](https://github.com/adinapoli/rusholme/issues/1) | Set up GitHub Actions CI via Nix flake | — | :white_circle: |
-| [#2](https://github.com/adinapoli/rusholme/issues/2) | Establish modular project layout (src/ split by pipeline stage) | — | :white_circle: |
+| [#1](https://github.com/adinapoli/rusholme/issues/1) | Set up GitHub Actions CI via Nix flake | — | :green_circle: |
+| [#2](https://github.com/adinapoli/rusholme/issues/2) | Establish modular project layout (src/ split by pipeline stage) | — | :green_circle: |
 
 ### Epic [#3](https://github.com/adinapoli/rusholme/issues/3): Structured Error Diagnostics
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#17](https://github.com/adinapoli/rusholme/issues/17) | Define SourceSpan and SourcePos types | — | :white_circle: |
+| [#17](https://github.com/adinapoli/rusholme/issues/17) | Define SourceSpan and SourcePos types | — | :green_circle: |
 | [#18](https://github.com/adinapoli/rusholme/issues/18) | Define Diagnostic ADT (errors as structured data, not strings) | [#17](https://github.com/adinapoli/rusholme/issues/17) | :white_circle: |
 | [#19](https://github.com/adinapoli/rusholme/issues/19) | Implement DiagnosticCollector for accumulating errors across modules | [#18](https://github.com/adinapoli/rusholme/issues/18) | :white_circle: |
 | [#20](https://github.com/adinapoli/rusholme/issues/20) | Implement terminal diagnostic renderer with source snippets | [#18](https://github.com/adinapoli/rusholme/issues/18) | :white_circle: |
@@ -43,12 +52,12 @@
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#22](https://github.com/adinapoli/rusholme/issues/22) | Research: Parser technique decision (tree-sitter vs Alex/Happy vs hand-written) | — | :white_circle: |
+| [#22](https://github.com/adinapoli/rusholme/issues/22) | Research: Parser technique decision (tree-sitter vs Alex/Happy vs hand-written) | — | :green_circle: |
 | [#23](https://github.com/adinapoli/rusholme/issues/23) | Define lexer token types for Haskell | [#22](https://github.com/adinapoli/rusholme/issues/22) | :white_circle: |
-| [#24](https://github.com/adinapoli/rusholme/issues/24) | Implement Unicode character classification for Haskell identifiers | — | :white_circle: |
+| [#24](https://github.com/adinapoli/rusholme/issues/24) | Implement Unicode character classification for Haskell identifiers | — | :green_circle: |
 | [#25](https://github.com/adinapoli/rusholme/issues/25) | Implement core lexer (keywords, identifiers, literals, symbols) | [#23](https://github.com/adinapoli/rusholme/issues/23), [#24](https://github.com/adinapoli/rusholme/issues/24), [#17](https://github.com/adinapoli/rusholme/issues/17) | :white_circle: |
 | [#26](https://github.com/adinapoli/rusholme/issues/26) | Implement full Haskell 2010 layout rule | [#25](https://github.com/adinapoli/rusholme/issues/25) | :white_circle: |
-| [#27](https://github.com/adinapoli/rusholme/issues/27) | Define Haskell AST types (module, declarations, expressions, patterns, types) | [#17](https://github.com/adinapoli/rusholme/issues/17) | :white_circle: |
+| [#27](https://github.com/adinapoli/rusholme/issues/27) | Define Haskell AST types (module, declarations, expressions, patterns, types) | [#17](https://github.com/adinapoli/rusholme/issues/17) | :green_circle: |
 | [#28](https://github.com/adinapoli/rusholme/issues/28) | Implement AST pretty-printer for debugging and golden tests | [#27](https://github.com/adinapoli/rusholme/issues/27) | :white_circle: |
 | [#29](https://github.com/adinapoli/rusholme/issues/29) | Implement parser: module header, imports, and top-level declarations | [#26](https://github.com/adinapoli/rusholme/issues/26), [#27](https://github.com/adinapoli/rusholme/issues/27) | :white_circle: |
 | [#30](https://github.com/adinapoli/rusholme/issues/30) | Implement parser: expressions | [#29](https://github.com/adinapoli/rusholme/issues/29) | :white_circle: |
@@ -97,7 +106,7 @@
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#53](https://github.com/adinapoli/rusholme/issues/53) | Set up LLVM C API bindings in Zig | — | :white_circle: |
+| [#53](https://github.com/adinapoli/rusholme/issues/53) | Set up LLVM C API bindings in Zig | — | :green_circle: |
 | [#54](https://github.com/adinapoli/rusholme/issues/54) | Implement LLVM codegen skeleton (module, function defs, entry point) | [#53](https://github.com/adinapoli/rusholme/issues/53), [#40](https://github.com/adinapoli/rusholme/issues/40) | :white_circle: |
 | [#55](https://github.com/adinapoli/rusholme/issues/55) | Implement LLVM codegen for GRIN expressions (store/fetch/update/case/app) | [#54](https://github.com/adinapoli/rusholme/issues/54) | :white_circle: |
 | [#56](https://github.com/adinapoli/rusholme/issues/56) | Implement Zig runtime (heap allocator, thunk evaluator, entry point) | [#53](https://github.com/adinapoli/rusholme/issues/53) | :white_circle: |
@@ -180,13 +189,13 @@ The longest dependency chain to M1 (`main = putStrLn "Hello"`):
                                ├─► #50 GRIN evaluator ──► #51 IO primitives  ✓ interpreter path
                                └─► #54 LLVM codegen ──► #55 GRIN exprs ─┐
                                                                          ├─► #57 link & run  ✓ compiler path
-                                                        #53 LLVM bindings ──► #56 Zig runtime ─┘
+                                                        #53✓ LLVM bindings ──► #56 Zig runtime ─┘
 
-#17 SourceSpan ──► #18 diagnostics ──► #36 (also needs diagnostics)
+#17✓ SourceSpan ──► #18 diagnostics ──► #36 (also needs diagnostics)
 
-#22 parser research ──► #23 tokens ─┐
-#24 unicode ────────────────────────┼─► #25 lexer ──► #26 layout ──► #29 parser ──► #30/#31/#32/#33
-#17 SourceSpan ─────────────────────┘
+#22✓ parser research ──► #23 tokens ─┐
+#24✓ unicode ────────────────────────┼─► #25 lexer ──► #26 layout ──► #29 parser ──► #30/#31/#32/#33
+#17✓ SourceSpan ─────────────────────┘
 ```
 
 **Legend:** :white_circle: Not started | :large_blue_circle: In progress | :green_circle: Done

@@ -1,18 +1,45 @@
-//! By convention, root.zig is the root source file when making a package.
-const std = @import("std");
-const Io = std.Io;
+//! Rusholme - A toy Haskell compiler in Zig.
+//!
+//! This is the root module that exports all public APIs.
 
-/// This is a documentation comment to explain the `printAnotherMessage` function below.
-///
-/// Accepting an `Io.Writer` instance is a handy way to write reusable code.
-pub fn printAnotherMessage(writer: *Io.Writer) Io.Writer.Error!void {
-    try writer.print("Run `zig build test` to run the tests.\n", .{});
-}
+// Diagnostics
+pub const diagnostics = struct {
+    pub const span = @import("diagnostics/span.zig");
+    pub const diagnostic = @import("diagnostics/diagnostic.zig");
+};
 
-pub fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
+// Frontend
+pub const frontend = struct {
+    pub const lexer = @import("frontend/lexer.zig");
+    pub const parser = @import("frontend/parser.zig");
+    pub const layout = @import("frontend/layout.zig");
+    pub const unicode = @import("frontend/unicode.zig");
+    pub const ast = @import("frontend/ast.zig");
+};
 
-test "basic add functionality" {
-    try std.testing.expect(add(3, 7) == 10);
-}
+// Type checking
+pub const typechecker = @import("typechecker.zig");
+
+// IR representations
+pub const core = struct {
+    pub const ir = @import("core/ir.zig");
+};
+
+pub const grin = struct {
+    pub const ir = @import("grin/ir.zig");
+};
+
+// Backend
+pub const backend = struct {
+    pub const llvm = @import("backend/llvm.zig");
+};
+
+// Runtime
+pub const runtime = @import("runtime.zig");
+
+// Re-export commonly used types
+pub const SourceSpan = diagnostics.span.SourceSpan;
+pub const SourcePos = diagnostics.span.SourcePos;
+pub const FileId = diagnostics.span.FileId;
+pub const Diagnostic = diagnostics.diagnostic.Diagnostic;
+pub const Severity = diagnostics.diagnostic.Severity;

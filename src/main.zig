@@ -1,13 +1,12 @@
+//! Rusholme compiler entry point.
 const std = @import("std");
 const Io = std.Io;
 
 const rusholme = @import("rusholme");
 
 pub fn main(init: std.process.Init) !void {
-    // Prints to stderr, unbuffered, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
+    std.debug.print("Rusholme — A toy Haskell compiler in Zig\n", .{});
 
-    // This is appropriate for anything that lives as long as the process.
     const arena: std.mem.Allocator = init.arena.allocator();
 
     // Accessing command line arguments:
@@ -16,25 +15,23 @@ pub fn main(init: std.process.Init) !void {
         std.log.info("arg: {s}", .{arg});
     }
 
-    // In order to do I/O operations need an `Io` instance.
-    const io = init.io;
+    // TODO: Implement compiler pipeline
+    _ = rusholme;
 
-    // Stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
+    // I/O for future output
+    const io = init.io;
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const stdout_writer = &stdout_file_writer.interface;
 
-    try rusholme.printAnotherMessage(stdout_writer);
-
-    try stdout_writer.flush(); // Don't forget to flush!
+    try stdout_writer.print("Hello from Rusholme!\n", .{});
+    try stdout_writer.flush();
 }
 
 test "simple test" {
     const gpa = std.testing.allocator;
     var list: std.ArrayList(i32) = .empty;
-    defer list.deinit(gpa); // Try commenting this out and see if zig detects the memory leak!
+    defer list.deinit(gpa);
     try list.append(gpa, 42);
     try std.testing.expectEqual(@as(i32, 42), list.pop());
 }
@@ -43,7 +40,6 @@ test "fuzz example" {
     const Context = struct {
         fn testOne(context: @This(), input: []const u8) anyerror!void {
             _ = context;
-            // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
             try std.testing.expect(!std.mem.eql(u8, "canyoufindme", input));
         }
     };

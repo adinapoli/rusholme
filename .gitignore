@@ -17,3 +17,4 @@ Thumbs.db
 # AI agent internals
 .gemini/
 .agent/
+.claude
