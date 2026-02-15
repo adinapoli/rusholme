@@ -28,7 +28,7 @@
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#17](https://github.com/adinapoli/rusholme/issues/17) | Define SourceSpan and SourcePos types | — | :green_circle: |
-| [#18](https://github.com/adinapoli/rusholme/issues/18) | Define Diagnostic ADT (errors as structured data, not strings) | [#17](https://github.com/adinapoli/rusholme/issues/17) | :white_circle: |
+| [#18](https://github.com/adinapoli/rusholme/issues/18) | Define Diagnostic ADT (errors as structured data, not strings) | [#17](https://github.com/adinapoli/rusholme/issues/17) | :large_blue_circle: |
 | [#19](https://github.com/adinapoli/rusholme/issues/19) | Implement DiagnosticCollector for accumulating errors across modules | [#18](https://github.com/adinapoli/rusholme/issues/18) | :white_circle: |
 | [#20](https://github.com/adinapoli/rusholme/issues/20) | Implement terminal diagnostic renderer with source snippets | [#18](https://github.com/adinapoli/rusholme/issues/18) | :white_circle: |
 | [#21](https://github.com/adinapoli/rusholme/issues/21) | Implement JSON diagnostic renderer | [#18](https://github.com/adinapoli/rusholme/issues/18) | :white_circle: |
