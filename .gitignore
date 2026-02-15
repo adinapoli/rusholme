@@ -1,0 +1,19 @@
+# Zig build artifacts
+zig-out/
+zig-cache/
+.zig-cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# AI agent internals
+.gemini/
+.agent/
