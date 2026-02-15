@@ -2,6 +2,15 @@
   <img src="assets/logo.png" alt="Rusholme logo" width="200">
 </p>
 
+<p align="center">
+  <a href="https://github.com/adinapoli/rusholme/actions/workflows/ci.yml">
+    <img src="https://github.com/adinapoli/rusholme/actions/workflows/ci.yml/badge.svg" alt="CI Status">
+  </a>
+  <img src="https://img.shields.io/badge/Zig-0.16.0--dev-orange?logo=zig" alt="Zig Version">
+  <img src="https://img.shields.io/badge/Haskell-2010-blue?logo=haskell" alt="Haskell 2010">
+  <img src="https://img.shields.io/badge/License-TBD-lightgrey" alt="License">
+</p>
+
 # 🍛 Rusholme
 
 **A toy Haskell compiler written in Zig — baked with LLMs, served with curry.**
