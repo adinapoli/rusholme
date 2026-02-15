@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="Rusholme logo" width="200">
+</p>
+
 # 🍛 Rusholme
 
 **A toy Haskell compiler written in Zig — baked with LLMs, served with curry.**
