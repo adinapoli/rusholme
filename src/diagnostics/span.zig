@@ -20,8 +20,8 @@ pub const SourcePos = struct {
 
     /// Creates a new SourcePos. Panics if line or column is 0.
     pub fn init(file_id: FileId, line: u32, column: u32) SourcePos {
-        std.debug.assert(line > 0, "line numbers are 1-based");
-        std.debug.assert(column > 0, "column numbers are 1-based");
+        std.debug.assert(line > 0);
+        std.debug.assert(column > 0);
         return .{
             .file_id = file_id,
             .line = line,
@@ -77,8 +77,8 @@ pub const SourceSpan = struct {
 
     /// Returns a human-readable representation like "Foo.hs:10:5-10:20".
     /// Caller must free the returned string with the provided allocator.
-    pub fn pretty(self: SourceSpan, allocator: std.mem.Allocator, path_lookup: *const std.StringHashMap([]const u8)) ![]u8 {
-        const start_path = path_lookup.get(@as(FileId, self.start.file_id)) orelse "<unknown>";
+    pub fn pretty(self: SourceSpan, allocator: std.mem.Allocator, path_lookup: *const std.AutoHashMap(FileId, []const u8)) ![]u8 {
+        const start_path = path_lookup.get(self.start.file_id) orelse "<unknown>";
         if (self.start.file_id != self.end.file_id) {
             // Multi-file span (rare, but possible for synthetic errors)
             return std.fmt.allocPrint(allocator, "{s}:{d}:{d}-{d}:{d}", .{
@@ -185,8 +185,8 @@ test "SourceSpan.pretty single line" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var path_lookup = std.StringHashMap([]const u8).init(allocator);
-    try path_lookup.put(@as(FileId, 1), "test.hs");
+    var path_lookup = std.AutoHashMap(FileId, []const u8).init(allocator);
+    try path_lookup.put(1, "test.hs");
 
     const span = SourceSpan.init(
         SourcePos.init(1, 10, 5),
@@ -201,8 +201,8 @@ test "SourceSpan.pretty multi line" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var path_lookup = std.StringHashMap([]const u8).init(allocator);
-    try path_lookup.put(@as(FileId, 1), "test.hs");
+    var path_lookup = std.AutoHashMap(FileId, []const u8).init(allocator);
+    try path_lookup.put(1, "test.hs");
 
     const span = SourceSpan.init(
         SourcePos.init(1, 10, 5),

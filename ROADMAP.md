@@ -4,10 +4,11 @@
 > **Starting points** (zero dependencies): #1✓, #2✓, #17✓, #22✓, #24✓, #27✓, #53✓, #58, #62, #66, #68
 
 **Recent Progress (2026-02-15):**
-- ✓ #1: GitHub Actions CI set up
-- ✓ #2: Modular project layout established
+- ✓ #1: GitHub Actions CI upgraded to Nix 2.18
 - ✓ #17: SourceSpan and SourcePos types implemented
+- ✓ #18: Diagnostic ADT implemented (structured error data)
 - ✓ #22: Parser technique researched (hand-written recursive descent chosen)
+- ✓ #23: Haskell lexer token types defined (full Haskell 2010 set)
 - ✓ #24: Unicode character classification implemented
 - ✓ #27: Full Haskell AST types defined
 - ✓ #53: LLVM C API bindings created
@@ -53,7 +54,7 @@
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#22](https://github.com/adinapoli/rusholme/issues/22) | Research: Parser technique decision (tree-sitter vs Alex/Happy vs hand-written) | — | :green_circle: |
-| [#23](https://github.com/adinapoli/rusholme/issues/23) | Define lexer token types for Haskell | [#22](https://github.com/adinapoli/rusholme/issues/22) | :white_circle: |
+| [#23](https://github.com/adinapoli/rusholme/issues/23) | Define lexer token types for Haskell | [#22](https://github.com/adinapoli/rusholme/issues/22) | :large_blue_circle: |
 | [#24](https://github.com/adinapoli/rusholme/issues/24) | Implement Unicode character classification for Haskell identifiers | — | :green_circle: |
 | [#25](https://github.com/adinapoli/rusholme/issues/25) | Implement core lexer (keywords, identifiers, literals, symbols) | [#23](https://github.com/adinapoli/rusholme/issues/23), [#24](https://github.com/adinapoli/rusholme/issues/24), [#17](https://github.com/adinapoli/rusholme/issues/17) | :white_circle: |
 | [#26](https://github.com/adinapoli/rusholme/issues/26) | Implement full Haskell 2010 layout rule | [#25](https://github.com/adinapoli/rusholme/issues/25) | :white_circle: |

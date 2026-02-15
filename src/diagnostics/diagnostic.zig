@@ -18,14 +18,14 @@ pub const Severity = enum {
     info,
     hint,
 
-    pub fn format(self: Severity, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: Severity, w: *std.Io.Writer) std.Io.Writer.Error!void {
         const s = switch (self) {
             .@"error" => "error",
             .warning => "warning",
             .info => "info",
             .hint => "hint",
         };
-        try writer.writeAll(s);
+        try w.writeAll(s);
     }
 };
 
@@ -52,8 +52,8 @@ pub const DiagnosticCode = enum {
         };
     }
 
-    pub fn format(self: DiagnosticCode, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        try writer.writeAll(self.code());
+    pub fn format(self: DiagnosticCode, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.writeAll(self.code());
     }
 };
 
@@ -119,16 +119,16 @@ pub const DiagnosticBag = struct {
 test "Severity.format renders all variants" {
     var buf: [16]u8 = undefined;
 
-    const err_str = try std.fmt.bufPrint(&buf, "{}", .{Severity.@"error"});
+    const err_str = try std.fmt.bufPrint(&buf, "{f}", .{Severity.@"error"});
     try std.testing.expectEqualStrings("error", err_str);
 
-    const warn_str = try std.fmt.bufPrint(&buf, "{}", .{Severity.warning});
+    const warn_str = try std.fmt.bufPrint(&buf, "{f}", .{Severity.warning});
     try std.testing.expectEqualStrings("warning", warn_str);
 
-    const info_str = try std.fmt.bufPrint(&buf, "{}", .{Severity.info});
+    const info_str = try std.fmt.bufPrint(&buf, "{f}", .{Severity.info});
     try std.testing.expectEqualStrings("info", info_str);
 
-    const hint_str = try std.fmt.bufPrint(&buf, "{}", .{Severity.hint});
+    const hint_str = try std.fmt.bufPrint(&buf, "{f}", .{Severity.hint});
     try std.testing.expectEqualStrings("hint", hint_str);
 }
 
@@ -143,7 +143,7 @@ test "DiagnosticCode.code returns stable string codes" {
 test "DiagnosticCode.format renders code string" {
     var buf: [8]u8 = undefined;
 
-    const code_str = try std.fmt.bufPrint(&buf, "{}", .{DiagnosticCode.parse_error});
+    const code_str = try std.fmt.bufPrint(&buf, "{f}", .{DiagnosticCode.parse_error});
     try std.testing.expectEqualStrings("E001", code_str);
 }
 

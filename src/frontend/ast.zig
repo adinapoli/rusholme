@@ -17,11 +17,11 @@ pub const QName = struct {
     name: []const u8,
     span: SourceSpan,
 
-    pub fn format(self: QName, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: QName, w: *std.Io.Writer) std.Io.Writer.Error!void {
         if (self.module_name) |mod| {
-            try writer.print("{s}.{s}", .{ mod, self.name });
+            try w.print("{s}.{s}", .{ mod, self.name });
         } else {
-            try writer.writeAll(self.name);
+            try w.writeAll(self.name);
         }
     }
 };
@@ -399,19 +399,19 @@ pub const Type = union(enum) {
     /// Type constructor: Int
     Con: QName,
     /// Type application: Maybe Int
-    App: []const Type,
+    App: []const *const Type,
     /// Function type: Int -> String
-    Fun: []const Type,
+    Fun: []const *const Type,
     /// Tuple type: (Int, String)
-    Tuple: []const Type,
+    Tuple: []const *const Type,
     /// List type: [Int]
-    List: Type,
+    List: *const Type,
     /// Forall type: forall a. a -> a
-    Forall: struct { tyvars: []const []const u8, context: ?Context, type: Type },
+    Forall: struct { tyvars: []const []const u8, context: ?Context, type: *const Type },
     /// Parenthesized type: (Maybe Int)
-    Paren: Type,
+    Paren: *const Type,
     /// Implicit parameter (?x::Int)
-    IParam: struct { ip_name: []const u8, type: Type },
+    IParam: struct { ip_name: []const u8, type: *const Type },
 
     pub fn getSpan(self: Type) SourceSpan {
         return switch (self) {
@@ -453,7 +453,7 @@ test "QName format" {
     };
 
     var buf: [100]u8 = undefined;
-    const formatted = try std.fmt.bufPrint(&buf, "{}", .{qname});
+    const formatted = try std.fmt.bufPrint(&buf, "{f}", .{qname});
     try std.testing.expectEqualStrings("Data.Foo.foo", formatted);
 }
 
@@ -467,7 +467,8 @@ test "TypeDecl construction" {
     const decl = TypeDecl{
         .name = name,
         .tyvars = &.{},
-        .type = .Var,
+        .type = .{ .Var = "a" },
+        .span = SourceSpan.init(SourcePos.init(1, 1, 1), SourcePos.init(1, 1, 10)),
     };
 
     try std.testing.expectEqualStrings("Point", decl.name);
