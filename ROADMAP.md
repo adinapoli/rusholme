@@ -4,10 +4,11 @@
 > **Starting points** (zero dependencies): #1✓, #2✓, #17✓, #22✓, #24✓, #27✓, #53✓, #58, #62, #66, #68
 
 **Recent Progress (2026-02-15):**
-- ✓ #1: GitHub Actions CI set up
-- ✓ #2: Modular project layout established
+- ✓ #1: GitHub Actions CI upgraded to Nix 2.18
 - ✓ #17: SourceSpan and SourcePos types implemented
+- ✓ #18: Diagnostic ADT implemented (structured error data)
 - ✓ #22: Parser technique researched (hand-written recursive descent chosen)
+- ✓ #23: Haskell lexer token types defined (full Haskell 2010 set)
 - ✓ #24: Unicode character classification implemented
 - ✓ #27: Full Haskell AST types defined
 - ✓ #53: LLVM C API bindings created
