@@ -1,0 +1,14 @@
+{
+    "title": "Research: Name uniqueness strategy (De Bruijn vs Unique supply vs hybrid)",
+    "epic": 13,
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:medium",
+        "component:core",
+        "type:research"
+    ],
+    "depends_on": [],
+    "body": "Research and recommend a naming/uniqueness strategy for all IRs in Rusholme.\n\n**Options to evaluate:**\n1. **De Bruijn indices** \u2014 variable-capture-free, no alpha-equivalence issues, but hard to read and debug\n2. **Unique supply** (GHC's approach) \u2014 every binder gets a globally unique `Int`; names are `(String, Unique)` pairs. Simple, fast, debuggable.\n3. **Locally nameless** \u2014 De Bruijn for bound variables, names for free variables. Compromise.\n4. **Hybrid** \u2014 e.g. unique supply for Core/GRIN, original names preserved in AST\n\n**Evaluation criteria:**\n- Debugging: can we print readable IR dumps?\n- Correctness: how hard is it to avoid name capture bugs?\n- Performance: allocation cost of unique supply vs index arithmetic\n- Cross-IR consistency: does the strategy work for AST, Core, AND GRIN?\n\n**Deliverable:** Written recommendation in `docs/decisions/` with chosen approach and implementation sketch.\n\n**References:**\n- GHC's `Unique` module: https://gitlab.haskell.org/ghc/ghc/-/blob/master/compiler/GHC/Types/Unique.hs\n- 'The Locally Nameless Representation', Chargu\u00e9raud 2012",
+    "github_issue": 68,
+    "depends_on_github": []
+}

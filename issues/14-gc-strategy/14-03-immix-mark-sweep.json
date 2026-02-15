@@ -1,0 +1,18 @@
+{
+    "title": "Implement Immix mark-and-sweep collection",
+    "epic": 14,
+    "milestone": "M2: Basic Programs",
+    "labels": [
+        "priority:medium",
+        "component:runtime",
+        "type:feature"
+    ],
+    "depends_on": [
+        "14-02"
+    ],
+    "body": "Implement the mark-and-sweep collection phase for the Immix GC.\n\n**Deliverables:**\n- Root scanning: identify GC roots (stack pointers, global variables)\n- Mark phase: trace from roots, mark live objects and their containing lines\n- Sweep phase: reclaim blocks/lines that contain no live objects\n- Line-granularity reclamation: free individual lines within blocks\n- Update the free-list / bump pointer for reuse of reclaimed space\n- GC triggering heuristic (e.g. collect when N blocks are full)\n- Unit tests: allocate, discard references, collect, verify memory is reclaimed\n- Stress test: allocate/free cycle to verify no leaks\n\n**Design notes:**\n- Root scanning is the hardest part \u2014 need to know which stack values are pointers\n- Options: conservative scanning (treat everything as potential pointer) or precise scanning (maintain a root set)\n- Start with conservative scanning for simplicity\n- Do NOT implement opportunistic defragmentation yet (14-04)",
+    "github_issue": 72,
+    "depends_on_github": [
+        71
+    ]
+}

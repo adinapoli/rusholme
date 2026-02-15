@@ -1,0 +1,20 @@
+{
+    "title": "Implement Prelude type classes (Eq, Ord, Show, Read, Num, Monad)",
+    "epic": 10,
+    "milestone": "M2: Basic Programs",
+    "labels": [
+        "priority:high",
+        "component:prelude",
+        "type:feature"
+    ],
+    "depends_on": [
+        "10-02",
+        "05-04"
+    ],
+    "body": "Define and implement the core Prelude type classes.\n\n**Deliverables:**\n- `Eq a`: `(==)`, `(/=)` with default for `(/=)`\n- `Ord a` (superclass `Eq`): `compare`, `(<)`, `(<=)`, `(>)`, `(>=)`, `min`, `max`\n- `Show a`: `show`, `showsPrec`, `showList` (minimal: just `show`)\n- `Read a`: `readsPrec`, `readList` (minimal: basic parsing)\n- `Num a`: `(+)`, `(-)`, `(*)`, `negate`, `abs`, `signum`, `fromInteger`\n- `Functor f`: `fmap`\n- `Applicative f` (superclass `Functor`): `pure`, `(<*>)`\n- `Monad m` (superclass `Applicative`): `(>>=)`, `return`\n- Instances for built-in types (Int, Char, Bool, Maybe, Either, IO, lists)\n- Stock deriving support for `Eq`, `Ord`, `Show`, `Read` on user ADTs\n- Unit tests for class methods on built-in types\n\n**Design notes:**\n- These classes enable `do`-notation (needs `Monad`), printing (needs `Show`), comparison (needs `Eq`/`Ord`)\n- The Monad hierarchy (`Functor` \u2192 `Applicative` \u2192 `Monad`) follows modern Haskell",
+    "github_issue": 60,
+    "depends_on_github": [
+        59,
+        37
+    ]
+}

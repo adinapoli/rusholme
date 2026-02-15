@@ -1,0 +1,18 @@
+{
+    "title": "Research: ASAP-style static deallocation via GRIN analysis",
+    "epic": 14,
+    "milestone": "M2: Basic Programs",
+    "labels": [
+        "priority:low",
+        "component:runtime",
+        "type:research"
+    ],
+    "depends_on": [
+        "07-01"
+    ],
+    "body": "Research how to leverage GRIN's whole-program analysis to insert compile-time deallocation where provably safe.\n\n**Questions to answer:**\n1. Which GRIN values can be statically deallocated? (ones that don't escape, are used linearly, etc.)\n2. How does ASAP's analysis map to GRIN's `store`/`fetch`/`update` primitives?\n3. Can we insert `free` calls after the last `fetch` of a value?\n4. How does laziness complicate static deallocation? (thunks may or may not be forced)\n5. What's the interaction with Immix? (ASAP for easy cases, Immix for the rest)\n\n**Deliverable:** Written document in `docs/decisions/` with feasibility assessment and implementation plan.\n\n**References:**\n- Proust, 'ASAP: As Static As Possible memory management', Cambridge TR-908, 2017 (see docs/references/asap-memory-management.md)\n- Kumar et al., 'Liveness-Based Garbage Collection for Lazy Languages', 2016 (see docs/references/liveness-based-gc.md)\n- This could be Rusholme's differentiating feature among toy compilers",
+    "github_issue": 74,
+    "depends_on_github": [
+        44
+    ]
+}

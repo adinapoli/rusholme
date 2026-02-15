@@ -1,0 +1,18 @@
+{
+    "title": "Implement Core lint (type-check Core IR for internal consistency)",
+    "epic": 5,
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:medium",
+        "component:core",
+        "type:feature"
+    ],
+    "depends_on": [
+        "05-01"
+    ],
+    "body": "Implement a Core lint pass that type-checks the Core IR to catch internal compiler bugs.\n\n**Deliverables:**\n- `lintCoreProgram(program) -> [Diagnostic]` that checks:\n  - All variables are in scope\n  - All applications are well-typed\n  - Case alternatives are exhaustive and consistent\n  - Let bindings have consistent types\n  - No unbound variables\n- Run lint after desugaring and after any Core transformation\n- Lint errors are internal compiler errors (ICE), not user-facing\n- Unit tests with deliberately malformed Core\n\n**Design notes:**\n- GHC's Core Lint (`compiler/GHC/Core/Lint.hs`) is the gold standard\n- Core is the 'type-safety firewall' \u2014 if Core type-checks, later stages can be trusted\n- This is a debugging aid; can be gated behind a flag for performance",
+    "github_issue": 39,
+    "depends_on_github": [
+        34
+    ]
+}

@@ -1,0 +1,18 @@
+{
+    "title": "Implement REPL auto-completion and multi-line input",
+    "epic": 15,
+    "milestone": "M4: Multi-backend + Polish",
+    "labels": [
+        "priority:low",
+        "component:frontend",
+        "type:feature"
+    ],
+    "depends_on": [
+        "15-01"
+    ],
+    "body": "Add auto-completion and multi-line input support to the REPL.\n\n**Deliverables:**\n- Tab-completion for:\n  - Identifiers in scope (functions, variables, types, constructors)\n  - Module names (for `:load`)\n  - REPL commands (`:quit`, `:type`, etc.)\n- Multi-line input: detect incomplete expressions/declarations and prompt for continuation\n- Integrate with linenoise or similar C library for readline-like behaviour\n- History: up/down arrows to navigate command history, persist across sessions\n\n**Design notes:**\n- Auto-completion requires access to the current type environment\n- GHCi's completion is quite good \u2014 use it as a reference for what to complete on",
+    "github_issue": 76,
+    "depends_on_github": [
+        75
+    ]
+}

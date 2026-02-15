@@ -1,0 +1,18 @@
+{
+    "title": "Define Haskell AST types (module, declarations, expressions, patterns, types)",
+    "epic": 4,
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:critical",
+        "component:frontend",
+        "type:feature"
+    ],
+    "depends_on": [
+        "03-01"
+    ],
+    "body": "Define the complete AST type hierarchy for parsed Haskell source.\n\n**Deliverables:**\n- `Module`: module name, exports, imports, declarations\n- `ImportDecl`: module name, qualified, as-alias, import/hiding list\n- `Decl` (declarations):\n  - `DataDecl`: ADTs with constructors\n  - `NewtypeDecl`\n  - `TypeDecl`: type aliases\n  - `ClassDecl`: type class declarations\n  - `InstanceDecl`: type class instances\n  - `FunBind`: function bindings (with multiple equations)\n  - `PatBind`: pattern bindings\n  - `TypeSig`: type signatures\n  - `FixityDecl`: fixity declarations\n  - `DerivingDecl`: standalone deriving\n- `Expr` (expressions):\n  - `Var`, `Con`, `Lit`, `App`, `InfixApp`, `Lambda`, `Let`, `Case`, `If`, `Do`, `Tuple`, `List`, `Section`, `TypeAnn`, `Negate`, `Paren`\n- `Pat` (patterns):\n  - `VarPat`, `ConPat`, `LitPat`, `WildPat`, `AsPat`, `TuplePat`, `ListPat`, `NegatePat`, `ParenPat`, `BangPat`\n- `Type` (types):\n  - `TyCon`, `TyVar`, `TyApp`, `TyFun`, `TyTuple`, `TyList`, `TyForall`, `TyContext`\n- Every node carries a `SourceSpan`\n- Unit tests for construction and basic properties\n\n**Design notes:**\n- This is a faithful representation of Haskell source, NOT a simplified IR\n- Keep it close to GHC's `HsSyn` in spirit (but simpler)\n- Use Zig tagged unions for sum types\n- GADTs have a different constructor syntax \u2014 handle it in the data decl representation",
+    "github_issue": 27,
+    "depends_on_github": [
+        17
+    ]
+}

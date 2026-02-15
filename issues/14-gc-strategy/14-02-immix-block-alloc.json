@@ -1,0 +1,18 @@
+{
+    "title": "Implement Immix block and line allocator",
+    "epic": 14,
+    "milestone": "M2: Basic Programs",
+    "labels": [
+        "priority:medium",
+        "component:runtime",
+        "type:feature"
+    ],
+    "depends_on": [
+        "14-01"
+    ],
+    "body": "Implement the Immix allocator's block/line structure and bump-pointer allocation.\n\n**Deliverables:**\n- `ImmixBlock` (32KB): subdivided into 128-byte lines\n- Block allocator: request blocks from the OS (`std.heap.page_allocator` or `mmap`)\n- Bump-pointer allocation within the current block\n- Overflow handling: when current block is full, get a new block\n- Line-granularity metadata: mark lines as used/free\n- Implement as a Zig `std.mem.Allocator` (provide `alloc`, `resize`, `free` vtable)\n- Unit tests: allocate many small objects, verify they're in the right blocks/lines\n\n**Design notes:**\n- Reference: Blackburn & McKinley, PLDI 2008 (see docs/references/immix-gc.md)\n- 32KB blocks, 128B lines is the standard Immix configuration\n- Bump-pointer allocation is fast \u2014 similar to GHC's nursery allocation\n- Don't implement collection yet (14-03); this issue is allocation only",
+    "github_issue": 71,
+    "depends_on_github": [
+        70
+    ]
+}

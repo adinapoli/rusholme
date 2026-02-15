@@ -1,0 +1,18 @@
+{
+    "title": "Implement parser: type expressions (functions, application, forall, contexts)",
+    "epic": 4,
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:critical",
+        "component:frontend",
+        "type:feature"
+    ],
+    "depends_on": [
+        "04-08"
+    ],
+    "body": "Implement type expression parsing for type signatures, data declarations, and class/instance heads.\n\n**Deliverables:**\n- Type variables: `a`\n- Type constructors: `Int`, `Maybe`\n- Type application: `Maybe Int`, `Either String Int`\n- Function types: `a -> b` (right-associative)\n- Tuple types: `(Int, Bool)`\n- List types: `[Int]`\n- Unit type: `()`\n- Parenthesised types\n- `forall a b. Type` (explicit quantification)\n- Type class contexts: `(Eq a, Show a) => a -> String`\n- Unit tests for complex type signatures\n\n**Design notes:**\n- Type parsing is needed for type signatures, data constructor fields, class method signatures, etc.\n- Kind signatures are deferred (DESIGN.md: forall for types, not kinds)\n- GHC-style type operators are deferred for now",
+    "github_issue": 32,
+    "depends_on_github": [
+        29
+    ]
+}

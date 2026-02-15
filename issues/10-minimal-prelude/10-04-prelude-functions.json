@@ -1,0 +1,18 @@
+{
+    "title": "Implement Prelude core functions (id, const, map, filter, foldr, foldl, etc.)",
+    "epic": 10,
+    "milestone": "M2: Basic Programs",
+    "labels": [
+        "priority:high",
+        "component:prelude",
+        "type:feature"
+    ],
+    "depends_on": [
+        "10-03"
+    ],
+    "body": "Implement the core Prelude functions, either as Haskell source or built-ins.\n\n**Deliverables:**\n- Basic combinators: `id`, `const`, `(.)`, `flip`, `($)`\n- List functions: `map`, `filter`, `foldr`, `foldl`, `foldl'`, `head`, `tail`, `null`, `length`, `(++)`, `concat`, `zip`, `unzip`, `take`, `drop`, `reverse`\n- Maybe functions: `maybe`, `fromMaybe`, `isJust`, `isNothing`\n- Either functions: `either`\n- IO functions: `putStrLn`, `putStr`, `print`, `getLine`, `getChar`\n- Numeric: `even`, `odd`, `succ`, `pred`\n- Boolean: `(&&)`, `(||)`, `not`, `otherwise`\n- Conversion: `show` (via Show class)\n- Error: `error`, `undefined`\n- Unit tests for each function\n\n**Design notes:**\n- Most of these are definable in Haskell and can live in a `Prelude.hs` file\n- Some (`error`, `undefined`, IO functions) need runtime/primop backing\n- `foldl'` needs `seq` which needs the runtime to support strict evaluation",
+    "github_issue": 61,
+    "depends_on_github": [
+        60
+    ]
+}

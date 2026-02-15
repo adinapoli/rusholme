@@ -1,0 +1,18 @@
+{
+    "title": "Implement Zig runtime (heap allocator, thunk evaluator, entry point)",
+    "epic": 9,
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:high",
+        "component:runtime",
+        "type:feature"
+    ],
+    "depends_on": [
+        "09-01"
+    ],
+    "body": "Implement the minimal Zig runtime system that the LLVM-generated code links against.\n\n**Deliverables:**\n- Entry point: `_start` or `main` that initialises the runtime and calls the Haskell `main`\n- Heap allocator: use `ArenaAllocator` (Phase 1 GC strategy)\n  - `rts_alloc(size) -> *Node` \u2014 allocate a heap node\n  - `rts_store(tag, fields...) -> *Node` \u2014 allocate and initialise a node\n- Thunk evaluation:\n  - `rts_eval(ptr) -> *Node` \u2014 force a thunk (fetch, check tag, if F-tag call function and update)\n- IO primitives:\n  - `rts_putStrLn(str)` \u2014 print string + newline\n  - `rts_putStr(str)` \u2014 print string\n- Expose functions with C calling convention for LLVM to call\n- Unit tests for the runtime in isolation\n\n**Design notes:**\n- The runtime is compiled as a static library that LLVM output links against\n- Use `export fn` with `callconv(.C)` for LLVM-visible functions\n- ArenaAllocator means no GC in Phase 1 \u2014 memory grows until program exits\n- The runtime will be swapped to Immix in Phase 2 (Epic #14) without changing the interface",
+    "github_issue": 56,
+    "depends_on_github": [
+        53
+    ]
+}

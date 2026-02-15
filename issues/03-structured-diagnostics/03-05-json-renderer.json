@@ -1,0 +1,18 @@
+{
+    "title": "Implement JSON diagnostic renderer",
+    "epic": 3,
+    "milestone": "M0: Project Infrastructure",
+    "labels": [
+        "priority:medium",
+        "component:infra",
+        "type:feature"
+    ],
+    "depends_on": [
+        "03-02"
+    ],
+    "body": "Render diagnostics as JSON for machine consumption (editors, CI, LSP).\n\n**Deliverables:**\n- `JsonRenderer` that serialises a `Diagnostic` (or list of diagnostics) to JSON\n- JSON schema: `{severity, code, file, startLine, startCol, endLine, endCol, message, notes: [...]}`\n- Unit tests comparing output against expected JSON strings\n\n**Design notes:**\n- Use Zig's `std.json` for serialisation\n- This enables future LSP integration and CI tooling\n- Keep the schema stable from the start \u2014 document it",
+    "github_issue": 21,
+    "depends_on_github": [
+        18
+    ]
+}

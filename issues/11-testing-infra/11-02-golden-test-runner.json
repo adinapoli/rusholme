@@ -1,0 +1,18 @@
+{
+    "title": "Implement golden/snapshot test runner",
+    "epic": 11,
+    "milestone": "M0: Project Infrastructure",
+    "labels": [
+        "priority:high",
+        "component:testing",
+        "type:infra"
+    ],
+    "depends_on": [
+        "11-01"
+    ],
+    "body": "Build a golden test runner that compiles Haskell snippets through the pipeline and compares output against expected results.\n\n**Deliverables:**\n- A test runner (Zig code or shell script invoked by `zig build`) that:\n  1. Reads `.hs` files from a `tests/golden/` directory\n  2. Runs them through the Rusholme pipeline (whichever stages exist)\n  3. Compares output against a `.expected` file\n  4. Reports pass/fail with diffs on failure\n- Support for updating expected files (`--update` or `--accept` flag)\n- Directory structure: `tests/golden/<test-name>/<test-name>.hs` + `.expected`\n- A few placeholder test cases (can be empty/trivial until pipeline stages exist)\n\n**Design notes:**\n- GHC's testsuite uses a similar approach; we're keeping it simpler\n- Golden tests will be the primary integration testing mechanism\n- The runner should support testing different pipeline stages (e.g. `--stage=parse` to test parser output)",
+    "github_issue": 63,
+    "depends_on_github": [
+        62
+    ]
+}

@@ -1,0 +1,18 @@
+{
+    "title": "Implement parser: expressions (application, operators, let, case, if, do, lambda)",
+    "epic": 4,
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:critical",
+        "component:frontend",
+        "type:feature"
+    ],
+    "depends_on": [
+        "04-08"
+    ],
+    "body": "Implement expression parsing with correct precedence and associativity.\n\n**Deliverables:**\n- Function application (juxtaposition, left-associative)\n- Operator expressions with fixity-aware precedence parsing\n- Negation (`-` prefix)\n- `let ... in ...`\n- `case expr of { alts }`\n- `if ... then ... else ...`\n- `do` notation (statement sequence: bind `<-`, let, plain expr)\n- Lambda: `\\x y -> expr`\n- Tuple expressions and sections\n- List expressions: `[1, 2, 3]`\n- Type annotations: `expr :: Type`\n- Parenthesised expressions\n- Literals: integers, floats, chars, strings\n- Unit tests for precedence, associativity, and complex expressions\n\n**Design notes:**\n- Operator precedence parsing is subtle: Haskell allows user-defined fixity\n- For M1, built-in fixity (e.g. `$` is infixr 0) is sufficient\n- `do`-notation parsing must interact correctly with layout",
+    "github_issue": 30,
+    "depends_on_github": [
+        29
+    ]
+}

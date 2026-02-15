@@ -1,0 +1,18 @@
+{
+    "title": "Configure LLVM backend to emit WebAssembly",
+    "epic": 16,
+    "milestone": "M4: Multi-backend + Polish",
+    "labels": [
+        "priority:low",
+        "component:backend",
+        "type:feature"
+    ],
+    "depends_on": [
+        "09-05"
+    ],
+    "body": "Configure the LLVM backend to target WebAssembly in addition to native code.\n\n**Deliverables:**\n- Set LLVM target triple to `wasm32-unknown-unknown` or `wasm32-wasi`\n- Ensure LLVM's WebAssembly backend is available in our LLVM build (via Nix flake)\n- Generate `.wasm` binary from GRIN\u2192LLVM pipeline\n- Handle Wasm-specific constraints:\n  - No direct syscalls (need WASI or JS imports for IO)\n  - Different memory model (linear memory)\n  - No computed gotos (if used in calling convention)\n- Smoke test: compile a minimal program to `.wasm`\n\n**Design notes:**\n- LLVM handles most of the Wasm complexity\n- The main challenge is the runtime: our Zig runtime needs to also compile to Wasm\n- WASI is the more portable option (runs in wasmtime, Node.js, browsers with polyfill)",
+    "github_issue": 77,
+    "depends_on_github": [
+        57
+    ]
+}

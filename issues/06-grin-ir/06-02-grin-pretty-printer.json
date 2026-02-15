@@ -1,0 +1,18 @@
+{
+    "title": "Implement GRIN IR pretty-printer",
+    "epic": 6,
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:high",
+        "component:grin",
+        "type:feature"
+    ],
+    "depends_on": [
+        "06-01"
+    ],
+    "body": "Implement a pretty-printer for GRIN IR for debugging and golden tests.\n\n**Deliverables:**\n- Pretty-print all GRIN expressions, values, and definitions\n- Use the conventional GRIN syntax from the papers (monadic bind with `;`, `store`/`fetch`/`update` as keywords)\n- Output should be deterministic for golden test comparison\n- Unit tests\n\n**Design notes:**\n- Reference the GRIN papers for conventional syntax\n- This is essential for debugging Core\u2192GRIN translation and GRIN optimisation passes",
+    "github_issue": 41,
+    "depends_on_github": [
+        40
+    ]
+}

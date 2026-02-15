@@ -1,0 +1,18 @@
+{
+    "title": "Implement end-to-end test runner (compile + run + check stdout)",
+    "epic": 11,
+    "milestone": "M0: Project Infrastructure",
+    "labels": [
+        "priority:high",
+        "component:testing",
+        "type:infra"
+    ],
+    "depends_on": [
+        "11-02"
+    ],
+    "body": "Build an end-to-end test runner that compiles a Haskell program, executes the resulting binary, and checks stdout against expected output.\n\n**Deliverables:**\n- Extend the golden test runner (or create a separate mode) for e2e tests\n- Directory structure: `tests/e2e/<test-name>/<test-name>.hs` + `.stdout`\n- The runner compiles the `.hs` file to a binary (or runs via interpreter), executes it, and compares stdout to `.stdout`\n- Support for expected exit codes and stderr checking\n- A placeholder test (e.g. `hello.hs` with `main = putStrLn \"Hello\"`) ready for when M1 is complete\n\n**Design notes:**\n- This won't be runnable until the pipeline can actually produce executables or the interpreter works\n- But the infrastructure should be ready so tests can be added incrementally",
+    "github_issue": 64,
+    "depends_on_github": [
+        63
+    ]
+}

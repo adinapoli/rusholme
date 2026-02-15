@@ -1,0 +1,18 @@
+{
+    "title": "Define lexer token types for Haskell",
+    "epic": 4,
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:critical",
+        "component:frontend",
+        "type:feature"
+    ],
+    "depends_on": [
+        "04-01"
+    ],
+    "body": "Define the complete set of token types for Haskell lexing.\n\n**Deliverables:**\n- `Token` tagged union covering all Haskell 2010 tokens:\n  - Keywords: `module`, `where`, `let`, `in`, `case`, `of`, `if`, `then`, `else`, `do`, `class`, `instance`, `data`, `newtype`, `type`, `import`, `qualified`, `as`, `hiding`, `forall`, `deriving`, `infixl`, `infixr`, `infix`, etc.\n  - Literals: integer, float, char, string\n  - Identifiers: varid, conid, varsym, consym\n  - Layout tokens: `{`, `}`, `;` (both explicit and virtual/inserted)\n  - Special: `(`, `)`, `[`, `]`, `,`, `..`, `::`, `=`, `\\`, `|`, `->`, `<-`, `@`, `~`, `=>`, `_`\n  - EOF, comment, pragma\n- Each token carries a `SourceSpan`\n- Unit tests verifying token classification\n\n**Design notes:**\n- Reference GHC's `compiler/GHC/Parser/Lexer.x` for the complete token list\n- Unicode operator support must be considered in the token definitions\n- Virtual tokens for layout (inserted `{`, `}`, `;`) should be distinguishable from explicit ones",
+    "github_issue": 23,
+    "depends_on_github": [
+        22
+    ]
+}

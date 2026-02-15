@@ -1,0 +1,18 @@
+{
+    "title": "Implement heap points-to analysis for GRIN",
+    "epic": 7,
+    "milestone": "M3: GRIN Optimisations",
+    "labels": [
+        "priority:high",
+        "component:grin",
+        "type:feature"
+    ],
+    "depends_on": [
+        "06-01"
+    ],
+    "body": "Implement the heap points-to (HPT) analysis that most GRIN optimisations depend on.\n\n**Deliverables:**\n- Abstract interpretation over GRIN programs that computes, for each variable and heap location, the set of possible node types (tags + field types)\n- Fixed-point iteration until the analysis converges\n- Result type: `HptResult` mapping each variable/heap-loc to a set of possible `(Tag, [AbstractType])`\n- `AbstractType`: `Node(TagSet)`, `SimpleType(BaseTy)`, `Pointer(LocSet)`\n- Unit tests with hand-written GRIN programs and expected analysis results\n\n**Design notes:**\n- HPT is GRIN's foundational analysis \u2014 dead code elimination, unboxing, case simplification all depend on it\n- Reference: Boquist thesis Chapter 5; Hruska et al. 2020 Section 4\n- Start with a simple, correct implementation; performance optimisation later\n- Consider using Souffl\u00e9 datalog in future (mentioned in GRIN overview), but implement directly in Zig first",
+    "github_issue": 44,
+    "depends_on_github": [
+        40
+    ]
+}

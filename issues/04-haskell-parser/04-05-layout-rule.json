@@ -1,0 +1,18 @@
+{
+    "title": "Implement full Haskell 2010 layout rule",
+    "epic": 4,
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:critical",
+        "component:frontend",
+        "type:feature"
+    ],
+    "depends_on": [
+        "04-04"
+    ],
+    "body": "Implement the full Haskell 2010 layout rule (Report section 2.7) as a token-stream transformation.\n\n**Deliverables:**\n- A `LayoutProcessor` that sits between the lexer and parser\n- Takes raw token stream, inserts virtual `{`, `}`, `;` tokens according to layout rules\n- Implements the full algorithm from Haskell 2010 Report section 2.7 (not a simplified version)\n- Handle: `where`, `let`, `of`, `do` as layout keywords\n- Handle explicit braces (disable layout when user writes `{`)\n- Handle the module-level implicit layout\n- Emit diagnostics for layout errors (e.g. indentation mismatch)\n- Comprehensive unit tests with tricky layout cases:\n  - Nested `where` clauses\n  - `do` blocks with varying indentation\n  - Mixed explicit/implicit layout\n  - Empty layout blocks\n  - Multi-line expressions\n\n**Design notes:**\n- This is notoriously tricky and a major source of confusing parse errors\n- GHC's layout implementation is in the lexer itself; we separate it for clarity\n- The DESIGN.md notes that confusing layout errors should be avoided \u2014 good diagnostics here are critical\n- Test against GHC's behaviour for edge cases",
+    "github_issue": 26,
+    "depends_on_github": [
+        25
+    ]
+}

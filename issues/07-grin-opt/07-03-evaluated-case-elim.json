@@ -1,0 +1,18 @@
+{
+    "title": "Implement evaluated case elimination",
+    "epic": 7,
+    "milestone": "M3: GRIN Optimisations",
+    "labels": [
+        "priority:high",
+        "component:grin",
+        "type:feature"
+    ],
+    "depends_on": [
+        "07-01"
+    ],
+    "body": "Implement evaluated case elimination: when HPT proves a value is already evaluated (not a thunk), eliminate the redundant `eval` call.\n\n**Deliverables:**\n- When a `case (eval x)` scrutinises a value that HPT shows can only be constructor nodes (C-tags, never F-tags), replace `eval x` with `fetch x` (skip thunk forcing)\n- When a variable is known to already hold a value (not a pointer), eliminate the fetch entirely\n- Unit tests showing the optimisation applies correctly\n\n**Design notes:**\n- This is one of GRIN's most impactful optimisations \u2014 removing unnecessary eval calls\n- Correctness depends on HPT accuracy\n- Reference: Boquist thesis, Section 5.3",
+    "github_issue": 46,
+    "depends_on_github": [
+        44
+    ]
+}

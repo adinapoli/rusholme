@@ -1,0 +1,18 @@
+{
+    "title": "Implement chosen name uniqueness mechanism",
+    "epic": 13,
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:medium",
+        "component:core",
+        "type:feature"
+    ],
+    "depends_on": [
+        "13-01"
+    ],
+    "body": "Implement the naming/uniqueness mechanism chosen in 13-01.\n\n**Deliverables (assuming Unique supply is chosen \u2014 adjust if different):**\n- `Unique` type: a wrapper around a unique integer\n- `UniqueSupply` that generates fresh `Unique` values (monotonically increasing counter)\n- `Name` type: `{ original_name: []const u8, unique: Unique }` \u2014 preserves readability while ensuring uniqueness\n- `Name.pretty()` for debug output (e.g. `foo_42`)\n- Ability to split a `UniqueSupply` for concurrent/independent use (if needed)\n- Unit tests\n\n**Design notes:**\n- This is used by every IR: AST identifiers get renamed, Core binders get uniques, GRIN variables get uniques\n- Keep it simple \u2014 GHC's `Unique` is just a tagged Int with a namespace character",
+    "github_issue": 69,
+    "depends_on_github": [
+        68
+    ]
+}

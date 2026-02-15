@@ -1,0 +1,18 @@
+{
+    "title": "Implement AST pretty-printer for debugging and golden tests",
+    "epic": 4,
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:high",
+        "component:frontend",
+        "type:feature"
+    ],
+    "depends_on": [
+        "04-06"
+    ],
+    "body": "Implement a pretty-printer for the Haskell AST, used for debugging and golden test output.\n\n**Deliverables:**\n- `prettyPrint(ast) -> []const u8` that produces readable, indented output for any AST node\n- Output should be deterministic (suitable for golden test comparison)\n- Round-trip friendly where possible: printing a parsed AST should produce valid Haskell (modulo comments)\n- Unit tests comparing pretty-printed output against expected strings\n\n**Design notes:**\n- This is essential for debugging the parser and for golden tests\n- Consider a tree-dump mode (showing node types) vs a Haskell-source mode (showing valid Haskell)\n- Use Zig's `std.fmt` / writer interface for output",
+    "github_issue": 28,
+    "depends_on_github": [
+        27
+    ]
+}

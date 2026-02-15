@@ -1,0 +1,18 @@
+{
+    "title": "Implement LLVM codegen for GRIN expressions (store/fetch/update/case/app)",
+    "epic": 9,
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:high",
+        "component:backend",
+        "type:feature"
+    ],
+    "depends_on": [
+        "09-02"
+    ],
+    "body": "Implement LLVM code generation for all GRIN expression types.\n\n**Deliverables:**\n- `Store` \u2192 call runtime `alloc`, write tag + fields to heap\n- `Fetch` \u2192 load tag + fields from heap pointer\n- `Update` \u2192 overwrite heap cell with new node\n- `App` \u2192 generate function call (direct call for known functions)\n- `Case` \u2192 LLVM `switch` on tag, branch to alternatives\n- `Bind` \u2192 sequence operations, bind results to variables\n- `Pure` \u2192 return a value\n- Handle GRIN patterns in case alternatives (tag matching, variable binding)\n- Integration tests: compile and run simple GRIN programs via LLVM\n\n**Design notes:**\n- `store`/`fetch`/`update` call into the Zig runtime for heap management\n- Case on tag uses LLVM's `switch` instruction\n- For M1, only direct (known) function calls are needed; indirect calls come with `eval`",
+    "github_issue": 55,
+    "depends_on_github": [
+        54
+    ]
+}

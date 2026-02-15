@@ -1,0 +1,18 @@
+{
+    "title": "Define runtime allocator interface for GC-swappable heap",
+    "epic": 14,
+    "milestone": "M2: Basic Programs",
+    "labels": [
+        "priority:medium",
+        "component:runtime",
+        "type:feature"
+    ],
+    "depends_on": [
+        "09-04"
+    ],
+    "body": "Define a clean allocator interface that all runtime heap operations go through, enabling GC strategy swapping.\n\n**Deliverables:**\n- Define the interface that the runtime uses for all heap operations:\n  - `alloc(size) -> *Node`\n  - `free(ptr)` (no-op for arena, real for Immix)\n  - `gc()` (trigger collection; no-op for arena)\n  - `stats() -> AllocStats` (bytes allocated, bytes freed, collections count)\n- Ensure the Zig runtime from 09-04 uses this interface exclusively (no direct `std.heap` calls)\n- Verify the ArenaAllocator satisfies this interface\n- Unit tests exercising the interface with ArenaAllocator\n\n**Design notes:**\n- This is the plug-and-play foundation from DESIGN.md: 'Phase 1 \u2192 Phase 2 is a swap, not a rewrite'\n- Use Zig's `std.mem.Allocator` vtable interface \u2014 the runtime is parameterised over `Allocator`\n- The interface must support root registration for future GC (roots are pointers on the stack)",
+    "github_issue": 70,
+    "depends_on_github": [
+        56
+    ]
+}

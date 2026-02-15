@@ -1,0 +1,18 @@
+{
+    "title": "Define Core IR types (System F_C expressions, binders, types)",
+    "epic": 5,
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:critical",
+        "component:core",
+        "type:feature"
+    ],
+    "depends_on": [
+        "13-02"
+    ],
+    "body": "Define the Core IR type hierarchy modelled on GHC's System F_C.\n\n**Deliverables:**\n- `CoreExpr` tagged union:\n  - `Var` \u2014 variable reference\n  - `Lit` \u2014 literal (integer, char, string)\n  - `App` \u2014 application (function, argument)\n  - `Lam` \u2014 lambda (binder, body)\n  - `Let` \u2014 let binding (recursive or non-recursive)\n  - `Case` \u2014 case expression (scrutinee, binder, type, alternatives)\n  - `Type` \u2014 type argument (for type application)\n  - `Coercion` \u2014 coercion (placeholder; full coercions deferred)\n- `CoreBind`: `NonRec(binder, expr)` | `Rec([(binder, expr)])`\n- `CoreAlt`: `(AltCon, [binder], expr)` where `AltCon` is `DataAlt | LitAlt | Default`\n- `CoreType` \u2014 Core's type representation (simpler than source types, post-elaboration)\n- `Id` \u2014 variable/binder with `Name`, type, and metadata\n- Unit tests for construction and equality\n\n**Design notes:**\n- Keep close to GHC Core for future interop (`-ddump-simpl` import)\n- Coercions are part of System F_C but we can stub them initially (use `Refl` everywhere)\n- No Core-to-Core optimisation passes (all deferred to GRIN per DESIGN.md)\n- Reference: GHC's `compiler/GHC/Core/Syntax.hs`",
+    "github_issue": 34,
+    "depends_on_github": [
+        69
+    ]
+}

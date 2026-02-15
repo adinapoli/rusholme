@@ -1,0 +1,20 @@
+{
+    "title": "Implement end-to-end: LLVM compile + link with Zig runtime + produce executable",
+    "epic": 9,
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:high",
+        "component:backend",
+        "type:feature"
+    ],
+    "depends_on": [
+        "09-03",
+        "09-04"
+    ],
+    "body": "Wire everything together: compile GRIN to LLVM IR, compile to object code, link with Zig runtime, produce a working executable.\n\n**Deliverables:**\n- Pipeline: `GrinProgram \u2192 LLVM IR \u2192 .o file \u2192 link with Zig runtime \u2192 executable`\n- Use LLVM's JIT or `llc` + system linker for object code generation\n- Produce an ELF (Linux) or Mach-O (macOS) binary\n- Integration test: `main = putStrLn \"Hello\"` compiles to a binary that prints \"Hello\"\n- Command-line interface: `rusholme compile hello.hs -o hello`\n\n**Design notes:**\n- This is the M1 milestone deliverable: a working end-to-end compiler\n- Consider using LLVM's OrcJIT for faster iteration during development\n- The Nix flake should provide all necessary build tools (LLVM, linker)",
+    "github_issue": 57,
+    "depends_on_github": [
+        55,
+        56
+    ]
+}

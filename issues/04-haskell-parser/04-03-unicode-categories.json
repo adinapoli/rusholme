@@ -1,0 +1,14 @@
+{
+    "title": "Implement Unicode character classification for Haskell identifiers",
+    "epic": 4,
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:high",
+        "component:frontend",
+        "type:feature"
+    ],
+    "depends_on": [],
+    "body": "Implement Unicode character classification per Haskell 2010 Report section 2.2.\n\n**Deliverables:**\n- Functions to classify Unicode code points per Haskell 2010 rules:\n  - `isUniSymbol(c)` \u2014 Unicode symbol/punctuation (for operators)\n  - `isUniLetter(c)` \u2014 Unicode letter (for identifiers)\n  - `isUniDigit(c)` \u2014 Unicode digit\n  - `isUniWhitespace(c)` \u2014 Unicode whitespace\n- Handle the distinction between `small` (lowercase start) and `large` (uppercase start) identifiers\n- Unit tests with representative Unicode characters (Greek, Cyrillic, CJK, mathematical symbols)\n\n**Design notes:**\n- Zig's `std.unicode` provides some classification but may not cover all Haskell-specific categories\n- Consider using a C library (ICU, utf8proc) via Zig's C interop per project mantra #2\n- Haskell 2010 Report section 2.2 defines the exact Unicode categories for each lexical class",
+    "github_issue": 24,
+    "depends_on_github": []
+}

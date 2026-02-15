@@ -1,0 +1,18 @@
+{
+    "title": "Implement Immix opportunistic defragmentation",
+    "epic": 14,
+    "milestone": "M2: Basic Programs",
+    "labels": [
+        "priority:low",
+        "component:runtime",
+        "type:feature"
+    ],
+    "depends_on": [
+        "14-03"
+    ],
+    "body": "Add opportunistic defragmentation to the Immix collector.\n\n**Deliverables:**\n- Identify fragmented blocks (blocks with many free lines interspersed with live objects)\n- During marking: selectively copy objects out of fragmented blocks into fresh blocks\n- Update all pointers to copied objects (forwarding pointers)\n- Reclaim the now-empty fragmented blocks\n- Heuristic for when to defragment vs just sweep\n- Unit tests and benchmarks comparing fragmented vs defragmented heap\n\n**Design notes:**\n- This is Immix's key innovation: 'opportunistic defrag' combines marking and copying in one pass\n- Only defragment when fragmentation is detected \u2014 don't pay the copying cost otherwise\n- Forwarding pointers need care: all references must be updated atomically",
+    "github_issue": 73,
+    "depends_on_github": [
+        72
+    ]
+}

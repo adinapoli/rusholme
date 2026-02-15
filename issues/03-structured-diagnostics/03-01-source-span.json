@@ -1,0 +1,14 @@
+{
+    "title": "Define SourceSpan and SourcePos types",
+    "epic": 3,
+    "milestone": "M0: Project Infrastructure",
+    "labels": [
+        "priority:critical",
+        "component:infra",
+        "type:feature"
+    ],
+    "depends_on": [],
+    "body": "Define the fundamental source location types used throughout the compiler.\n\n**Deliverables:**\n- `SourcePos` struct: file path (or file ID), line, column (all 1-based)\n- `SourceSpan` struct: start `SourcePos`, end `SourcePos`\n- `SourceSpan.merge(other)` to combine two spans\n- `SourceSpan.pretty()` for human-readable rendering (e.g. `Foo.hs:10:5-10:20`)\n- Unit tests for all operations\n\n**Design notes:**\n- Use a string-interning table or integer file IDs to avoid duplicating file paths\n- Consider GHC's `SrcSpan` as reference (it has `RealSrcSpan` and `UnhelpfulSpan`)\n- These types will be used by every subsequent pipeline stage",
+    "github_issue": 17,
+    "depends_on_github": []
+}

@@ -1,0 +1,20 @@
+{
+    "title": "Implement parser: module header, imports, and top-level declarations",
+    "epic": 4,
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:critical",
+        "component:frontend",
+        "type:feature"
+    ],
+    "depends_on": [
+        "04-05",
+        "04-06"
+    ],
+    "body": "Implement parsing of module structure, imports, and top-level declarations.\n\n**Deliverables:**\n- Parse `module Name (exports) where`\n- Parse import declarations: `import [qualified] Module [as Alias] [(items)] [hiding (items)]`\n- Parse top-level declarations:\n  - Type signatures: `f :: Type`\n  - Function bindings: `f x y = expr` and `f x y | guard = expr`\n  - Pattern bindings: `x = expr`\n  - `data` declarations with constructors and deriving\n  - `newtype` declarations\n  - `type` aliases\n  - Fixity declarations: `infixl 6 +`\n- Handle the default module (`module Main (main) where` when no header)\n- Emit diagnostics for parse errors via `DiagnosticCollector`\n- Unit tests with valid and invalid inputs\n\n**Design notes:**\n- Build a recursive descent parser (or whichever technique chosen in 04-01)\n- The parser consumes the layout-processed token stream from 04-05\n- For M1, `main = putStrLn \"Hello\"` must parse successfully",
+    "github_issue": 29,
+    "depends_on_github": [
+        26,
+        27
+    ]
+}

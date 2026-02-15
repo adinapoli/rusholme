@@ -1,0 +1,20 @@
+{
+    "title": "Implement Hindley-Milner type inference engine",
+    "epic": 5,
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:critical",
+        "component:core",
+        "type:feature"
+    ],
+    "depends_on": [
+        "05-01",
+        "03-02"
+    ],
+    "body": "Implement the Hindley-Milner type inference algorithm for Rusholme.\n\n**Deliverables:**\n- Unification engine: `unify(type1, type2) -> Substitution | TypeError`\n- Type variable generation (fresh type variables)\n- Type environment: maps names to type schemes (`forall a. ...`)\n- `infer(env, expr) -> (type, substitution)` \u2014 Algorithm W or Algorithm J\n- Generalisation (let-polymorphism): `let id = \\x -> x in (id 1, id True)`\n- Instantiation of polymorphic types at use sites\n- Emit type error diagnostics via `DiagnosticCollector`\n- Unit tests:\n  - Literal types\n  - Lambda/application\n  - Let-polymorphism\n  - Occurs check (reject infinite types)\n  - Basic error cases\n\n**Design notes:**\n- Algorithm W is simpler; Algorithm J is more efficient. Either is fine for v1.\n- Type classes are handled separately (05-04)\n- This operates on the AST and produces typed Core",
+    "github_issue": 36,
+    "depends_on_github": [
+        34,
+        18
+    ]
+}

@@ -1,0 +1,20 @@
+{
+    "title": "Port Zig runtime to WebAssembly (WASI)",
+    "epic": 16,
+    "milestone": "M4: Multi-backend + Polish",
+    "labels": [
+        "priority:low",
+        "component:runtime",
+        "type:feature"
+    ],
+    "depends_on": [
+        "16-01",
+        "09-04"
+    ],
+    "body": "Port the Zig runtime to compile to WebAssembly so compiled Haskell programs can run in Wasm environments.\n\n**Deliverables:**\n- Compile the Zig runtime with `zig build -Dtarget=wasm32-wasi`\n- Replace OS-specific calls with WASI equivalents:\n  - IO: use WASI `fd_write` / `fd_read` for stdout/stdin\n  - Memory: use Wasm linear memory (no `mmap`)\n- Link Wasm runtime with Wasm-compiled GRIN output\n- Integration test: `main = putStrLn \"Hello\"` runs in `wasmtime` and prints \"Hello\"\n\n**Design notes:**\n- Zig has first-class Wasm support \u2014 `zig build` can target `wasm32-wasi` natively\n- The GC (Immix) may need adjustments for linear memory (no `mmap`, no virtual memory)\n- For Phase 1 (ArenaAllocator), Wasm should work out of the box",
+    "github_issue": 78,
+    "depends_on_github": [
+        77,
+        56
+    ]
+}
