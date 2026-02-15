@@ -1,0 +1,10 @@
+{
+    "title": "Epic: Tree-walking interpreter for Core/GRIN",
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:high",
+        "component:runtime",
+        "type:feature"
+    ],
+    "body": "Build a tree-walking interpreter for Core/GRIN to validate the frontend pipeline before tackling LLVM codegen. Enables early end-to-end testing.\n\n**Key decisions**: #24 in DESIGN.md"
+}

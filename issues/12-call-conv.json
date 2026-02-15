@@ -1,0 +1,10 @@
+{
+    "title": "Research: Calling convention (eval/apply vs push/enter vs CPS)",
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:high",
+        "component:runtime",
+        "type:research"
+    ],
+    "body": "Research and decide on calling convention for compiled Haskell functions. Candidates: eval/apply (GHC default), push/enter (Marlow & Peyton Jones), CPS. Must work with GRIN's explicit thunk representation and LLVM backend.\n\n**References**: Marlow & Peyton Jones, \"Making a Fast Curry\" (2004)"
+}

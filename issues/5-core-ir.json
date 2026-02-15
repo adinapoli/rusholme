@@ -1,0 +1,10 @@
+{
+    "title": "Epic: Core IR (System F_C)",
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:critical",
+        "component:core",
+        "type:feature"
+    ],
+    "body": "Define the Core IR modelled on GHC's System F_C. Enables future interop: import GHC's `-ddump-simpl` output. No Core-to-Core optimisations (all deferred to GRIN). Includes typechecker and desugarer.\n\n**Key decisions**: #6, #20 in DESIGN.md\n**Sub-tasks to split later**: Core IR types, typechecker, desugarer, name uniqueness strategy"
+}

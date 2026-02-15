@@ -1,0 +1,10 @@
+{
+    "title": "Epic: GRIN optimisation passes",
+    "milestone": "M3: GRIN Optimisations",
+    "labels": [
+        "priority:high",
+        "component:grin",
+        "type:feature"
+    ],
+    "body": "Implement GRIN optimisation passes. All optimisation lives here (no Core-to-Core). Priority: dead code elimination, then unboxing, heap-to-stack, evaluated case elimination. Heap points-to analysis depth TBD.\n\n**Key decisions**: #20 in DESIGN.md\n**Sub-tasks to split later**: dead code elimination, unboxing, heap-to-stack, sparse case, heap points-to analysis"
+}

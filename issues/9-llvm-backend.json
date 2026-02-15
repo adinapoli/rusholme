@@ -1,0 +1,10 @@
+{
+    "title": "Epic: LLVM backend and Zig runtime",
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:high",
+        "component:backend",
+        "type:feature"
+    ],
+    "body": "Implement LLVM backend for GRIN. LLVM generates native code + Wasm. Runtime system written in Zig. Calling convention TBD (eval/apply, push/enter, or CPS — needs research).\n\n**Key decisions**: #22, #23 in DESIGN.md\n**Sub-tasks to split later**: GRIN→LLVM IR, calling convention research, Zig runtime (entry point, thunk eval, heap alloc, basic I/O)"
+}

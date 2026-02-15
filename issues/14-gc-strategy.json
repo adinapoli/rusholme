@@ -1,0 +1,10 @@
+{
+    "title": "Epic: Memory management (Arena → Immix GC)",
+    "milestone": "M2: Basic Programs",
+    "labels": [
+        "priority:medium",
+        "component:runtime",
+        "type:feature"
+    ],
+    "body": "Implement the phased GC strategy: start with ArenaAllocator (Phase 1), then Immix mark-region GC as a custom `std.mem.Allocator` (Phase 2). Phase 3 (ASAP static deallocation) is a separate epic.\n\n**Key decisions**: #8, #9, #11 in DESIGN.md\n**Sub-tasks to split later**: Arena integration, Immix allocator, GC root scanning"
+}

@@ -1,0 +1,10 @@
+{
+    "title": "Epic: Minimal Prelude",
+    "milestone": "M2: Basic Programs",
+    "labels": [
+        "priority:high",
+        "component:prelude",
+        "type:research"
+    ],
+    "body": "Research and implement a minimal Prelude. Needs: basic types (Bool, Int, Char, String, Maybe, Either, IO, lists), core functions (id, const, map, filter, foldr, foldl), basic type classes (Eq, Ord, Show, Read, Num, Monad). Research existing trimmed-down Preludes from teaching compilers.\n\n**Key decisions**: #12, #13 in DESIGN.md"
+}
