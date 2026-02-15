@@ -53,7 +53,7 @@
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#22](https://github.com/adinapoli/rusholme/issues/22) | Research: Parser technique decision (tree-sitter vs Alex/Happy vs hand-written) | — | :green_circle: |
-| [#23](https://github.com/adinapoli/rusholme/issues/23) | Define lexer token types for Haskell | [#22](https://github.com/adinapoli/rusholme/issues/22) | :white_circle: |
+| [#23](https://github.com/adinapoli/rusholme/issues/23) | Define lexer token types for Haskell | [#22](https://github.com/adinapoli/rusholme/issues/22) | :large_blue_circle: |
 | [#24](https://github.com/adinapoli/rusholme/issues/24) | Implement Unicode character classification for Haskell identifiers | — | :green_circle: |
 | [#25](https://github.com/adinapoli/rusholme/issues/25) | Implement core lexer (keywords, identifiers, literals, symbols) | [#23](https://github.com/adinapoli/rusholme/issues/23), [#24](https://github.com/adinapoli/rusholme/issues/24), [#17](https://github.com/adinapoli/rusholme/issues/17) | :white_circle: |
 | [#26](https://github.com/adinapoli/rusholme/issues/26) | Implement full Haskell 2010 layout rule | [#25](https://github.com/adinapoli/rusholme/issues/25) | :white_circle: |
