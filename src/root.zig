@@ -42,4 +42,5 @@ pub const SourceSpan = diagnostics.span.SourceSpan;
 pub const SourcePos = diagnostics.span.SourcePos;
 pub const FileId = diagnostics.span.FileId;
 pub const Diagnostic = diagnostics.diagnostic.Diagnostic;
+pub const DiagnosticCode = diagnostics.diagnostic.DiagnosticCode;
 pub const Severity = diagnostics.diagnostic.Severity;
