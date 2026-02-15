@@ -30,4 +30,5 @@ applicable to our multi-backend goals than GRIN.
 ## Links
 
 - Project: https://cakeml.org/purecake
-- Paper: Available via ACM Digital Library (PLDI 2023)
+- Direct PDF: https://hrutvik.co.uk/assets/pdf/pldi23.pdf
+- ACM Digital Library: PLDI 2023

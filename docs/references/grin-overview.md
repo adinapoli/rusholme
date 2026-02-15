@@ -66,9 +66,10 @@ covering desktop, mobile and web.
 
 - **Boquist GRIN** — the original GRIN formulation
 - **UHC, JHC, LHC** — other Haskell whole-program compilers
-- **[HRC (Intel Labs Haskell Research Compiler)](http://www.leafpetersen.com/leaf/publications/hs2013/hrc-paper.pdf)**
+- **HRC (Intel Labs Haskell Research Compiler)**
   — showed performance effect of whole program optimization on Haskell
-  - Also: [Measuring the Haskell Gap](http://www.leafpetersen.com/leaf/publications/ifl2013/haskell-gap.pdf)
+  - Paper PDF: http://www.leafpetersen.com/leaf/publications/hs2013/hrc-paper.pdf
+  - Also: [Measuring the Haskell Gap (PDF)](http://www.leafpetersen.com/leaf/publications/ifl2013/haskell-gap.pdf)
 - **[MLton](http://mlton.org/)** — leading industrial strength whole program
   compiler for SML; showed whole program compilation is feasible with low
   compile times
@@ -83,16 +84,20 @@ covering desktop, mobile and web.
 
 ### Memory Management
 
-- **[ASAP Memory Management](https://www.cl.cam.ac.uk/techreports/UCAM-CL-TR-908.pdf)**
+- **ASAP Memory Management**
   — compile-time automatic memory management using whole program analysis;
   generates a specialised garbage collector per program; may enable running
   Haskell without a runtime GC
+  - Paper PDF: https://www.cl.cam.ac.uk/techreports/UCAM-CL-TR-908.pdf
 - **[Gibbon](https://github.com/iu-parfunc/gibbon)** — experiments with packed
   memory data representation; pointerless data reduces cache misses
+  - Paper PDF: http://drops.dagstuhl.de/opus/volltexte/2017/7273/pdf/LIPIcs-ECOOP-2017-26.pdf
 
 ## Key Paper
 
-> Csaba Hruska, Péter Dávid Podlovics, Andor Pénzes.
+> Péter Dávid Podlovics, Csaba Hruska, Andor Pénzes.
 > **"A Modern Look at GRIN, an Optimizing Functional Language Back End"**
-> *Acta Cybernetica*, Volume 25, 2020, pp. 847–876.
-> PDF: http://nbviewer.jupyter.org/github/Anabra/grin/blob/fd9de6d3b9c7ec5f4aa7d6be41285359a73494e3/papers/stcs-2019/article/tex/main.pdf
+> *Acta Cybernetica*, Volume 25, No. 4, 2020, pp. 847–876.
+
+- Direct PDF: http://nbviewer.jupyter.org/github/Anabra/grin/blob/fd9de6d3b9c7ec5f4aa7d6be41285359a73494e3/papers/stcs-2019/article/tex/main.pdf
+- Journal page: https://cyber.bibl.u-szeged.hu/index.php/actcam/article/view/4037
