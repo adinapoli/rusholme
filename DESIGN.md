@@ -96,6 +96,29 @@ phased approach.
 | **Phase 2** | Immix (mark-region GC) | Implement an Immix-style collector as a custom `std.mem.Allocator`. Immix allocates in 32KB blocks / 128B lines, with opportunistic defragmentation. Best balance of performance and complexity. Simon Marlow noted GHC's allocator is "quite similar to Immix" |
 | **Phase 3** | ASAP-style static deallocation | Leverage GRIN's whole-program analysis to insert compile-time deallocation where provably safe. Goal: eliminate runtime GC for as much of the program as possible, falling back to Immix for the rest |
 
+### Plug-and-play via Zig allocators
+
+A key enabler of this phased strategy is Zig's `std.mem.Allocator` interface.
+In Zig, `Allocator` is a **vtable-based interface** — any struct that provides
+`alloc`, `resize`, and `free` function pointers can serve as an allocator. The
+entire runtime and all data structures are parameterised over `Allocator`,
+meaning:
+
+- **Phase 1 → Phase 2 is a swap, not a rewrite.** The runtime code calls
+  `allocator.alloc(...)` and `allocator.free(...)` everywhere. Switching from
+  `ArenaAllocator` to an Immix allocator means changing which allocator is
+  passed in — the rest of the codebase is untouched.
+- **Multiple strategies can coexist.** Different parts of the runtime (e.g.
+  the parser vs. the GRIN evaluator) can use different allocators
+  simultaneously.
+- **Testing and benchmarking is trivial.** We can run the same program under
+  Arena, Immix, and ASAP allocators and compare behaviour, memory usage, and
+  performance with no code changes.
+
+This is analogous to Haskell's type class polymorphism, but at the systems
+level — and it's a zero-cost abstraction in Zig (the vtable is resolved at
+comptime when the concrete allocator type is known).
+
 ### Why Immix?
 
 - 7–25% faster than canonical GCs in benchmarks (Blackburn & McKinley, PLDI 2008)
