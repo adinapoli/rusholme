@@ -22,9 +22,9 @@ pub const LocatedToken = struct {
         return .{ .token = token, .span = span_val };
     }
 
-    pub fn format(self: LocatedToken, comptime fmt: []const u8, opts: std.fmt.FormatOptions, writer: anytype) !void {
-        try self.token.format(fmt, opts, writer);
-        try writer.print(" @ {d}:{d}-{d}:{d}", .{
+    pub fn format(self: LocatedToken, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try self.token.format(w);
+        try w.print(" @ {d}:{d}-{d}:{d}", .{
             self.span.start.line,
             self.span.start.column,
             self.span.end.line,
@@ -232,82 +232,82 @@ pub const Token = union(enum) {
         return map.get(s);
     }
 
-    pub fn format(self: Token, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: Token, w: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self) {
             // Keywords
-            .kw_module => try writer.writeAll("module"),
-            .kw_where => try writer.writeAll("where"),
-            .kw_import => try writer.writeAll("import"),
-            .kw_qualified => try writer.writeAll("qualified"),
-            .kw_as => try writer.writeAll("as"),
-            .kw_hiding => try writer.writeAll("hiding"),
-            .kw_let => try writer.writeAll("let"),
-            .kw_in => try writer.writeAll("in"),
-            .kw_case => try writer.writeAll("case"),
-            .kw_of => try writer.writeAll("of"),
-            .kw_if => try writer.writeAll("if"),
-            .kw_then => try writer.writeAll("then"),
-            .kw_else => try writer.writeAll("else"),
-            .kw_do => try writer.writeAll("do"),
-            .kw_data => try writer.writeAll("data"),
-            .kw_type => try writer.writeAll("type"),
-            .kw_newtype => try writer.writeAll("newtype"),
-            .kw_class => try writer.writeAll("class"),
-            .kw_instance => try writer.writeAll("instance"),
-            .kw_deriving => try writer.writeAll("deriving"),
-            .kw_default => try writer.writeAll("default"),
-            .kw_foreign => try writer.writeAll("foreign"),
-            .kw_forall => try writer.writeAll("forall"),
-            .kw_infixl => try writer.writeAll("infixl"),
-            .kw_infixr => try writer.writeAll("infixr"),
-            .kw_infix => try writer.writeAll("infix"),
+            .kw_module => try w.writeAll("module"),
+            .kw_where => try w.writeAll("where"),
+            .kw_import => try w.writeAll("import"),
+            .kw_qualified => try w.writeAll("qualified"),
+            .kw_as => try w.writeAll("as"),
+            .kw_hiding => try w.writeAll("hiding"),
+            .kw_let => try w.writeAll("let"),
+            .kw_in => try w.writeAll("in"),
+            .kw_case => try w.writeAll("case"),
+            .kw_of => try w.writeAll("of"),
+            .kw_if => try w.writeAll("if"),
+            .kw_then => try w.writeAll("then"),
+            .kw_else => try w.writeAll("else"),
+            .kw_do => try w.writeAll("do"),
+            .kw_data => try w.writeAll("data"),
+            .kw_type => try w.writeAll("type"),
+            .kw_newtype => try w.writeAll("newtype"),
+            .kw_class => try w.writeAll("class"),
+            .kw_instance => try w.writeAll("instance"),
+            .kw_deriving => try w.writeAll("deriving"),
+            .kw_default => try w.writeAll("default"),
+            .kw_foreign => try w.writeAll("foreign"),
+            .kw_forall => try w.writeAll("forall"),
+            .kw_infixl => try w.writeAll("infixl"),
+            .kw_infixr => try w.writeAll("infixr"),
+            .kw_infix => try w.writeAll("infix"),
 
             // Literals
-            .lit_integer => |v| try writer.print("integer({d})", .{v}),
-            .lit_float => |v| try writer.print("float({d})", .{v}),
-            .lit_char => |v| try writer.print("char({u})", .{v}),
-            .lit_string => |v| try writer.print("string(\"{s}\")", .{v}),
+            .lit_integer => |v| try w.print("integer({d})", .{v}),
+            .lit_float => |v| try w.print("float({d})", .{v}),
+            .lit_char => |v| try w.print("char({u})", .{v}),
+            .lit_string => |v| try w.print("string(\"{s}\")", .{v}),
 
             // Identifiers
-            .varid => |v| try writer.print("varid({s})", .{v}),
-            .conid => |v| try writer.print("conid({s})", .{v}),
-            .varsym => |v| try writer.print("varsym({s})", .{v}),
-            .consym => |v| try writer.print("consym({s})", .{v}),
+            .varid => |v| try w.print("varid({s})", .{v}),
+            .conid => |v| try w.print("conid({s})", .{v}),
+            .varsym => |v| try w.print("varsym({s})", .{v}),
+            .consym => |v| try w.print("consym({s})", .{v}),
 
             // Layout tokens (explicit)
-            .open_brace => try writer.writeAll("{"),
-            .close_brace => try writer.writeAll("}"),
-            .semi => try writer.writeAll(";"),
+            .open_brace => try w.writeAll("{"),
+            .close_brace => try w.writeAll("}"),
+            .semi => try w.writeAll(";"),
 
             // Layout tokens (virtual)
-            .v_open_brace => try writer.writeAll("v{"),
-            .v_close_brace => try writer.writeAll("v}"),
-            .v_semi => try writer.writeAll("v;"),
+            .v_open_brace => try w.writeAll("v{"),
+            .v_close_brace => try w.writeAll("v}"),
+            .v_semi => try w.writeAll("v;"),
 
             // Special symbols
-            .open_paren => try writer.writeAll("("),
-            .close_paren => try writer.writeAll(")"),
-            .open_bracket => try writer.writeAll("["),
-            .close_bracket => try writer.writeAll("]"),
-            .comma => try writer.writeAll(","),
-            .dotdot => try writer.writeAll(".."),
-            .dcolon => try writer.writeAll("::"),
-            .equals => try writer.writeAll("="),
-            .backslash => try writer.writeAll("\\"),
-            .pipe => try writer.writeAll("|"),
-            .arrow_right => try writer.writeAll("->"),
-            .arrow_left => try writer.writeAll("<-"),
-            .at => try writer.writeAll("@"),
-            .tilde => try writer.writeAll("~"),
-            .darrow => try writer.writeAll("=>"),
-            .underscore => try writer.writeAll("_"),
-            .minus => try writer.writeAll("-"),
+            .open_paren => try w.writeAll("("),
+            .close_paren => try w.writeAll(")"),
+            .open_bracket => try w.writeAll("["),
+            .close_bracket => try w.writeAll("]"),
+            .comma => try w.writeAll(","),
+            .dotdot => try w.writeAll(".."),
+            .dcolon => try w.writeAll("::"),
+            .equals => try w.writeAll("="),
+            .backslash => try w.writeAll("\\"),
+            .pipe => try w.writeAll("|"),
+            .arrow_right => try w.writeAll("->"),
+            .arrow_left => try w.writeAll("<-"),
+            .at => try w.writeAll("@"),
+            .tilde => try w.writeAll("~"),
+            .darrow => try w.writeAll("=>"),
+            .underscore => try w.writeAll("_"),
+            .minus => try w.writeAll("-"),
 
             // Other
-            .eof => try writer.writeAll("<eof>"),
-            .line_comment => |v| try writer.print("comment({s})", .{v}),
-            .block_comment => |v| try writer.print("block_comment({s})", .{v}),
-            .pragma => |v| try writer.print("pragma({s})", .{v}),
+            .eof => try w.writeAll("<eof>"),
+            .line_comment => |v| try w.print("comment({s})", .{v}),
+            .block_comment => |v| try w.print("block_comment({s})", .{v}),
+            .pragma => |v| try w.print("pragma({s})", .{v}),
         }
     }
 };
@@ -315,17 +315,24 @@ pub const Token = union(enum) {
 // ── Tests ──────────────────────────────────────────────────────────────
 
 test "Token keyword classification" {
-    try std.testing.expect(Token.kw_module.isKeyword());
-    try std.testing.expect(Token.kw_where.isKeyword());
-    try std.testing.expect(Token.kw_let.isKeyword());
-    try std.testing.expect(Token.kw_forall.isKeyword());
-    try std.testing.expect(Token.kw_infix.isKeyword());
+    const kw_module: Token = .kw_module;
+    const kw_where: Token = .kw_where;
+    const kw_let: Token = .kw_let;
+    const kw_forall: Token = .kw_forall;
+    const kw_infix: Token = .kw_infix;
+    try std.testing.expect(kw_module.isKeyword());
+    try std.testing.expect(kw_where.isKeyword());
+    try std.testing.expect(kw_let.isKeyword());
+    try std.testing.expect(kw_forall.isKeyword());
+    try std.testing.expect(kw_infix.isKeyword());
 
     // Non-keywords
-    try std.testing.expect(!Token.eof.isKeyword());
+    const eof_tok: Token = .eof;
+    const open_paren_tok: Token = .open_paren;
+    try std.testing.expect(!eof_tok.isKeyword());
     try std.testing.expect(!(Token{ .varid = "x" }).isKeyword());
     try std.testing.expect(!(Token{ .lit_integer = 42 }).isKeyword());
-    try std.testing.expect(!Token.open_paren.isKeyword());
+    try std.testing.expect(!open_paren_tok.isKeyword());
 }
 
 test "Token literal classification" {
@@ -335,25 +342,35 @@ test "Token literal classification" {
     try std.testing.expect((Token{ .lit_string = "hello" }).isLiteral());
 
     // Non-literals
-    try std.testing.expect(!Token.kw_module.isLiteral());
+    const kw: Token = .kw_module;
+    const paren: Token = .open_paren;
+    try std.testing.expect(!kw.isLiteral());
     try std.testing.expect(!(Token{ .varid = "x" }).isLiteral());
-    try std.testing.expect(!Token.open_paren.isLiteral());
+    try std.testing.expect(!paren.isLiteral());
 }
 
 test "Token virtual layout classification" {
     // Virtual tokens
-    try std.testing.expect(Token.v_open_brace.isLayoutVirtual());
-    try std.testing.expect(Token.v_close_brace.isLayoutVirtual());
-    try std.testing.expect(Token.v_semi.isLayoutVirtual());
+    const v_open: Token = .v_open_brace;
+    const v_close: Token = .v_close_brace;
+    const v_s: Token = .v_semi;
+    try std.testing.expect(v_open.isLayoutVirtual());
+    try std.testing.expect(v_close.isLayoutVirtual());
+    try std.testing.expect(v_s.isLayoutVirtual());
 
     // Explicit layout tokens are NOT virtual
-    try std.testing.expect(!Token.open_brace.isLayoutVirtual());
-    try std.testing.expect(!Token.close_brace.isLayoutVirtual());
-    try std.testing.expect(!Token.semi.isLayoutVirtual());
+    const e_open: Token = .open_brace;
+    const e_close: Token = .close_brace;
+    const e_semi: Token = .semi;
+    try std.testing.expect(!e_open.isLayoutVirtual());
+    try std.testing.expect(!e_close.isLayoutVirtual());
+    try std.testing.expect(!e_semi.isLayoutVirtual());
 
     // Other tokens
-    try std.testing.expect(!Token.kw_where.isLayoutVirtual());
-    try std.testing.expect(!Token.eof.isLayoutVirtual());
+    const kw: Token = .kw_where;
+    const eof_tok: Token = .eof;
+    try std.testing.expect(!kw.isLayoutVirtual());
+    try std.testing.expect(!eof_tok.isLayoutVirtual());
 }
 
 test "Token.keywordFromString" {
@@ -395,64 +412,84 @@ test "Token.keywordFromString" {
 test "Token.format keywords" {
     var buf: [32]u8 = undefined;
 
-    const s1 = try std.fmt.bufPrint(&buf, "{}", .{Token.kw_module});
+    const kw1: Token = .kw_module;
+    const s1 = try std.fmt.bufPrint(&buf, "{f}", .{kw1});
     try std.testing.expectEqualStrings("module", s1);
 
-    const s2 = try std.fmt.bufPrint(&buf, "{}", .{Token.kw_forall});
+    const kw2: Token = .kw_forall;
+    const s2 = try std.fmt.bufPrint(&buf, "{f}", .{kw2});
     try std.testing.expectEqualStrings("forall", s2);
 }
 
 test "Token.format literals" {
     var buf: [64]u8 = undefined;
 
-    const s1 = try std.fmt.bufPrint(&buf, "{}", .{Token{ .lit_integer = 42 }});
+    const s1 = try std.fmt.bufPrint(&buf, "{f}", .{Token{ .lit_integer = 42 }});
     try std.testing.expectEqualStrings("integer(42)", s1);
 
-    const s2 = try std.fmt.bufPrint(&buf, "{}", .{Token{ .lit_string = "hello" }});
+    const s2 = try std.fmt.bufPrint(&buf, "{f}", .{Token{ .lit_string = "hello" }});
     try std.testing.expectEqualStrings("string(\"hello\")", s2);
 }
 
 test "Token.format identifiers" {
     var buf: [64]u8 = undefined;
 
-    const s1 = try std.fmt.bufPrint(&buf, "{}", .{Token{ .varid = "foo" }});
+    const s1 = try std.fmt.bufPrint(&buf, "{f}", .{Token{ .varid = "foo" }});
     try std.testing.expectEqualStrings("varid(foo)", s1);
 
-    const s2 = try std.fmt.bufPrint(&buf, "{}", .{Token{ .conid = "Just" }});
+    const s2 = try std.fmt.bufPrint(&buf, "{f}", .{Token{ .conid = "Just" }});
     try std.testing.expectEqualStrings("conid(Just)", s2);
 
-    const s3 = try std.fmt.bufPrint(&buf, "{}", .{Token{ .varsym = ">>=" }});
+    const s3 = try std.fmt.bufPrint(&buf, "{f}", .{Token{ .varsym = ">>=" }});
     try std.testing.expectEqualStrings("varsym(>>=)", s3);
 
-    const s4 = try std.fmt.bufPrint(&buf, "{}", .{Token{ .consym = ":" }});
+    const s4 = try std.fmt.bufPrint(&buf, "{f}", .{Token{ .consym = ":" }});
     try std.testing.expectEqualStrings("consym(:)", s4);
 }
 
 test "Token.format special symbols" {
     var buf: [16]u8 = undefined;
 
+    const open_paren: Token = .open_paren;
+    const close_paren: Token = .close_paren;
+    const open_bracket: Token = .open_bracket;
+    const close_bracket: Token = .close_bracket;
+    const comma_tok: Token = .comma;
+    const dotdot_tok: Token = .dotdot;
+    const dcolon_tok: Token = .dcolon;
+    const equals_tok: Token = .equals;
+    const backslash_tok: Token = .backslash;
+    const pipe_tok: Token = .pipe;
+    const arrow_r: Token = .arrow_right;
+    const arrow_l: Token = .arrow_left;
+    const at_tok: Token = .at;
+    const tilde_tok: Token = .tilde;
+    const darrow_tok: Token = .darrow;
+    const underscore_tok: Token = .underscore;
+    const minus_tok: Token = .minus;
+
     const cases = .{
-        .{ Token.open_paren, "(" },
-        .{ Token.close_paren, ")" },
-        .{ Token.open_bracket, "[" },
-        .{ Token.close_bracket, "]" },
-        .{ Token.comma, "," },
-        .{ Token.dotdot, ".." },
-        .{ Token.dcolon, "::" },
-        .{ Token.equals, "=" },
-        .{ Token.backslash, "\\" },
-        .{ Token.pipe, "|" },
-        .{ Token.arrow_right, "->" },
-        .{ Token.arrow_left, "<-" },
-        .{ Token.at, "@" },
-        .{ Token.tilde, "~" },
-        .{ Token.darrow, "=>" },
-        .{ Token.underscore, "_" },
-        .{ Token.minus, "-" },
+        .{ open_paren, "(" },
+        .{ close_paren, ")" },
+        .{ open_bracket, "[" },
+        .{ close_bracket, "]" },
+        .{ comma_tok, "," },
+        .{ dotdot_tok, ".." },
+        .{ dcolon_tok, "::" },
+        .{ equals_tok, "=" },
+        .{ backslash_tok, "\\" },
+        .{ pipe_tok, "|" },
+        .{ arrow_r, "->" },
+        .{ arrow_l, "<-" },
+        .{ at_tok, "@" },
+        .{ tilde_tok, "~" },
+        .{ darrow_tok, "=>" },
+        .{ underscore_tok, "_" },
+        .{ minus_tok, "-" },
     };
 
     inline for (cases) |c| {
-        const s = try std.fmt.bufPrint(&buf, "{}", .{c[0]});
+        const s = try std.fmt.bufPrint(&buf, "{f}", .{c[0]});
         try std.testing.expectEqualStrings(c[1], s);
     }
 }
@@ -461,32 +498,39 @@ test "Token.format layout tokens" {
     var buf: [16]u8 = undefined;
 
     // Explicit
-    const s1 = try std.fmt.bufPrint(&buf, "{}", .{Token.open_brace});
+    const ob: Token = .open_brace;
+    const s1 = try std.fmt.bufPrint(&buf, "{f}", .{ob});
     try std.testing.expectEqualStrings("{", s1);
-    const s2 = try std.fmt.bufPrint(&buf, "{}", .{Token.close_brace});
+    const cb: Token = .close_brace;
+    const s2 = try std.fmt.bufPrint(&buf, "{f}", .{cb});
     try std.testing.expectEqualStrings("}", s2);
-    const s3 = try std.fmt.bufPrint(&buf, "{}", .{Token.semi});
+    const sm: Token = .semi;
+    const s3 = try std.fmt.bufPrint(&buf, "{f}", .{sm});
     try std.testing.expectEqualStrings(";", s3);
 
     // Virtual (prefixed with 'v')
-    const s4 = try std.fmt.bufPrint(&buf, "{}", .{Token.v_open_brace});
+    const vob: Token = .v_open_brace;
+    const s4 = try std.fmt.bufPrint(&buf, "{f}", .{vob});
     try std.testing.expectEqualStrings("v{", s4);
-    const s5 = try std.fmt.bufPrint(&buf, "{}", .{Token.v_close_brace});
+    const vcb: Token = .v_close_brace;
+    const s5 = try std.fmt.bufPrint(&buf, "{f}", .{vcb});
     try std.testing.expectEqualStrings("v}", s5);
-    const s6 = try std.fmt.bufPrint(&buf, "{}", .{Token.v_semi});
+    const vs: Token = .v_semi;
+    const s6 = try std.fmt.bufPrint(&buf, "{f}", .{vs});
     try std.testing.expectEqualStrings("v;", s6);
 }
 
 test "Token.format eof and comments" {
     var buf: [64]u8 = undefined;
 
-    const s1 = try std.fmt.bufPrint(&buf, "{}", .{Token.eof});
+    const eof_tok: Token = .eof;
+    const s1 = try std.fmt.bufPrint(&buf, "{f}", .{eof_tok});
     try std.testing.expectEqualStrings("<eof>", s1);
 
-    const s2 = try std.fmt.bufPrint(&buf, "{}", .{Token{ .line_comment = "a comment" }});
+    const s2 = try std.fmt.bufPrint(&buf, "{f}", .{Token{ .line_comment = "a comment" }});
     try std.testing.expectEqualStrings("comment(a comment)", s2);
 
-    const s3 = try std.fmt.bufPrint(&buf, "{}", .{Token{ .pragma = "LANGUAGE GADTs" }});
+    const s3 = try std.fmt.bufPrint(&buf, "{f}", .{Token{ .pragma = "LANGUAGE GADTs" }});
     try std.testing.expectEqualStrings("pragma(LANGUAGE GADTs)", s3);
 }
 
@@ -503,7 +547,7 @@ test "LocatedToken construction and format" {
     try std.testing.expectEqual(@as(u32, 5), loc.span.start.line);
     try std.testing.expectEqual(@as(u32, 10), loc.span.start.column);
 
-    const s = try std.fmt.bufPrint(&buf, "{}", .{loc});
+    const s = try std.fmt.bufPrint(&buf, "{f}", .{loc});
     try std.testing.expectEqualStrings("module @ 5:10-5:16", s);
 }
 
@@ -516,6 +560,6 @@ test "LocatedToken with identifier payload" {
     );
     const loc = LocatedToken.init(.{ .varid = "foo" }, span);
 
-    const s = try std.fmt.bufPrint(&buf, "{}", .{loc});
+    const s = try std.fmt.bufPrint(&buf, "{f}", .{loc});
     try std.testing.expectEqualStrings("varid(foo) @ 10:1-10:4", s);
 }

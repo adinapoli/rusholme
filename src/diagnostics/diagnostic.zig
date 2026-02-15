@@ -18,14 +18,14 @@ pub const Severity = enum {
     info,
     hint,
 
-    pub fn format(self: Severity, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: Severity, w: *std.Io.Writer) std.Io.Writer.Error!void {
         const s = switch (self) {
             .@"error" => "error",
             .warning => "warning",
             .info => "info",
             .hint => "hint",
         };
-        try writer.writeAll(s);
+        try w.writeAll(s);
     }
 };
 

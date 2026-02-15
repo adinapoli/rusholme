@@ -44,3 +44,19 @@ pub const FileId = diagnostics.span.FileId;
 pub const Diagnostic = diagnostics.diagnostic.Diagnostic;
 pub const DiagnosticCode = diagnostics.diagnostic.DiagnosticCode;
 pub const Severity = diagnostics.diagnostic.Severity;
+
+// ── Test discovery ─────────────────────────────────────────────────────
+// Zig's test runner only discovers test blocks in transitively-referenced
+// files. Imports inside struct wrappers above are not automatically
+// traversed for tests. This block ensures all submodule tests are found.
+test {
+    const testing = @import("std").testing;
+    // Top-level re-exports and direct imports
+    testing.refAllDecls(@This());
+    // Nested struct modules need explicit referencing
+    testing.refAllDecls(diagnostics);
+    testing.refAllDecls(frontend);
+    testing.refAllDecls(core);
+    testing.refAllDecls(grin);
+    testing.refAllDecls(backend);
+}
