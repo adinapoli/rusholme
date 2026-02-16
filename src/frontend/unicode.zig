@@ -38,9 +38,9 @@ pub fn isUniLetter(c: u21) bool {
 /// Check if a Unicode code point is a symbol or punctuation (uniSymbol in Haskell).
 /// Corresponds to Unicode categories Sm, Sc, Sk, So.
 pub fn isUniSymbol(c: u21) bool {
-    // ASCII symbols: !"#$%&*+./<=>?@\^|~- (excluding : and ' which are operators)
+    // ASCII symbols: !#$%&*+./<=>?@\^|~- (excluding :, ', ", and specials)
     return switch (c) {
-        '!', '"', '#', '$', '%', '&', '*', '+', '.', '/', '<', '=', '>', '?', '@', '\\', '^', '|', '~', '-' => true,
+        '!', '#', '$', '%', '&', '*', '+', '.', '/', '<', '=', '>', '?', '@', '\\', '^', '|', '~', '-' => true,
         else => false,
     };
 }
@@ -69,15 +69,15 @@ pub fn isUniWhite(c: u21) bool {
     // ASCII whitespace
     return switch (c) {
         ' ', '\t', '\n', '\r', '\x0C' => true, // space, tab, newline, CR, form feed
-        '\x0B' => true,       // vertical tab
-        0x00A0 => true,       // NO-BREAK SPACE (Zs)
-        0x1680 => true,       // OGHAM SPACE MARK (Zs)
+        '\x0B' => true, // vertical tab
+        0x00A0 => true, // NO-BREAK SPACE (Zs)
+        0x1680 => true, // OGHAM SPACE MARK (Zs)
         0x2000...0x200A => true, // EN QUAD...HAIR SPACE (Zs)
-        0x2028 => true,       // LINE SEPARATOR (Zl)
-        0x2029 => true,       // PARAGRAPH SEPARATOR (Zp)
-        0x202F => true,       // NARROW NO-BREAK SPACE (Zs)
-        0x205F => true,       // MEDIUM MATHEMATICAL SPACE (Zs)
-        0x3000 => true,       // IDEOGRAPHIC SPACE (Zs)
+        0x2028 => true, // LINE SEPARATOR (Zl)
+        0x2029 => true, // PARAGRAPH SEPARATOR (Zp)
+        0x202F => true, // NARROW NO-BREAK SPACE (Zs)
+        0x205F => true, // MEDIUM MATHEMATICAL SPACE (Zs)
+        0x3000 => true, // IDEOGRAPHIC SPACE (Zs)
         else => false,
     };
 }
