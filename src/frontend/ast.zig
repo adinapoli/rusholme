@@ -352,7 +352,7 @@ pub const Pattern = union(enum) {
     /// List pattern: [x, y, xs]
     List: []const Pattern,
     /// Infix constructor pattern: x : xs
-    InfixCon: struct { left: Pattern, con: QName, right: Pattern },
+    InfixCon: struct { left: *const Pattern, con: QName, right: *const Pattern },
     /// Negation pattern: -5
     Negate: *const Pattern,
     /// Parenthesized pattern: (Just x)
