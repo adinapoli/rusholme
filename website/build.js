@@ -3,7 +3,7 @@
 /**
  * Rusholme Website Build Script
  * 
- * Genera a static HTML file by replacing the placeholder
+ * Generates a static HTML file by replacing the placeholder
  * in template.html with data fetched from GitHub API.
  */
 
@@ -21,6 +21,19 @@ const CONFIG = {
   apiBaseUrl: 'https://api.github.com/repos/adinapoli/rusholme',
   maxRecentIssues: 6
 };
+
+// Copy logo from assets directory
+function copyLogo() {
+  const logoSource = path.join(__dirname, '../assets/logo.png');
+  const logoTarget = path.join(__dirname, 'logo.png');
+  
+  if (fs.existsSync(logoSource)) {
+    fs.copyFileSync(logoSource, logoTarget);
+    console.log('   ✓ Copied logo from assets/');
+  } else {
+    console.warn('   ⚠️  assets/logo.png not found');
+  }
+}
 
 // Fetch JSON from URL
 function fetchJSON(url) {
@@ -125,10 +138,12 @@ function generateRecentProgressHTML(issues) {
 async function build() {
   console.log('🏗️  Building Rusholme website...\n');
   
+  // Copy logo from assets
+  copyLogo();
+  
   const templatePath = path.join(__dirname, 'template.html');
   if (!fs.existsSync(templatePath)) {
     console.error('❌ Error: template.html not found!');
-    console.log('   Make sure you\'re running this from the website directory.');
     process.exit(1);
   }
   

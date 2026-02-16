@@ -242,7 +242,7 @@
             <div class="mb-8 animate-float">
                 <div class="relative inline-block">
                     <div class="absolute -inset-4 bg-gradient-to-br from-zig to-haskell rounded-full opacity-50 blur-3xl"></div>
-                    <img src="official-logo.png" alt="Rusholme Logo" class="relative w-40 h-40 md:w-48 md:h-48 object-contain">
+                    <img src="logo.png" alt="Rusholme Logo" class="relative w-40 h-40 md:w-48 md:h-48 object-contain">
                 </div>
             </div>
             
@@ -623,20 +623,52 @@
                     <i data-lucide="flame" class="w-5 h-5 text-zig"></i>
                     Recent Progress
                 </h3>
-                <div id="recent-progress" class="space-y-3">
-                    <div class="flex items-start gap-3">
+                <div id="recent-progress" class="space-y-3 max-h-96 overflow-y-auto pr-2">
+                    <!-- RECENT_ISSUES_PLACEHOLDER -->
+                </div>
+            </div>
+
       <div class="w-6 h-6 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
           <polyline points="20 6 9 17 4 12"></polyline>
         </svg>
-                <div id="recent-progress" class="space-y-3 max-h-96 overflow-y-auto pr-2">
-                    <!-- RECENT_ISSUES_PLACEHOLDER -->
+      </div>
+      <div class="flex-1">
+        <a href="https://github.com/adinapoli/rusholme/issues/23" target="_blank" class="text-white hover:text-[#f7a41d] font-medium">
+          #23: Define lexer token types for Haskell
+        </a>
+        <p class="text-xs text-gray-500 mt-1">Closed 17 hours ago</p>
+      </div>
+    </div><div class="flex items-start gap-3">
+      <div class="w-6 h-6 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+          <polyline points="20 6 9 17 4 12"></polyline>
+        </svg>
+      </div>
+      <div class="flex-1">
+        <a href="https://github.com/adinapoli/rusholme/issues/18" target="_blank" class="text-white hover:text-[#f7a41d] font-medium">
+          #18: Define Diagnostic ADT (errors as structured data, not strings)
+        </a>
+        <p class="text-xs text-gray-500 mt-1">Closed 18 hours ago</p>
+      </div>
+    </div><div class="flex items-start gap-3">
+      <div class="w-6 h-6 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+          <polyline points="20 6 9 17 4 12"></polyline>
+        </svg>
+      </div>
+      <div class="flex-1">
+        <a href="https://github.com/adinapoli/rusholme/issues/1" target="_blank" class="text-white hover:text-[#f7a41d] font-medium">
+          #1: Set up GitHub Actions CI via Nix flake
+        </a>
+        <p class="text-xs text-gray-500 mt-1">Closed 19 hours ago</p>
+      </div>
+    </div>
                 </div>
             </div>
         </div>
     </section>
 
-    <!-- Design Section -->
     <!-- Design Section -->
     <section id="design" class="py-24 px-4 sm:px-6 lg:px-8 bg-gray-900/50 relative">
         <div class="max-w-7xl mx-auto">
