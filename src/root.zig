@@ -17,6 +17,7 @@ pub const frontend = struct {
     pub const layout = @import("frontend/layout.zig");
     pub const unicode = @import("frontend/unicode.zig");
     pub const ast = @import("frontend/ast.zig");
+    pub const pretty = @import("frontend/pretty.zig");
 };
 
 // Type checking
