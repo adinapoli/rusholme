@@ -11,6 +11,7 @@
 const std = @import("std");
 const span_mod = @import("../diagnostics/span.zig");
 const diag_mod = @import("../diagnostics/diagnostic.zig");
+const unicode = @import("unicode.zig");
 const SourceSpan = span_mod.SourceSpan;
 const SourcePos = span_mod.SourcePos;
 
@@ -348,14 +349,41 @@ pub const Lexer = struct {
 
         const c = self.peek().?;
 
-        // Numeric literals
-        if (std.ascii.isDigit(c)) {
-            return self.scanNumericLiteral();
-        }
-
-        // Character literals
-        if (c == '\'') {
-            return self.scanCharLiteral();
+        // Special characters (Haskell "specials")
+        switch (c) {
+            '(' => {
+                _ = self.advance();
+                return LocatedToken.init(.open_paren, span_mod.SourceSpan.init(start_pos, self.currentPos()));
+            },
+            ')' => {
+                _ = self.advance();
+                return LocatedToken.init(.close_paren, span_mod.SourceSpan.init(start_pos, self.currentPos()));
+            },
+            '[' => {
+                _ = self.advance();
+                return LocatedToken.init(.open_bracket, span_mod.SourceSpan.init(start_pos, self.currentPos()));
+            },
+            ']' => {
+                _ = self.advance();
+                return LocatedToken.init(.close_bracket, span_mod.SourceSpan.init(start_pos, self.currentPos()));
+            },
+            ',' => {
+                _ = self.advance();
+                return LocatedToken.init(.comma, span_mod.SourceSpan.init(start_pos, self.currentPos()));
+            },
+            ';' => {
+                _ = self.advance();
+                return LocatedToken.init(.semi, span_mod.SourceSpan.init(start_pos, self.currentPos()));
+            },
+            '{' => {
+                _ = self.advance();
+                return LocatedToken.init(.open_brace, span_mod.SourceSpan.init(start_pos, self.currentPos()));
+            },
+            '}' => {
+                _ = self.advance();
+                return LocatedToken.init(.close_brace, span_mod.SourceSpan.init(start_pos, self.currentPos()));
+            },
+            else => {},
         }
 
         // String literals
@@ -363,8 +391,27 @@ pub const Lexer = struct {
             return self.scanStringLiteral();
         }
 
-        // TODO: Handle other token types (identifiers, keywords, symbols, etc.)
-        // For now, we return a single character as an error/unsupported token to avoid infinite loops
+        // Character literals
+        if (c == '\'') {
+            return self.scanCharLiteral();
+        }
+
+        // Numeric literals
+        if (std.ascii.isDigit(c)) {
+            return self.scanNumericLiteral();
+        }
+
+        // Operators
+        if (unicode.isUniSymbol(@intCast(c)) or c == ':') {
+            return self.scanOperator();
+        }
+
+        // Identifiers & Keywords
+        if (unicode.isIdStart(@intCast(c))) {
+            return self.scanIdentifierOrKeyword();
+        }
+
+        // Fallback for unknown characters
         _ = self.advance();
         const end_pos = self.currentPos();
         const msg = "unsupported token";
@@ -407,28 +454,203 @@ pub const Lexer = struct {
         while (!self.isAtEnd()) {
             const c = self.peek().?;
             switch (c) {
-                ' ', '\t', '\r', '\n' => {
+                ' ', '\t', '\r', '\n', 0x0C, 0x0B => {
                     _ = self.advance();
                 },
                 '-' => {
                     if (self.peekNext() == '-') {
-                        // TODO: Handle line comments
-                        break;
+                        // Potential line comment
+                        var i: usize = self.pos + 2;
+                        while (i < self.source.len and self.source[i] == '-') i += 1;
+                        if (i < self.source.len and (unicode.isUniSymbol(@intCast(self.source[i])) or self.source[i] == ':')) {
+                            // It's an operator start (e.g. --> or ---+)
+                            break;
+                        }
+                        // It's a comment!
+                        while (!self.isAtEnd() and self.peek() != '\n') {
+                            _ = self.advance();
+                        }
                     } else {
                         break;
                     }
                 },
                 '{' => {
                     if (self.peekNext() == '-') {
-                        // TODO: Handle block comments
-                        break;
+                        // Block comment. Nested.
+                        _ = self.advance(); // {
+                        _ = self.advance(); // -
+                        var depth: usize = 1;
+                        while (!self.isAtEnd() and depth > 0) {
+                            const cur = self.advance().?;
+                            if (cur == '-' and self.peek() == '}') {
+                                _ = self.advance();
+                                depth -= 1;
+                            } else if (cur == '{' and self.peek() == '-') {
+                                _ = self.advance();
+                                depth += 1;
+                            }
+                        }
                     } else {
                         break;
                     }
                 },
-                else => break,
+                else => {
+                    if (unicode.isUniWhite(@intCast(c))) {
+                        _ = self.advance();
+                    } else break;
+                },
             }
         }
+    }
+
+    fn scanIdentifierOrKeyword(self: *Lexer) LocatedToken {
+        const start_pos = self.currentPos();
+        const start_idx = self.pos;
+
+        // Scan the first segment
+        _ = self.advance();
+        while (!self.isAtEnd() and unicode.isIdContinue(@intCast(self.peek().?))) {
+            _ = self.advance();
+        }
+
+        while (self.peek() == '.') {
+            const dot_idx = self.pos;
+            const dot_line = self.line;
+            const dot_col = self.column;
+
+            const segment = self.source[start_idx..self.pos];
+            const last_dot = std.mem.lastIndexOfScalar(u8, segment, '.');
+            const last_segment = if (last_dot) |i| segment[i + 1 ..] else segment;
+
+            if (last_segment.len > 0 and unicode.isUniLarge(@intCast(last_segment[0]))) {
+                _ = self.advance(); // consume '.'
+                if (self.isAtEnd()) {
+                    self.pos = dot_idx;
+                    self.line = dot_line;
+                    self.column = dot_col;
+                    break;
+                }
+                const next = self.peek().?;
+                if (unicode.isIdStart(@intCast(next))) {
+                    _ = self.advance();
+                    while (!self.isAtEnd() and unicode.isIdContinue(@intCast(self.peek().?))) {
+                        _ = self.advance();
+                    }
+                } else if (unicode.isUniSymbol(@intCast(next)) or next == ':') {
+                    _ = self.advance();
+                    while (!self.isAtEnd() and (unicode.isUniSymbol(@intCast(self.peek().?)) or self.peek().? == ':')) {
+                        _ = self.advance();
+                    }
+                    break; // Final operator segment
+                } else {
+                    self.pos = dot_idx;
+                    self.line = dot_line;
+                    self.column = dot_col;
+                    break;
+                }
+            } else break;
+        }
+
+        const full_str = self.source[start_idx..self.pos];
+        const end_pos = self.currentPos();
+
+        if (!std.mem.containsAtLeast(u8, full_str, 1, ".")) {
+            if (self.lookupKeyword(full_str)) |kw| {
+                return LocatedToken.init(kw, span_mod.SourceSpan.init(start_pos, end_pos));
+            }
+        }
+
+        const last_dot = std.mem.lastIndexOfScalar(u8, full_str, '.');
+        const final_part = if (last_dot) |i| full_str[i + 1 ..] else full_str;
+
+        if (final_part.len > 0) {
+            const first = final_part[0];
+            if (unicode.isUniLarge(@intCast(first))) {
+                return LocatedToken.init(.{ .conid = full_str }, span_mod.SourceSpan.init(start_pos, end_pos));
+            } else if (unicode.isUniSymbol(@intCast(first))) {
+                return LocatedToken.init(.{ .varsym = full_str }, span_mod.SourceSpan.init(start_pos, end_pos));
+            } else if (first == ':') {
+                return LocatedToken.init(.{ .consym = full_str }, span_mod.SourceSpan.init(start_pos, end_pos));
+            }
+        }
+        return LocatedToken.init(.{ .varid = full_str }, span_mod.SourceSpan.init(start_pos, end_pos));
+    }
+
+    fn scanOperator(self: *Lexer) LocatedToken {
+        const start_pos = self.currentPos();
+        const start_idx = self.pos;
+
+        while (!self.isAtEnd()) {
+            const c = self.peek().?;
+            if (unicode.isUniSymbol(@intCast(c)) or c == ':') {
+                _ = self.advance();
+            } else break;
+        }
+
+        const full_str = self.source[start_idx..self.pos];
+        const end_pos = self.currentPos();
+
+        if (self.lookupReservedSymbol(full_str)) |sym| {
+            return LocatedToken.init(sym, span_mod.SourceSpan.init(start_pos, end_pos));
+        }
+
+        if (full_str[0] == ':') {
+            return LocatedToken.init(.{ .consym = full_str }, span_mod.SourceSpan.init(start_pos, end_pos));
+        } else {
+            return LocatedToken.init(.{ .varsym = full_str }, span_mod.SourceSpan.init(start_pos, end_pos));
+        }
+    }
+
+    fn lookupKeyword(self: Lexer, s: []const u8) ?Token {
+        _ = self;
+        const map = std.StaticStringMap(Token).initComptime(.{
+            .{ "case", .kw_case },
+            .{ "class", .kw_class },
+            .{ "data", .kw_data },
+            .{ "default", .kw_default },
+            .{ "deriving", .kw_deriving },
+            .{ "do", .kw_do },
+            .{ "else", .kw_else },
+            .{ "foreign", .kw_foreign },
+            .{ "if", .kw_if },
+            .{ "import", .kw_import },
+            .{ "in", .kw_in },
+            .{ "infix", .kw_infix },
+            .{ "infixl", .kw_infixl },
+            .{ "infixr", .kw_infixr },
+            .{ "instance", .kw_instance },
+            .{ "let", .kw_let },
+            .{ "module", .kw_module },
+            .{ "newtype", .kw_newtype },
+            .{ "of", .kw_of },
+            .{ "then", .kw_then },
+            .{ "type", .kw_type },
+            .{ "where", .kw_where },
+            .{ "as", .kw_as },
+            .{ "qualified", .kw_qualified },
+            .{ "hiding", .kw_hiding },
+            .{ "forall", .kw_forall },
+            .{ "_", .underscore },
+        });
+        return map.get(s);
+    }
+
+    fn lookupReservedSymbol(self: Lexer, s: []const u8) ?Token {
+        _ = self;
+        const map = std.StaticStringMap(Token).initComptime(.{
+            .{ "..", .dotdot },
+            .{ "::", .dcolon },
+            .{ "=", .equals },
+            .{ "\\", .backslash },
+            .{ "|", .pipe },
+            .{ "<-", .arrow_left },
+            .{ "->", .arrow_right },
+            .{ "@", .at },
+            .{ "~", .tilde },
+            .{ "=>", .darrow },
+            .{ "-", .minus },
+        });
+        return map.get(s);
     }
 
     fn scanNumericLiteral(self: *Lexer) LocatedToken {
@@ -622,6 +844,11 @@ pub const Lexer = struct {
                         return LocatedToken.init(.{ .lex_error = "allocation error" }, span_mod.SourceSpan.init(start_pos, self.currentPos()));
                     };
                 }
+            } else if (c == '\n' or c == '\r') {
+                const end_pos = self.currentPos();
+                const msg = "newlines are not allowed in string literals";
+                self.emitError(span_mod.SourceSpan.init(start_pos, end_pos), msg);
+                return LocatedToken.init(.{ .lex_error = msg }, span_mod.SourceSpan.init(start_pos, end_pos));
             } else {
                 _ = self.advance();
                 buf.append(self.allocator, c) catch {
@@ -1090,15 +1317,14 @@ test "Lexer: String literals" {
 }
 
 test "Lexer: String/Char errors" {
-    const source = "'ab' '' \"unterminated\" '\\xG'";
+    const source = "'ab' \"\n\" \"\\xG\"";
     var bag = diag_mod.DiagnosticBag.init();
     defer bag.deinit(std.testing.allocator);
 
     var lexer = Lexer.init(std.testing.allocator, source, 1);
     lexer.diagnostics = &bag;
 
-    _ = lexer.nextToken(); // 'ab' -> unterminated? actually it scans 'a' and then expects '.
-    // Wait, my scanner: scans 'a', then checks for '. if not ', error. Correct.
+    _ = lexer.nextToken(); // 'ab'
 
     // Let's just check that we get errors for these.
     while (true) {
@@ -1111,4 +1337,50 @@ test "Lexer: String/Char errors" {
     }
 
     try std.testing.expect(bag.errorCount() >= 3);
+}
+
+test "Lexer: Identifiers and Keywords" {
+    const source = "module Main where import Data.List as L (map) let x = 1 in x + _forall _";
+    var lexer = Lexer.init(std.testing.allocator, source, 1);
+
+    try std.testing.expect(std.meta.activeTag(lexer.nextToken().token) == .kw_module);
+    try std.testing.expectEqualStrings("Main", lexer.nextToken().token.conid);
+    try std.testing.expect(std.meta.activeTag(lexer.nextToken().token) == .kw_where);
+    try std.testing.expect(std.meta.activeTag(lexer.nextToken().token) == .kw_import);
+    try std.testing.expectEqualStrings("Data.List", lexer.nextToken().token.conid);
+    try std.testing.expect(std.meta.activeTag(lexer.nextToken().token) == .kw_as);
+    try std.testing.expectEqualStrings("L", lexer.nextToken().token.conid);
+    try std.testing.expect(std.meta.activeTag(lexer.nextToken().token) == .open_paren);
+    try std.testing.expectEqualStrings("map", lexer.nextToken().token.varid);
+    try std.testing.expect(std.meta.activeTag(lexer.nextToken().token) == .close_paren);
+    try std.testing.expect(std.meta.activeTag(lexer.nextToken().token) == .kw_let);
+    try std.testing.expectEqualStrings("x", lexer.nextToken().token.varid);
+    try std.testing.expect(std.meta.activeTag(lexer.nextToken().token) == .equals);
+    try std.testing.expectEqual(@as(i64, 1), lexer.nextToken().token.lit_integer);
+    try std.testing.expect(std.meta.activeTag(lexer.nextToken().token) == .kw_in);
+    try std.testing.expectEqualStrings("x", lexer.nextToken().token.varid);
+    try std.testing.expectEqualStrings("+", lexer.nextToken().token.varsym);
+    try std.testing.expectEqualStrings("_forall", lexer.nextToken().token.varid);
+    try std.testing.expect(std.meta.activeTag(lexer.nextToken().token) == .underscore);
+}
+
+test "Lexer: Operators and Comments" {
+    const source = "f . g -- comment\n{- nested {- block -} -} x >>= :+:";
+    var lexer = Lexer.init(std.testing.allocator, source, 1);
+
+    try std.testing.expectEqualStrings("f", lexer.nextToken().token.varid);
+    try std.testing.expectEqualStrings(".", lexer.nextToken().token.varsym);
+    try std.testing.expectEqualStrings("g", lexer.nextToken().token.varid);
+    try std.testing.expectEqualStrings("x", lexer.nextToken().token.varid);
+    try std.testing.expectEqualStrings(">>=", lexer.nextToken().token.varsym);
+    try std.testing.expectEqualStrings(":+:", lexer.nextToken().token.consym);
+}
+
+test "Lexer: Qualified Operators" {
+    const source = "Prelude.+ Data.Map.! M.:+:";
+    var lexer = Lexer.init(std.testing.allocator, source, 1);
+
+    try std.testing.expectEqualStrings("Prelude.+", lexer.nextToken().token.varsym);
+    try std.testing.expectEqualStrings("Data.Map.!", lexer.nextToken().token.varsym);
+    try std.testing.expectEqualStrings("M.:+:", lexer.nextToken().token.consym);
 }
