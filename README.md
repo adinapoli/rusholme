@@ -75,6 +75,16 @@ zig build test --summary all
 zig build run
 ```
 
+## Binary Cache (Cachix)
+
+Rusholme uses [Cachix](https://cachix.org/) for binary caching to speed up builds.
+To use the cache locally, create or edit `~/.config/nix/nix.conf`:
+
+```conf
+substituters = https://cache.nixos.org https://adinapoli-rusholme.cachix.org
+trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= adinapoli-rusholme.cachix.org-1:TPBkX8B1CfCiqiMRQbq1rg12C8Lgaczubka/fO/cHeo=
+```
+
 > **⚠️ Note on `zig build` vs `zig build test`**
 >
 > Zig uses lazy compilation — `zig build` only compiles code paths reachable
