@@ -1,0 +1,13 @@
+{
+  "name": "rusholme-website",
+  "version": "1.0.0",
+  "description": "Build script for Rusholme website with dynamic content",
+  "type": "module",
+  "scripts": {
+    "build": "node build.js",
+    "serve": "npx serve ."
+  },
+  "dependencies": {
+    "marked": "^12.0.0"
+  }
+}
