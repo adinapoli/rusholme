@@ -12,7 +12,6 @@ pub const diagnostics = struct {
 pub const frontend = struct {
     pub const lexer = @import("frontend/lexer.zig");
     pub const parser = @import("frontend/parser.zig");
-    pub const layout = @import("frontend/layout.zig");
     pub const unicode = @import("frontend/unicode.zig");
     pub const ast = @import("frontend/ast.zig");
 };
