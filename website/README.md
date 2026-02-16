@@ -4,78 +4,86 @@ A modern, responsive static website for the Rusholme Haskell compiler project, h
 
 ## Features
 
-- **Hero Section** - Eye-catching introduction with animated gradient orbs and floating logo
+- **Hero Section** - Eye-catching introduction with animated gradient orbs and the official logo
 - **About Section** - Explains the "Curry Mile" backstory and project goals
 - **Pipeline Visualization** - Interactive SVG diagram showing the compilation pipeline
 - **Roadmap Section** - Milestone tracking with progress indicators
-- **Dynamic Recent Progress** - Fetches closed issues from GitHub API to show recent work
-- **Live Documentation** - Renders DESIGN.md and ROADMAP.md previews directly from GitHub
+- **Dynamic Recent Progress** - Built via Node.js script that fetches closed issues from GitHub API
+- **Live Documentation** - Client-side rendering of DESIGN.md and ROADMAP.md from GitHub
 - **Responsive Design** - Mobile-first with hamburger menu navigation
-- **Smooth Animations** - Fade-in effects, floating elements, and animated SVG connectors
-
-## Tech Stack
-
-This is a **pure static site** - no build step required:
-
-- **Tailwind CSS** (via CDN) - Utility-first styling
-- **Marked.js** (via CDN) - Client-side markdown parsing  
-- **Lucide Icons** (via CDN) - Beautiful icon set
-- **GitHub API** - Dynamic issue fetching for recent progress section
-- **Inter & JetBrains Mono** (Google Fonts) - Typography
 
 ## Development
 
-### Local Preview
+### Prerequisites
 
-The simplest way to preview the website locally:
+- Node.js (v18+ recommended)
+- npm or yarn
+
+### Installation
 
 ```bash
-# Using Python (if installed)
+cd website
+npm install
+```
+
+### Building the Website
+
+The build process fetches the latest GitHub issues and generates the static HTML:
+
+```bash
+cd website
+npm run build
+```
+
+This does the following:
+1. Reads `template.html`
+2. Fetches recent closed issues from GitHub API
+3. Replaces the `<!-- RECENT_ISSUES_PLACEHOLDER -->` with actual data
+4. Outputs `index.html` ready for deployment
+
+### Local Preview
+
+```bash
+# Using npm serve (recommended)
+cd website
+npm run serve
+
+# Or with Python
 cd website
 python -m http.server 8000
 
-# Or using Node.js (if installed)
-npx serve .
-
-# Or using PHP (if installed)
-php -S localhost:8000
+# Or with Node.js's http-server
+cd website
+npx http-server .
 ```
 
 Then open `http://localhost:8000` in your browser.
 
-### Direct File Opening
+### Making Changes
 
-The site can also be opened directly as a file:
+1. **Edit `template.html`** - This is the source template with the placeholder
+2. **Run `npm run build`** to generate the final `index.html`
+3. **Test locally** with `npm run serve`
+4. **Commit both files** (`template.html` and `index.html`)
 
-```bash
-cd website
-open index.html  # macOS
-xdg-open index.html  # Linux
-start index.html  # Windows
+> **Important:** Always edit `template.html`, not `index.html`. If you edit `index.html` directly, your changes will be overwritten by the next build.
+
+## File Structure
+
 ```
-
-Note: Some features (like markdown fetching) may be blocked by CORS when opening as a file due to browser security policies. A local server is recommended.
+website/
+├── package.json          # npm config with build/serve scripts
+├── build.js             # Build script that fetches GitHub data
+├── template.html        # Source template (edit this)
+├── index.html           # Generated output (do not edit)
+├── official-logo.png    # Official Rusholme logo
+├── logo.png             # Legacy/backup logo
+└── README.md            # This file
+```
 
 ## Deployment
 
-This website is configured for GitHub Pages:
-
-1. The `index.html` is designed to work at the root path
-2. All assets are self-contained in the same directory or loaded from CDNs
-3. GitHub Actions will automatically build and deploy to `gh-pages` branch
-
-To deploy manually:
-
-```bash
-# From the rusholme root
-cd website
-git checkout --orphan gh-pages
-git add index.html logo.png
-git commit -m "Deploy website"
-git push origin gh-pages
-```
-
-The site will be available at: `https://adinapoli.github.io/rusholme/`
+The website is automatically deployed to GitHub Pages via GitHub Actions.
 
 ## Customization
 
@@ -86,30 +94,54 @@ The theme uses a Zig-inspired orange palette:
 - `--zig`: #f7a41d
 - `--haskell`: #b87e18
 
-These can be modified in the `<style>` section of `index.html`.
+Edit the CSS variables in `template.html` to customize.
 
 ### Content Updates
 
-- **Logo**: Replace `logo.png` with your own
-- **Recent Progress**: Automatically fetched from GitHub API - no manual updates needed
-- **Milestone Progress**: Update the percentages in the roadmap section HTML
+- **Logo**: Replace `official-logo.png` with your own
+- **Recent Progress**: Run `npm run build` to refresh GitHub data
+- **Milestone Progress**: Manually update percentages in the roadmap section HTML
 - **Documentation**: Automatically rendered from GitHub - no manual updates needed
+
+## Troubleshooting
+
+### Build fails with "template.html not found"
+
+Make sure you're running from the `website/` directory:
+
+```bash
+cd website
+npm run build
+```
+
+### Recent progress shows old data
+
+Run `npm run build` again to fetch the latest GitHub issues.
+
+### GitHub API rate limit
+
+If you see rate limit errors, you can add a GitHub token. Create a `.env` file:
+
+```bash
+GITHUB_TOKEN=your_token_here
+```
+
+Then update `build.js` to use `process.env.GITHUB_TOKEN` in the request headers.
 
 ## Browser Compatibility
 
-- ✅ Chrome/Edge 90+
-- ✅ Firefox 88+
-- ✅ Safari 14+
-- ✅ Mobile browsers (iOS Safari, Chrome Mobile)
+- Chrome/Edge 90+
+- Firefox 88+
+- Safari 14+
+- Mobile browsers (iOS Safari, Chrome Mobile)
 
 ## Performance
 
-The site is optimized for speed:
-- Single HTML file (~25KB gzipped)
-- No JavaScript frameworks overhead
+- Single HTML file (~55KB)
+- No JavaScript frameworks
 - CDN-delivered libraries with good caching
 - Critical CSS inlined
-- Lazy-loaded documentation content
+- Lazy-loaded content from GitHub
 
 ## License
 
