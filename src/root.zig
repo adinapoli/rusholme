@@ -6,6 +6,8 @@
 pub const diagnostics = struct {
     pub const span = @import("diagnostics/span.zig");
     pub const diagnostic = @import("diagnostics/diagnostic.zig");
+    pub const terminal = @import("diagnostics/terminal.zig");
+    pub const json = @import("diagnostics/json.zig");
 };
 
 // Frontend
