@@ -5,6 +5,7 @@
 
 **Recent Progress (2026-02-16):**
 - ✓ #85: Lexer support for numeric literals (Dec, Hex, Oct, Bin, Float)
+- ✓ #86: Lexer support for string and character literals (Escapes, Gaps, Mnemonics)
 
 **Older Progress:**
 - ✓ #1: GitHub Actions CI upgraded to Nix 2.18
@@ -64,7 +65,7 @@
 | [#23](https://github.com/adinapoli/rusholme/issues/23) | Define lexer token types for Haskell | [#22](https://github.com/adinapoli/rusholme/issues/22) | :green_circle: |
 | [#24](https://github.com/adinapoli/rusholme/issues/24) | Implement Unicode character classification | — | :large_blue_circle: |
 | [#85](https://github.com/adinapoli/rusholme/issues/85) | Lexer: Numeric Literals | [#23](https://github.com/adinapoli/rusholme/issues/23), [#24](https://github.com/adinapoli/rusholme/issues/24) | :green_circle: |
-| [#86](https://github.com/adinapoli/rusholme/issues/86) | Lexer: String and Character Literals | [#85](https://github.com/adinapoli/rusholme/issues/85) | :white_circle: |
+| [#86](https://github.com/adinapoli/rusholme/issues/86) | Lexer: String and Character Literals | [#85](https://github.com/adinapoli/rusholme/issues/85) | :green_circle: |
 | [#25](https://github.com/adinapoli/rusholme/issues/25) | Lexer: Identifiers, Keywords and Operators | [#85](https://github.com/adinapoli/rusholme/issues/85), [#86](https://github.com/adinapoli/rusholme/issues/86) | :white_circle: |
 | [#26](https://github.com/adinapoli/rusholme/issues/26) | Layout Rule: Indentation stack and virtual tokens | [#25](https://github.com/adinapoli/rusholme/issues/25) | :white_circle: |
 | [#27](https://github.com/adinapoli/rusholme/issues/27) | Define Haskell AST types | [#17](https://github.com/adinapoli/rusholme/issues/17) | :large_blue_circle: |
