@@ -11,5 +11,5 @@
     "body": "Set up LLVM C API bindings for use from Zig via C interop.\n\n**Deliverables:**\n- Add LLVM as a dependency via the Nix flake (pin a specific LLVM version, e.g. LLVM 17 or 18)\n- Create Zig bindings for the LLVM-C API (`@cImport` of `llvm-c/Core.h`, `llvm-c/Target.h`, etc.)\n- Verify bindings work: create a trivial LLVM module, add a function, emit IR, compile to object code\n- Smoke test: generate and execute a `main` that returns 42\n- Document LLVM version requirements and setup in README\n\n**Design notes:**\n- Zig's `@cImport` can directly import LLVM-C headers\n- LLVM-C is a stable C API wrapper around LLVM's C++ API \u2014 sufficient for code generation\n- Source LLVM via Nix for reproducibility (project mantra #2)\n- Consider wrapping raw C bindings in a thin Zig-idiomatic layer",
     "github_issue": 53,
     "depends_on_github": [],
-    "state": "open"
+    "state": "closed"
 }
