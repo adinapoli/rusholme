@@ -40,18 +40,20 @@ jobs:
       - name: Build website
         working-directory: ./website
         run: npm run build
-      
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
+
+      - name: Copy files for Pages upload
+        run: |
+          mkdir -p _site
+          cp website/index.html _site/
+          cp website/logo.png _site/
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          # Upload index.html and logo (copied from assets by build script)
-          path: |
-            ./website/index.html
-            ./website/logo.png
-          upload-dir: ./
+          path: _site/
 
   deploy:
     environment:
