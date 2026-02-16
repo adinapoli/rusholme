@@ -36,10 +36,10 @@
 |---|-------|------|--------|
 | [#17](https://github.com/adinapoli/rusholme/issues/17) | Define SourceSpan and SourcePos types | — | :green_circle: |
 | [#18](https://github.com/adinapoli/rusholme/issues/18) | Define Diagnostic ADT (errors as structured data, not strings) | [#17](https://github.com/adinapoli/rusholme/issues/17) | :green_circle: |
-| [#19](https://github.com/adinapoli/rusholme/issues/19) | Implement DiagnosticCollector for accumulating errors across modules | [#18](https://github.com/adinapoli/rusholme/issues/18) | :white_circle: |
-| [#20](https://github.com/adinapoli/rusholme/issues/20) | Implement terminal diagnostic renderer with source snippets | [#18](https://github.com/adinapoli/rusholme/issues/18) | :white_circle: |
-| [#21](https://github.com/adinapoli/rusholme/issues/21) | Implement JSON diagnostic renderer | [#18](https://github.com/adinapoli/rusholme/issues/18) | :white_circle: |
-| [#89](https://github.com/adinapoli/rusholme/issues/89) | Terminal Renderer: Source Code Snippets with Context | [#20](https://github.com/adinapoli/rusholme/issues/20) | :white_circle: |
+| [#19](https://github.com/adinapoli/rusholme/issues/19) | Implement DiagnosticCollector for accumulating errors across modules | [#18](https://github.com/adinapoli/rusholme/issues/18) | :yellow_circle: |
+| [#20](https://github.com/adinapoli/rusholme/issues/20) | Implement terminal diagnostic renderer with source snippets | [#18](https://github.com/adinapoli/rusholme/issues/18) | :yellow_circle: |
+| [#21](https://github.com/adinapoli/rusholme/issues/21) | Implement JSON diagnostic renderer | [#18](https://github.com/adinapoli/rusholme/issues/18) | :yellow_circle: |
+| [#89](https://github.com/adinapoli/rusholme/issues/89) | Terminal Renderer: Source Code Snippets with Context | [#20](https://github.com/adinapoli/rusholme/issues/20) | :yellow_circle: |
 | [#80](https://github.com/adinapoli/rusholme/issues/80) | #18: Define Diagnostic ADT (errors as structured data, not strings) | — | :green_circle: |
 | [#81](https://github.com/adinapoli/rusholme/issues/81) | ci: Upgrade install-nix-action v23 → v31 | — | :green_circle: |
 | [#83](https://github.com/adinapoli/rusholme/issues/83) | docs: add status badges to README | — | :green_circle: |

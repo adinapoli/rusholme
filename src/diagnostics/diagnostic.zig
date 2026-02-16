@@ -83,36 +83,88 @@ pub const Diagnostic = struct {
 ///
 /// Tracks whether any errors have been emitted to allow early termination
 /// decisions without scanning the full list.
-pub const DiagnosticBag = struct {
+///
+/// Thread Safety: This implementation is single-threaded. If multi-threaded
+/// compilation is needed in the future, wrap `diagnostics` in a mutex and
+/// modify `hasErrors()` and `errorCount()` to read under lock protection.
+pub const DiagnosticCollector = struct {
     diagnostics: std.ArrayListUnmanaged(Diagnostic),
     had_errors: bool = false,
 
-    pub fn init() DiagnosticBag {
+    pub fn init() DiagnosticCollector {
         return .{
             .diagnostics = .{},
         };
     }
 
-    pub fn deinit(self: *DiagnosticBag, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *DiagnosticCollector, allocator: std.mem.Allocator) void {
         self.diagnostics.deinit(allocator);
         self.* = undefined;
     }
 
-    pub fn add(self: *DiagnosticBag, allocator: std.mem.Allocator, diag: Diagnostic) !void {
+    /// Emit a diagnostic to the collector.
+    pub fn emit(self: *DiagnosticCollector, allocator: std.mem.Allocator, diag: Diagnostic) !void {
         if (diag.severity == .@"error") {
             self.had_errors = true;
         }
         try self.diagnostics.append(allocator, diag);
     }
 
-    pub fn errorCount(self: DiagnosticBag) usize {
+    /// Add a diagnostic to the collector (backward compatibility alias for emit).
+    pub fn add(self: *DiagnosticCollector, allocator: std.mem.Allocator, diag: Diagnostic) !void {
+        return self.emit(allocator, diag);
+    }
+
+    /// Returns true if any error-severity diagnostics have been emitted.
+    pub fn hasErrors(self: DiagnosticCollector) bool {
+        return self.had_errors;
+    }
+
+    /// Returns the total number of error-severity diagnostics.
+    pub fn errorCount(self: DiagnosticCollector) usize {
         var count: usize = 0;
         for (self.diagnostics.items) |d| {
             if (d.severity == .@"error") count += 1;
         }
         return count;
     }
+
+    /// Returns all diagnostics sorted by source location.
+    /// For diagnostics with the same location, maintains insertion order.
+    /// Caller owns the returned slice (free with allocator).
+    /// Returns an empty slice that doesn't need freeing if collector is empty.
+    pub fn getAll(self: *DiagnosticCollector, allocator: std.mem.Allocator) ![]const Diagnostic {
+        if (self.diagnostics.items.len == 0) return &.{};
+
+        // Create a mutable copy for sorting
+        const sorted = try allocator.dupe(Diagnostic, self.diagnostics.items);
+        errdefer allocator.free(sorted);
+
+        // Sort the copy in place
+        std.sort.block(Diagnostic, sorted, {}, compareDiagnostic);
+
+        return sorted;
+    }
+
+    // Helper: Compare two diagnostics by source location for sorting
+    fn compareDiagnostic(_: void, a: Diagnostic, b: Diagnostic) bool {
+        // Compare by file_id first
+        if (a.span.start.file_id != b.span.start.file_id) {
+            return a.span.start.file_id < b.span.start.file_id;
+        }
+
+        // Same file: compare line
+        if (a.span.start.line != b.span.start.line) {
+            return a.span.start.line < b.span.start.line;
+        }
+
+        // Same line: compare column
+        return a.span.start.column < b.span.start.column;
+    }
 };
+
+/// Backward compatibility alias for existing code.
+pub const DiagnosticBag = DiagnosticCollector;
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
@@ -227,9 +279,10 @@ test "DiagnosticBag tracks errors" {
 
     // Initially no errors
     try std.testing.expect(!bag.had_errors);
+    try std.testing.expect(!bag.hasErrors());
     try std.testing.expectEqual(@as(usize, 0), bag.errorCount());
 
-    // Add a warning — does not set had_errors
+    // Add a warning via add() (backward compatibility)
     try bag.add(std.testing.allocator, .{
         .severity = .warning,
         .code = .parse_error,
@@ -237,22 +290,24 @@ test "DiagnosticBag tracks errors" {
         .message = "unused variable",
     });
     try std.testing.expect(!bag.had_errors);
+    try std.testing.expect(!bag.hasErrors());
     try std.testing.expectEqual(@as(usize, 0), bag.errorCount());
     try std.testing.expectEqual(@as(usize, 1), bag.diagnostics.items.len);
 
-    // Add an error — sets had_errors
-    try bag.add(std.testing.allocator, .{
+    // Add an error via emit() (new API)
+    try bag.emit(std.testing.allocator, .{
         .severity = .@"error",
         .code = .unbound_variable,
         .span = span,
         .message = "not in scope: 'x'",
     });
     try std.testing.expect(bag.had_errors);
+    try std.testing.expect(bag.hasErrors());
     try std.testing.expectEqual(@as(usize, 1), bag.errorCount());
     try std.testing.expectEqual(@as(usize, 2), bag.diagnostics.items.len);
 
-    // Add an info — does not change error count
-    try bag.add(std.testing.allocator, .{
+    // Add an info
+    try bag.emit(std.testing.allocator, .{
         .severity = .info,
         .code = .type_error,
         .span = span,
@@ -260,4 +315,54 @@ test "DiagnosticBag tracks errors" {
     });
     try std.testing.expectEqual(@as(usize, 1), bag.errorCount());
     try std.testing.expectEqual(@as(usize, 3), bag.diagnostics.items.len);
+}
+
+test "DiagnosticCollector getAll returns sorted by location" {
+    var collector = DiagnosticCollector.init();
+    defer collector.deinit(std.testing.allocator);
+
+    // Add diagnostics in random order
+    try collector.emit(std.testing.allocator, .{
+        .severity = .@"error",
+        .code = .parse_error,
+        .span = SourceSpan.init(SourcePos.init(1, 10, 5), SourcePos.init(1, 10, 20)),
+        .message = "error at line 10",
+    });
+
+    try collector.emit(std.testing.allocator, .{
+        .severity = .@"error",
+        .code = .parse_error,
+        .span = SourceSpan.init(SourcePos.init(1, 5, 1), SourcePos.init(1, 5, 10)),
+        .message = "error at line 5",
+    });
+
+    try collector.emit(std.testing.allocator, .{
+        .severity = .@"error",
+        .code = .parse_error,
+        .span = SourceSpan.init(SourcePos.init(1, 15, 1), SourcePos.init(1, 15, 5)),
+        .message = "error at line 15",
+    });
+
+    // Get sorted diagnostics
+    const diags = try collector.getAll(std.testing.allocator);
+    defer std.testing.allocator.free(diags);
+    try std.testing.expectEqual(@as(usize, 3), diags.len);
+
+    // Should be sorted by line number: 5, 10, 15
+    try std.testing.expectEqual(@as(u32, 5), diags[0].span.start.line);
+    try std.testing.expectEqual(@as(u32, 10), diags[1].span.start.line);
+    try std.testing.expectEqual(@as(u32, 15), diags[2].span.start.line);
+
+    try std.testing.expectEqualStrings("error at line 5", diags[0].message);
+    try std.testing.expectEqualStrings("error at line 10", diags[1].message);
+    try std.testing.expectEqualStrings("error at line 15", diags[2].message);
+}
+
+test "DiagnosticCollector getAll handles empty collector" {
+    var collector = DiagnosticCollector.init();
+    defer collector.deinit(std.testing.allocator);
+
+    const diags = try collector.getAll(std.testing.allocator);
+    // Empty collector returns sentinel, don't free
+    try std.testing.expectEqual(@as(usize, 0), diags.len);
 }
