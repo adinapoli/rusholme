@@ -1,5 +1,5 @@
 {
-    "title": "Implement parser: expressions (application, operators, let, case, if, do, lambda)",
+    "title": "Parser: Primary Expressions and Control Flow",
     "epic": 4,
     "milestone": "M1: Hello World",
     "labels": [
@@ -8,12 +8,14 @@
         "type:feature"
     ],
     "depends_on": [
-        "04-08"
+        "04-08",
+        "04-16"
     ],
-    "body": "Implement expression parsing with correct precedence and associativity.\n\n**Deliverables:**\n- Function application (juxtaposition, left-associative)\n- Operator expressions with fixity-aware precedence parsing\n- Negation (`-` prefix)\n- `let ... in ...`\n- `case expr of { alts }`\n- `if ... then ... else ...`\n- `do` notation (statement sequence: bind `<-`, let, plain expr)\n- Lambda: `\\x y -> expr`\n- Tuple expressions and sections\n- List expressions: `[1, 2, 3]`\n- Type annotations: `expr :: Type`\n- Parenthesised expressions\n- Literals: integers, floats, chars, strings\n- Unit tests for precedence, associativity, and complex expressions\n\n**Design notes:**\n- Operator precedence parsing is subtle: Haskell allows user-defined fixity\n- For M1, built-in fixity (e.g. `$` is infixr 0) is sufficient\n- `do`-notation parsing must interact correctly with layout",
     "github_issue": 30,
     "depends_on_github": [
-        29
+        29,
+        88
     ],
+    "body": "Implement expression parsing for primary constructs and control flow, leveraging the precedence parser.\n\n**Deliverables:**\n- `let ... in ...`\n- `case expr of { alts }`\n- `if ... then ... else ...`\n- `do` notation (statement sequence: bind `<-`, let, plain expr)\n- Lambda: `\\x y -> expr`\n- Tuple expressions and sections\n- List expressions: `[1, 2, 3]`\n- Unit tests for control flow constructs and their interaction with layout\n\n**Design notes:**\n- Must handle the high precedence of function application correctly.\n- Interaction with layout in `do` and `let` blocks is critical.",
     "state": "open"
 }
