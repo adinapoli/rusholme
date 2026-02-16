@@ -80,6 +80,55 @@ test {
 
 This pattern forces the test runner to discover tests across all submodules.
 
+## Memory Safety: Zero-Leak Policy
+
+Rusholme enforces a **zero-leak policy**. Every heap allocation must be paired
+with a deallocation. No PR may be merged if it introduces a memory leak.
+
+See [docs/decisions/002-zero-leak-strategy.md](docs/decisions/002-zero-leak-strategy.md)
+for the full rationale.
+
+### Rules
+
+1. **All tests MUST use `std.testing.allocator`** (or `ArenaAllocator` wrapping
+   it). This allocator automatically fails the test if any allocation is not
+   freed.
+
+2. **`main.zig` uses `GeneralPurposeAllocator`** with a `.deinit() == .ok`
+   assertion. This catches leaks during development runs.
+
+3. **Every allocation needs a corresponding `defer`**:
+   ```zig
+   const data = try allocator.alloc(u8, size);
+   defer allocator.free(data);
+   ```
+
+4. **Use `errdefer` for error path cleanup**:
+   ```zig
+   const foo = try allocator.create(Foo);
+   errdefer allocator.destroy(foo);
+
+   const bar = try initBar(allocator); // if this fails, foo is freed
+   ```
+
+5. **Use `ArenaAllocator` for batch temporary allocations**:
+   ```zig
+   var arena = std.heap.ArenaAllocator.init(parent_allocator);
+   defer arena.deinit(); // frees everything at once
+   const allocator = arena.allocator();
+   ```
+
+6. **Pass allocators explicitly** — never use global allocators. All functions
+   that allocate take `allocator: std.mem.Allocator` as a parameter.
+
+### What the tooling catches
+
+| Layer | Tool | Catches |
+|-------|------|---------|
+| Unit tests | `std.testing.allocator` | Zig-side leaks per test |
+| Debug builds | GPA with `.deinit()` check | Zig-side leaks in full runs |
+| C interop | Valgrind (future, see #109) | LLVM C API leaks |
+
 ## Coding Standards
 
 - **Read before writing.** Always read existing code before modifying.
@@ -88,6 +137,7 @@ This pattern forces the test runner to discover tests across all submodules.
 - **Source spans everywhere.** Every AST/IR node must carry a `SourceSpan`.
 - **Errors are structured, not strings.** Use the `Diagnostic` infrastructure.
 - **Write tests.** Every new feature needs unit tests.
+- **Zero leaks.** Every test uses `std.testing.allocator`. Every allocation has a `defer` free.
 
 ## Project Structure
 
