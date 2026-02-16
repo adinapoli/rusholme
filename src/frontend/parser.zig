@@ -353,6 +353,864 @@ pub const Parser = struct {
             .message = owned_msg,
         });
     }
+
+    // ── Module parsing ─────────────────────────────────────────────────
+
+    /// Parse a complete Haskell module.
+    ///
+    /// ```
+    /// module  ->  module modid [exports] where body
+    ///         |   body
+    /// body    ->  { topdecls }
+    /// ```
+    pub fn parseModule(self: *Parser) ParseError!ast_mod.Module {
+        const start = try self.currentSpan();
+
+        var module_name: []const u8 = "Main";
+        var exports: ?[]const ast_mod.ExportSpec = null;
+
+        if (try self.check(.kw_module)) {
+            _ = try self.advance(); // consume 'module'
+            const name_tok = try self.expect(.conid);
+            module_name = name_tok.token.conid;
+            if (try self.check(.open_paren)) {
+                exports = try self.parseExportList();
+            }
+            _ = try self.expect(.kw_where);
+        }
+
+        // Parse body: { impdecls ; topdecls }
+        _ = try self.expectOpenBrace();
+
+        var imports: std.ArrayListUnmanaged(ast_mod.ImportDecl) = .empty;
+        var decls: std.ArrayListUnmanaged(ast_mod.Decl) = .empty;
+
+        // Parse imports (they come first)
+        while (try self.check(.kw_import)) {
+            const imp = try self.parseImportDecl();
+            try imports.append(self.allocator, imp);
+            while (try self.matchSemi()) {}
+        }
+
+        // Parse top-level declarations
+        while (true) {
+            if (try self.checkCloseBrace()) break;
+            if (try self.atEnd()) break;
+
+            const decl = self.parseTopDecl() catch |err| switch (err) {
+                error.UnexpectedToken, error.InvalidSyntax => {
+                    try self.synchronize();
+                    while (try self.matchSemi()) {}
+                    continue;
+                },
+                else => return err,
+            };
+            if (decl) |d| {
+                try decls.append(self.allocator, d);
+            }
+            while (try self.matchSemi()) {}
+        }
+
+        _ = try self.expectCloseBrace();
+
+        return ast_mod.Module{
+            .module_name = module_name,
+            .exports = exports,
+            .imports = try imports.toOwnedSlice(self.allocator),
+            .declarations = try decls.toOwnedSlice(self.allocator),
+            .span = self.spanFrom(start),
+        };
+    }
+
+    // ── Export list ────────────────────────────────────────────────────
+
+    fn parseExportList(self: *Parser) ParseError![]const ast_mod.ExportSpec {
+        _ = try self.expect(.open_paren);
+        var specs: std.ArrayListUnmanaged(ast_mod.ExportSpec) = .empty;
+
+        while (true) {
+            if (try self.check(.close_paren)) break;
+
+            const spec = try self.parseExportSpec();
+            try specs.append(self.allocator, spec);
+
+            if (try self.match(.comma) == null) break;
+        }
+
+        _ = try self.expect(.close_paren);
+        return specs.toOwnedSlice(self.allocator);
+    }
+
+    fn parseExportSpec(self: *Parser) ParseError!ast_mod.ExportSpec {
+        // module ModName
+        if (try self.check(.kw_module)) {
+            _ = try self.advance();
+            const name_tok = try self.expect(.conid);
+            return .{ .Module = name_tok.token.conid };
+        }
+        // ConId (..)  or  ConId
+        if (try self.check(.conid)) {
+            const tok = try self.advance();
+            if (try self.check(.open_paren)) {
+                _ = try self.advance();
+                _ = try self.expect(.dotdot);
+                _ = try self.expect(.close_paren);
+                return .{ .Type = .{ .name = tok.token.conid, .with_constructors = true } };
+            }
+            return .{ .Con = tok.token.conid };
+        }
+        // varid
+        if (try self.check(.varid)) {
+            const tok = try self.advance();
+            return .{ .Var = tok.token.varid };
+        }
+        // ( varsym ) — operator export
+        if (try self.check(.open_paren)) {
+            _ = try self.advance();
+            const op_tok = try self.expect(.varsym);
+            _ = try self.expect(.close_paren);
+            return .{ .Var = op_tok.token.varsym };
+        }
+        const got = try self.peek();
+        try self.emitErrorMsg(got.span, "expected export specification");
+        return error.UnexpectedToken;
+    }
+
+    // ── Import declarations ────────────────────────────────────────────
+
+    fn parseImportDecl(self: *Parser) ParseError!ast_mod.ImportDecl {
+        const start = (try self.expect(.kw_import)).span;
+        const qualified = (try self.match(.kw_qualified)) != null;
+        const name_tok = try self.expect(.conid);
+
+        var as_alias: ?[]const u8 = null;
+        if (try self.match(.kw_as) != null) {
+            const alias_tok = try self.expect(.conid);
+            as_alias = alias_tok.token.conid;
+        }
+
+        var specs: ?ast_mod.ImportSpecs = null;
+        const is_hiding = (try self.match(.kw_hiding)) != null;
+        if (is_hiding or try self.check(.open_paren)) {
+            specs = try self.parseImportSpecs(is_hiding);
+        }
+
+        return ast_mod.ImportDecl{
+            .module_name = name_tok.token.conid,
+            .qualified = qualified,
+            .as_alias = as_alias,
+            .specs = specs,
+            .span = self.spanFrom(start),
+        };
+    }
+
+    fn parseImportSpecs(self: *Parser, hiding: bool) ParseError!ast_mod.ImportSpecs {
+        _ = try self.expect(.open_paren);
+        var items: std.ArrayListUnmanaged(ast_mod.ImportSpec) = .empty;
+
+        while (true) {
+            if (try self.check(.close_paren)) break;
+
+            const tag = try self.peekTag();
+            if (tag == .varid) {
+                const tok = try self.advance();
+                try items.append(self.allocator, .{ .Var = tok.token.varid });
+            } else if (tag == .conid) {
+                const tok = try self.advance();
+                try items.append(self.allocator, .{ .TyCon = tok.token.conid });
+            } else if (tag == .open_paren) {
+                // ( varsym ) — operator import
+                _ = try self.advance();
+                const op = try self.expect(.varsym);
+                _ = try self.expect(.close_paren);
+                try items.append(self.allocator, .{ .Var = op.token.varsym });
+            } else {
+                break;
+            }
+
+            if (try self.match(.comma) == null) break;
+        }
+
+        _ = try self.expect(.close_paren);
+        return ast_mod.ImportSpecs{
+            .hiding = hiding,
+            .items = try items.toOwnedSlice(self.allocator),
+        };
+    }
+
+    // ── Top-level declarations ─────────────────────────────────────────
+
+    fn parseTopDecl(self: *Parser) ParseError!?ast_mod.Decl {
+        const tag = try self.peekTag();
+        return switch (tag) {
+            .kw_data => try self.parseDataDecl(),
+            .kw_newtype => try self.parseNewtypeDecl(),
+            .kw_type => try self.parseTypeAliasDecl(),
+            .kw_class => try self.parseClassDecl(),
+            .kw_instance => try self.parseInstanceDecl(),
+            .kw_default => try self.parseDefaultDecl(),
+            .kw_infixl, .kw_infixr, .kw_infix => try self.parseFixityDecl(),
+            .varid => try self.parseValueDecl(),
+            .open_paren => try self.parseValueDecl(),
+            .eof, .v_close_brace, .close_brace => null,
+            else => {
+                const got = try self.peek();
+                try self.emitErrorMsg(got.span, "expected declaration");
+                return error.UnexpectedToken;
+            },
+        };
+    }
+
+    // ── Value declarations (type sigs and bindings) ────────────────────
+
+    /// Parse a value-level declaration. This handles both type signatures
+    /// and function/pattern bindings by lookahead:
+    ///   - `name :: type`  → TypeSig
+    ///   - `name pats = expr` → FunBind
+    ///   - `( op ) :: type` → TypeSig for operator
+    fn parseValueDecl(self: *Parser) ParseError!?ast_mod.Decl {
+        // Check for operator type sig: ( op ) :: ...
+        if (try self.check(.open_paren)) {
+            const tok1 = try self.peekAt(1);
+            if (std.meta.activeTag(tok1.token) == .varsym) {
+                const tok2 = try self.peekAt(2);
+                if (std.meta.activeTag(tok2.token) == .close_paren) {
+                    _ = try self.advance(); // (
+                    const op = try self.advance(); // operator
+                    _ = try self.advance(); // )
+                    _ = try self.expect(.dcolon);
+                    const ty = try self.parseType();
+                    return .{ .TypeSig = .{
+                        .names = try self.allocSlice([]const u8, &.{op.token.varsym}),
+                        .type = ty,
+                        .span = self.spanFrom(op.span),
+                    } };
+                }
+            }
+        }
+
+        const start = try self.currentSpan();
+        const name_tok = try self.expect(.varid);
+        const name = name_tok.token.varid;
+
+        // Type signature: name :: type
+        if (try self.check(.dcolon)) {
+            _ = try self.advance(); // consume ::
+            const ty = try self.parseType();
+            return .{ .TypeSig = .{
+                .names = try self.allocSlice([]const u8, &.{name}),
+                .type = ty,
+                .span = self.spanFrom(start),
+            } };
+        }
+
+        // Function binding: name [patterns] = expr [where ...]
+        // or guarded: name [patterns] | guard = expr
+        var patterns: std.ArrayListUnmanaged(ast_mod.Pattern) = .empty;
+        while (true) {
+            const pat = try self.tryParseAtomicPattern() orelse break;
+            try patterns.append(self.allocator, pat);
+        }
+
+        const rhs = try self.parseRhs();
+        const where_clause = try self.parseWhereClause();
+
+        const eq = ast_mod.Match{
+            .patterns = try patterns.toOwnedSlice(self.allocator),
+            .rhs = rhs,
+            .where_clause = where_clause,
+            .span = self.spanFrom(start),
+        };
+
+        return .{ .FunBind = .{
+            .name = name,
+            .equations = try self.allocSlice(ast_mod.Match, &.{eq}),
+            .span = self.spanFrom(start),
+        } };
+    }
+
+    fn parseRhs(self: *Parser) ParseError!ast_mod.Rhs {
+        if (try self.check(.pipe)) {
+            return try self.parseGuardedRhs();
+        }
+        _ = try self.expect(.equals);
+        const expr = try self.parseExpr();
+        return .{ .UnGuarded = expr };
+    }
+
+    fn parseGuardedRhs(self: *Parser) ParseError!ast_mod.Rhs {
+        var guards: std.ArrayListUnmanaged(ast_mod.GuardedRhs) = .empty;
+        while (try self.check(.pipe)) {
+            _ = try self.advance(); // consume |
+            const guard_expr = try self.parseExpr();
+            _ = try self.expect(.equals);
+            const rhs_expr = try self.parseExpr();
+            try guards.append(self.allocator, .{
+                .guards = try self.allocSlice(ast_mod.Guard, &.{.{ .ExprGuard = guard_expr }}),
+                .rhs = rhs_expr,
+            });
+        }
+        return .{ .Guarded = try guards.toOwnedSlice(self.allocator) };
+    }
+
+    fn parseWhereClause(self: *Parser) ParseError!?[]const ast_mod.Decl {
+        if (try self.match(.kw_where) == null) return null;
+
+        _ = try self.expectOpenBrace();
+        var decls: std.ArrayListUnmanaged(ast_mod.Decl) = .empty;
+
+        while (true) {
+            if (try self.checkCloseBrace()) break;
+            if (try self.atEnd()) break;
+
+            const decl = self.parseTopDecl() catch |err| switch (err) {
+                error.UnexpectedToken, error.InvalidSyntax => {
+                    try self.synchronize();
+                    while (try self.matchSemi()) {}
+                    continue;
+                },
+                else => return err,
+            };
+            if (decl) |d| {
+                try decls.append(self.allocator, d);
+            }
+            while (try self.matchSemi()) {}
+        }
+
+        _ = try self.expectCloseBrace();
+        return try decls.toOwnedSlice(self.allocator);
+    }
+
+    // ── Data declarations ──────────────────────────────────────────────
+
+    fn parseDataDecl(self: *Parser) ParseError!?ast_mod.Decl {
+        const start = (try self.expect(.kw_data)).span;
+        const name_tok = try self.expect(.conid);
+
+        // Type variables
+        var tyvars: std.ArrayListUnmanaged([]const u8) = .empty;
+        while (try self.check(.varid)) {
+            const tv = try self.advance();
+            try tyvars.append(self.allocator, tv.token.varid);
+        }
+
+        // Constructors
+        var constructors: std.ArrayListUnmanaged(ast_mod.ConDecl) = .empty;
+        if (try self.match(.equals) != null) {
+            const first = try self.parseConDecl();
+            try constructors.append(self.allocator, first);
+            while (try self.match(.pipe) != null) {
+                const con = try self.parseConDecl();
+                try constructors.append(self.allocator, con);
+            }
+        }
+
+        // Deriving
+        const deriving = try self.parseDerivingClause();
+
+        return .{ .Data = .{
+            .name = name_tok.token.conid,
+            .tyvars = try tyvars.toOwnedSlice(self.allocator),
+            .constructors = try constructors.toOwnedSlice(self.allocator),
+            .deriving = deriving,
+            .span = self.spanFrom(start),
+        } };
+    }
+
+    fn parseConDecl(self: *Parser) ParseError!ast_mod.ConDecl {
+        const start = try self.currentSpan();
+        const name_tok = try self.expect(.conid);
+
+        var fields: std.ArrayListUnmanaged(ast_mod.FieldDecl) = .empty;
+        // Parse fields as atomic types (constructor arguments)
+        while (true) {
+            const ty = try self.tryParseAtomicType() orelse break;
+            try fields.append(self.allocator, .{ .Plain = ty });
+        }
+
+        return ast_mod.ConDecl{
+            .name = name_tok.token.conid,
+            .fields = try fields.toOwnedSlice(self.allocator),
+            .span = self.spanFrom(start),
+        };
+    }
+
+    fn parseDerivingClause(self: *Parser) ParseError![]const []const u8 {
+        if (try self.match(.kw_deriving) == null) return &.{};
+
+        if (try self.check(.open_paren)) {
+            _ = try self.advance();
+            var classes: std.ArrayListUnmanaged([]const u8) = .empty;
+            while (true) {
+                if (try self.check(.close_paren)) break;
+                const cls = try self.expect(.conid);
+                try classes.append(self.allocator, cls.token.conid);
+                if (try self.match(.comma) == null) break;
+            }
+            _ = try self.expect(.close_paren);
+            return classes.toOwnedSlice(self.allocator);
+        }
+
+        // Single class: deriving Show
+        const cls = try self.expect(.conid);
+        return self.allocSlice([]const u8, &.{cls.token.conid});
+    }
+
+    // ── Newtype declarations ───────────────────────────────────────────
+
+    fn parseNewtypeDecl(self: *Parser) ParseError!?ast_mod.Decl {
+        const start = (try self.expect(.kw_newtype)).span;
+        const name_tok = try self.expect(.conid);
+
+        var tyvars: std.ArrayListUnmanaged([]const u8) = .empty;
+        while (try self.check(.varid)) {
+            const tv = try self.advance();
+            try tyvars.append(self.allocator, tv.token.varid);
+        }
+
+        _ = try self.expect(.equals);
+        const constructor = try self.parseConDecl();
+        const deriving = try self.parseDerivingClause();
+
+        return .{ .Newtype = .{
+            .name = name_tok.token.conid,
+            .tyvars = try tyvars.toOwnedSlice(self.allocator),
+            .constructor = constructor,
+            .deriving = deriving,
+            .span = self.spanFrom(start),
+        } };
+    }
+
+    // ── Type alias ─────────────────────────────────────────────────────
+
+    fn parseTypeAliasDecl(self: *Parser) ParseError!?ast_mod.Decl {
+        const start = (try self.expect(.kw_type)).span;
+        const name_tok = try self.expect(.conid);
+
+        var tyvars: std.ArrayListUnmanaged([]const u8) = .empty;
+        while (try self.check(.varid)) {
+            const tv = try self.advance();
+            try tyvars.append(self.allocator, tv.token.varid);
+        }
+
+        _ = try self.expect(.equals);
+        const ty = try self.parseType();
+
+        return .{ .Type = .{
+            .name = name_tok.token.conid,
+            .tyvars = try tyvars.toOwnedSlice(self.allocator),
+            .type = ty,
+            .span = self.spanFrom(start),
+        } };
+    }
+
+    // ── Class declaration (minimal) ────────────────────────────────────
+
+    fn parseClassDecl(self: *Parser) ParseError!?ast_mod.Decl {
+        const start = (try self.expect(.kw_class)).span;
+
+        const context: ?ast_mod.Context = null;
+        // Try to detect context: Foo a => ...
+        // Simplified: if we see ConId varid => then it's a context
+        const saved_len = self.lookahead.items.len;
+        _ = saved_len;
+        // For now, no context parsing — just class name and tyvars
+        const name_tok = try self.expect(.conid);
+
+        var tyvars: std.ArrayListUnmanaged([]const u8) = .empty;
+        while (try self.check(.varid)) {
+            const tv = try self.advance();
+            try tyvars.append(self.allocator, tv.token.varid);
+        }
+
+        var methods: std.ArrayListUnmanaged(ast_mod.ClassMethod) = .empty;
+        if (try self.match(.kw_where) != null) {
+            _ = try self.expectOpenBrace();
+            while (true) {
+                if (try self.checkCloseBrace()) break;
+                if (try self.atEnd()) break;
+
+                // Parse method signatures: name :: Type
+                if (try self.check(.varid)) {
+                    const method_name = try self.advance();
+                    _ = try self.expect(.dcolon);
+                    const ty = try self.parseType();
+                    try methods.append(self.allocator, .{
+                        .name = method_name.token.varid,
+                        .type = ty,
+                        .default_implementation = null,
+                    });
+                }
+                while (try self.matchSemi()) {}
+            }
+            _ = try self.expectCloseBrace();
+        }
+
+        return .{ .Class = .{
+            .context = context,
+            .class_name = name_tok.token.conid,
+            .tyvars = try tyvars.toOwnedSlice(self.allocator),
+            .methods = try methods.toOwnedSlice(self.allocator),
+            .span = self.spanFrom(start),
+        } };
+    }
+
+    // ── Instance declaration (minimal) ─────────────────────────────────
+
+    fn parseInstanceDecl(self: *Parser) ParseError!?ast_mod.Decl {
+        const start = (try self.expect(.kw_instance)).span;
+        const ty = try self.parseType();
+
+        var bindings: std.ArrayListUnmanaged(ast_mod.FunBinding) = .empty;
+        if (try self.match(.kw_where) != null) {
+            _ = try self.expectOpenBrace();
+            while (true) {
+                if (try self.checkCloseBrace()) break;
+                if (try self.atEnd()) break;
+
+                const decl = self.parseTopDecl() catch |err| switch (err) {
+                    error.UnexpectedToken, error.InvalidSyntax => {
+                        try self.synchronize();
+                        while (try self.matchSemi()) {}
+                        continue;
+                    },
+                    else => return err,
+                };
+                if (decl) |d| {
+                    switch (d) {
+                        .FunBind => |fb| try bindings.append(self.allocator, fb),
+                        else => {},
+                    }
+                }
+                while (try self.matchSemi()) {}
+            }
+            _ = try self.expectCloseBrace();
+        }
+
+        return .{ .Instance = .{
+            .context = null,
+            .constructor_type = ty,
+            .bindings = try bindings.toOwnedSlice(self.allocator),
+            .span = self.spanFrom(start),
+        } };
+    }
+
+    // ── Default declaration ────────────────────────────────────────────
+
+    fn parseDefaultDecl(self: *Parser) ParseError!?ast_mod.Decl {
+        const start = (try self.expect(.kw_default)).span;
+        _ = try self.expect(.open_paren);
+        var types: std.ArrayListUnmanaged(ast_mod.Type) = .empty;
+        while (true) {
+            if (try self.check(.close_paren)) break;
+            const ty = try self.parseType();
+            try types.append(self.allocator, ty);
+            if (try self.match(.comma) == null) break;
+        }
+        _ = try self.expect(.close_paren);
+
+        return .{ .Default = .{
+            .types = try types.toOwnedSlice(self.allocator),
+            .span = self.spanFrom(start),
+        } };
+    }
+
+    // ── Fixity declarations ────────────────────────────────────────────
+
+    fn parseFixityDecl(self: *Parser) ParseError!?ast_mod.Decl {
+        const start = try self.currentSpan();
+        const fixity_tok = try self.advance();
+        const fixity: ast_mod.Fixity = switch (std.meta.activeTag(fixity_tok.token)) {
+            .kw_infixl => .InfixL,
+            .kw_infixr => .InfixR,
+            .kw_infix => .InfixN,
+            else => unreachable,
+        };
+
+        // Parse precedence (optional, defaults to 9)
+        var prec: u8 = 9;
+        if (try self.check(.lit_integer)) {
+            const prec_tok = try self.advance();
+            prec = @intCast(@min(9, @max(0, prec_tok.token.lit_integer)));
+        }
+
+        // Parse operator names
+        var ops: std.ArrayListUnmanaged([]const u8) = .empty;
+        while (true) {
+            const tag = try self.peekTag();
+            if (tag == .varsym) {
+                const op = try self.advance();
+                try ops.append(self.allocator, op.token.varsym);
+            } else if (tag == .consym) {
+                const op = try self.advance();
+                try ops.append(self.allocator, op.token.consym);
+            } else if (tag == .varid) {
+                // backtick operator: `mod`
+                const op = try self.advance();
+                try ops.append(self.allocator, op.token.varid);
+            } else {
+                break;
+            }
+            if (try self.match(.comma) == null) break;
+        }
+
+        // FixityDecl is not a Decl variant, so skip for now
+        // TODO: Add FixityDecl to Decl union or handle separately
+        _ = start;
+        _ = fixity;
+        self.allocator.free(try ops.toOwnedSlice(self.allocator));
+        return null;
+    }
+
+    // ── Minimal type parsing ───────────────────────────────────────────
+    // (Full type parsing is issue #32; this is enough for declarations)
+
+    fn parseType(self: *Parser) ParseError!ast_mod.Type {
+        const ty = try self.parseTypeApp();
+
+        // Function arrow: a -> b -> c
+        if (try self.check(.arrow_right)) {
+            var parts: std.ArrayListUnmanaged(*const ast_mod.Type) = .empty;
+            const first = try self.allocNode(ast_mod.Type, ty);
+            try parts.append(self.allocator, first);
+            while (try self.match(.arrow_right) != null) {
+                const next = try self.parseTypeApp();
+                try parts.append(self.allocator, try self.allocNode(ast_mod.Type, next));
+            }
+            return .{ .Fun = try parts.toOwnedSlice(self.allocator) };
+        }
+
+        return ty;
+    }
+
+    fn parseTypeApp(self: *Parser) ParseError!ast_mod.Type {
+        var parts: std.ArrayListUnmanaged(*const ast_mod.Type) = .empty;
+        const first = try self.parseAtomicType();
+        try parts.append(self.allocator, try self.allocNode(ast_mod.Type, first));
+
+        while (true) {
+            const arg = try self.tryParseAtomicType() orelse break;
+            try parts.append(self.allocator, try self.allocNode(ast_mod.Type, arg));
+        }
+
+        if (parts.items.len == 1) {
+            const only = parts.items[0].*;
+            self.allocator.destroy(parts.items[0]);
+            self.allocator.free(try parts.toOwnedSlice(self.allocator));
+            return only;
+        }
+
+        return .{ .App = try parts.toOwnedSlice(self.allocator) };
+    }
+
+    fn parseAtomicType(self: *Parser) ParseError!ast_mod.Type {
+        return try self.tryParseAtomicType() orelse {
+            const got = try self.peek();
+            try self.emitErrorMsg(got.span, "expected type");
+            return error.UnexpectedToken;
+        };
+    }
+
+    fn tryParseAtomicType(self: *Parser) ParseError!?ast_mod.Type {
+        const tag = try self.peekTag();
+        switch (tag) {
+            .conid => {
+                const tok = try self.advance();
+                return .{ .Con = .{
+                    .name = tok.token.conid,
+                    .span = tok.span,
+                } };
+            },
+            .varid => {
+                const tok = try self.advance();
+                return .{ .Var = tok.token.varid };
+            },
+            .open_paren => {
+                _ = try self.advance();
+                // Unit type ()
+                if (try self.check(.close_paren)) {
+                    _ = try self.advance();
+                    return .{ .Tuple = &.{} };
+                }
+                // Tuple type or parenthesized type
+                const first = try self.parseType();
+                if (try self.check(.comma)) {
+                    var parts: std.ArrayListUnmanaged(*const ast_mod.Type) = .empty;
+                    try parts.append(self.allocator, try self.allocNode(ast_mod.Type, first));
+                    while (try self.match(.comma) != null) {
+                        const next = try self.parseType();
+                        try parts.append(self.allocator, try self.allocNode(ast_mod.Type, next));
+                    }
+                    _ = try self.expect(.close_paren);
+                    return .{ .Tuple = try parts.toOwnedSlice(self.allocator) };
+                }
+                _ = try self.expect(.close_paren);
+                return .{ .Paren = try self.allocNode(ast_mod.Type, first) };
+            },
+            .open_bracket => {
+                _ = try self.advance();
+                const inner = try self.parseType();
+                _ = try self.expect(.close_bracket);
+                return .{ .List = try self.allocNode(ast_mod.Type, inner) };
+            },
+            else => return null,
+        }
+    }
+
+    // ── Minimal expression parsing ─────────────────────────────────────
+    // (Full expression parsing is issue #30; this is enough for bindings)
+
+    fn parseExpr(self: *Parser) ParseError!ast_mod.Expr {
+        return try self.parseExprApp();
+    }
+
+    fn parseExprApp(self: *Parser) ParseError!ast_mod.Expr {
+        var func = try self.parseAtomicExpr();
+
+        while (true) {
+            const arg = try self.tryParseAtomicExpr() orelse break;
+            const fn_node = try self.allocNode(ast_mod.Expr, func);
+            const arg_node = try self.allocNode(ast_mod.Expr, arg);
+            func = .{ .App = .{ .fn_expr = fn_node, .arg_expr = arg_node } };
+        }
+
+        return func;
+    }
+
+    fn parseAtomicExpr(self: *Parser) ParseError!ast_mod.Expr {
+        return try self.tryParseAtomicExpr() orelse {
+            const got = try self.peek();
+            try self.emitErrorMsg(got.span, "expected expression");
+            return error.UnexpectedToken;
+        };
+    }
+
+    fn tryParseAtomicExpr(self: *Parser) ParseError!?ast_mod.Expr {
+        const tag = try self.peekTag();
+        switch (tag) {
+            .varid => {
+                const tok = try self.advance();
+                return .{ .Var = .{ .name = tok.token.varid, .span = tok.span } };
+            },
+            .conid => {
+                const tok = try self.advance();
+                return .{ .Var = .{ .name = tok.token.conid, .span = tok.span } };
+            },
+            .lit_integer => {
+                const tok = try self.advance();
+                return .{ .Lit = .{ .Int = .{ .value = tok.token.lit_integer, .span = tok.span } } };
+            },
+            .lit_float => {
+                const tok = try self.advance();
+                return .{ .Lit = .{ .Float = .{ .value = tok.token.lit_float, .span = tok.span } } };
+            },
+            .lit_string => {
+                const tok = try self.advance();
+                return .{ .Lit = .{ .String = .{ .value = tok.token.lit_string, .span = tok.span } } };
+            },
+            .lit_char => {
+                const tok = try self.advance();
+                return .{ .Lit = .{ .Char = .{ .value = tok.token.lit_char, .span = tok.span } } };
+            },
+            .open_paren => {
+                _ = try self.advance();
+                // Unit: ()
+                if (try self.check(.close_paren)) {
+                    _ = try self.advance();
+                    return .{ .Tuple = &.{} };
+                }
+                const inner = try self.parseExpr();
+                _ = try self.expect(.close_paren);
+                return .{ .Paren = try self.allocNode(ast_mod.Expr, inner) };
+            },
+            .open_bracket => {
+                _ = try self.advance();
+                if (try self.check(.close_bracket)) {
+                    _ = try self.advance();
+                    return .{ .List = &.{} };
+                }
+                var items: std.ArrayListUnmanaged(ast_mod.Expr) = .empty;
+                const first = try self.parseExpr();
+                try items.append(self.allocator, first);
+                while (try self.match(.comma) != null) {
+                    const item = try self.parseExpr();
+                    try items.append(self.allocator, item);
+                }
+                _ = try self.expect(.close_bracket);
+                return .{ .List = try items.toOwnedSlice(self.allocator) };
+            },
+            .minus => {
+                _ = try self.advance();
+                const inner = try self.parseAtomicExpr();
+                return .{ .Negate = try self.allocNode(ast_mod.Expr, inner) };
+            },
+            else => return null,
+        }
+    }
+
+    // ── Minimal pattern parsing ────────────────────────────────────────
+    // (Full pattern parsing is issue #31; this is enough for function args)
+
+    fn tryParseAtomicPattern(self: *Parser) ParseError!?ast_mod.Pattern {
+        const tag = try self.peekTag();
+        switch (tag) {
+            .varid => {
+                const tok = try self.advance();
+                return .{ .Var = tok.token.varid };
+            },
+            .conid => {
+                const tok = try self.advance();
+                return .{ .Con = .{
+                    .name = .{ .name = tok.token.conid, .span = tok.span },
+                    .args = &.{},
+                } };
+            },
+            .underscore => {
+                const tok = try self.advance();
+                return .{ .Wild = tok.span };
+            },
+            .lit_integer => {
+                const tok = try self.advance();
+                return .{ .Lit = .{ .Int = .{ .value = tok.token.lit_integer, .span = tok.span } } };
+            },
+            .lit_char => {
+                const tok = try self.advance();
+                return .{ .Lit = .{ .Char = .{ .value = tok.token.lit_char, .span = tok.span } } };
+            },
+            .lit_string => {
+                const tok = try self.advance();
+                return .{ .Lit = .{ .String = .{ .value = tok.token.lit_string, .span = tok.span } } };
+            },
+            .open_paren => {
+                _ = try self.advance();
+                if (try self.check(.close_paren)) {
+                    _ = try self.advance();
+                    return .{ .Tuple = &.{} };
+                }
+                // Parse pattern inside parens
+                const inner = try self.tryParseAtomicPattern() orelse {
+                    const got = try self.peek();
+                    try self.emitErrorMsg(got.span, "expected pattern");
+                    return error.UnexpectedToken;
+                };
+                _ = try self.expect(.close_paren);
+                return .{ .Paren = try self.allocNode(ast_mod.Pattern, inner) };
+            },
+            else => return null,
+        }
+    }
+
+    // ── Allocation helpers ─────────────────────────────────────────────
+
+    fn allocNode(self: *Parser, comptime T: type, value: T) ParseError!*const T {
+        const ptr = try self.allocator.create(T);
+        ptr.* = value;
+        return ptr;
+    }
+
+    fn allocSlice(self: *Parser, comptime T: type, items: []const T) ParseError![]const T {
+        return self.allocator.dupe(T, items);
+    }
 };
 
 // ── Tests ──────────────────────────────────────────────────────────────
