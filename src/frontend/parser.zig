@@ -1148,27 +1148,156 @@ pub const Parser = struct {
         }
     }
 
-    // ── Minimal pattern parsing ────────────────────────────────────────
-    // (Full pattern parsing is issue #31; this is enough for function args)
+    // ── Pattern parsing ─────────────────────────────────────────────────
 
-    fn tryParseAtomicPattern(self: *Parser) ParseError!?ast_mod.Pattern {
+    /// Main entry point for pattern parsing.
+    /// Handles: as-patterns, negation, infix constructors, and atomic patterns.
+    pub fn parsePattern(self: *Parser) ParseError!ast_mod.Pattern {
+        const start = try self.currentSpan();
+
+        // Handle negated pattern: -x, -5, -Just 5
+        if (try self.check(.minus)) {
+            _ = try self.advance();
+            const pat = try self.parsePattern();
+            return .{ .Negate = try self.allocNode(ast_mod.Pattern, pat) };
+        }
+
+        const pat = try self.parseAtomicPattern();
+
+        // Handle as-pattern: xs@(x:rest)
+        if (try self.check(.at)) {
+            _ = try self.advance();
+            const right_pat = try self.parsePattern();
+            // Get the variable name from the left pattern (must be a varid)
+            const name = switch (pat) {
+                .Var => |n| n,
+                else => {
+                    try self.emitErrorMsg(start, "as-pattern requires a variable name on the left of @");
+                    return error.InvalidSyntax;
+                },
+            };
+            return .{ .AsPar = .{
+                .name = name,
+                .pat = try self.allocNode(ast_mod.Pattern, right_pat),
+            } };
+        }
+
+        // Handle infix constructor pattern: x : xs, True && True
+        // Look for operator symbols
+        if (self.isAtomPattern(pat) and try self.isInfixOp()) {
+            const tok = try self.advance();
+            const op_name = switch (tok.token) {
+                .varsym => |s| s,
+                .consym => |c| c,
+                else => unreachable,
+            };
+            const right_pat = try self.parsePattern();
+            return .{ .InfixCon = .{
+                .left = try self.allocNode(ast_mod.Pattern, pat),
+                .con = .{ .name = op_name, .span = tok.span },
+                .right = try self.allocNode(ast_mod.Pattern, right_pat),
+            } };
+        }
+
+        return pat;
+    }
+
+    /// Try to parse a pattern without raising an error. Returns null if no pattern found.
+    pub fn tryParsePattern(self: *Parser) ParseError!?ast_mod.Pattern {
+        if (try self.isPatternStart()) {
+            return try self.parsePattern();
+        }
+        return null;
+    }
+
+    /// Check if the current token could start a pattern.
+    fn isPatternStart(self: *Parser) ParseError!bool {
         const tag = try self.peekTag();
-        switch (tag) {
-            .varid => {
-                const tok = try self.advance();
-                return .{ .Var = tok.token.varid };
+        return switch (tag) {
+            .varid,
+            .conid,
+            .underscore,
+            .lit_integer,
+            .lit_char,
+            .lit_string,
+            .minus,
+            .open_paren,
+            .open_bracket => true,
+            else => false,
+        };
+    }
+
+    /// Check if current is an infix operator (varsym or consym).
+    fn isInfixOp(self: *Parser) ParseError!bool {
+        const tag = try self.peekTag();
+        return tag == .varsym or tag == .consym;
+    }
+
+    /// Check if a pattern is an "atom" pattern (can appear on left of infix op).
+    fn isAtomPattern(_: *Parser, pat: ast_mod.Pattern) bool {
+        return switch (pat) {
+            .Var, .Con, .Lit, .Wild, .Paren, .Bang, .Tuple, .List => true,
+            else => false,
+        };
+    }
+
+    /// Parse an atomic pattern (no as-pattern, no infix, no negation).
+    fn parseAtomicPattern(self: *Parser) ParseError!ast_mod.Pattern {
+        const tag = try self.peekTag();
+        return switch (tag) {
+            .varid => try self.parseVarPattern(),
+            .conid => try self.parseConPattern(),
+            .underscore => try self.parseWildPattern(),
+            .lit_integer, .lit_char, .lit_string => try self.parseLitPattern(),
+            .open_paren => try self.parseParenOrTuplePattern(),
+            .open_bracket => try self.parseListPattern(),
+            else => {
+                const got = try self.peek();
+                try self.emitErrorMsg(got.span, "expected pattern");
+                return error.UnexpectedToken;
             },
-            .conid => {
-                const tok = try self.advance();
-                return .{ .Con = .{
-                    .name = .{ .name = tok.token.conid, .span = tok.span },
-                    .args = &.{},
-                } };
-            },
-            .underscore => {
-                const tok = try self.advance();
-                return .{ .Wild = tok.span };
-            },
+        };
+    }
+
+    /// Parse variable pattern: x, foo, bar'
+    fn parseVarPattern(self: *Parser) ParseError!ast_mod.Pattern {
+        const tok = try self.expect(.varid);
+        return .{ .Var = tok.token.varid };
+    }
+
+    /// Parse constructor pattern: Just x, Nothing, True
+    fn parseConPattern(self: *Parser) ParseError!ast_mod.Pattern {
+        const tok = try self.expect(.conid);
+
+        // Try to parse constructor arguments
+        var args: std.ArrayListUnmanaged(ast_mod.Pattern) = .empty;
+        defer args.deinit(self.allocator);
+
+        while (try self.isPatternStart()) {
+            // For atomic patterns after conid, parse directly
+            // But we need to be careful not to parse infix constructors here
+            // Since we're left-associative, parse atomic patterns only
+            const arg = try self.parseAtomicPattern();
+            try args.append(self.allocator, arg);
+        }
+
+        const args_slice = try self.allocSlice(ast_mod.Pattern, args.items);
+        return .{ .Con = .{
+            .name = .{ .name = tok.token.conid, .span = tok.span },
+            .args = args_slice,
+        } };
+    }
+
+    /// Parse wildcard pattern: _
+    fn parseWildPattern(self: *Parser) ParseError!ast_mod.Pattern {
+        const tok = try self.expect(.underscore);
+        return .{ .Wild = tok.span };
+    }
+
+    /// Parse literal pattern: 42, 'a', "hello"
+    fn parseLitPattern(self: *Parser) ParseError!ast_mod.Pattern {
+        const tag = try self.peekTag();
+        return switch (tag) {
             .lit_integer => {
                 const tok = try self.advance();
                 return .{ .Lit = .{ .Int = .{ .value = tok.token.lit_integer, .span = tok.span } } };
@@ -1181,23 +1310,101 @@ pub const Parser = struct {
                 const tok = try self.advance();
                 return .{ .Lit = .{ .String = .{ .value = tok.token.lit_string, .span = tok.span } } };
             },
-            .open_paren => {
-                _ = try self.advance();
-                if (try self.check(.close_paren)) {
-                    _ = try self.advance();
-                    return .{ .Tuple = &.{} };
-                }
-                // Parse pattern inside parens
-                const inner = try self.tryParseAtomicPattern() orelse {
-                    const got = try self.peek();
-                    try self.emitErrorMsg(got.span, "expected pattern");
-                    return error.UnexpectedToken;
-                };
-                _ = try self.expect(.close_paren);
-                return .{ .Paren = try self.allocNode(ast_mod.Pattern, inner) };
-            },
-            else => return null,
+            else => unreachable,
+        };
+    }
+
+    /// Parse parenthesized pattern or tuple: (Just x), (a, b, c), ()
+    fn parseParenOrTuplePattern(self: *Parser) ParseError!ast_mod.Pattern {
+        _ = try self.expect(.open_paren);
+
+        // Check for unit pattern: ()
+        if (try self.check(.close_paren)) {
+            _ = try self.advance();
+            return .{ .Tuple = &.{} };
         }
+
+        // Parse first pattern
+        const first = try self.parsePattern();
+
+        // Check if this is a tuple: check for comma after first pattern
+        if (try self.check(.comma)) {
+            // Tuple pattern: (a, b, c)
+            var patterns: std.ArrayListUnmanaged(ast_mod.Pattern) = .empty;
+            try patterns.append(self.allocator, first);
+
+            while (try self.check(.comma)) {
+                _ = try self.advance();
+                const pat = try self.parsePattern();
+                try patterns.append(self.allocator, pat);
+            }
+
+            _ = try self.expect(.close_paren);
+            return .{ .Tuple = try self.allocSlice(ast_mod.Pattern, patterns.items) };
+        }
+
+        // Single parenthesized pattern: (Just x)
+        _ = try self.expect(.close_paren);
+        return .{ .Paren = try self.allocNode(ast_mod.Pattern, first) };
+    }
+
+    /// Parse list pattern: [], [x, y], [x:xs]
+    fn parseListPattern(self: *Parser) ParseError!ast_mod.Pattern {
+        _ = try self.expect(.open_bracket);
+
+        // Check for empty list: []
+        if (try self.check(.close_bracket)) {
+            _ = try self.advance();
+            return .{ .List = &.{} };
+        }
+
+        // Parse first pattern
+        const first = try self.parsePattern();
+
+        // Check for cons pattern: [x:xs]
+        // The : is tokenized as consym
+        if (try self.check(.consym)) {
+            const cons_tok = try self.advance();
+            // Verify it's actually the : operator (could be other consyms like :+:)
+            if (std.mem.eql(u8, cons_tok.token.consym, ":")) {
+                const rest = try self.parsePattern();
+                _ = try self.expect(.close_bracket);
+
+                // Create an InfixCon pattern with : operator
+                return .{ .InfixCon = .{
+                    .left = try self.allocNode(ast_mod.Pattern, first),
+                    .con = .{ .name = ":", .span = cons_tok.span },
+                    .right = try self.allocNode(ast_mod.Pattern, rest),
+                } };
+            } else {
+                // Got a consym other than :, treat as regular list with operator
+                // For now, error out since this is unusual
+                try self.emitErrorMsg(cons_tok.span, "expected : for list cons, got other constructor operator");
+                return error.UnexpectedToken;
+            }
+        }
+
+        // Regular list pattern: [x, y, z]
+        var patterns: std.ArrayListUnmanaged(ast_mod.Pattern) = .empty;
+        try patterns.append(self.allocator, first);
+
+        while (try self.check(.comma)) {
+            _ = try self.advance();
+            const pat = try self.parsePattern();
+            try patterns.append(self.allocator, pat);
+        }
+
+        _ = try self.expect(.close_bracket);
+        return .{ .List = try self.allocSlice(ast_mod.Pattern, patterns.items) };
+    }
+
+    /// Legacy function for backward compatibility. Tries to parse an atomic pattern.
+    /// Used for function arguments in value declarations.
+    fn tryParseAtomicPattern(self: *Parser) ParseError!?ast_mod.Pattern {
+        if (try self.isPatternStart()) {
+            return try self.parseAtomicPattern();
+        }
+        return null;
     }
 
     // ── Allocation helpers ─────────────────────────────────────────────
