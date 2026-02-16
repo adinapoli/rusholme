@@ -20,3 +20,5 @@ Thumbs.db
 .claude
 tags
 website/logo.png
+node_modules
+website/package-lock.json
