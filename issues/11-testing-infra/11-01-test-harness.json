@@ -11,5 +11,5 @@
     "body": "Establish the testing conventions and infrastructure for the project.\n\n**Deliverables:**\n- Document testing conventions: where tests live, naming, how to run\n- Ensure `zig build test` runs all unit tests across all modules\n- Add a `test` step to `build.zig` that discovers and runs tests from all source modules\n- Create a sample test in `src/` to validate the setup works\n- Add test instructions to README or a CONTRIBUTING.md section\n\n**Design notes:**\n- Zig's built-in `test` blocks are the unit test mechanism\n- Each pipeline module (lexer, parser, etc.) will have its own `test` blocks\n- `build.zig` should have a `test` step that exercises everything",
     "github_issue": 62,
     "depends_on_github": [],
-    "state": "open"
+    "state": "completed"
 }
