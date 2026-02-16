@@ -5,14 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Rusholme — A Toy Haskell Compiler in Zig</title>
     <meta name="description" content="Rusholme is a toy Haskell compiler written in Zig, developed collaboratively with AI assistance. Built with Zig, targeting Haskell 2010, exploring compiler construction.">
-    
+
     <!-- Open Graph -->
     <meta property="og:title" content="Rusholme — A Toy Haskell Compiler in Zig">
     <meta property="og:description" content="A toy Haskell compiler written in Zig - baked with LLMs, served with curry. Exploring compiler construction through AI-assisted development.">
     <meta property="og:image" content="https://adinapoli.github.io/rusholme/logo.png">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://adinapoli.github.io/rusholme/">
-    
+
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -38,63 +38,63 @@
             }
         }
     </script>
-    
+
     <!-- Marked for markdown rendering -->
     <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
-    
+
     <!-- Lucide icons -->
     <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
-    
+
     <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-    
+
     <style>
         :root {
             --zig: #f7a41d;
             --haskell: #b87e18;
         }
-        
+
         body {
             font-family: 'Inter', sans-serif;
             background: #0a0a0f;
             color: #f1f5f9;
         }
-        
+
         .font-mono {
             font-family: 'JetBrains Mono', monospace;
         }
-        
+
         .gradient-text {
             background: linear-gradient(135deg, var(--zig) 0%, var(--haskell) 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
         }
-        
+
         .gradient-border {
             background: linear-gradient(135deg, var(--zig), var(--haskell));
             padding: 1px;
         }
-        
+
         .gradient-border > div {
             background: #111827;
         }
-        
+
         .card-hover {
             transition: all 0.3s ease;
         }
-        
+
         .card-hover:hover {
             transform: translateY(-4px);
             box-shadow: 0 20px 40px rgba(247, 164, 29, 0.1);
         }
-        
+
         .nav-link {
             position: relative;
         }
-        
+
         .nav-link::after {
             content: '';
             position: absolute;
@@ -105,25 +105,25 @@
             background: linear-gradient(90deg, var(--zig), var(--haskell));
             transition: width 0.3s ease;
         }
-        
+
         .nav-link:hover::after {
             width: 100%;
         }
-        
+
         .backdrop-blur-custom {
             backdrop-filter: blur(12px);
             -webkit-backdrop-filter: blur(12px);
         }
-        
+
         .prose-custom {
             max-width: none;
         }
-        
+
         .prose-custom h1, .prose-custom h2, .prose-custom h3 {
             color: #f1f5f9;
             font-weight: 600;
         }
-        
+
         .prose-custom h1 { font-size: 1.875rem; margin-bottom: 1rem; }
         .prose-custom h2 { font-size: 1.5rem; margin-top: 1.5rem; margin-bottom: 0.75rem; }
         .prose-custom h3 { font-size: 1.25rem; margin-top: 1.25rem; margin-bottom: 0.5rem; }
@@ -134,51 +134,51 @@
         .prose-custom pre { background: #1e293b; padding: 1rem; border-radius: 0.5rem; overflow-x: auto; margin-bottom: 1rem; }
         .prose-custom pre code { background: none; color: #e2e8f0; padding: 0; }
         .prose-custom a { color: var(--zig); text-decoration: underline; }
-        
+
         .glow-effect {
             box-shadow: 0 0 60px rgba(247, 164, 29, 0.3);
         }
-        
+
         .scroll-indicator {
             animation: bounce 2s infinite;
         }
-        
+
         @keyframes bounce {
             0%, 20%, 50%, 80%, 100% { transform: translateY(0) translateX(-50%); }
             40% { transform: translateY(-10px) translateX(-50%); }
             60% { transform: translateY(-5px) translateX(-50%); }
         }
-        
+
         /* Custom scrollbar */
         ::-webkit-scrollbar {
             width: 8px;
         }
-        
+
         ::-webkit-scrollbar-track {
             background: #0a0a0f;
         }
-        
+
         ::-webkit-scrollbar-thumb {
             background: #374151;
             border-radius: 4px;
         }
-        
+
         ::-webkit-scrollbar-thumb:hover {
             background: var(--zig);
         }
-        
+
         /* Milestone progress bar animation */
         .progress-bar {
             transition: width 1.5s ease-out;
         }
-        
+
         /* Pipeline styles - static, no hover effects */
-        
+
         .pipeline-line {
             stroke-dasharray: 5;
             animation: dash 1s linear infinite;
         }
-        
+
         @keyframes dash {
             to { stroke-dashoffset: -10; }
         }
@@ -193,7 +193,7 @@
                     <span class="text-2xl">🍛</span>
                     <span class="text-xl font-bold text-white">Rusholme</span>
                 </a>
-                
+
                 <div class="hidden md:flex items-center space-x-8">
                     <a href="#home" class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">Home</a>
                     <a href="#about" class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">About</a>
@@ -201,7 +201,7 @@
                     <a href="#roadmap" class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">Roadmap</a>
                     <a href="#design" class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">Design</a>
                 </div>
-                
+
                 <div class="flex items-center gap-4">
                     <a href="https://github.com/adinapoli/rusholme" target="_blank" class="text-gray-400 hover:text-white transition-colors">
                         <i data-lucide="github" class="w-5 h-5"></i>
@@ -212,7 +212,7 @@
                 </div>
             </div>
         </div>
-        
+
         <!-- Mobile Menu -->
         <div id="mobile-menu" class="hidden md:hidden bg-gray-950/95 border-t border-gray-800">
             <div class="px-4 py-4 space-y-3">
@@ -233,10 +233,10 @@
             <div class="absolute bottom-1/4 -left-1/4 w-[600px] h-[600px] rounded-full bg-haskell/10 blur-3xl animate-float-delayed"></div>
             <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] rounded-full bg-gradient-to-br from-zig/5 to-haskell/5 blur-3xl"></div>
         </div>
-        
+
         <!-- Grid pattern -->
         <div class="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.02)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.02)_1px,transparent_1px)] bg-[size:60px_60px]"></div>
-        
+
         <div class="relative z-10 text-center px-4 sm:px-6 lg:px-8 max-w-5xl mx-auto pt-20">
             <!-- Logo -->
             <div class="mb-8 animate-float">
@@ -245,24 +245,24 @@
                     <img src="logo.png" alt="Rusholme Logo" class="relative w-40 h-40 md:w-48 md:h-48 object-contain">
                 </div>
             </div>
-            
+
             <!-- Title -->
             <h1 class="text-5xl md:text-7xl lg:text-8xl font-black mb-6 tracking-tight">
                 <span class="gradient-text">Rusholme</span>
             </h1>
-            
+
             <!-- Tagline -->
             <p class="text-xl md:text-2xl lg:text-3xl text-gray-400 mb-8 max-w-3xl mx-auto font-light">
-                A toy <span class="text-white font-medium">Haskell compiler</span> written in 
+                A toy <span class="text-white font-medium">Haskell compiler</span> written in
                 <span class="text-zig font-medium">Zig</span>
             </p>
-            
+
             <!-- Subtagline -->
             <p class="text-lg text-gray-500 mb-12 max-w-2xl mx-auto">
-                Built collaboratively with AI assistance. Exploring compiler construction, 
+                Built collaboratively with AI assistance. Exploring compiler construction,
                 one curried function at a time.
             </p>
-            
+
             <!-- CTA Buttons -->
             <div class="flex flex-wrap justify-center gap-4 mb-16">
                 <a href="#about" class="group relative px-8 py-4 bg-gradient-to-r from-zig to-haskell text-white font-semibold rounded-xl shadow-lg hover:shadow-2xl transition-all duration-300 hover:scale-105">
@@ -276,7 +276,7 @@
                     View on GitHub
                 </a>
             </div>
-            
+
             <!-- Tech stack badges -->
             <div class="flex flex-wrap justify-center gap-3">
                 <div class="flex items-center gap-2 px-4 py-2 bg-gray-800/50 rounded-full border border-gray-700/50">
@@ -297,7 +297,7 @@
                 </div>
             </div>
         </div>
-        
+
         <!-- Scroll indicator -->
         <div class="scroll-indicator absolute bottom-8 left-1/2 text-gray-500">
             <i data-lucide="chevron-down" class="w-8 h-8"></i>
@@ -313,19 +313,19 @@
                     <h2 class="text-4xl md:text-5xl font-bold text-white mt-4 mb-6">
                         Why <span class="gradient-text">"Rusholme"</span>?
                     </h2>
-                    
+
                     <p class="text-lg text-gray-400 mb-6 leading-relaxed">
-                        <a href="https://en.wikipedia.org/wiki/Rusholme" target="_blank" class="text-zig hover:underline font-medium">Rusholme</a> 
-                        is an area in Manchester, England, famous as <strong>"the Curry Mile"</strong> — 
-                        a vibrant street lined with Indian restaurants. Since 
-                        <em class="text-white">currying</em> is the signature technique from Haskell (after the 
+                        <a href="https://en.wikipedia.org/wiki/Rusholme" target="_blank" class="text-zig hover:underline font-medium">Rusholme</a>
+                        is an area in Manchester, England, famous as <strong>"the Curry Mile"</strong> —
+                        a vibrant street lined with Indian restaurants. Since
+                        <em class="text-white">currying</em> is the signature technique from Haskell (after the
                         mathematician Haskell Curry), the name was irresistible.
                     </p>
-                    
+
                     <p class="text-gray-400 mb-8 leading-relaxed">
                         This project serves two purposes simultaneously:
                     </p>
-                    
+
                     <div class="space-y-4 mb-8">
                         <div class="flex items-start gap-4 p-4 bg-gray-900/50 rounded-xl border border-gray-800">
                             <div class="w-12 h-12 rounded-xl bg-zig/10 flex items-center justify-center flex-shrink-0">
@@ -336,7 +336,7 @@
                                 <p class="text-sm text-gray-500">By building a real, non-trivial compiler from scratch</p>
                             </div>
                         </div>
-                        
+
                         <div class="flex items-start gap-4 p-4 bg-gray-900/50 rounded-xl border border-gray-800">
                             <div class="w-12 h-12 rounded-xl bg-haskell/10 flex items-center justify-center flex-shrink-0">
                                 <i data-lucide="cpu" class="w-6 h-6 text-haskell"></i>
@@ -347,7 +347,7 @@
                             </div>
                         </div>
                     </div>
-                    
+
                     <div class="flex items-center gap-3 px-6 py-4 bg-gradient-to-r from-zig/10 to-haskell/10 rounded-xl border border-zig/20">
                         <div class="w-3 h-3 rounded-full bg-green-500 animate-pulse"></div>
                         <div>
@@ -356,7 +356,7 @@
                         </div>
                     </div>
                 </div>
-                
+
                 <!-- Feature cards -->
                 <div class="grid grid-cols-2 gap-4">
                     <div class="card-hover p-6 bg-gray-900 rounded-2xl border border-gray-800">
@@ -364,19 +364,19 @@
                         <h3 class="text-lg font-bold text-white mb-2">Fast</h3>
                         <p class="text-sm text-gray-500">Zig + LLVM optimization for blazing-fast compilation</p>
                     </div>
-                    
+
                     <div class="card-hover p-6 bg-gray-900 rounded-2xl border border-gray-800">
                         <div class="text-4xl mb-4">🌐</div>
                         <h3 class="text-lg font-bold text-white mb-2">Multi-Backend</h3>
                         <p class="text-sm text-gray-500">LLVM, C, JavaScript, and WebAssembly targets</p>
                     </div>
-                    
+
                     <div class="card-hover p-6 bg-gray-900 rounded-2xl border border-gray-800">
                         <div class="text-4xl mb-4">🔥</div>
                         <h3 class="text-lg font-bold text-white mb-2">Pure Laziness</h3>
                         <p class="text-sm text-gray-500">Call-by-need semantics preserved through GRIN</p>
                     </div>
-                    
+
                     <div class="card-hover p-6 bg-gray-900 rounded-2xl border border-gray-800">
                         <div class="text-4xl mb-4">🧠</div>
                         <h3 class="text-lg font-bold text-white mb-2">AI-Assisted</h3>
@@ -397,7 +397,7 @@
                     A modern, pragmatic pipeline inspired by GHC but simplified for educational purposes
                 </p>
             </div>
-            
+
             <!-- Pipeline diagram -->
             <div class="mb-16">
                 <div class="bg-gray-950 rounded-3xl p-8 border border-gray-800 overflow-x-auto">
@@ -411,17 +411,17 @@
                                 <stop offset="100%" stop-color="#b87e18"/>
                             </linearGradient>
                         </defs>
-                        
+
                         <!-- Stage 1: Haskell Source -->
                         <g>
                             <rect x="20" y="85" width="120" height="80" rx="12" fill="#1f2937" stroke="url(#flowGradient)" stroke-width="2"/>
                             <text x="80" y="115" text-anchor="middle" fill="#f1f5f9" font-size="12" font-weight="600">Haskell</text>
                             <text x="80" y="135" text-anchor="middle" fill="#9ca3af" font-size="10">Source</text>
                         </g>
-                        
+
                         <!-- Arrow -->
                         <line x1="140" y1="125" x2="170" y2="125" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)" class="pipeline-line"/>
-                        
+
                         <!-- Stage 2: Lexer/Parser -->
                         <g>
                             <rect x="170" y="85" width="130" height="80" rx="12" fill="#1f2937" stroke="url(#flowGradient)" stroke-width="2"/>
@@ -429,10 +429,10 @@
                             <text x="235" y="125" text-anchor="middle" fill="#f1f5f9" font-size="11" font-weight="600">Parser</text>
                             <text x="235" y="145" text-anchor="middle" fill="#9ca3af" font-size="10">AST</text>
                         </g>
-                        
+
                         <!-- Arrow -->
                         <line x1="300" y1="125" x2="330" y2="125" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)" class="pipeline-line"/>
-                        
+
                         <!-- Stage 3: Typecheck/Desugar -->
                         <g>
                             <rect x="330" y="85" width="130" height="80" rx="12" fill="#1f2937" stroke="url(#flowGradient)" stroke-width="2"/>
@@ -440,42 +440,42 @@
                             <text x="395" y="125" text-anchor="middle" fill="#f1f5f9" font-size="10" font-weight="600">Desugar</text>
                             <text x="395" y="145" text-anchor="middle" fill="#9ca3af" font-size="10">Core (F_C)</text>
                         </g>
-                        
+
                         <!-- Arrow -->
                         <line x1="460" y1="125" x2="490" y2="125" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)" class="pipeline-line"/>
-                        
+
                         <!-- Stage 4: Core → GRIN -->
                         <g>
                             <rect x="490" y="85" width="120" height="80" rx="12" fill="#1f2937" stroke="url(#flowGradient)" stroke-width="2"/>
                             <text x="550" y="115" text-anchor="middle" fill="#f1f5f9" font-size="11" font-weight="600">Core → GRIN</text>
                             <text x="550" y="135" text-anchor="middle" fill="#9ca3af" font-size="10">GRIN</text>
                         </g>
-                        
+
                         <!-- Arrow -->
                         <line x1="610" y1="125" x2="650" y2="125" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)" class="pipeline-line"/>
-                        
+
                         <!-- Backends -->
                         <g>
                             <rect x="650" y="25" width="80" height="50" rx="8" fill="#1f2937" stroke="#22c55e" stroke-width="2"/>
                             <text x="690" y="55" text-anchor="middle" fill="#f1f5f9" font-size="11" font-weight="600">LLVM</text>
                         </g>
-                        
+
                         <g>
                             <rect x="650" y="85" width="80" height="80" rx="8" fill="#1f2937" stroke="#22c55e" stroke-width="2"/>
                             <text x="690" y="115" text-anchor="middle" fill="#f1f5f9" font-size="11" font-weight="600">C / JS</text>
                             <text x="690" y="135" text-anchor="middle" fill="#9ca3af" font-size="10">Portable</text>
                         </g>
-                        
+
                         <g>
                             <rect x="650" y="175" width="80" height="50" rx="8" fill="#1f2937" stroke="#22c55e" stroke-width="2"/>
                             <text x="690" y="205" text-anchor="middle" fill="#f1f5f9" font-size="11" font-weight="600">Wasm</text>
                         </g>
-                        
+
                         <!-- Dashed lines to backends -->
                         <line x1="610" y1="125" x2="650" y2="50" stroke="#64748b" stroke-width="2" stroke-dasharray="5,5" marker-end="url(#arrow)"/>
                         <line x1="610" y1="125" x2="650" y2="125" stroke="#64748b" stroke-width="2" stroke-dasharray="5,5" marker-end="url(#arrow)"/>
                         <line x1="610" y1="125" x2="650" y2="200" stroke="#64748b" stroke-width="2" stroke-dasharray="5,5" marker-end="url(#arrow)"/>
-                        
+
                         <!-- Labels -->
                         <text x="80" y="185" text-anchor="middle" fill="#6b7280" font-size="9">Haskell 2010</text>
                         <text x="235" y="185" text-anchor="middle" fill="#6b7280" font-size="9">Recursive Descent</text>
@@ -485,7 +485,7 @@
                     </svg>
                 </div>
             </div>
-            
+
             <!-- Pipeline details -->
             <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-4">
                 <div class="card-hover p-6 bg-gray-900 rounded-2xl border border-gray-800">
@@ -494,40 +494,40 @@
                     </div>
                     <h3 class="text-lg font-bold text-white mb-2">Frontend</h3>
                     <p class="text-sm text-gray-500">
-                        Hand-written recursive descent parser with full Unicode support. 
+                        Hand-written recursive descent parser with full Unicode support.
                         Produces a complete Haskell 2010 AST.
                     </p>
                 </div>
-                
+
                 <div class="card-hover p-6 bg-gray-900 rounded-2xl border border-gray-800">
                     <div class="w-12 h-12 rounded-xl bg-zig/10 flex items-center justify-center mb-4">
                         <i data-lucide="zap" class="w-6 h-6 text-haskell"></i>
                     </div>
                     <h3 class="text-lg font-bold text-white mb-2">Core IR</h3>
                     <p class="text-sm text-gray-500">
-                        GHC's System F_C with type annotations. The type-safety firewall — 
+                        GHC's System F_C with type annotations. The type-safety firewall —
                         if Core typechecks, later stages are trusted.
                     </p>
                 </div>
-                
+
                 <div class="card-hover p-6 bg-gray-900 rounded-2xl border border-gray-800">
                     <div class="w-12 h-12 rounded-xl bg-zig/10 flex items-center justify-center mb-4">
                         <i data-lucide="layers" class="w-6 h-6 text-purple-500"></i>
                     </div>
                     <h3 class="text-lg font-bold text-white mb-2">GRIN IR</h3>
                     <p class="text-sm text-gray-500">
-                        Replaces STG+Cmm. Explicit memory operations (store/fetch/update) 
+                        Replaces STG+Cmm. Explicit memory operations (store/fetch/update)
                         while preserving lazy evaluation semantics.
                     </p>
                 </div>
-                
+
                 <div class="card-hover p-6 bg-gray-900 rounded-2xl border border-gray-800">
                     <div class="w-12 h-12 rounded-xl bg-zig/10 flex items-center justify-center mb-4">
                         <i data-lucide="server" class="w-6 h-6 text-blue-500"></i>
                     </div>
                     <h3 class="text-lg font-bold text-white mb-2">Runtime</h3>
                     <p class="text-sm text-gray-500">
-                        Written in Zig. Handles heap allocation, thunk evaluation, I/O, 
+                        Written in Zig. Handles heap allocation, thunk evaluation, I/O,
                         and provides cross-platform runtime support.
                     </p>
                 </div>
@@ -548,7 +548,7 @@
                     <i data-lucide="external-link" class="w-4 h-4 group-hover:translate-x-1 transition-transform"></i>
                 </a>
             </div>
-            
+
             <!-- Milestones -->
             <div class="grid md:grid-cols-5 gap-4 mb-16">
                 <div class="card-hover p-6 bg-gray-900 rounded-2xl border border-gray-800">
@@ -563,7 +563,7 @@
                         <div class="h-full bg-gradient-to-r from-green-500 to-emerald-500 progress-bar" style="width: 100%"></div>
                     </div>
                 </div>
-                
+
                 <div class="card-hover p-6 bg-gray-900 rounded-2xl border border-gray-800">
                     <div class="text-4xl mb-4">👋</div>
                     <h3 class="font-bold text-lg text-white mb-1">M1</h3>
@@ -576,7 +576,7 @@
                         <div class="h-full bg-gradient-to-r from-blue-500 to-indigo-500 progress-bar" style="width: 35%"></div>
                     </div>
                 </div>
-                
+
                 <div class="card-hover p-6 bg-gray-900 rounded-2xl border border-gray-800 opacity-60">
                     <div class="text-4xl mb-4">📋</div>
                     <h3 class="font-bold text-lg text-white mb-1">M2</h3>
@@ -589,7 +589,7 @@
                         <div class="h-full bg-gray-700 progress-bar" style="width: 0%"></div>
                     </div>
                 </div>
-                
+
                 <div class="card-hover p-6 bg-gray-900 rounded-2xl border border-gray-800 opacity-60">
                     <div class="text-4xl mb-4">⚙️</div>
                     <h3 class="font-bold text-lg text-white mb-1">M3</h3>
@@ -602,7 +602,7 @@
                         <div class="h-full bg-gray-700 progress-bar" style="width: 0%"></div>
                     </div>
                 </div>
-                
+
                 <div class="card-hover p-6 bg-gray-900 rounded-2xl border border-gray-800 opacity-60">
                     <div class="text-4xl mb-4">✨</div>
                     <h3 class="font-bold text-lg text-white mb-1">M4</h3>
@@ -616,7 +616,7 @@
                     </div>
                 </div>
             </div>
-            
+
             <!-- Recent progress -->
             <div class="bg-gray-900 rounded-2xl border border-gray-800 p-8">
                 <h3 class="text-xl font-bold text-white mb-6 flex items-center gap-2">
@@ -694,51 +694,13 @@
         <a href="https://github.com/adinapoli/rusholme/issues/1" target="_blank" class="text-white hover:text-[#f7a41d] font-medium">
           #1: Set up GitHub Actions CI via Nix flake
         </a>
-        <p class="text-xs text-gray-500 mt-1">Closed 19 hours ago</p>
+        <p class="text-xs text-gray-500 mt-1">Closed 20 hours ago</p>
       </div>
     </div>
                 </div>
             </div>
 
-      <div class="w-6 h-6 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
-          <polyline points="20 6 9 17 4 12"></polyline>
-        </svg>
-      </div>
-      <div class="flex-1">
-        <a href="https://github.com/adinapoli/rusholme/issues/23" target="_blank" class="text-white hover:text-[#f7a41d] font-medium">
-          #23: Define lexer token types for Haskell
-        </a>
-        <p class="text-xs text-gray-500 mt-1">Closed 17 hours ago</p>
-      </div>
-    </div><div class="flex items-start gap-3">
-      <div class="w-6 h-6 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
-          <polyline points="20 6 9 17 4 12"></polyline>
-        </svg>
-      </div>
-      <div class="flex-1">
-        <a href="https://github.com/adinapoli/rusholme/issues/18" target="_blank" class="text-white hover:text-[#f7a41d] font-medium">
-          #18: Define Diagnostic ADT (errors as structured data, not strings)
-        </a>
-        <p class="text-xs text-gray-500 mt-1">Closed 18 hours ago</p>
-      </div>
-    </div><div class="flex items-start gap-3">
-      <div class="w-6 h-6 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
-          <polyline points="20 6 9 17 4 12"></polyline>
-        </svg>
-      </div>
-      <div class="flex-1">
-        <a href="https://github.com/adinapoli/rusholme/issues/1" target="_blank" class="text-white hover:text-[#f7a41d] font-medium">
-          #1: Set up GitHub Actions CI via Nix flake
-        </a>
-        <p class="text-xs text-gray-500 mt-1">Closed 19 hours ago</p>
-      </div>
     </div>
-                </div>
-            </div>
-        </div>
     </section>
 
     <!-- Design Section -->
@@ -751,7 +713,7 @@
                     Full architectural documentation, design decisions, and rationale
                 </p>
             </div>
-            
+
             <div class="grid lg:grid-cols-2 gap-8">
                 <!-- DESIGN.md -->
                 <div class="card-hover bg-gray-900 rounded-2xl border border-gray-800 overflow-hidden">
@@ -781,7 +743,7 @@
                         </a>
                     </div>
                 </div>
-                
+
                 <!-- ROADMAP.md -->
                 <div class="card-hover bg-gray-900 rounded-2xl border border-gray-800 overflow-hidden">
                     <div class="p-6 border-b border-gray-800">
@@ -818,16 +780,16 @@
     <section class="py-24 px-4 sm:px-6 lg:px-8 relative overflow-hidden">
         <div class="absolute inset-0 bg-gradient-to-br from-zig via-haskell to-purple-900 opacity-10"></div>
         <div class="absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-gray-950"></div>
-        
+
         <div class="max-w-4xl mx-auto text-center relative z-10">
             <h2 class="text-4xl md:text-5xl font-bold text-white mb-6">
                 Join the <span class="gradient-text">Curry Mile</span>
             </h2>
             <p class="text-xl text-gray-400 mb-12 max-w-2xl mx-auto">
-                Rusholme is an open, collaborative project. Whether you're interested in compilers, 
+                Rusholme is an open, collaborative project. Whether you're interested in compilers,
                 Zig, Haskell, or just want to learn alongside us — there's a place for you.
             </p>
-            
+
             <div class="flex flex-wrap justify-center gap-4">
                 <a href="https://github.com/adinapoli/rusholme" target="_blank" class="group px-8 py-4 bg-white text-zig font-semibold rounded-xl shadow-2xl hover:shadow-3xl transition-all duration-300 hover:scale-105 flex items-center gap-3">
                     <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
@@ -887,21 +849,21 @@
     <script>
         // Initialize Lucide icons
         lucide.createIcons();
-        
+
         // Mobile menu toggle
         const mobileMenuBtn = document.getElementById('mobile-menu-btn');
         const mobileMenu = document.getElementById('mobile-menu');
-        
+
         mobileMenuBtn.addEventListener('click', () => {
             mobileMenu.classList.toggle('hidden');
         });
-        
+
         mobileMenu.querySelectorAll('a').forEach(link => {
             link.addEventListener('click', () => {
                 mobileMenu.classList.add('hidden');
             });
         });
-        
+
         // Smooth scroll for anchor links
         document.querySelectorAll('a[href^="#"]').forEach(anchor => {
             anchor.addEventListener('click', function(e) {
@@ -912,17 +874,17 @@
                 }
             });
         });
-        
+
         // Load markdown content
         async function loadMarkdown() {
             const baseUrl = 'https://raw.githubusercontent.com/adinapoli/rusholme/main';
-            
+
             try {
                 const [designRes, roadmapRes] = await Promise.all([
                     fetch(`${baseUrl}/DESIGN.md`),
                     fetch(`${baseUrl}/ROADMAP.md`)
                 ]);
-                
+
                 if (designRes.ok) {
                     const designText = await designRes.text();
                     // Extract first 50 lines for preview
@@ -931,7 +893,7 @@
                 } else {
                     document.getElementById('design-content').innerHTML = '<p class="text-gray-500">Error loading design document</p>';
                 }
-                
+
                 if (roadmapRes.ok) {
                     const roadmapText = await roadmapRes.text();
                     const roadmapPreview = roadmapText.split('\n').slice(0, 50).join('\n');
@@ -945,27 +907,27 @@
                 document.getElementById('roadmap-content').innerHTML = '<p class="text-gray-500">Unable to load documentation</p>';
             }
         }
-        
+
         // Load markdown after a short delay
         setTimeout(loadMarkdown, 500);
-        
+
         // Load GitHub issues for recent progress
         async function loadGitHubIssues() {
             const recentProgressEl = document.getElementById('recent-progress');
-            
+
             try {
                 // Fetch closed issues (recently completed)
                 const response = await fetch('https://api.github.com/repos/adinapoli/rusholme/issues?state=closed&per_page=10&sort=created&direction=desc');
-                
+
                 if (response.ok) {
                     const issues = await response.json();
-                    
+
                     if (issues.length > 0) {
                         recentProgressEl.innerHTML = issues.slice(0, 6).map(issue => {
                             const closedDate = new Date(issue.closed_at);
                             const timeAgo = getTimeAgo(closedDate);
                             const emoji = issue.pull_request ? ' 🔀' : '';
-                            
+
                             return `
                                 <div class="flex items-start gap-3">
                                     <div class="w-6 h-6 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
@@ -980,7 +942,7 @@
                                 </div>
                             `;
                         }).join('');
-                        
+
                         // Re-initialize icons for dynamically added content
                         lucide.createIcons();
                     }
@@ -990,7 +952,7 @@
                 // Keep static content as fallback
             }
         }
-        
+
         // Helper: format time ago
         function getTimeAgo(date) {
             const seconds = Math.floor((new Date() - date) / 1000);
@@ -1001,7 +963,7 @@
                 { label: 'hour', seconds: 3600 },
                 { label: 'minute', seconds: 60 }
             ];
-            
+
             for (const interval of intervals) {
                 const count = Math.floor(seconds / interval.seconds);
                 if (count >= 1) {
@@ -1010,17 +972,17 @@
             }
             return 'just now';
         }
-        
+
         // Helper: escape HTML to prevent XSS
         function escapeHtml(text) {
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
         }
-        
+
         // Load GitHub issues
         loadGitHubIssues();
-        
+
         // Intersection Observer for fade-in animations
         const observer = new IntersectionObserver((entries) => {
             entries.forEach(entry => {
@@ -1030,14 +992,14 @@
                 }
             });
         }, { threshold: 0.1 });
-        
+
         document.querySelectorAll('.card-hover').forEach(el => {
             el.style.opacity = '0';
             el.style.transform = 'translateY(20px)';
             el.style.transition = 'opacity 0.5s ease, transform 0.5s ease';
             observer.observe(el);
         });
-        
+
         // Navbar background on scroll
         const nav = document.querySelector('nav');
         window.addEventListener('scroll', () => {
