@@ -1,7 +1,7 @@
 # Rusholme Roadmap
 
 > Auto-generated from GitHub issues. Each issue links to its tracker.
-> **Starting points** (zero dependencies): #1✓, #2✓, #17✓, #22✓, #24✓, #27✓, #53✓, #85✓, #58, #62⚡, #66, #68
+> **Starting points** (zero dependencies): #1✓, #2✓, #17✓, #22✓, #24✓, #27✓, #53✓, #85✓, #58, #62⚡, #66, #68, #107
 
 **Recent Progress (2026-02-16):**
 - ✓ #85: Lexer support for numeric literals (Dec, Hex, Oct, Bin, Float)
@@ -52,6 +52,15 @@
 | [#63](https://github.com/adinapoli/rusholme/issues/63) | Implement golden/snapshot test runner | [#62](https://github.com/adinapoli/rusholme/issues/62) | :white_circle: |
 | [#64](https://github.com/adinapoli/rusholme/issues/64) | Implement end-to-end test runner (compile + run + check stdout) | [#63](https://github.com/adinapoli/rusholme/issues/63) | :white_circle: |
 | [#65](https://github.com/adinapoli/rusholme/issues/65) | Research and import simple test programs from GHC's testsuite | [#63](https://github.com/adinapoli/rusholme/issues/63) | :white_circle: |
+
+### Epic [#106](https://github.com/adinapoli/rusholme/issues/106): Zero-Leak Compiler
+
+| # | Issue | Deps | Status |
+|---|-------|------|--------|
+| [#107](https://github.com/adinapoli/rusholme/issues/107) | Research: Zero-leak enforcement strategy (GPA vs Valgrind vs hybrid) | — | :white_circle: |
+| [#108](https://github.com/adinapoli/rusholme/issues/108) | Enforce std.testing.allocator in all tests and add GPA to main.zig | [#107](https://github.com/adinapoli/rusholme/issues/107) | :white_circle: |
+| [#109](https://github.com/adinapoli/rusholme/issues/109) | Add Valgrind CI step for C interop leak detection | [#107](https://github.com/adinapoli/rusholme/issues/107) | :white_circle: |
+| [#110](https://github.com/adinapoli/rusholme/issues/110) | Document zero-leak policy in CONTRIBUTING.md and DESIGN.md | [#107](https://github.com/adinapoli/rusholme/issues/107) | :white_circle: |
 
 ---
 

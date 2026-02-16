@@ -1,0 +1,19 @@
+{
+    "title": "Add Valgrind CI step for C interop leak detection",
+    "epic": 90,
+    "milestone": "M0: Project Infrastructure",
+    "labels": [
+        "priority:medium",
+        "component:infra",
+        "type:infra"
+    ],
+    "depends_on": [
+        "17-01"
+    ],
+    "body": "Add a CI step that runs end-to-end tests under Valgrind to catch memory leaks in C library code (primarily LLVM C API bindings).\n\n**Deliverables:**\n- Add Valgrind to the Nix flake dev dependencies\n- Create a Valgrind suppression file for known LLVM/system library noise\n- Add a GitHub Actions CI step that runs tests under Valgrind\n- Document how to run Valgrind locally in CONTRIBUTING.md\n\n**Design notes:**\n- This is deferred until the LLVM backend (#53, #54, #55) is actively exercised in tests\n- Zig's std.testing.allocator cannot see leaks inside C libraries\n- Valgrind needs code built with std.heap.c_allocator for full visibility\n- Consider running Valgrind on a subset of tests (e.g. end-to-end only) to limit CI time\n- May need -mcpu=baseline for Valgrind compatibility on AVX-512 systems",
+    "github_issue": 109,
+    "depends_on_github": [
+        107
+    ],
+    "state": "open"
+}

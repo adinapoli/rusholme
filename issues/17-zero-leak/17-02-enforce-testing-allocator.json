@@ -1,0 +1,19 @@
+{
+    "title": "Enforce std.testing.allocator in all tests and add GPA to main.zig",
+    "epic": 90,
+    "milestone": "M0: Project Infrastructure",
+    "labels": [
+        "priority:critical",
+        "component:infra",
+        "type:infra"
+    ],
+    "depends_on": [
+        "17-01"
+    ],
+    "body": "Audit all existing tests to ensure they use std.testing.allocator (or ArenaAllocator wrapping it). Add GeneralPurposeAllocator with .deinit() leak check to main.zig for debug builds.\n\n**Deliverables:**\n- Audit all test blocks across the codebase for allocator usage\n- Fix any tests not using std.testing.allocator (audit shows none currently, but verify)\n- Add GPA with .deinit() == .ok assertion to main.zig entry point (debug builds only)\n- Ensure zig build test passes with zero leaks\n\n**Design notes:**\n- Current audit shows 100% compliance — all heap-allocating tests use std.testing.allocator\n- main.zig should use GeneralPurposeAllocator in debug builds, with deinit check at exit\n- This ensures leaks are caught both in tests AND during manual development runs\n- ArenaAllocator wrapping std.testing.allocator is acceptable (the parent allocator still detects leaks)",
+    "github_issue": 108,
+    "depends_on_github": [
+        107
+    ],
+    "state": "open"
+}

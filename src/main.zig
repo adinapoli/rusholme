@@ -5,6 +5,13 @@ const Io = std.Io;
 const rusholme = @import("rusholme");
 
 pub fn main(init: std.process.Init) !void {
+    // In debug builds, use a GeneralPurposeAllocator to detect memory leaks.
+    // On exit, any unfreed allocations cause a loud failure.
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+    _ = allocator; // TODO: pass to compiler pipeline once it exists
+
     std.debug.print("Rusholme — A toy Haskell compiler in Zig\n", .{});
 
     const arena: std.mem.Allocator = init.arena.allocator();

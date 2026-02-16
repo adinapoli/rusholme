@@ -118,6 +118,9 @@ nix develop --command zig build test
   Example: `#17: Define SourceSpan and SourcePos types`.
 - **No dead code.** Don't leave commented-out code, unused imports, or TODO placeholders
   that aren't part of the deliverable.
+- **Zero leaks.** Every test MUST use `std.testing.allocator` (or `ArenaAllocator`
+  wrapping it). Every allocation needs a corresponding `defer` free/deinit. Use
+  `errdefer` for error path cleanup. See `CONTRIBUTING.md` for the full policy.
 - **Errors are structured, not strings.** Use the `Diagnostic` infrastructure (once built)
   for all user-facing errors. Internal assertions can use Zig's `@panic` or `unreachable`.
 - **Source spans everywhere.** Every AST/IR node must carry a `SourceSpan`. Don't skip this
