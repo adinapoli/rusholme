@@ -6,5 +6,7 @@
         "component:frontend",
         "type:feature"
     ],
-    "body": "Build a REPL (interactive mode) for Rusholme. Should be more uniform than GHCi's bytecode approach — ideally reuse the same evaluation path as batch compilation. Auto-completion desirable."
+    "github_issue": 15,
+    "body": "Build a REPL (interactive mode) for Rusholme. Should be more uniform than GHCi's bytecode approach \u2014 ideally reuse the same evaluation path as batch compilation. Auto-completion desirable.",
+    "state": "open"
 }

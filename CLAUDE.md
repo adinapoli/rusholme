@@ -27,15 +27,18 @@ Read this file in full before doing anything.
 
 ## 3. Work on the Issue
 
-### Branch
+### Branch for Project Planning
+
+For tasks involving issue synchronization, roadmap updates, or general project planning:
 
 ```bash
-git checkout main
-git pull origin main
-git checkout -b llm-agent/issue-<NUMBER>
+git checkout project-planning
+git rebase main
+# Perform planning work...
+git push origin project-planning
 ```
 
-Where `<NUMBER>` is the GitHub issue number (e.g. `llm-agent/issue-17`).
+Always ensure the `project-planning` branch is up-to-date with `main` before starting.
 
 ### Build and Test
 

@@ -6,5 +6,7 @@
         "component:testing",
         "type:infra"
     ],
-    "body": "Set up testing infrastructure: Zig unit tests per pipeline stage, golden/snapshot tests (compile Haskell snippets, compare output), end-to-end tests (compile + run + check stdout). Borrow simple programs from GHC's testsuite where possible.\n\n**Key decisions**: #25 in DESIGN.md\n**Sub-tasks to split later**: test harness, golden test runner, GHC testsuite import"
+    "github_issue": 11,
+    "body": "Set up testing infrastructure: Zig unit tests per pipeline stage, golden/snapshot tests (compile Haskell snippets, compare output), end-to-end tests (compile + run + check stdout). Borrow simple programs from GHC's testsuite where possible.\n\n**Key decisions**: #25 in DESIGN.md\n**Sub-tasks to split later**: test harness, golden test runner, GHC testsuite import",
+    "state": "open"
 }

@@ -6,5 +6,7 @@
         "component:runtime",
         "type:feature"
     ],
-    "body": "Build a tree-walking interpreter for Core/GRIN to validate the frontend pipeline before tackling LLVM codegen. Enables early end-to-end testing.\n\n**Key decisions**: #24 in DESIGN.md"
+    "github_issue": 8,
+    "body": "Build a tree-walking interpreter for Core/GRIN to validate the frontend pipeline before tackling LLVM codegen. Enables early end-to-end testing.\n\n**Key decisions**: #24 in DESIGN.md",
+    "state": "open"
 }

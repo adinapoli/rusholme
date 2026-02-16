@@ -16,5 +16,6 @@
     "depends_on_github": [
         26,
         27
-    ]
+    ],
+    "state": "open"
 }

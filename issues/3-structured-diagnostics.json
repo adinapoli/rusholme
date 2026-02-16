@@ -6,5 +6,7 @@
         "component:infra",
         "type:feature"
     ],
-    "body": "Design and implement structured error diagnostics infrastructure (errors as AST, not strings). Source spans from the lexer. Multiple renderers (terminal, JSON, LSP). Collect errors across all modules.\n\n**Key decisions**: #18, #19 in DESIGN.md"
+    "github_issue": 3,
+    "body": "Design and implement structured error diagnostics infrastructure (errors as AST, not strings). Source spans from the lexer. Multiple renderers (terminal, JSON, LSP). Collect errors across all modules.\n\n**Key decisions**: #18, #19 in DESIGN.md",
+    "state": "open"
 }

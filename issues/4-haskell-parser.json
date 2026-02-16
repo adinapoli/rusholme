@@ -6,5 +6,7 @@
         "component:frontend",
         "type:research"
     ],
-    "body": "Research and decide on parser technique for Haskell. Options: reuse GHC's Alex/Happy grammar, tree-sitter-haskell, or hand-written recursive descent. Must implement full Haskell 2010 layout rule and full Unicode.\n\n**Key decisions**: #14, #17 in DESIGN.md\n**Sub-tasks to split later**: lexer, parser, layout rule, Unicode handling"
+    "github_issue": 4,
+    "body": "Research and decide on parser technique for Haskell. Options: reuse GHC's Alex/Happy grammar, tree-sitter-haskell, or hand-written recursive descent. Must implement full Haskell 2010 layout rule and full Unicode.\n\n**Key decisions**: #14, #17 in DESIGN.md\n**Sub-tasks to split later**: lexer, parser, layout rule, Unicode handling",
+    "state": "open"
 }

@@ -14,5 +14,6 @@
     "github_issue": 39,
     "depends_on_github": [
         34
-    ]
+    ],
+    "state": "open"
 }

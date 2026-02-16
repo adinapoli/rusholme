@@ -1,10 +1,12 @@
 {
-    "title": "Epic: GRIN IR and Core→GRIN translation",
+    "title": "Epic: GRIN IR and Core\u2192GRIN translation",
     "milestone": "M1: Hello World",
     "labels": [
         "priority:critical",
         "component:grin",
         "type:feature"
     ],
-    "body": "Implement the GRIN IR following the \"Modern GRIN\" dialect (Hruska et al., 2020). Define Core→GRIN translation for thunks, partial applications, and constructors. Clear interfaces at the Core/GRIN boundary.\n\n**Key decisions**: #5, #20, #21 in DESIGN.md\n**Sub-tasks to split later**: GRIN IR types, Core→GRIN translation, pretty-printer"
+    "github_issue": 6,
+    "body": "Implement the GRIN IR following the \"Modern GRIN\" dialect (Hruska et al., 2020). Define Core\u2192GRIN translation for thunks, partial applications, and constructors. Clear interfaces at the Core/GRIN boundary.\n\n**Key decisions**: #5, #20, #21 in DESIGN.md\n**Sub-tasks to split later**: GRIN IR types, Core\u2192GRIN translation, pretty-printer",
+    "state": "open"
 }
