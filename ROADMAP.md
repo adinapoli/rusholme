@@ -6,8 +6,9 @@
 **Recent Progress (2026-02-16):**
 - ✓ #85: Lexer support for numeric literals (Dec, Hex, Oct, Bin, Float)
 - ✓ #86: Lexer support for string and character literals (Escapes, Gaps, Mnemonics)
+- ✓ #25: Lexer support for Identifiers, Keywords and Operators
 
-**Older Progress:**
+**Recent Progress (2026-02-15):**
 - ✓ #1: GitHub Actions CI upgraded to Nix 2.18
 - ✓ #17: SourceSpan and SourcePos types implemented
 - ✓ #18: Diagnostic ADT implemented (structured error data)
@@ -61,19 +62,19 @@
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#22](https://github.com/adinapoli/rusholme/issues/22) | Research: Parser technique decision | — | :large_blue_circle: |
+| [#22](https://github.com/adinapoli/rusholme/issues/22) | Research: Parser technique decision (tree-sitter vs Alex/Happy vs hand-written) | — | :green_circle: |
 | [#23](https://github.com/adinapoli/rusholme/issues/23) | Define lexer token types for Haskell | [#22](https://github.com/adinapoli/rusholme/issues/22) | :green_circle: |
-| [#24](https://github.com/adinapoli/rusholme/issues/24) | Implement Unicode character classification | — | :large_blue_circle: |
+| [#24](https://github.com/adinapoli/rusholme/issues/24) | Implement Unicode character classification | — | :green_circle: |
 | [#85](https://github.com/adinapoli/rusholme/issues/85) | Lexer: Numeric Literals | [#23](https://github.com/adinapoli/rusholme/issues/23), [#24](https://github.com/adinapoli/rusholme/issues/24) | :green_circle: |
 | [#86](https://github.com/adinapoli/rusholme/issues/86) | Lexer: String and Character Literals | [#85](https://github.com/adinapoli/rusholme/issues/85) | :green_circle: |
-| [#25](https://github.com/adinapoli/rusholme/issues/25) | Lexer: Identifiers, Keywords and Operators | [#85](https://github.com/adinapoli/rusholme/issues/85), [#86](https://github.com/adinapoli/rusholme/issues/86) | :white_circle: |
-| [#26](https://github.com/adinapoli/rusholme/issues/26) | Layout Rule: Indentation stack and virtual tokens | [#25](https://github.com/adinapoli/rusholme/issues/25) | :white_circle: |
-| [#27](https://github.com/adinapoli/rusholme/issues/27) | Define Haskell AST types | [#17](https://github.com/adinapoli/rusholme/issues/17) | :large_blue_circle: |
-| [#28](https://github.com/adinapoli/rusholme/issues/28) | Implement AST pretty-printer | [#27](https://github.com/adinapoli/rusholme/issues/27) | :white_circle: |
+| [#25](https://github.com/adinapoli/rusholme/issues/25) | Lexer: Identifiers, Keywords and Operators | [#85](https://github.com/adinapoli/rusholme/issues/85), [#86](https://github.com/adinapoli/rusholme/issues/86) | :green_circle: |
+| [#26](https://github.com/adinapoli/rusholme/issues/26) | Implement full Haskell 2010 layout rule | [#25](https://github.com/adinapoli/rusholme/issues/25) | :white_circle: |
+| [#27](https://github.com/adinapoli/rusholme/issues/27) | Define Haskell AST types (module, declarations, expressions, patterns, types) | [#17](https://github.com/adinapoli/rusholme/issues/17) | :green_circle: |
+| [#28](https://github.com/adinapoli/rusholme/issues/28) | Implement AST pretty-printer for debugging and golden tests | [#27](https://github.com/adinapoli/rusholme/issues/27) | :white_circle: |
 | [#87](https://github.com/adinapoli/rusholme/issues/87) | Parser: Infrastructure, Combinators and Error Recovery | [#26](https://github.com/adinapoli/rusholme/issues/26), [#19](https://github.com/adinapoli/rusholme/issues/19) | :white_circle: |
-| [#29](https://github.com/adinapoli/rusholme/issues/29) | Parser: Module header, imports, and top-level headers | [#87](https://github.com/adinapoli/rusholme/issues/87), [#27](https://github.com/adinapoli/rusholme/issues/27) | :white_circle: |
+| [#29](https://github.com/adinapoli/rusholme/issues/29) | Implement parser: module header, imports, and top-level declarations | [#26](https://github.com/adinapoli/rusholme/issues/26), [#27](https://github.com/adinapoli/rusholme/issues/27) | :white_circle: |
 | [#88](https://github.com/adinapoli/rusholme/issues/88) | Parser: Expression Precedence (Fixity-aware) | [#87](https://github.com/adinapoli/rusholme/issues/87), [#27](https://github.com/adinapoli/rusholme/issues/27) | :white_circle: |
-| [#30](https://github.com/adinapoli/rusholme/issues/30) | Parser: Primary Expressions and Control Flow | [#29](https://github.com/adinapoli/rusholme/issues/29), [#88](https://github.com/adinapoli/rusholme/issues/88) | :white_circle: |
+| [#30](https://github.com/adinapoli/rusholme/issues/30) | Implement parser: expressions | [#29](https://github.com/adinapoli/rusholme/issues/29), [#88](https://github.com/adinapoli/rusholme/issues/88) | :white_circle: |
 | [#31](https://github.com/adinapoli/rusholme/issues/31) | Implement parser: patterns | [#29](https://github.com/adinapoli/rusholme/issues/29) | :white_circle: |
 | [#32](https://github.com/adinapoli/rusholme/issues/32) | Implement parser: type expressions | [#29](https://github.com/adinapoli/rusholme/issues/29) | :white_circle: |
 | [#33](https://github.com/adinapoli/rusholme/issues/33) | Implement parser: class and instance declarations, deriving | [#29](https://github.com/adinapoli/rusholme/issues/29), [#32](https://github.com/adinapoli/rusholme/issues/32) | :white_circle: |

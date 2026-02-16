@@ -17,5 +17,5 @@
         24
     ],
     "body": "Implement scanning for all Haskell numeric literal formats.\n\n**Deliverables:**\n- `scanNumericLiteral()` helper\n- Decimal: `123`, `0123`\n- Octal: `0o123`, `0O123` (Haskell 2010 uses `o` or `O`)\n- Hexadecimal: `0x123`, `0X123`\n- Floating point: `0.123`, `1.23e-4`, `1.23E+4`\n- Validates range (e.g. overflow for fix-width types if applicable, though Haskell literals are technically polymorphic)\n- Error handling for malformed literals (e.g. `0xG123`)\n\n**Design notes:**\n- Use `std.fmt.parseInt` and `std.fmt.parseFloat` where possible, but be careful with Haskell-specific prefixes.\n- All tokens must carry `SourceSpan`.",
-    "state": "open"
+    "state": "closed"
 }
