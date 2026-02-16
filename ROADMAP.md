@@ -22,17 +22,21 @@
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#1](https://github.com/adinapoli/rusholme/issues/1) | Set up GitHub Actions CI via Nix flake | — | :green_circle: |
-| [#2](https://github.com/adinapoli/rusholme/issues/2) | Establish modular project layout (src/ split by pipeline stage) | — | :green_circle: |
+| [#2](https://github.com/adinapoli/rusholme/issues/2) | Establish modular project layout (src/ split by pipeline stage) | — | :large_blue_circle: |
 
 ### Epic [#3](https://github.com/adinapoli/rusholme/issues/3): Structured Error Diagnostics
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#17](https://github.com/adinapoli/rusholme/issues/17) | Define SourceSpan and SourcePos types | — | :green_circle: |
-| [#18](https://github.com/adinapoli/rusholme/issues/18) | Define Diagnostic ADT (errors as structured data, not strings) | [#17](https://github.com/adinapoli/rusholme/issues/17) | :large_blue_circle: |
+| [#17](https://github.com/adinapoli/rusholme/issues/17) | Define SourceSpan and SourcePos types | — | :large_blue_circle: |
+| [#18](https://github.com/adinapoli/rusholme/issues/18) | Define Diagnostic ADT (errors as structured data, not strings) | [#17](https://github.com/adinapoli/rusholme/issues/17) | :green_circle: |
 | [#19](https://github.com/adinapoli/rusholme/issues/19) | Implement DiagnosticCollector for accumulating errors across modules | [#18](https://github.com/adinapoli/rusholme/issues/18) | :white_circle: |
 | [#20](https://github.com/adinapoli/rusholme/issues/20) | Implement terminal diagnostic renderer with source snippets | [#18](https://github.com/adinapoli/rusholme/issues/18) | :white_circle: |
 | [#21](https://github.com/adinapoli/rusholme/issues/21) | Implement JSON diagnostic renderer | [#18](https://github.com/adinapoli/rusholme/issues/18) | :white_circle: |
+| [#89](https://github.com/adinapoli/rusholme/issues/89) | Terminal Renderer: Source Code Snippets with Context | [#20](https://github.com/adinapoli/rusholme/issues/20) | :white_circle: |
+| [#80](https://github.com/adinapoli/rusholme/issues/80) | #18: Define Diagnostic ADT (errors as structured data, not strings) | — | :green_circle: |
+| [#81](https://github.com/adinapoli/rusholme/issues/81) | ci: Upgrade install-nix-action v23 → v31 | — | :green_circle: |
+| [#83](https://github.com/adinapoli/rusholme/issues/83) | docs: add status badges to README | — | :green_circle: |
 
 ### Epic [#11](https://github.com/adinapoli/rusholme/issues/11): Testing Infrastructure
 
@@ -53,18 +57,23 @@
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#22](https://github.com/adinapoli/rusholme/issues/22) | Research: Parser technique decision (tree-sitter vs Alex/Happy vs hand-written) | — | :green_circle: |
-| [#23](https://github.com/adinapoli/rusholme/issues/23) | Define lexer token types for Haskell | [#22](https://github.com/adinapoli/rusholme/issues/22) | :large_blue_circle: |
-| [#24](https://github.com/adinapoli/rusholme/issues/24) | Implement Unicode character classification for Haskell identifiers | — | :green_circle: |
-| [#25](https://github.com/adinapoli/rusholme/issues/25) | Implement core lexer (keywords, identifiers, literals, symbols) | [#23](https://github.com/adinapoli/rusholme/issues/23), [#24](https://github.com/adinapoli/rusholme/issues/24), [#17](https://github.com/adinapoli/rusholme/issues/17) | :white_circle: |
-| [#26](https://github.com/adinapoli/rusholme/issues/26) | Implement full Haskell 2010 layout rule | [#25](https://github.com/adinapoli/rusholme/issues/25) | :white_circle: |
-| [#27](https://github.com/adinapoli/rusholme/issues/27) | Define Haskell AST types (module, declarations, expressions, patterns, types) | [#17](https://github.com/adinapoli/rusholme/issues/17) | :green_circle: |
-| [#28](https://github.com/adinapoli/rusholme/issues/28) | Implement AST pretty-printer for debugging and golden tests | [#27](https://github.com/adinapoli/rusholme/issues/27) | :white_circle: |
-| [#29](https://github.com/adinapoli/rusholme/issues/29) | Implement parser: module header, imports, and top-level declarations | [#26](https://github.com/adinapoli/rusholme/issues/26), [#27](https://github.com/adinapoli/rusholme/issues/27) | :white_circle: |
-| [#30](https://github.com/adinapoli/rusholme/issues/30) | Implement parser: expressions | [#29](https://github.com/adinapoli/rusholme/issues/29) | :white_circle: |
+| [#22](https://github.com/adinapoli/rusholme/issues/22) | Research: Parser technique decision | — | :large_blue_circle: |
+| [#23](https://github.com/adinapoli/rusholme/issues/23) | Define lexer token types for Haskell | [#22](https://github.com/adinapoli/rusholme/issues/22) | :green_circle: |
+| [#24](https://github.com/adinapoli/rusholme/issues/24) | Implement Unicode character classification | — | :large_blue_circle: |
+| [#85](https://github.com/adinapoli/rusholme/issues/85) | Lexer: Numeric Literals | [#23](https://github.com/adinapoli/rusholme/issues/23), [#24](https://github.com/adinapoli/rusholme/issues/24) | :white_circle: |
+| [#86](https://github.com/adinapoli/rusholme/issues/86) | Lexer: String and Character Literals | [#85](https://github.com/adinapoli/rusholme/issues/85) | :white_circle: |
+| [#25](https://github.com/adinapoli/rusholme/issues/25) | Lexer: Identifiers, Keywords and Operators | [#85](https://github.com/adinapoli/rusholme/issues/85), [#86](https://github.com/adinapoli/rusholme/issues/86) | :white_circle: |
+| [#26](https://github.com/adinapoli/rusholme/issues/26) | Layout Rule: Indentation stack and virtual tokens | [#25](https://github.com/adinapoli/rusholme/issues/25) | :white_circle: |
+| [#27](https://github.com/adinapoli/rusholme/issues/27) | Define Haskell AST types | [#17](https://github.com/adinapoli/rusholme/issues/17) | :large_blue_circle: |
+| [#28](https://github.com/adinapoli/rusholme/issues/28) | Implement AST pretty-printer | [#27](https://github.com/adinapoli/rusholme/issues/27) | :white_circle: |
+| [#87](https://github.com/adinapoli/rusholme/issues/87) | Parser: Infrastructure, Combinators and Error Recovery | [#26](https://github.com/adinapoli/rusholme/issues/26), [#19](https://github.com/adinapoli/rusholme/issues/19) | :white_circle: |
+| [#29](https://github.com/adinapoli/rusholme/issues/29) | Parser: Module header, imports, and top-level headers | [#87](https://github.com/adinapoli/rusholme/issues/87), [#27](https://github.com/adinapoli/rusholme/issues/27) | :white_circle: |
+| [#88](https://github.com/adinapoli/rusholme/issues/88) | Parser: Expression Precedence (Fixity-aware) | [#87](https://github.com/adinapoli/rusholme/issues/87), [#27](https://github.com/adinapoli/rusholme/issues/27) | :white_circle: |
+| [#30](https://github.com/adinapoli/rusholme/issues/30) | Parser: Primary Expressions and Control Flow | [#29](https://github.com/adinapoli/rusholme/issues/29), [#88](https://github.com/adinapoli/rusholme/issues/88) | :white_circle: |
 | [#31](https://github.com/adinapoli/rusholme/issues/31) | Implement parser: patterns | [#29](https://github.com/adinapoli/rusholme/issues/29) | :white_circle: |
 | [#32](https://github.com/adinapoli/rusholme/issues/32) | Implement parser: type expressions | [#29](https://github.com/adinapoli/rusholme/issues/29) | :white_circle: |
 | [#33](https://github.com/adinapoli/rusholme/issues/33) | Implement parser: class and instance declarations, deriving | [#29](https://github.com/adinapoli/rusholme/issues/29), [#32](https://github.com/adinapoli/rusholme/issues/32) | :white_circle: |
+| [#82](https://github.com/adinapoli/rusholme/issues/82) | #23: Define lexer token types for Haskell | — | :green_circle: |
 
 ### Research: Cross-cutting Decisions
 
@@ -107,7 +116,7 @@
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#53](https://github.com/adinapoli/rusholme/issues/53) | Set up LLVM C API bindings in Zig | — | :green_circle: |
+| [#53](https://github.com/adinapoli/rusholme/issues/53) | Set up LLVM C API bindings in Zig | — | :large_blue_circle: |
 | [#54](https://github.com/adinapoli/rusholme/issues/54) | Implement LLVM codegen skeleton (module, function defs, entry point) | [#53](https://github.com/adinapoli/rusholme/issues/53), [#40](https://github.com/adinapoli/rusholme/issues/40) | :white_circle: |
 | [#55](https://github.com/adinapoli/rusholme/issues/55) | Implement LLVM codegen for GRIN expressions (store/fetch/update/case/app) | [#54](https://github.com/adinapoli/rusholme/issues/54) | :white_circle: |
 | [#56](https://github.com/adinapoli/rusholme/issues/56) | Implement Zig runtime (heap allocator, thunk evaluator, entry point) | [#53](https://github.com/adinapoli/rusholme/issues/53) | :white_circle: |

@@ -6,5 +6,7 @@
         "component:backend",
         "type:feature"
     ],
-    "body": "Produce WebAssembly output via the LLVM backend. Target: compile `main = putStrLn \"Hello\"` to Wasm and run it in a browser.\n\n**Key decisions**: #7, #22 in DESIGN.md"
+    "github_issue": 16,
+    "body": "Produce WebAssembly output via the LLVM backend. Target: compile `main = putStrLn \"Hello\"` to Wasm and run it in a browser.\n\n**Key decisions**: #7, #22 in DESIGN.md",
+    "state": "open"
 }

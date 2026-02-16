@@ -1,5 +1,5 @@
 {
-    "title": "Implement core lexer (keywords, identifiers, literals, symbols)",
+    "title": "Lexer: Identifiers, Keywords and Operators",
     "epic": 4,
     "milestone": "M1: Hello World",
     "labels": [
@@ -10,13 +10,18 @@
     "depends_on": [
         "04-02",
         "04-03",
-        "03-01"
+        "03-01",
+        "04-13",
+        "04-14"
     ],
-    "body": "Implement the core lexer that tokenises Haskell source into a token stream.\n\n**Deliverables:**\n- `Lexer` struct that takes source text (UTF-8 `[]const u8`) and produces tokens\n- `nextToken() -> Token` iterator interface\n- Lex all token types defined in 04-02:\n  - Keywords (context-sensitive where needed, e.g. `as`, `qualified`)\n  - Identifiers (varid, conid) with Unicode support\n  - Operators (varsym, consym) with Unicode support\n  - Integer literals (decimal, octal `0o`, hex `0x`)\n  - Float literals\n  - Character literals (including escape sequences)\n  - String literals (including escape sequences, gaps)\n  - Comments (line `--` and block `{- -}`, nested)\n- All tokens carry `SourceSpan`\n- Emit diagnostics via `DiagnosticCollector` for errors (unterminated string, invalid escape, etc.)\n- Unit tests for each token category\n\n**Design notes:**\n- Do NOT handle layout rule here \u2014 that's a separate pass (04-05)\n- Handle nested block comments `{- {- -} -}` correctly\n- GHC's Lexer.x is ~4000 lines; our hand-written version should be structured into clear helper functions",
     "github_issue": 25,
     "depends_on_github": [
         23,
         24,
-        17
-    ]
+        17,
+        85,
+        86
+    ],
+    "body": "Implement scanning for identifiers, keywords, and operator symbols.\n\n**Deliverables:**\n- `scanIdentifierOrKeyword()` and `scanOperator()` helpers\n- Identifiers (varid, conid) with Unicode support\n- Operators (varsym, consym) with Unicode support\n- Support for qualified names (e.g. `Data.List.map`)\n- Keywords (context-sensitive where needed, e.g. `as`, `qualified`)\n- Reserved symbols: `..`, `::`, `=`, `\\`, `|`, `<-`, `->`, `@`, `~`, `=>`\n- Comments (line `--` and block `{- -}`, nested)\n- Unit tests for identifiers, keywords, and operators",
+    "state": "open"
 }

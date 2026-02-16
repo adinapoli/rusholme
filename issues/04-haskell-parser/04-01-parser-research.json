@@ -10,5 +10,6 @@
     "depends_on": [],
     "body": "Research and recommend a parser technique for Rusholme.\n\n**Options to evaluate:**\n1. **tree-sitter-haskell** \u2014 community-maintained, quite complete. Can Zig call the C API? What does the parse tree look like? Does it handle layout?\n2. **Reuse GHC's Alex/Happy grammar** \u2014 port or translate the `.x` / `.y` grammar files. How complex is the translation to Zig?\n3. **Hand-written recursive descent** \u2014 informed by GHC's grammar. Most control, most work.\n4. **Other** \u2014 ANTLR, PEG, parser combinators in Zig, etc.\n\n**Evaluation criteria:**\n- Completeness (full Haskell 2010 grammar including layout rule)\n- Quality of error messages (can we produce good diagnostics?)\n- Maintainability (can we evolve the grammar?)\n- Zig integration (C interop available?)\n- Mantra compliance: 'parse everything GHC parses'\n\n**Deliverable:** A written recommendation document in `docs/decisions/` with the chosen approach, rationale, and any prototype code.\n\n**References:**\n- tree-sitter-haskell: https://github.com/tree-sitter/tree-sitter-haskell\n- GHC lexer: https://gitlab.haskell.org/ghc/ghc/-/blob/master/compiler/GHC/Parser/Lexer.x\n- GHC parser: https://gitlab.haskell.org/ghc/ghc/-/blob/master/compiler/GHC/Parser.y",
     "github_issue": 22,
-    "depends_on_github": []
+    "depends_on_github": [],
+    "state": "open"
 }

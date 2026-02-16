@@ -1,0 +1,21 @@
+{
+    "title": "Parser: Expression Precedence (Fixity-aware Parsing)",
+    "epic": 4,
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:high",
+        "component:frontend",
+        "type:feature"
+    ],
+    "depends_on": [
+        "04-15",
+        "04-06"
+    ],
+    "github_issue": 88,
+    "depends_on_github": [
+        87,
+        27
+    ],
+    "body": "Implement fixity-aware expression parsing (infix operator precedence).\n\n**Deliverables:**\n- `parseExpr()` entry point\n- Precedence climbing or Shunting-yard implementation for infix operators\n- Fixed operator table for M1 (hardcode standard operators: `$`, `.` , `++`, `+`, `-`, `*`, `==`, etc.)\n- Handle `infixl`, `infixr`, `infix` associativity\n- Correctly handle prefix negation `-` vs infix subtraction\n\n**Design notes:**\n- Full Haskell allows user-definable fixity, but M1 can use a static table.\n- Must handle the high precedence of function application correctly.",
+    "state": "open"
+}

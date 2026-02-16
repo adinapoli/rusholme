@@ -1,0 +1,19 @@
+{
+    "title": "Lexer: String and Character Literals (Escapes, Gaps)",
+    "epic": 4,
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:high",
+        "component:frontend",
+        "type:feature"
+    ],
+    "depends_on": [
+        "04-13"
+    ],
+    "github_issue": 86,
+    "depends_on_github": [
+        85
+    ],
+    "body": "Implement scanning for String and Character literals with full Haskell escape sequence support.\n\n**Deliverables:**\n- `scanCharLiteral()` and `scanStringLiteral()` helpers\n- Standard escapes: `\\n`, `\\t`, `\\\\`, `\\\"`, `\\'`\n- ASCII control escapes: `\\NUL`, `\\SOH`, ... `\\DEL`\n- Numeric escapes: Decimal `\\123`, Octal `\\o123`, Hex `\\x123`\n- Control escapes: `\\^A`, `\\^[`\n- Empty escape: `\\&` (used as a separator)\n- String gaps: `\\` followed by whitespace and another `\\` (ignores everything between)\n- Multi-line strings (Haskell doesn't have them per se, but gaps enable them)\n\n**Design notes:**\n- Correctly handle UTF-8 encoding into the token's byte buffer.\n- Unterminated strings/chars must produce structured diagnostics.",
+    "state": "open"
+}

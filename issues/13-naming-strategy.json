@@ -6,5 +6,7 @@
         "component:core",
         "type:research"
     ],
-    "body": "Research and decide on naming/uniqueness strategy across all IRs. Options: De Bruijn indices, unique supply (like GHC's Unique), or hybrid. This affects every IR representation."
+    "github_issue": 13,
+    "body": "Research and decide on naming/uniqueness strategy across all IRs. Options: De Bruijn indices, unique supply (like GHC's Unique), or hybrid. This affects every IR representation.",
+    "state": "open"
 }

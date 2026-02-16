@@ -1,0 +1,12 @@
+{
+    "title": "docs: add status badges to README",
+    "milestone": "M0: Project Infrastructure",
+    "labels": [
+        "priority:low",
+        "component:infra",
+        "type:feature"
+    ],
+    "github_issue": 83,
+    "body": "Add status badges to the README.",
+    "state": "closed"
+}

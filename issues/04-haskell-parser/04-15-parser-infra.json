@@ -1,0 +1,21 @@
+{
+    "title": "Parser: Infrastructure, Combinators and Error Recovery",
+    "epic": 4,
+    "milestone": "M1: Hello World",
+    "labels": [
+        "priority:critical",
+        "component:frontend",
+        "type:infra"
+    ],
+    "depends_on": [
+        "04-05",
+        "03-03"
+    ],
+    "github_issue": 87,
+    "depends_on_github": [
+        26,
+        19
+    ],
+    "body": "Set up the base parser infrastructure for recursive descent.\n\n**Deliverables:**\n- `Parser` struct that wraps a token stream (with layout)\n- Lookahead helpers: `peek()`, `peekAt(index)`, `check(type)`\n- Consumption helpers: `expect(type)`, `consume()`\n- Basic recursive descent 'combinators' as methods: `sepBy`, `many`, `optional`, `between`\n- Error recovery primitives: `synchronize()` to skip to next declaration/delimiter\n- Diagnostic reporting integration with current `SourceSpan`\n\n**Design notes:**\n- Avoid deep recursion if possible, but recursive descent is the primary model.\n- Use Zig's error unions for 'soft' fails vs 'hard' (unexpected EOF) fails.",
+    "state": "open"
+}
