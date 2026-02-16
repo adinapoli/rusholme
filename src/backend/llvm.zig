@@ -176,3 +176,28 @@ fn tryToNullTerminated(s: []const u8) [:0]const u8 {
     @memcpy(result, s);
     return @ptrCast(result);
 }
+
+// Note: LLVM tests require C headers and libc, which are not available
+// during `zig test`. These tests should be run with the full build instead.
+// test "LLM-C bindings: create context and module" {
+//     initialize();
+//     const ctx = createContext();
+//     defer disposeContext(ctx);
+//
+//     const mod = createModule("test", ctx);
+//     try std.testing.expect(mod != null);
+//
+//     const int32_t = llvm_c.LLVMInt32Type();
+//     try std.testing.expect(int32_t != null);
+// }
+//
+// test "LLVM-C bindings: constInt32 creates integer constant" {
+//     const val = constInt32(42);
+//     try std.testing.expect(val != null);
+// }
+//
+// test "LLVM-C bindings: getTypeKind on basic types" {
+//     const int32_t = llvm_c.LLVMInt32Type();
+//     const kind = llvm_c.LLVMGetTypeKind(int32_t);
+//     try std.testing.expectEqual(@intFromEnum(c.LLVMTypeKind.Integer), @intFromEnum(kind));
+// }
