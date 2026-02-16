@@ -193,6 +193,15 @@ pub const Token = union(enum) {
         };
     }
 
+    pub fn deinit(self: Token, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .lit_string, .lex_error, .line_comment, .block_comment, .pragma => |v| {
+                allocator.free(v);
+            },
+            else => {},
+        }
+    }
+
     /// Returns true if this token is a virtual layout token
     /// (inserted by the layout rule, not present in source).
     pub fn isLayoutVirtual(self: Token) bool {
