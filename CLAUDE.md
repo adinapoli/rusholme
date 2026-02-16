@@ -15,7 +15,49 @@ Read this file in full before doing anything.
    - `github_issue` — the GitHub issue number
    - `labels`, `milestone` — metadata
 
-## 2. Pick an Issue
+## 2. Preflight Check (before starting any issue)
+
+Before any agent (human or machine) begins work on a new issue, run a consistency
+check across the three sources of truth. **ROADMAP.md is the ultimate authority** —
+GitHub and `issues/` must agree with it, not the other way around.
+
+### What to check
+
+1. **GitHub issues via `gh`** — for every issue referenced in `ROADMAP.md`, verify:
+   - The issue exists on GitHub (`gh issue view <NUMBER>`).
+   - Its open/closed state is consistent with the roadmap status
+     (:green_circle: = closed, everything else = open).
+   - Its title matches (minor wording differences are acceptable).
+
+2. **`issues/` JSON files** — for every issue in `ROADMAP.md`, verify:
+   - A corresponding JSON file exists under `issues/`.
+   - The `github_issue` field matches the issue number.
+   - The `depends_on_github` list matches the "Deps" column in the roadmap.
+
+3. **Cross-check** — flag any issue that:
+   - Appears in `issues/` but not in `ROADMAP.md` (orphaned JSON).
+   - Appears on GitHub but not in `ROADMAP.md` (orphaned issue).
+   - Has dependency or status mismatches between the three sources.
+
+### If inconsistencies are found
+
+Do **not** start the new issue. Instead:
+
+```bash
+git checkout project-planning
+git rebase main
+# Fix ROADMAP.md, issues/ JSON files, and/or GitHub issue state to restore consistency.
+git add -A
+git commit -m "sync: Reconcile ROADMAP / issues / GitHub state"
+git push origin project-planning
+# Open a PR for the sync, get it merged, then proceed with the original issue.
+```
+
+### If everything is consistent
+
+Proceed to "Pick an Issue" below.
+
+## 3. Pick an Issue
 
 1. Open `ROADMAP.md` and find an issue marked :white_circle: (not started).
 2. Check that **all its dependencies** are marked :green_circle: (done). Never start an issue
@@ -25,7 +67,7 @@ Read this file in full before doing anything.
 5. Read the full JSON file in `issues/` for the issue you pick — it contains detailed
    deliverables and design notes.
 
-## 3. Work on the Issue
+## 4. Work on the Issue
 
 ### Branch for Project Planning
 
@@ -92,7 +134,7 @@ nix develop --command zig build test
 2. **Leverage battle-tested C libraries.** Zig has exceptional C interop — use strong,
    industrial-grade C libraries for hard tasks whenever possible, and source them via Nix.
 
-## 4. Submit for Review
+## 5. Submit for Review
 
 ### Commit and Push
 
@@ -136,7 +178,7 @@ git commit -m "#<NUMBER>: Update roadmap status to in-review"
 git push origin llm-agent/issue-<NUMBER>
 ```
 
-## 5. Status Legend (ROADMAP.md)
+## 6. Status Legend (ROADMAP.md)
 
 | Emoji | Meaning |
 |-------|---------|
@@ -145,7 +187,7 @@ git push origin llm-agent/issue-<NUMBER>
 | :yellow_circle: | In review (PR open) |
 | :green_circle: | Done (PR merged) |
 
-## 6. Research Issues
+## 7. Research Issues
 
 Some issues are `type:research` — their deliverable is a written document, not code.
 
@@ -156,7 +198,7 @@ Some issues are `type:research` — their deliverable is a written document, not
 4. Downstream implementation issues depend on the research decision — they cannot start
    until the research PR is merged.
 
-## 7. Common Pitfalls
+## 8. Common Pitfalls
 
 - **Don't start an issue with unmet dependencies.** The dependency graph exists for a reason.
   Check `depends_on_github` in the JSON file.
