@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const span_mod = @import("../diagnostics/span.zig");
+const diag_mod = @import("../diagnostics/diagnostic.zig");
 const SourceSpan = span_mod.SourceSpan;
 const SourcePos = span_mod.SourcePos;
 
@@ -144,6 +145,8 @@ pub const Token = union(enum) {
     block_comment: []const u8,
     /// Pragma ({-# ... #-})
     pragma: []const u8,
+    /// Lexical error message
+    lex_error: []const u8,
 
     // ── Classification helpers ─────────────────────────────────────────
 
@@ -308,9 +311,245 @@ pub const Token = union(enum) {
             .line_comment => |v| try w.print("comment({s})", .{v}),
             .block_comment => |v| try w.print("block_comment({s})", .{v}),
             .pragma => |v| try w.print("pragma({s})", .{v}),
+            .lex_error => |v| try w.print("error({s})", .{v}),
         }
     }
 };
+
+/// The Haskell lexer.
+///
+/// Takes a source string and produces a stream of `LocatedToken`s.
+pub const Lexer = struct {
+    source: []const u8,
+    pos: u32 = 0,
+    line: u32 = 1,
+    column: u32 = 1,
+    file_id: span_mod.FileId,
+    allocator: std.mem.Allocator,
+    diagnostics: ?*diag_mod.DiagnosticBag = null,
+
+    pub fn init(allocator: std.mem.Allocator, source: []const u8, file_id: span_mod.FileId) Lexer {
+        return .{
+            .allocator = allocator,
+            .source = source,
+            .file_id = file_id,
+        };
+    }
+
+    /// Returns the next token in the stream.
+    pub fn nextToken(self: *Lexer) LocatedToken {
+        self.skipWhitespaceAndComments();
+
+        const start_pos = self.currentPos();
+
+        if (self.isAtEnd()) {
+            return LocatedToken.init(.eof, span_mod.SourceSpan.init(start_pos, start_pos));
+        }
+
+        const c = self.peek().?;
+
+        // Numeric literals
+        if (std.ascii.isDigit(c)) {
+            return self.scanNumericLiteral();
+        }
+
+        // TODO: Handle other token types (identifiers, keywords, symbols, etc.)
+        // For now, we return a single character as an error/unsupported token to avoid infinite loops
+        _ = self.advance();
+        const end_pos = self.currentPos();
+        const msg = "unsupported token";
+        self.emitError(span_mod.SourceSpan.init(start_pos, end_pos), msg);
+        return LocatedToken.init(.{ .lex_error = msg }, span_mod.SourceSpan.init(start_pos, end_pos));
+    }
+
+    fn currentPos(self: Lexer) SourcePos {
+        return SourcePos.init(self.file_id, self.line, self.column);
+    }
+
+    fn isAtEnd(self: Lexer) bool {
+        return self.pos >= self.source.len;
+    }
+
+    fn peek(self: Lexer) ?u8 {
+        if (self.isAtEnd()) return null;
+        return self.source[self.pos];
+    }
+
+    fn peekNext(self: Lexer) ?u8 {
+        if (self.pos + 1 >= self.source.len) return null;
+        return self.source[self.pos + 1];
+    }
+
+    fn advance(self: *Lexer) ?u8 {
+        if (self.isAtEnd()) return null;
+        const c = self.source[self.pos];
+        self.pos += 1;
+        if (c == '\n') {
+            self.line += 1;
+            self.column = 1;
+        } else {
+            self.column += 1;
+        }
+        return c;
+    }
+
+    fn skipWhitespaceAndComments(self: *Lexer) void {
+        while (!self.isAtEnd()) {
+            const c = self.peek().?;
+            switch (c) {
+                ' ', '\t', '\r', '\n' => {
+                    _ = self.advance();
+                },
+                '-' => {
+                    if (self.peekNext() == '-') {
+                        // TODO: Handle line comments
+                        break;
+                    } else {
+                        break;
+                    }
+                },
+                '{' => {
+                    if (self.peekNext() == '-') {
+                        // TODO: Handle block comments
+                        break;
+                    } else {
+                        break;
+                    }
+                },
+                else => break,
+            }
+        }
+    }
+
+    fn scanNumericLiteral(self: *Lexer) LocatedToken {
+        const start_pos = self.currentPos();
+
+        if (self.peek() == '0') {
+            const next = self.peekNext() orelse ' ';
+            if (next == 'x' or next == 'X') {
+                _ = self.advance(); // consume '0'
+                _ = self.advance(); // consume 'x'/'X'
+                return self.scanIntWithRadix(start_pos, 16);
+            } else if (next == 'o' or next == 'O') {
+                _ = self.advance(); // consume '0'
+                _ = self.advance(); // consume 'o'/'O'
+                return self.scanIntWithRadix(start_pos, 8);
+            } else if (next == 'b' or next == 'B') {
+                _ = self.advance(); // consume '0'
+                _ = self.advance(); // consume 'b'/'B'
+                return self.scanIntWithRadix(start_pos, 2);
+            }
+        }
+
+        return self.scanDecimalOrFloat(start_pos);
+    }
+
+    fn scanIntWithRadix(self: *Lexer, start_pos: SourcePos, radix: u8) LocatedToken {
+        const start_idx = self.pos;
+        while (!self.isAtEnd()) {
+            const c = self.peek().?;
+            if (isDigitForRadix(c, radix)) {
+                _ = self.advance();
+            } else break;
+        }
+
+        const end_idx = self.pos;
+        const end_pos = self.currentPos();
+        const lit_str = self.source[start_idx..end_idx];
+
+        if (lit_str.len == 0) {
+            const msg = "empty integer literal";
+            self.emitError(span_mod.SourceSpan.init(start_pos, end_pos), msg);
+            return LocatedToken.init(.{ .lex_error = msg }, span_mod.SourceSpan.init(start_pos, end_pos));
+        }
+
+        const val = std.fmt.parseInt(i64, lit_str, radix) catch {
+            const msg = "invalid integer literal or overflow";
+            self.emitError(span_mod.SourceSpan.init(start_pos, end_pos), msg);
+            return LocatedToken.init(.{ .lex_error = msg }, span_mod.SourceSpan.init(start_pos, end_pos));
+        };
+
+        return LocatedToken.init(.{ .lit_integer = val }, span_mod.SourceSpan.init(start_pos, end_pos));
+    }
+
+    fn scanDecimalOrFloat(self: *Lexer, start_pos: SourcePos) LocatedToken {
+        const start_idx = self.pos;
+        var is_float = false;
+
+        // Decimal part
+        while (!self.isAtEnd() and std.ascii.isDigit(self.peek().?)) {
+            _ = self.advance();
+        }
+
+        // Optional fractional part
+        if (self.peek() == '.' and std.ascii.isDigit(self.peekNext() orelse ' ')) {
+            is_float = true;
+            _ = self.advance(); // consume '.'
+            while (!self.isAtEnd() and std.ascii.isDigit(self.peek().?)) {
+                _ = self.advance();
+            }
+        }
+
+        // Optional exponent part
+        if (self.peek() == 'e' or self.peek() == 'E') {
+            is_float = true;
+            _ = self.advance(); // consume 'e'/'E'
+            if (self.peek() == '+' or self.peek() == '-') {
+                _ = self.advance();
+            }
+            if (!std.ascii.isDigit(self.peek() orelse ' ')) {
+                const end_pos = self.currentPos();
+                const msg = "malformed exponent in float literal";
+                self.emitError(span_mod.SourceSpan.init(start_pos, end_pos), msg);
+                return LocatedToken.init(.{ .lex_error = msg }, span_mod.SourceSpan.init(start_pos, end_pos));
+            }
+            while (!self.isAtEnd() and std.ascii.isDigit(self.peek().?)) {
+                _ = self.advance();
+            }
+        }
+
+        const end_idx = self.pos;
+        const end_pos = self.currentPos();
+        const lit_str = self.source[start_idx..end_idx];
+
+        if (is_float) {
+            const val = std.fmt.parseFloat(f64, lit_str) catch {
+                const msg = "invalid float literal";
+                self.emitError(span_mod.SourceSpan.init(start_pos, end_pos), msg);
+                return LocatedToken.init(.{ .lex_error = msg }, span_mod.SourceSpan.init(start_pos, end_pos));
+            };
+            return LocatedToken.init(.{ .lit_float = val }, span_mod.SourceSpan.init(start_pos, end_pos));
+        } else {
+            const val = std.fmt.parseInt(i64, lit_str, 10) catch {
+                const msg = "invalid integer literal or overflow";
+                self.emitError(span_mod.SourceSpan.init(start_pos, end_pos), msg);
+                return LocatedToken.init(.{ .lex_error = msg }, span_mod.SourceSpan.init(start_pos, end_pos));
+            };
+            return LocatedToken.init(.{ .lit_integer = val }, span_mod.SourceSpan.init(start_pos, end_pos));
+        }
+    }
+
+    fn emitError(self: *Lexer, span: span_mod.SourceSpan, message: []const u8) void {
+        if (self.diagnostics) |bag| {
+            bag.add(self.allocator, .{
+                .severity = .@"error",
+                .code = .parse_error,
+                .span = span,
+                .message = message,
+            }) catch {}; // Ignore allocation errors for now
+        }
+    }
+};
+
+fn isDigitForRadix(c: u8, radix: u8) bool {
+    return switch (radix) {
+        2 => c == '0' or c == '1',
+        8 => c >= '0' and c <= '7',
+        10 => std.ascii.isDigit(c),
+        16 => std.ascii.isHex(c),
+        else => false,
+    };
+}
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
@@ -562,4 +801,62 @@ test "LocatedToken with identifier payload" {
 
     const s = try std.fmt.bufPrint(&buf, "{f}", .{loc});
     try std.testing.expectEqualStrings("varid(foo) @ 10:1-10:4", s);
+}
+
+test "Lexer: Decimal integers" {
+    const source = "123 456 0";
+    var lexer = Lexer.init(std.testing.allocator, source, 1);
+
+    const t1 = lexer.nextToken();
+    try std.testing.expectEqual(Token{ .lit_integer = 123 }, t1.token);
+
+    const t2 = lexer.nextToken();
+    try std.testing.expectEqual(Token{ .lit_integer = 456 }, t2.token);
+
+    const t3 = lexer.nextToken();
+    try std.testing.expectEqual(Token{ .lit_integer = 0 }, t3.token);
+
+    const t4 = lexer.nextToken();
+    try std.testing.expectEqual(Token.eof, t4.token);
+}
+
+test "Lexer: Hex, Octal, Binary integers" {
+    const source = "0x123 0Xabc 0o123 0O456 0b1010";
+    var lexer = Lexer.init(std.testing.allocator, source, 1);
+
+    try std.testing.expectEqual(Token{ .lit_integer = 0x123 }, lexer.nextToken().token);
+    try std.testing.expectEqual(Token{ .lit_integer = 0xabc }, lexer.nextToken().token);
+    try std.testing.expectEqual(Token{ .lit_integer = 0o123 }, lexer.nextToken().token);
+    try std.testing.expectEqual(Token{ .lit_integer = 0o456 }, lexer.nextToken().token);
+    try std.testing.expectEqual(Token{ .lit_integer = 10 }, lexer.nextToken().token);
+}
+
+test "Lexer: Floats" {
+    const source = "1.23 1.23e10 1.23E-5 123e2";
+    var lexer = Lexer.init(std.testing.allocator, source, 1);
+
+    try std.testing.expectEqual(Token{ .lit_float = 1.23 }, lexer.nextToken().token);
+    try std.testing.expectEqual(Token{ .lit_float = 1.23e10 }, lexer.nextToken().token);
+    try std.testing.expectEqual(Token{ .lit_float = 1.23e-5 }, lexer.nextToken().token);
+    try std.testing.expectEqual(Token{ .lit_float = 123e2 }, lexer.nextToken().token);
+}
+
+test "Lexer: Numeric errors" {
+    const source = "0x 1.23e 0o";
+    var bag = diag_mod.DiagnosticBag.init();
+    defer bag.deinit(std.testing.allocator);
+
+    var lexer = Lexer.init(std.testing.allocator, source, 1);
+    lexer.diagnostics = &bag;
+
+    const t1 = lexer.nextToken();
+    try std.testing.expect(t1.token == .lex_error);
+
+    const t2 = lexer.nextToken();
+    try std.testing.expect(t2.token == .lex_error);
+
+    const t3 = lexer.nextToken();
+    try std.testing.expect(t3.token == .lex_error);
+
+    try std.testing.expectEqual(@as(usize, 3), bag.errorCount());
 }
