@@ -15,5 +15,5 @@
         85
     ],
     "body": "Implement scanning for String and Character literals with full Haskell escape sequence support.\n\n**Deliverables:**\n- `scanCharLiteral()` and `scanStringLiteral()` helpers\n- Standard escapes: `\\n`, `\\t`, `\\\\`, `\\\"`, `\\'`\n- ASCII control escapes: `\\NUL`, `\\SOH`, ... `\\DEL`\n- Numeric escapes: Decimal `\\123`, Octal `\\o123`, Hex `\\x123`\n- Control escapes: `\\^A`, `\\^[`\n- Empty escape: `\\&` (used as a separator)\n- String gaps: `\\` followed by whitespace and another `\\` (ignores everything between)\n- Multi-line strings (Haskell doesn't have them per se, but gaps enable them)\n\n**Design notes:**\n- Correctly handle UTF-8 encoding into the token's byte buffer.\n- Unterminated strings/chars must produce structured diagnostics.",
-    "state": "open"
+    "state": "closed"
 }
