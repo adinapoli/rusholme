@@ -777,15 +777,33 @@ pub const Parser = struct {
             try tyvars.append(self.allocator, tv.token.varid);
         }
 
-        // Constructors
+        // Check for GADT-style declaration: data T a where { ... }
+        // GADT constructors have the form: Con :: Type
+        const is_gadt = try self.check(.kw_where);
+
         var constructors: std.ArrayListUnmanaged(ast_mod.ConDecl) = .empty;
         if (try self.match(.equals) != null) {
+            // Standard Haskell 98 style: data T a = Con1 ... | Con2 ...
             const first = try self.parseConDecl();
             try constructors.append(self.allocator, first);
             while (try self.match(.pipe) != null) {
                 const con = try self.parseConDecl();
                 try constructors.append(self.allocator, con);
             }
+        } else if (is_gadt) {
+            // GADT style: data T a where { Con1 :: Type1 ; Con2 :: Type2 }
+            _ = try self.advance(); // consume `where`
+            _ = try self.expectOpenBrace();
+            while (true) {
+                if (try self.checkCloseBrace()) break;
+                if (try self.atEnd()) break;
+
+                const con = try self.parseGADTConDecl();
+                try constructors.append(self.allocator, con);
+
+                while (try self.matchSemi()) {}
+            }
+            _ = try self.expectCloseBrace();
         }
 
         // Deriving
@@ -800,6 +818,24 @@ pub const Parser = struct {
         } };
     }
 
+    /// Parse a GADT constructor declaration: Con :: Type
+    fn parseGADTConDecl(self: *Parser) ParseError!ast_mod.ConDecl {
+        const start = try self.currentSpan();
+        const name_tok = try self.expect(.conid);
+
+        // Parse the type annotation :: Type
+        _ = try self.expect(.dcolon);
+        const gadt_type = try self.parseType();
+
+        return ast_mod.ConDecl{
+            .name = name_tok.token.conid,
+            .fields = &.{}, // GADT constructors don't use fields
+            .span = self.spanFrom(start),
+            .gadt_type = gadt_type,
+        };
+    }
+
+    // Parse standard (H98) constructor declaration: Con t1 t2 ...
     fn parseConDecl(self: *Parser) ParseError!ast_mod.ConDecl {
         const start = try self.currentSpan();
         const name_tok = try self.expect(.conid);
@@ -887,25 +923,25 @@ pub const Parser = struct {
         } };
     }
 
-    // ── Class declaration (minimal) ────────────────────────────────────
+    // ── Class declaration ──────────────────────────────────────────────
 
     fn parseClassDecl(self: *Parser) ParseError!?ast_mod.Decl {
         const start = (try self.expect(.kw_class)).span;
 
-        const context: ?ast_mod.Context = null;
-        // Try to detect context: Foo a => ...
-        // Simplified: if we see ConId varid => then it's a context
-        const saved_len = self.lookahead.items.len;
-        _ = saved_len;
-        // For now, no context parsing — just class name and tyvars
+        // Parse optional superclass context: (Super a) => ...
+        const context = try self.parseContextOptional();
+
+        // Parse class name
         const name_tok = try self.expect(.conid);
 
+        // Parse type variables
         var tyvars: std.ArrayListUnmanaged([]const u8) = .empty;
         while (try self.check(.varid)) {
             const tv = try self.advance();
             try tyvars.append(self.allocator, tv.token.varid);
         }
 
+        // Parse methods with optional default implementations
         var methods: std.ArrayListUnmanaged(ast_mod.ClassMethod) = .empty;
         if (try self.match(.kw_where) != null) {
             _ = try self.expectOpenBrace();
@@ -913,17 +949,51 @@ pub const Parser = struct {
                 if (try self.checkCloseBrace()) break;
                 if (try self.atEnd()) break;
 
-                // Parse method signatures: name :: Type
-                if (try self.check(.varid)) {
-                    const method_name = try self.advance();
-                    _ = try self.expect(.dcolon);
-                    const ty = try self.parseType();
-                    try methods.append(self.allocator, .{
-                        .name = method_name.token.varid,
-                        .type = ty,
-                        .default_implementation = null,
-                    });
-                }
+                // Parse method declarations:
+                //   name :: Type
+                //   (op) :: Type
+                //   name :: Type = expr  (with default implementation)
+
+                // Check for parenthesized operator: (op) :: Type
+                const method_name: ?LocatedToken = if (try self.check(.open_paren)) blk: {
+                    const tok1 = try self.peekAt(1);
+                    if (std.meta.activeTag(tok1.token) == .varsym) {
+                        const tok2 = try self.peekAt(2);
+                        if (std.meta.activeTag(tok2.token) == .close_paren) {
+                            _ = try self.advance(); // (
+                            const op = try self.advance(); // operator
+                            _ = try self.advance(); // )
+                            break :blk LocatedToken{
+                                .token = .{ .varid = op.token.varsym },
+                                .span = op.span,
+                            };
+                        }
+                    }
+                    // Not a parenthesized operator, continue to check for varid
+                    // The open_paren token wasn't consumed, so it's still there
+                    break :blk null;
+                } else null;
+
+                const varid_tok = if (method_name == null)
+                    if (try self.check(.varid)) try self.advance() else return error.UnexpectedToken
+                else
+                    null;
+
+                _ = try self.expect(.dcolon);
+                const ty = try self.parseType();
+
+                const rhs: ?ast_mod.Rhs = if (try self.match(.equals) != null)
+                    // Default implementation: = expr
+                    .{ .UnGuarded = try self.parseExpr() }
+                else
+                    null;
+
+                const actual_name = if (method_name) |t| t.token.varid else varid_tok.?.token.varid;
+                try methods.append(self.allocator, .{
+                    .name = actual_name,
+                    .type = ty,
+                    .default_implementation = rhs,
+                });
                 while (try self.matchSemi()) {}
             }
             _ = try self.expectCloseBrace();
@@ -938,10 +1008,15 @@ pub const Parser = struct {
         } };
     }
 
-    // ── Instance declaration (minimal) ─────────────────────────────────
+    // ── Instance declaration ───────────────────────────────────────────
 
     fn parseInstanceDecl(self: *Parser) ParseError!?ast_mod.Decl {
         const start = (try self.expect(.kw_instance)).span;
+
+        // Parse optional context from the instance head
+        const context = try self.parseContextOptional();
+
+        // Parse the instance type (e.g., Eq Bool or Monad (Maybe a))
         const ty = try self.parseType();
 
         var bindings: std.ArrayListUnmanaged(ast_mod.FunBinding) = .empty;
@@ -971,7 +1046,7 @@ pub const Parser = struct {
         }
 
         return .{ .Instance = .{
-            .context = null,
+            .context = context,
             .constructor_type = ty,
             .bindings = try bindings.toOwnedSlice(self.allocator),
             .span = self.spanFrom(start),
@@ -2981,5 +3056,221 @@ test "expr: tuple with trailing comma" {
     const expr = try parseTestExpr(&arena, "x = (1, 2, )");
     try std.testing.expect(expr == .Tuple);
     try std.testing.expectEqual(2, expr.Tuple.len);
+}
+
+// ── Class, Instance, Deriving, GADT tests (Issue #33) ────────────────────
+
+/// Helper: parse a module from source text
+fn parseTestModule(allocator: std.mem.Allocator, source: []const u8) !ast_mod.Module {
+    var lexer = Lexer.init(allocator, source, 1);
+    var layout = LayoutProcessor.init(allocator, &lexer);
+    var diags = DiagnosticCollector.init();
+    var parser = Parser.init(allocator, &layout, &diags) catch |err| switch (err) {
+        error.OutOfMemory => @panic("OOM in parseTestModule"),
+        error.UnexpectedToken, error.UnexpectedEOF, error.InvalidSyntax => @panic("parse error in parseTestModule"),
+    };
+    return try parser.parseModule();
+}
+
+test "decl: class declaration without context" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\class Eq a where
+        \\  (==) :: a -> a -> Bool
+    );
+    try std.testing.expectEqual(1, mod.declarations.len);
+    try std.testing.expect(mod.declarations[0] == .Class);
+
+    const class_decl = mod.declarations[0].Class;
+    try std.testing.expectEqualStrings("Eq", class_decl.class_name);
+    try std.testing.expectEqual(1, class_decl.tyvars.len);
+    try std.testing.expectEqualStrings("a", class_decl.tyvars[0]);
+    try std.testing.expectEqual(1, class_decl.methods.len);
+    try std.testing.expectEqualStrings("==", class_decl.methods[0].name);
+    try std.testing.expect(class_decl.context == null);
+}
+
+test "decl: class declaration with context" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\class (Eq a) => Ord a where
+        \\  (<) :: a -> a -> Bool
+    );
+    try std.testing.expectEqual(1, mod.declarations.len);
+    try std.testing.expect(mod.declarations[0] == .Class);
+
+    const class_decl = mod.declarations[0].Class;
+    try std.testing.expectEqualStrings("Ord", class_decl.class_name);
+    try std.testing.expectEqual(1, class_decl.tyvars.len);
+    try std.testing.expect(class_decl.context != null);
+
+    const ctx = class_decl.context.?;
+    try std.testing.expectEqual(1, ctx.constraints.len);
+    try std.testing.expectEqualStrings("Eq", ctx.constraints[0].class_name);
+    try std.testing.expectEqual(1, ctx.constraints[0].types.len);
+}
+
+test "decl: class with default implementation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\class Eq a where
+        \\  (==) :: a -> a -> Bool = alwaysFalse
+        \\  alwaysFalse :: Bool = False
+    );
+    try std.testing.expectEqual(1, mod.declarations.len);
+
+    const class_decl = mod.declarations[0].Class;
+    try std.testing.expectEqual(2, class_decl.methods.len);
+    try std.testing.expect(class_decl.methods[0].default_implementation != null);
+    try std.testing.expect(class_decl.methods[0].default_implementation.? == .UnGuarded);
+    try std.testing.expectEqualStrings("alwaysFalse", class_decl.methods[1].name);
+}
+
+test "decl: instance declaration" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Note: Using a simple helper for now since operator LHS parsing (== patterns = expr)
+    // is not yet implemented in parseValueDecl
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\instance Eq Bool where
+        \\  eqTrue True = True
+        \\  eqFalse False = True
+        \\  eqFalse _ = False
+    );
+    try std.testing.expectEqual(1, mod.declarations.len);
+    try std.testing.expect(mod.declarations[0] == .Instance);
+
+    const inst_decl = mod.declarations[0].Instance;
+    try std.testing.expect(inst_decl.context == null);
+    try std.testing.expectEqual(3, inst_decl.bindings.len);
+}
+
+test "decl: instance with context" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\instance (Eq a) => Eq [a] where
+        \\  [] == [] = True
+    );
+    try std.testing.expectEqual(1, mod.declarations.len);
+
+    const inst_decl = mod.declarations[0].Instance;
+    try std.testing.expect(inst_decl.context != null);
+    const ctx = inst_decl.context.?;
+    try std.testing.expectEqual(1, ctx.constraints.len);
+    try std.testing.expectEqualStrings("Eq", ctx.constraints[0].class_name);
+}
+
+test "decl: deriving clause with single class" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator, "module M where data Maybe a = Nothing | Just a deriving Show");
+    try std.testing.expectEqual(1, mod.declarations.len);
+    try std.testing.expect(mod.declarations[0] == .Data);
+
+    const data_decl = mod.declarations[0].Data;
+    try std.testing.expectEqualStrings("Maybe", data_decl.name);
+    try std.testing.expectEqual(1, data_decl.tyvars.len);
+    try std.testing.expectEqual(2, data_decl.constructors.len);
+    try std.testing.expectEqual(1, data_decl.deriving.len);
+    try std.testing.expectEqualStrings("Show", data_decl.deriving[0]);
+}
+
+test "decl: deriving clause with multiple classes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        "module M where data X = X deriving (Eq, Show, Ord)"
+    );
+    try std.testing.expectEqual(1, mod.declarations.len);
+
+    const data_decl = mod.declarations[0].Data;
+    try std.testing.expectEqual(3, data_decl.deriving.len);
+    try std.testing.expectEqualStrings("Eq", data_decl.deriving[0]);
+    try std.testing.expectEqualStrings("Show", data_decl.deriving[1]);
+    try std.testing.expectEqualStrings("Ord", data_decl.deriving[2]);
+}
+
+test "decl: GADT-style data declaration" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\data Expr a where
+        \\  Lit :: Int -> Expr Int
+        \\  Add :: Expr Int -> Expr Int -> Expr Int
+    );
+    try std.testing.expectEqual(1, mod.declarations.len);
+    try std.testing.expect(mod.declarations[0] == .Data);
+
+    const data_decl = mod.declarations[0].Data;
+    try std.testing.expectEqualStrings("Expr", data_decl.name);
+    try std.testing.expectEqual(1, data_decl.tyvars.len);
+    try std.testing.expectEqualStrings("a", data_decl.tyvars[0]);
+    try std.testing.expectEqual(2, data_decl.constructors.len);
+
+    // Check GADT constructors
+    try std.testing.expectEqualStrings("Lit", data_decl.constructors[0].name);
+    try std.testing.expect(data_decl.constructors[0].gadt_type != null);
+    try std.testing.expect(data_decl.constructors[1].gadt_type != null);
+}
+
+test "decl: newtype with deriving" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator, "module M where newtype Age = Age Int deriving (Eq, Show)");
+    try std.testing.expectEqual(1, mod.declarations.len);
+    try std.testing.expect(mod.declarations[0] == .Newtype);
+
+    const newtype_decl = mod.declarations[0].Newtype;
+    try std.testing.expectEqualStrings("Age", newtype_decl.name);
+    try std.testing.expectEqual(0, newtype_decl.tyvars.len);
+    try std.testing.expect(newtype_decl.constructor.fields[0].Plain == .Con);
+    try std.testing.expectEqualStrings("Int", newtype_decl.constructor.fields[0].Plain.Con.name);
+    try std.testing.expectEqual(2, newtype_decl.deriving.len);
+}
+
+test "decl: multiple declarations in module" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Using single-line explicit-brace syntax to test multiple declarations
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\class Eq a where { (==) :: a -> a -> Bool }
+        \\data Bool = True | False deriving Eq
+        \\instance Eq Bool where { eqBool _ = False }
+    );
+    try std.testing.expectEqual(3, mod.declarations.len);
+    try std.testing.expect(mod.declarations[0] == .Class);
+    try std.testing.expect(mod.declarations[1] == .Data);
+    try std.testing.expect(mod.declarations[2] == .Instance);
 }
 
