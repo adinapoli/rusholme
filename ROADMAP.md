@@ -95,7 +95,7 @@
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#68](https://github.com/adinapoli/rusholme/issues/68) | Research: Name uniqueness strategy (De Bruijn vs Unique supply vs hybrid) | — | :green_circle: |
-| [#69](https://github.com/adinapoli/rusholme/issues/69) | Implement chosen name uniqueness mechanism | [#68](https://github.com/adinapoli/rusholme/issues/68) | :yellow_circle: |
+| [#69](https://github.com/adinapoli/rusholme/issues/69) | Implement chosen name uniqueness mechanism | [#68](https://github.com/adinapoli/rusholme/issues/68) | :green_circle: |
 | [#66](https://github.com/adinapoli/rusholme/issues/66) | Research: Calling convention (eval/apply vs push/enter vs CPS) | — | :green_circle: |
 | [#67](https://github.com/adinapoli/rusholme/issues/67) | Implement chosen calling convention in runtime and codegen | [#66](https://github.com/adinapoli/rusholme/issues/66), [#54](https://github.com/adinapoli/rusholme/issues/54) | :white_circle: |
 
@@ -103,7 +103,7 @@
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#34](https://github.com/adinapoli/rusholme/issues/34) | Define Core IR types (System F_C expressions, binders, types) | [#69](https://github.com/adinapoli/rusholme/issues/69) | :white_circle: |
+| [#34](https://github.com/adinapoli/rusholme/issues/34) | Define Core IR types (System F_C expressions, binders, types) | [#69](https://github.com/adinapoli/rusholme/issues/69) | :yellow_circle: |
 | [#35](https://github.com/adinapoli/rusholme/issues/35) | Implement Core IR pretty-printer | [#34](https://github.com/adinapoli/rusholme/issues/34) | :white_circle: |
 | [#36](https://github.com/adinapoli/rusholme/issues/36) | Implement Hindley-Milner type inference engine | [#34](https://github.com/adinapoli/rusholme/issues/34), [#18](https://github.com/adinapoli/rusholme/issues/18) | :white_circle: |
 | [#37](https://github.com/adinapoli/rusholme/issues/37) | Implement type class resolution and dictionary passing | [#36](https://github.com/adinapoli/rusholme/issues/36) | :white_circle: |
