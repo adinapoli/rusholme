@@ -69,6 +69,14 @@ Proceed to "Pick an Issue" below.
 
 ## 4. Work on the Issue
 
+IMPORTANT: This is a zig project created primarily with the goal of learning Zig, so it's important that:
+
+1. The code is as idiomatic as possible;
+2. The code respects principles of good software engineering (abstraction, information hiding, encapsulation);
+3. The code would use Zig's ecosystem best practices (de facto libraries, etc).
+
+Every time you write a single line of code, respect the three laws above.
+
 ### Branch for Project Planning
 
 For tasks involving issue synchronization, roadmap updates, or general project planning:
