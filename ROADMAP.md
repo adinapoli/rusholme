@@ -95,7 +95,7 @@
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#68](https://github.com/adinapoli/rusholme/issues/68) | Research: Name uniqueness strategy (De Bruijn vs Unique supply vs hybrid) | — | :green_circle: |
-| [#69](https://github.com/adinapoli/rusholme/issues/69) | Implement chosen name uniqueness mechanism | [#68](https://github.com/adinapoli/rusholme/issues/68) | :yellow_circle: |
+| [#69](https://github.com/adinapoli/rusholme/issues/69) | Implement chosen name uniqueness mechanism | [#68](https://github.com/adinapoli/rusholme/issues/68) | :green_circle: |
 | [#66](https://github.com/adinapoli/rusholme/issues/66) | Research: Calling convention (eval/apply vs push/enter vs CPS) | — | :green_circle: |
 | [#67](https://github.com/adinapoli/rusholme/issues/67) | Implement chosen calling convention in runtime and codegen | [#66](https://github.com/adinapoli/rusholme/issues/66), [#54](https://github.com/adinapoli/rusholme/issues/54) | :white_circle: |
 
