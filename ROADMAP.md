@@ -83,7 +83,7 @@
 | [#28](https://github.com/adinapoli/rusholme/issues/28) | Implement AST pretty-printer for debugging and golden tests | [#27](https://github.com/adinapoli/rusholme/issues/27) | :green_circle: |
 | [#87](https://github.com/adinapoli/rusholme/issues/87) | Parser: Infrastructure, Combinators and Error Recovery | [#26](https://github.com/adinapoli/rusholme/issues/26), [#19](https://github.com/adinapoli/rusholme/issues/19) | :green_circle: |
 | [#29](https://github.com/adinapoli/rusholme/issues/29) | Implement parser: module header, imports, and top-level declarations | [#26](https://github.com/adinapoli/rusholme/issues/26), [#27](https://github.com/adinapoli/rusholme/issues/27) | :green_circle: |
-| [#88](https://github.com/adinapoli/rusholme/issues/88) | Parser: Expression Precedence (Fixity-aware) | [#87](https://github.com/adinapoli/rusholme/issues/87), [#27](https://github.com/adinapoli/rusholme/issues/27) | :yellow_circle: |
+| [#88](https://github.com/adinapoli/rusholme/issues/88) | Parser: Expression Precedence (Fixity-aware) | [#87](https://github.com/adinapoli/rusholme/issues/87), [#27](https://github.com/adinapoli/rusholme/issues/27) | :green_circle: |
 | [#30](https://github.com/adinapoli/rusholme/issues/30) | Implement parser: expressions | [#29](https://github.com/adinapoli/rusholme/issues/29), [#88](https://github.com/adinapoli/rusholme/issues/88) | :white_circle: |
 | [#31](https://github.com/adinapoli/rusholme/issues/31) | Implement parser: patterns | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
 | [#32](https://github.com/adinapoli/rusholme/issues/32) | Implement parser: type expressions | [#29](https://github.com/adinapoli/rusholme/issues/29) | :white_circle: |
@@ -103,7 +103,7 @@
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#34](https://github.com/adinapoli/rusholme/issues/34) | Define Core IR types (System F_C expressions, binders, types) | [#69](https://github.com/adinapoli/rusholme/issues/69) | :yellow_circle: |
+| [#34](https://github.com/adinapoli/rusholme/issues/34) | Define Core IR types (System F_C expressions, binders, types) | [#69](https://github.com/adinapoli/rusholme/issues/69) | :green_circle: |
 | [#35](https://github.com/adinapoli/rusholme/issues/35) | Implement Core IR pretty-printer | [#34](https://github.com/adinapoli/rusholme/issues/34) | :white_circle: |
 | [#36](https://github.com/adinapoli/rusholme/issues/36) | Implement Hindley-Milner type inference engine | [#34](https://github.com/adinapoli/rusholme/issues/34), [#18](https://github.com/adinapoli/rusholme/issues/18) | :white_circle: |
 | [#37](https://github.com/adinapoli/rusholme/issues/37) | Implement type class resolution and dictionary passing | [#36](https://github.com/adinapoli/rusholme/issues/36) | :white_circle: |
@@ -114,7 +114,7 @@
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#40](https://github.com/adinapoli/rusholme/issues/40) | Define GRIN IR types (Modern GRIN dialect) | [#69](https://github.com/adinapoli/rusholme/issues/69) | :yellow_circle: |
+| [#40](https://github.com/adinapoli/rusholme/issues/40) | Define GRIN IR types (Modern GRIN dialect) | [#69](https://github.com/adinapoli/rusholme/issues/69) | :green_circle: |
 | [#41](https://github.com/adinapoli/rusholme/issues/41) | Implement GRIN IR pretty-printer | [#40](https://github.com/adinapoli/rusholme/issues/40) | :white_circle: |
 | [#42](https://github.com/adinapoli/rusholme/issues/42) | Research: Core to GRIN translation strategy | [#34](https://github.com/adinapoli/rusholme/issues/34), [#40](https://github.com/adinapoli/rusholme/issues/40) | :white_circle: |
 | [#43](https://github.com/adinapoli/rusholme/issues/43) | Implement Core to GRIN translation | [#42](https://github.com/adinapoli/rusholme/issues/42) | :white_circle: |
