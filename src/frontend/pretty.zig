@@ -12,6 +12,29 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 
+/// Returns true when `current` is a function/pattern binding whose name
+/// matches a type signature in `prev`. This is used to suppress the blank
+/// line between a type signature and its implementation, mirroring how
+/// Haskell source is conventionally formatted.
+fn isBindingForPreviousSig(prev: ast.Decl, current: ast.Decl) bool {
+    const sig_names = switch (prev) {
+        .TypeSig => |ts| ts.names,
+        else => return false,
+    };
+    const bind_name: []const u8 = switch (current) {
+        .FunBind => |fb| fb.name,
+        .PatBind => |pb| switch (pb.pattern) {
+            .Var => |v| v,
+            else => return false,
+        },
+        else => return false,
+    };
+    for (sig_names) |name| {
+        if (std.mem.eql(u8, name, bind_name)) return true;
+    }
+    return false;
+}
+
 /// Pretty-printer for Haskell AST nodes.
 ///
 /// Renders AST nodes to a string buffer using Zig's ArrayList writer.
@@ -95,9 +118,16 @@ pub const PrettyPrinter = struct {
             try self.newline();
         }
 
-        for (mod.declarations) |decl| {
+        for (mod.declarations, 0..) |decl, i| {
+            // Separate declarations with a blank line, except when a type
+            // signature is immediately followed by its binding.
+            if (i > 0 and !isBindingForPreviousSig(mod.declarations[i - 1], decl)) {
+                try self.newline();
+            }
             try self.newline();
             try self.printDecl(decl);
+        }
+        if (mod.declarations.len > 0) {
             try self.newline();
         }
 
