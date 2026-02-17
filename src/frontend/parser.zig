@@ -1606,14 +1606,49 @@ pub const Parser = struct {
             },
             .open_paren => {
                 _ = try self.advance();
+                const next_tag = try self.peekTag();
+
+                // Check for right operator section: (op expr) or (op)
+                // Right sections start with an operator
+                if (next_tag == .varsym or next_tag == .consym or next_tag == .minus) {
+                    const op_tok = try self.advance();
+                    const op_name: []const u8 = if (next_tag == .minus)
+                        "-"
+                    else switch (op_tok.token) {
+                        .varsym => |s| s,
+                        .consym => |c| c,
+                        else => unreachable,
+                    };
+
+                    // Right section with expression: (op expr)
+                    if (try self.check(.close_paren)) {
+                        _ = try self.advance();
+                        // Just the operator: (+), (+ +), etc.
+                        // This is just the operator as an expression
+                        return .{ .Var = .{ .name = op_name, .span = op_tok.span } };
+                    }
+
+                    const right_expr = try self.parseExpr();
+                    _ = try self.expect(.close_paren);
+                    return .{ .RightSection = .{
+                        .op = .{ .name = op_name, .span = op_tok.span },
+                        .expr = try self.allocNode(ast_mod.Expr, right_expr),
+                    } };
+                }
+
                 // Unit: ()
                 if (try self.check(.close_paren)) {
                     _ = try self.advance();
                     return .{ .Tuple = &.{} };
                 }
 
-                // Parse the first expression
-                const first = try self.parseExpr();
+                // Parse the first APP/atomic expression (not full expr, to avoid consuming infix ops for left sections)
+                var first = try self.parseAppExpr();
+
+                // Check for type annotation on the first atom: (expr :: type)
+                if (try self.isTypeAnnotation()) {
+                    first = try self.parseTypeAnnotation(first);
+                }
 
                 // Check for tuple: (a, b, c)
                 if (try self.check(.comma)) {
@@ -1631,12 +1666,40 @@ pub const Parser = struct {
                     return .{ .Tuple = try items.toOwnedSlice(self.allocator) };
                 }
 
-                // Check for operator sections
+                // Check for left operator section: (expr op)
+                // by peeking ahead to see if we have operator followed by close_paren
                 const op_tag = try self.peekTag();
                 if (op_tag == .varsym or op_tag == .consym or op_tag == .minus) {
-                    // Operator section: (expr op) or (op expr)
-                    const op_tok = try self.advance();
-                    const op_name: []const u8 = if (op_tag == .minus)
+                    const after_op = try self.peekAt(1);
+                    if (after_op.token == .close_paren) {
+                        // It's a left section: (expr op)
+                        const op_tok = try self.advance();
+                        const op_name: []const u8 = if (op_tag == .minus)
+                            "-"
+                        else switch (op_tok.token) {
+                            .varsym => |s| s,
+                            .consym => |c| c,
+                            else => unreachable,
+                        };
+                        _ = try self.expect(.close_paren);
+                        return .{ .LeftSection = .{
+                            .expr = try self.allocNode(ast_mod.Expr, first),
+                            .op = .{ .name = op_name, .span = op_tok.span },
+                        } };
+                    }
+                }
+
+                // Handle infix expressions in parentheses: (a + b)
+                // Now parse the full infix expression starting with `first`
+                var result = first;
+                while (true) {
+                    const infix_tag = try self.peekTag();
+                    const is_sym = (infix_tag == .varsym or infix_tag == .consym);
+                    const is_minus = (infix_tag == .minus);
+                    if (!is_sym and !is_minus) break;
+
+                    const op_tok = try self.peek();
+                    const op_name: []const u8 = if (is_minus)
                         "-"
                     else switch (op_tok.token) {
                         .varsym => |s| s,
@@ -1644,37 +1707,26 @@ pub const Parser = struct {
                         else => unreachable,
                     };
 
-                    // Left section: (expr op)
-                    if (try self.check(.close_paren)) {
-                        _ = try self.advance();
-                        return .{ .LeftSection = .{
-                            .expr = try self.allocNode(ast_mod.Expr, first),
-                            .op = .{ .name = op_name, .span = op_tok.span },
-                        } };
-                    }
+                    _ = try self.advance();
+                    const rhs = try self.parseAppExpr();
 
-                    // Need to check if it's a right section (op) with no expr on left
-                    // If first was just an operator name (Var/Con), it's a right section
-                    if (first == .Var or first == .Lit) {
-                        const second = try self.parseExpr();
-                        _ = try self.expect(.close_paren);
-                        return .{ .RightSection = .{
-                            .op = .{ .name = op_name, .span = op_tok.span },
-                            .expr = try self.allocNode(ast_mod.Expr, second),
-                        } };
-                    }
+                    // Check for type annotation after rhs
+                    const final_rhs = if (try self.isTypeAnnotation())
+                        try self.parseTypeAnnotation(rhs)
+                    else
+                        rhs;
 
-                    // Otherwise treat as left section but we have an extra expression - error case or handle as infix
-                    _ = try self.expect(.close_paren);
-                    return .{ .LeftSection = .{
-                        .expr = try self.allocNode(ast_mod.Expr, first),
+                    const lhs_node = try self.allocNode(ast_mod.Expr, result);
+                    const rhs_node = try self.allocNode(ast_mod.Expr, final_rhs);
+                    result = .{ .InfixApp = .{
+                        .left = lhs_node,
                         .op = .{ .name = op_name, .span = op_tok.span },
+                        .right = rhs_node,
                     } };
                 }
 
-                // Regular parenthesized expression
                 _ = try self.expect(.close_paren);
-                return .{ .Paren = try self.allocNode(ast_mod.Expr, first) };
+                return .{ .Paren = try self.allocNode(ast_mod.Expr, result) };
             },
             .open_bracket => {
                 _ = try self.advance();
@@ -1741,16 +1793,43 @@ pub const Parser = struct {
     /// Parse a let expression: let x = 1; y = 2 in x + y
     fn parseLet(self: *Parser) ParseError!ast_mod.Expr {
         _ = try self.expect(.kw_let);
-        var binds: std.ArrayListUnmanaged(ast_mod.Decl) = .empty;
-        while (try self.parseTopDecl()) |decl| {
+
+        // Handle explicit or virtual open brace for let bindings
+        if (try self.check(.open_brace) or try self.check(.v_open_brace)) {
+            _ = try self.advance(); // consume { or virtual {
+            var binds: std.ArrayListUnmanaged(ast_mod.Decl) = .empty;
+            while (true) {
+                if (try self.check(.close_brace) or try self.check(.v_close_brace)) {
+                    _ = try self.advance(); // consume } or virtual }
+                    break;
+                }
+                if (try self.atEnd()) break;
+                const decl = try self.parseTopDecl() orelse break;
+                try binds.append(self.allocator, decl);
+                while (try self.matchSemi()) {}
+            }
+            _ = try self.expect(.kw_in);
+            const body = try self.parseExpr();
+            return .{ .Let = .{
+                .binds = try binds.toOwnedSlice(self.allocator),
+                .body = try self.allocNode(ast_mod.Expr, body),
+            } };
+        } else {
+            // Single binding without braces: let x = 1 in x + 1
+            const decl = try self.parseTopDecl() orelse {
+                const got = try self.peek();
+                try self.emitErrorMsg(got.span, "expected let binding");
+                return error.UnexpectedToken;
+            };
+            var binds: std.ArrayListUnmanaged(ast_mod.Decl) = .empty;
             try binds.append(self.allocator, decl);
+            _ = try self.expect(.kw_in);
+            const body = try self.parseExpr();
+            return .{ .Let = .{
+                .binds = try binds.toOwnedSlice(self.allocator),
+                .body = try self.allocNode(ast_mod.Expr, body),
+            } };
         }
-        _ = try self.expect(.kw_in);
-        const body = try self.parseExpr();
-        return .{ .Let = .{
-            .binds = try binds.toOwnedSlice(self.allocator),
-            .body = try self.allocNode(ast_mod.Expr, body),
-        } };
     }
 
     /// Parse a case expression: case x of { 0 -> "zero"; _ -> "other" }
@@ -2373,13 +2452,17 @@ fn parseTestExpr(
     var lexer = Lexer.init(allocator, full, 1);
     var layout = LayoutProcessor.init(allocator, &lexer);
     var diags = DiagnosticCollector.init();
-    _ = &diags;
     var parser = Parser.init(allocator, &layout, &diags) catch |err| switch (err) {
         error.OutOfMemory => @panic("OOM in parseTestExpr"),
         error.UnexpectedToken, error.UnexpectedEOF, error.InvalidSyntax => @panic("parse error in parseTestExpr"),
     };
     const mod = try parser.parseModule();
+
     const decl = mod.declarations[0];
+    if (decl != .FunBind) {
+        @panic("parseTestExpr: Expected FunBind");
+    }
+
     const rhs = decl.FunBind.equations[0].rhs;
     return rhs.UnGuarded;
 }
@@ -2899,3 +2982,4 @@ test "expr: tuple with trailing comma" {
     try std.testing.expect(expr == .Tuple);
     try std.testing.expectEqual(2, expr.Tuple.len);
 }
+
