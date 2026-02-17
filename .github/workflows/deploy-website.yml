@@ -1,12 +1,11 @@
 name: Deploy Website
 
 on:
-  # Run on pushes to main branch
+  # Run on every push to main — milestone progress is computed from
+  # ROADMAP.md and GitHub issue state, so any merge can change the site.
   push:
     branches:
       - main
-    paths:
-      - 'website/**'
   # Allow manual trigger from GitHub UI
   workflow_dispatch:
 

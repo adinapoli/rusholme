@@ -79,6 +79,106 @@ function escapeHtml(text) {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+// Milestone metadata (order, emoji, label)
+const MILESTONES = [
+  { id: 'M0', emoji: '🚀', label: 'Infrastructure' },
+  { id: 'M1', emoji: '👋', label: 'Hello World' },
+  { id: 'M2', emoji: '📋', label: 'Basic Programs' },
+  { id: 'M3', emoji: '⚙️', label: 'Optimisations' },
+  { id: 'M4', emoji: '✨', label: 'Polish' },
+];
+
+// Parse ROADMAP.md and compute milestone progress
+function computeMilestoneProgress() {
+  const roadmapPath = path.join(__dirname, '..', 'ROADMAP.md');
+  if (!fs.existsSync(roadmapPath)) {
+    console.warn('   ⚠️  ROADMAP.md not found, using fallback');
+    return MILESTONES.map(m => ({ ...m, done: 0, total: 0, percentage: 0 }));
+  }
+
+  const content = fs.readFileSync(roadmapPath, 'utf-8');
+  const lines = content.split('\n');
+
+  // Split lines into milestone sections keyed by "M0", "M1", etc.
+  const sections = new Map();
+  let currentMilestone = null;
+
+  for (const line of lines) {
+    const headingMatch = line.match(/^## (M\d):/);
+    if (headingMatch) {
+      currentMilestone = headingMatch[1];
+      sections.set(currentMilestone, []);
+      continue;
+    }
+    // Stop collecting when we hit the dependency graph or a non-milestone section
+    if (line.startsWith('## Dependency Graph') || line.startsWith('## Legend')) {
+      currentMilestone = null;
+      continue;
+    }
+    if (currentMilestone) {
+      sections.get(currentMilestone).push(line);
+    }
+  }
+
+  return MILESTONES.map(m => {
+    const sectionLines = sections.get(m.id) || [];
+    let done = 0;
+    let total = 0;
+
+    for (const line of sectionLines) {
+      // Match table rows that contain a status emoji
+      // Format: | [#N](url) | title | deps | :emoji: |
+      if (line.includes(':green_circle:')) { done++; total++; }
+      else if (line.includes(':yellow_circle:')) { total++; }
+      else if (line.includes(':large_blue_circle:')) { total++; }
+      else if (line.includes(':white_circle:')) { total++; }
+    }
+
+    const percentage = total > 0 ? Math.round((done / total) * 100) : 0;
+    return { ...m, done, total, percentage };
+  });
+}
+
+// Generate milestone cards HTML
+function generateMilestoneCardsHTML(milestones) {
+  return milestones.map(m => {
+    let statusIcon, statusText, statusColor, barGradient, opacity;
+
+    if (m.percentage === 100) {
+      statusIcon = '<i data-lucide="check-circle-2" class="w-4 h-4"></i>';
+      statusText = '100% complete';
+      statusColor = 'text-green-500';
+      barGradient = 'bg-gradient-to-r from-green-500 to-emerald-500';
+      opacity = '';
+    } else if (m.percentage > 0) {
+      statusIcon = '<i data-lucide="clock" class="w-4 h-4"></i>';
+      statusText = `~${m.percentage}% complete`;
+      statusColor = 'text-blue-500';
+      barGradient = 'bg-gradient-to-r from-blue-500 to-indigo-500';
+      opacity = '';
+    } else {
+      statusIcon = '<i data-lucide="circle" class="w-4 h-4"></i>';
+      statusText = 'Not started';
+      statusColor = 'text-gray-500';
+      barGradient = 'bg-gray-700';
+      opacity = ' opacity-60';
+    }
+
+    return `                <div class="card-hover p-6 bg-gray-900 rounded-2xl border border-gray-800${opacity}">
+                    <div class="text-4xl mb-4">${m.emoji}</div>
+                    <h3 class="font-bold text-lg text-white mb-1">${m.id}</h3>
+                    <p class="text-sm text-gray-500 mb-4">${escapeHtml(m.label)}</p>
+                    <div class="flex items-center gap-2 text-sm ${statusColor} font-semibold">
+                        ${statusIcon}
+                        ${statusText}
+                    </div>
+                    <div class="mt-4 h-2 bg-gray-800 rounded-full overflow-hidden">
+                        <div class="h-full ${barGradient} progress-bar" style="width: ${m.percentage}%"></div>
+                    </div>
+                </div>`;
+  }).join('\n\n');
+}
+
 // Fetch recent issues from GitHub API
 async function fetchRecentIssues() {
   try {
@@ -149,6 +249,21 @@ async function build() {
   
   let html = fs.readFileSync(templatePath, 'utf-8');
   
+  // Compute milestone progress from ROADMAP.md
+  console.log('📊 Computing milestone progress...');
+  const milestones = computeMilestoneProgress();
+  for (const m of milestones) {
+    console.log(`   ${m.id}: ${m.done}/${m.total} done (${m.percentage}%)`);
+  }
+
+  const milestonePlaceholder = '<!-- MILESTONE_CARDS_PLACEHOLDER -->';
+  if (html.includes(milestonePlaceholder)) {
+    html = html.replace(milestonePlaceholder, generateMilestoneCardsHTML(milestones));
+    console.log('   ✓ Replaced milestone cards with computed progress');
+  } else {
+    console.log('   ⚠️  No milestone placeholder found in template.html');
+  }
+
   // Fetch GitHub issues
   console.log('📥 Fetching GitHub issues...');
   const issues = await fetchRecentIssues();
