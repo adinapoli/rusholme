@@ -285,7 +285,7 @@ pub const Expr = union(enum) {
     pub fn getSpan(self: Expr) SourceSpan {
         return switch (self) {
             .Var => |q| q.span,
-            .Lit => |l| l.span,
+            .Lit => |l| l.getSpan(),
             .App => |a| a.fn_expr.getSpan().merge(a.arg_expr.getSpan()),
             .InfixApp => |a| a.left.getSpan().merge(a.right.getSpan()),
             .LeftSection => |a| a.expr.getSpan().merge(a.op.span),
@@ -364,8 +364,10 @@ pub const Pattern = union(enum) {
 
     pub fn getSpan(self: Pattern) SourceSpan {
         return switch (self) {
-            .Var, .Con, .AsPar, .Tuple, .List, .InfixCon, .NPlusK => unreachable, // TODO: Add span to these variants
-            .Lit => |l| l.span,
+            .Con => |c| c.name.span,
+            .Var => unreachable, // Simple variable patterns don't carry span (TODO)
+            .AsPar, .Tuple, .List, .InfixCon, .NPlusK => unreachable, // TODO: Add span to these variants
+            .Lit => |l| l.getSpan(),
             .Wild => |s| s,
             .Negate, .Paren, .Bang => |p| p.getSpan(),
         };

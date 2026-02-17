@@ -677,7 +677,7 @@ pub const Parser = struct {
         const name = name_tok.token.varid;
 
         // Type signature: name :: type
-        if (try self.check(.dcolon)) {
+        if (try self.check(.dcolon) or (try self.check(.consym) and std.mem.eql(u8, (try self.peek()).token.consym, "::"))) {
             _ = try self.advance(); // consume ::
             const ty = try self.parseType();
             return .{ .TypeSig = .{
@@ -1470,7 +1470,33 @@ pub const Parser = struct {
     // We use precedence climbing for the infixexp level.
 
     fn parseExpr(self: *Parser) ParseError!ast_mod.Expr {
-        return try self.parseInfixExpr(0);
+        const expr = try self.parseInfixExpr(0);
+        // Check for type annotation: expr :: type
+        if (try self.isTypeAnnotation()) {
+            return try self.parseTypeAnnotation(expr);
+        }
+        return expr;
+    }
+
+    /// Check if we're looking at a type annotation (::)
+    fn isTypeAnnotation(self: *Parser) ParseError!bool {
+        const tag = try self.peekTag();
+        if (tag == .dcolon) return true;
+        if (tag == .consym) {
+            const tok = try self.peek();
+            return std.mem.eql(u8, tok.token.consym, "::");
+        }
+        return false;
+    }
+
+    /// Parse a type annotation: expr :: Type
+    fn parseTypeAnnotation(self: *Parser, left_expr: ast_mod.Expr) ParseError!ast_mod.Expr {
+        _ = try self.advance(); // consume ::
+        const ty = try self.parseType();
+        return .{ .TypeAnn = .{
+            .expr = try self.allocNode(ast_mod.Expr, left_expr),
+            .type = ty,
+        } };
     }
 
     /// Precedence climbing for infix operators.
@@ -1580,14 +1606,127 @@ pub const Parser = struct {
             },
             .open_paren => {
                 _ = try self.advance();
+                const next_tag = try self.peekTag();
+
+                // Check for right operator section: (op expr) or (op)
+                // Right sections start with an operator
+                if (next_tag == .varsym or next_tag == .consym or next_tag == .minus) {
+                    const op_tok = try self.advance();
+                    const op_name: []const u8 = if (next_tag == .minus)
+                        "-"
+                    else switch (op_tok.token) {
+                        .varsym => |s| s,
+                        .consym => |c| c,
+                        else => unreachable,
+                    };
+
+                    // Right section with expression: (op expr)
+                    if (try self.check(.close_paren)) {
+                        _ = try self.advance();
+                        // Just the operator: (+), (+ +), etc.
+                        // This is just the operator as an expression
+                        return .{ .Var = .{ .name = op_name, .span = op_tok.span } };
+                    }
+
+                    const right_expr = try self.parseExpr();
+                    _ = try self.expect(.close_paren);
+                    return .{ .RightSection = .{
+                        .op = .{ .name = op_name, .span = op_tok.span },
+                        .expr = try self.allocNode(ast_mod.Expr, right_expr),
+                    } };
+                }
+
                 // Unit: ()
                 if (try self.check(.close_paren)) {
                     _ = try self.advance();
                     return .{ .Tuple = &.{} };
                 }
-                const inner = try self.parseExpr();
+
+                // Parse the first APP/atomic expression (not full expr, to avoid consuming infix ops for left sections)
+                var first = try self.parseAppExpr();
+
+                // Check for type annotation on the first atom: (expr :: type)
+                if (try self.isTypeAnnotation()) {
+                    first = try self.parseTypeAnnotation(first);
+                }
+
+                // Check for tuple: (a, b, c)
+                if (try self.check(.comma)) {
+                    var items: std.ArrayListUnmanaged(ast_mod.Expr) = .empty;
+                    try items.append(self.allocator, first);
+                    while (try self.match(.comma) != null) {
+                        if (try self.check(.close_paren)) {
+                            // Trailing comma
+                            break;
+                        }
+                        const item = try self.parseExpr();
+                        try items.append(self.allocator, item);
+                    }
+                    _ = try self.expect(.close_paren);
+                    return .{ .Tuple = try items.toOwnedSlice(self.allocator) };
+                }
+
+                // Check for left operator section: (expr op)
+                // by peeking ahead to see if we have operator followed by close_paren
+                const op_tag = try self.peekTag();
+                if (op_tag == .varsym or op_tag == .consym or op_tag == .minus) {
+                    const after_op = try self.peekAt(1);
+                    if (after_op.token == .close_paren) {
+                        // It's a left section: (expr op)
+                        const op_tok = try self.advance();
+                        const op_name: []const u8 = if (op_tag == .minus)
+                            "-"
+                        else switch (op_tok.token) {
+                            .varsym => |s| s,
+                            .consym => |c| c,
+                            else => unreachable,
+                        };
+                        _ = try self.expect(.close_paren);
+                        return .{ .LeftSection = .{
+                            .expr = try self.allocNode(ast_mod.Expr, first),
+                            .op = .{ .name = op_name, .span = op_tok.span },
+                        } };
+                    }
+                }
+
+                // Handle infix expressions in parentheses: (a + b)
+                // Now parse the full infix expression starting with `first`
+                var result = first;
+                while (true) {
+                    const infix_tag = try self.peekTag();
+                    const is_sym = (infix_tag == .varsym or infix_tag == .consym);
+                    const is_minus = (infix_tag == .minus);
+                    if (!is_sym and !is_minus) break;
+
+                    const op_tok = try self.peek();
+                    const op_name: []const u8 = if (is_minus)
+                        "-"
+                    else switch (op_tok.token) {
+                        .varsym => |s| s,
+                        .consym => |c| c,
+                        else => unreachable,
+                    };
+
+                    _ = try self.advance();
+                    const rhs = try self.parseAppExpr();
+
+                    // Check for type annotation after rhs
+                    const final_rhs = if (try self.isTypeAnnotation())
+                        try self.parseTypeAnnotation(rhs)
+                    else
+                        rhs;
+
+                    const lhs_node = try self.allocNode(ast_mod.Expr, result);
+                    const rhs_node = try self.allocNode(ast_mod.Expr, final_rhs);
+                    result = .{ .InfixApp = .{
+                        .left = lhs_node,
+                        .op = .{ .name = op_name, .span = op_tok.span },
+                        .right = rhs_node,
+                    } };
+                }
+
                 _ = try self.expect(.close_paren);
-                return .{ .Paren = try self.allocNode(ast_mod.Expr, inner) };
+                return .{ .Paren = try self.allocNode(ast_mod.Expr, result) };
             },
             .open_bracket => {
                 _ = try self.advance();
@@ -1610,8 +1749,180 @@ pub const Parser = struct {
                 const inner = try self.parseAtomicExpr();
                 return .{ .Negate = try self.allocNode(ast_mod.Expr, inner) };
             },
+            .backslash => return try self.parseLambda(),
+            .kw_if => return try self.parseIf(),
+            .kw_let => return try self.parseLet(),
+            .kw_case => return try self.parseCase(),
+            .kw_do => return try self.parseDo(),
             else => return null,
         }
+    }
+
+    /// Parse a lambda expression: \x y z -> x + y + z
+    fn parseLambda(self: *Parser) ParseError!ast_mod.Expr {
+        _ = try self.expect(.backslash);
+        var pats: std.ArrayListUnmanaged(ast_mod.Pattern) = .empty;
+        while (!try self.check(.arrow_right)) {
+            const name_tok = try self.expect(.varid);
+            // Lambda patterns are only simple variable patterns
+            try pats.append(self.allocator, .{ .Var = name_tok.token.varid });
+        }
+        _ = try self.expect(.arrow_right);
+        const body = try self.parseExpr();
+        return .{ .Lambda = .{
+            .patterns = try pats.toOwnedSlice(self.allocator),
+            .body = try self.allocNode(ast_mod.Expr, body),
+        } };
+    }
+
+    /// Parse an if expression: if cond then true_expr else false_expr
+    fn parseIf(self: *Parser) ParseError!ast_mod.Expr {
+        _ = try self.expect(.kw_if);
+        const condition = try self.parseExpr();
+        _ = try self.expect(.kw_then);
+        const then_expr = try self.parseExpr();
+        _ = try self.expect(.kw_else);
+        const else_expr = try self.parseExpr();
+        return .{ .If = .{
+            .condition = try self.allocNode(ast_mod.Expr, condition),
+            .then_expr = try self.allocNode(ast_mod.Expr, then_expr),
+            .else_expr = try self.allocNode(ast_mod.Expr, else_expr),
+        } };
+    }
+
+    /// Parse a let expression: let x = 1; y = 2 in x + y
+    fn parseLet(self: *Parser) ParseError!ast_mod.Expr {
+        _ = try self.expect(.kw_let);
+
+        // Handle explicit or virtual open brace for let bindings
+        if (try self.check(.open_brace) or try self.check(.v_open_brace)) {
+            _ = try self.advance(); // consume { or virtual {
+            var binds: std.ArrayListUnmanaged(ast_mod.Decl) = .empty;
+            while (true) {
+                if (try self.check(.close_brace) or try self.check(.v_close_brace)) {
+                    _ = try self.advance(); // consume } or virtual }
+                    break;
+                }
+                if (try self.atEnd()) break;
+                const decl = try self.parseTopDecl() orelse break;
+                try binds.append(self.allocator, decl);
+                while (try self.matchSemi()) {}
+            }
+            _ = try self.expect(.kw_in);
+            const body = try self.parseExpr();
+            return .{ .Let = .{
+                .binds = try binds.toOwnedSlice(self.allocator),
+                .body = try self.allocNode(ast_mod.Expr, body),
+            } };
+        } else {
+            // Single binding without braces: let x = 1 in x + 1
+            const decl = try self.parseTopDecl() orelse {
+                const got = try self.peek();
+                try self.emitErrorMsg(got.span, "expected let binding");
+                return error.UnexpectedToken;
+            };
+            var binds: std.ArrayListUnmanaged(ast_mod.Decl) = .empty;
+            try binds.append(self.allocator, decl);
+            _ = try self.expect(.kw_in);
+            const body = try self.parseExpr();
+            return .{ .Let = .{
+                .binds = try binds.toOwnedSlice(self.allocator),
+                .body = try self.allocNode(ast_mod.Expr, body),
+            } };
+        }
+    }
+
+    /// Parse a case expression: case x of { 0 -> "zero"; _ -> "other" }
+    fn parseCase(self: *Parser) ParseError!ast_mod.Expr {
+        _ = try self.expect(.kw_case);
+        const scrutinee = try self.parseExpr();
+        _ = try self.expect(.kw_of);
+        _ = try self.expectOpenBrace();
+        var alts: std.ArrayListUnmanaged(ast_mod.Alt) = .empty;
+        const first_alt = try self.parseAlt();
+        try alts.append(self.allocator, first_alt);
+        while (try self.match(.semi) != null) {
+            if (try self.tryParseAlt()) |alt| {
+                try alts.append(self.allocator, alt);
+            } else {
+                // Allow trailing semicolon
+                break;
+            }
+        }
+        _ = try self.expectCloseBrace();
+        return .{ .Case = .{
+            .scrutinee = try self.allocNode(ast_mod.Expr, scrutinee),
+            .alts = try alts.toOwnedSlice(self.allocator),
+        } };
+    }
+
+    /// Parse a single case alternative: pattern -> expr where binds
+    fn parseAlt(self: *Parser) ParseError!ast_mod.Alt {
+        const pat = try self.parsePattern();
+        const arrow_tok = try self.expect(.arrow_right);
+        const start = pat.getSpan().merge(arrow_tok.span);
+        const rhs = try self.parseRhs();
+        return .{
+            .pattern = pat,
+            .rhs = rhs,
+            .where_clause = null,
+            .span = start,
+        };
+    }
+
+    /// Try to parse a case alternative without error
+    fn tryParseAlt(self: *Parser) ParseError!?ast_mod.Alt {
+        if (try self.isPatternStart()) {
+            return try self.parseAlt();
+        }
+        return null;
+    }
+
+    /// Parse do notation: do { x <- action; return x }
+    fn parseDo(self: *Parser) ParseError!ast_mod.Expr {
+        _ = try self.expect(.kw_do);
+        _ = try self.expectOpenBrace();
+        var stmts: std.ArrayListUnmanaged(ast_mod.Stmt) = .empty;
+
+        while (true) {
+            if (try self.isExprStart()) {
+                // Could be a bind or a plain expression
+                const expr = try self.parseExpr();
+                // Check if it's a bind: pattern <- action
+                if (try self.check(.arrow_left)) {
+                    _ = try self.advance();
+                    const action = try self.parseExpr();
+                    // Extract pattern from the expression (should be a variable)
+                    const binding_pat: ast_mod.Pattern = switch (expr) {
+                        .Var => |q| .{ .Var = q.name },
+                        else => {
+                            try self.emitErrorMsg(expr.getSpan(), "bind pattern must be a variable");
+                            return error.InvalidSyntax;
+                        },
+                    };
+                    const gen = ast_mod.Stmt{ .Generator = .{ .pat = binding_pat, .expr = action } };
+                    try stmts.append(self.allocator, gen);
+                } else {
+                    try stmts.append(self.allocator, .{ .Stmt = expr });
+                }
+                _ = try self.match(.semi);
+            } else {
+                break;
+            }
+        }
+        _ = try self.expectCloseBrace();
+        return .{ .Do = try stmts.toOwnedSlice(self.allocator) };
+    }
+
+    /// Check if current token could start an expression
+    fn isExprStart(self: *Parser) ParseError!bool {
+        const tag = try self.peekTag();
+        return switch (tag) {
+            .varid, .conid, .lit_integer, .lit_float, .lit_string, .lit_char,
+            .open_paren, .open_bracket, .minus, .backslash,
+            .kw_if, .kw_let, .kw_case, .kw_do => true,
+            else => false,
+        };
     }
 
     // ── Pattern parsing ─────────────────────────────────────────────────
@@ -2141,13 +2452,17 @@ fn parseTestExpr(
     var lexer = Lexer.init(allocator, full, 1);
     var layout = LayoutProcessor.init(allocator, &lexer);
     var diags = DiagnosticCollector.init();
-    _ = &diags;
     var parser = Parser.init(allocator, &layout, &diags) catch |err| switch (err) {
         error.OutOfMemory => @panic("OOM in parseTestExpr"),
         error.UnexpectedToken, error.UnexpectedEOF, error.InvalidSyntax => @panic("parse error in parseTestExpr"),
     };
     const mod = try parser.parseModule();
+
     const decl = mod.declarations[0];
+    if (decl != .FunBind) {
+        @panic("parseTestExpr: Expected FunBind");
+    }
+
     const rhs = decl.FunBind.equations[0].rhs;
     return rhs.UnGuarded;
 }
@@ -2602,3 +2917,69 @@ test "type: constraint with type application" {
     // The main type is a function type: f a -> b
     try std.testing.expect(ty.Forall.type.* == .Fun);
 }
+
+// ── Expression tests (Issue #30) ───────────────────────────────────────────
+
+test "expr: lambda with single parameter" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const expr = try parseTestExpr(&arena, "x = \\y -> y + 1");
+    try std.testing.expect(expr == .Lambda);
+    try std.testing.expectEqual(1, expr.Lambda.patterns.len);
+    try std.testing.expectEqualStrings("y", expr.Lambda.patterns[0].Var);
+    try std.testing.expect(expr.Lambda.body.* == .InfixApp);
+}
+
+test "expr: lambda with multiple parameters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const expr = try parseTestExpr(&arena, "x = \\a b c -> a + b + c");
+    try std.testing.expect(expr == .Lambda);
+    try std.testing.expectEqual(3, expr.Lambda.patterns.len);
+    try std.testing.expectEqualStrings("a", expr.Lambda.patterns[0].Var);
+    try std.testing.expectEqualStrings("b", expr.Lambda.patterns[1].Var);
+    try std.testing.expectEqualStrings("c", expr.Lambda.patterns[2].Var);
+}
+
+test "expr: if then else" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const expr = try parseTestExpr(&arena, "x = if True then 1 else 0");
+    try std.testing.expect(expr == .If);
+    try std.testing.expect(expr.If.condition.* == .Var);
+    try std.testing.expect(expr.If.then_expr.* == .Lit);
+    try std.testing.expect(expr.If.else_expr.* == .Lit);
+}
+
+test "expr: do notation with binding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const expr = try parseTestExpr(&arena, "x = do { y <- action; return y }");
+    try std.testing.expect(expr == .Do);
+    try std.testing.expectEqual(2, expr.Do.len);
+    try std.testing.expect(expr.Do[0] == .Generator);
+    try std.testing.expectEqualStrings("y", expr.Do[0].Generator.pat.Var);
+}
+
+test "expr: tuple expression" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const expr = try parseTestExpr(&arena, "x = (1, 2, 3)");
+    try std.testing.expect(expr == .Tuple);
+    try std.testing.expectEqual(3, expr.Tuple.len);
+}
+
+test "expr: tuple with trailing comma" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const expr = try parseTestExpr(&arena, "x = (1, 2, )");
+    try std.testing.expect(expr == .Tuple);
+    try std.testing.expectEqual(2, expr.Tuple.len);
+}
+
