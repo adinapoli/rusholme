@@ -137,6 +137,9 @@ pub const ConDecl = struct {
     fields: []const FieldDecl,
     doc_comment: ?[]const u8 = null,
     span: SourceSpan,
+    // GADT-style explicit type annotation: Con :: Type
+    // Simple GADT form only - full existential variables not yet supported
+    gadt_type: ?Type = null,
 };
 
 pub const FieldDecl = union(enum) {
