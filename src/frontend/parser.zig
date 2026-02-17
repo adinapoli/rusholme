@@ -46,12 +46,20 @@ pub const Parser = struct {
     /// Span of the last successfully consumed token.
     last_span: SourceSpan,
 
+    /// Fixity environment for operator precedence parsing.
+    /// Maps operator names to their precedence and associativity.
+    /// Keys are owned (heap-duped) strings freed on deinit.
+    fixity_env: std.StringHashMap(ast_mod.FixityInfo),
+
+    /// Default fixity for operators without a declaration (Haskell 2010 §4.4.2).
+    const default_fixity = ast_mod.FixityInfo{ .precedence = 9, .fixity = .InfixL };
+
     pub fn init(
         allocator: std.mem.Allocator,
         layout: *LayoutProcessor,
         diagnostics: *DiagnosticCollector,
-    ) Parser {
-        return .{
+    ) ParseError!Parser {
+        var parser = Parser{
             .allocator = allocator,
             .layout = layout,
             .diagnostics = diagnostics,
@@ -59,14 +67,89 @@ pub const Parser = struct {
                 SourcePos.init(1, 1, 1),
                 SourcePos.init(1, 1, 1),
             ),
+            .fixity_env = std.StringHashMap(ast_mod.FixityInfo).init(allocator),
         };
+
+        try parser.initBuiltInFixities();
+
+        return parser;
     }
 
     pub fn deinit(self: *Parser) void {
+        var it = self.fixity_env.keyIterator();
+        while (it.next()) |key| {
+            self.allocator.free(key.*);
+        }
+        self.fixity_env.deinit();
+
         for (self.lookahead.items) |tok| {
             tok.token.deinit(self.allocator);
         }
         self.lookahead.deinit(self.allocator);
+    }
+
+    // ── Fixity environment ─────────────────────────────────────────────
+
+    /// Haskell 2010 Prelude fixity declarations (Report §9, PreludeList).
+    fn initBuiltInFixities(self: *Parser) ParseError!void {
+        // infixr 9  .
+        try self.registerFixity(".", .InfixR, 9);
+        // infixl 9  !!
+        try self.registerFixity("!!", .InfixL, 9);
+        // infixr 8  ^, ^^, **
+        try self.registerFixity("^", .InfixR, 8);
+        try self.registerFixity("^^", .InfixR, 8);
+        try self.registerFixity("**", .InfixR, 8);
+        // infixl 7  *, /
+        try self.registerFixity("*", .InfixL, 7);
+        try self.registerFixity("/", .InfixL, 7);
+        // infixl 6  +, -
+        try self.registerFixity("+", .InfixL, 6);
+        try self.registerFixity("-", .InfixL, 6);
+        // infixr 5  :, ++
+        try self.registerFixity(":", .InfixR, 5);
+        try self.registerFixity("++", .InfixR, 5);
+        // infix  4  ==, /=, <, <=, >=, >
+        try self.registerFixity("==", .InfixN, 4);
+        try self.registerFixity("/=", .InfixN, 4);
+        try self.registerFixity("<", .InfixN, 4);
+        try self.registerFixity("<=", .InfixN, 4);
+        try self.registerFixity(">", .InfixN, 4);
+        try self.registerFixity(">=", .InfixN, 4);
+        // infixr 3  &&
+        try self.registerFixity("&&", .InfixR, 3);
+        // infixr 2  ||
+        try self.registerFixity("||", .InfixR, 2);
+        // infixl 1  >>, >>=
+        try self.registerFixity(">>", .InfixL, 1);
+        try self.registerFixity(">>=", .InfixL, 1);
+        // infixr 1  =<<
+        try self.registerFixity("=<<", .InfixR, 1);
+        // infixr 0  $, $!
+        try self.registerFixity("$", .InfixR, 0);
+        try self.registerFixity("$!", .InfixR, 0);
+    }
+
+    /// Register an operator's fixity in the environment.
+    /// If the operator already exists, the old entry is replaced and its
+    /// heap-duped key is freed.
+    fn registerFixity(self: *Parser, op: []const u8, fixity: ast_mod.Fixity, precedence: u8) ParseError!void {
+        const info = ast_mod.FixityInfo{ .precedence = precedence, .fixity = fixity };
+
+        // If the key already exists, free the old key and reuse the slot.
+        if (self.fixity_env.getEntry(op)) |entry| {
+            entry.value_ptr.* = info;
+            return;
+        }
+
+        const key = try self.allocator.dupe(u8, op);
+        errdefer self.allocator.free(key);
+        try self.fixity_env.put(key, info);
+    }
+
+    /// Look up fixity for an operator. Returns null if not registered.
+    fn getFixity(self: *Parser, op: []const u8) ?ast_mod.FixityInfo {
+        return self.fixity_env.get(op);
     }
 
     // ── Lookahead ──────────────────────────────────────────────────────
@@ -934,31 +1017,26 @@ pub const Parser = struct {
             prec = @intCast(@min(9, @max(0, prec_tok.token.lit_integer)));
         }
 
-        // Parse operator names
-        var ops: std.ArrayListUnmanaged([]const u8) = .empty;
+        // Parse operator names and register them in the fixity environment.
         while (true) {
             const tag = try self.peekTag();
-            if (tag == .varsym) {
-                const op = try self.advance();
-                try ops.append(self.allocator, op.token.varsym);
-            } else if (tag == .consym) {
-                const op = try self.advance();
-                try ops.append(self.allocator, op.token.consym);
-            } else if (tag == .varid) {
-                // backtick operator: `mod`
-                const op = try self.advance();
-                try ops.append(self.allocator, op.token.varid);
-            } else {
+            const op_name: []const u8 = if (tag == .varsym)
+                (try self.advance()).token.varsym
+            else if (tag == .consym)
+                (try self.advance()).token.consym
+            else if (tag == .varid)
+                (try self.advance()).token.varid
+            else
                 break;
-            }
+
+            try self.registerFixity(op_name, fixity, prec);
+
             if (try self.match(.comma) == null) break;
         }
 
-        // FixityDecl is not a Decl variant, so skip for now
-        // TODO: Add FixityDecl to Decl union or handle separately
+        // Fixity declarations are parser metadata; they don't produce AST nodes.
+        // TODO: Add FixityDecl to Decl union when needed for pretty-printing.
         _ = start;
-        _ = fixity;
-        self.allocator.free(try ops.toOwnedSlice(self.allocator));
         return null;
     }
 
@@ -1057,14 +1135,79 @@ pub const Parser = struct {
         }
     }
 
-    // ── Minimal expression parsing ─────────────────────────────────────
-    // (Full expression parsing is issue #30; this is enough for bindings)
+    // ── Expression parsing ───────────────────────────────────────────
+    //
+    // Grammar hierarchy (Haskell 2010 §3):
+    //   exp      → infixexp                  (top level)
+    //   infixexp → lexp (qop lexp)*          (infix operators, prec 0–9)
+    //   lexp     → fexp                      (lambda/let/case/if/do are issue #30)
+    //   fexp     → aexp (aexp)*              (function application, highest prec)
+    //   aexp     → var | con | lit | (exp) | [exp,…] | …
+    //
+    // We use precedence climbing for the infixexp level.
 
     fn parseExpr(self: *Parser) ParseError!ast_mod.Expr {
-        return try self.parseExprApp();
+        return try self.parseInfixExpr(0);
     }
 
-    fn parseExprApp(self: *Parser) ParseError!ast_mod.Expr {
+    /// Precedence climbing for infix operators.
+    ///
+    /// At each level, first parses a function-application chain (fexp),
+    /// then looks for infix operators (varsym, consym, or binary minus)
+    /// and builds `InfixApp` nodes respecting precedence and associativity.
+    fn parseInfixExpr(self: *Parser, min_prec: u8) ParseError!ast_mod.Expr {
+        var lhs = try self.parseAppExpr();
+
+        while (true) {
+            const tag = try self.peekTag();
+
+            // Operators are varsym, consym, or the distinguished minus token.
+            const is_sym = (tag == .varsym or tag == .consym);
+            const is_minus = (tag == .minus);
+            if (!is_sym and !is_minus) break;
+
+            const op_tok = try self.peek();
+            const op_name: []const u8 = if (is_minus)
+                "-"
+            else switch (op_tok.token) {
+                .varsym => |s| s,
+                .consym => |c| c,
+                else => unreachable,
+            };
+
+            // Look up fixity; unknown operators default to infixl 9.
+            const info = self.getFixity(op_name) orelse default_fixity;
+
+            if (info.precedence < min_prec) break;
+
+            // Non-associative operators at min_prec cannot chain:
+            // e.g. `a == b == c` is a parse error.
+            if (info.fixity == .InfixN and info.precedence == min_prec and min_prec > 0) break;
+
+            const next_prec: u8 = switch (info.fixity) {
+                .InfixL, .InfixN => info.precedence + 1,
+                .InfixR => info.precedence,
+            };
+
+            // Consume operator.
+            _ = try self.advance();
+
+            const rhs = try self.parseInfixExpr(next_prec);
+
+            const lhs_node = try self.allocNode(ast_mod.Expr, lhs);
+            const rhs_node = try self.allocNode(ast_mod.Expr, rhs);
+            lhs = .{ .InfixApp = .{
+                .left = lhs_node,
+                .op = .{ .name = op_name, .span = op_tok.span },
+                .right = rhs_node,
+            } };
+        }
+
+        return lhs;
+    }
+
+    /// Parse a function application chain: `f x y z` → App(App(App(f, x), y), z).
+    fn parseAppExpr(self: *Parser) ParseError!ast_mod.Expr {
         var func = try self.parseAtomicExpr();
 
         while (true) {
@@ -1437,7 +1580,10 @@ fn initTestParser(
     lexer.* = Lexer.init(allocator, source, 1);
     layout.* = LayoutProcessor.init(allocator, lexer);
     diags.* = DiagnosticCollector.init();
-    return Parser.init(allocator, layout, diags);
+    return Parser.init(allocator, layout, diags) catch |err| switch (err) {
+        error.OutOfMemory => @panic("OOM in initTestParser"),
+        error.UnexpectedToken, error.UnexpectedEOF, error.InvalidSyntax => @panic("parse error in initTestParser"),
+    };
 }
 
 test "Parser.peek returns current token without consuming" {
@@ -1656,4 +1802,213 @@ test "Parser.checkSemi detects virtual semicolons" {
     _ = try parser.advance(); // x
     // Next should be a virtual semicolon
     try std.testing.expect(try parser.checkSemi());
+}
+
+// ── Infix expression tests ─────────────────────────────────────────
+
+/// Helper: parse `module M where\n<source>` and return the RHS expression
+/// of the first FunBind declaration. Uses an ArenaAllocator wrapping
+/// std.testing.allocator so all AST nodes are freed automatically.
+fn parseTestExpr(
+    arena: *std.heap.ArenaAllocator,
+    source: []const u8,
+) !ast_mod.Expr {
+    const allocator = arena.allocator();
+    const full = try std.fmt.allocPrint(allocator, "module M where\n{s}", .{source});
+    var lexer = Lexer.init(allocator, full, 1);
+    var layout = LayoutProcessor.init(allocator, &lexer);
+    var diags = DiagnosticCollector.init();
+    _ = &diags;
+    var parser = Parser.init(allocator, &layout, &diags) catch |err| switch (err) {
+        error.OutOfMemory => @panic("OOM in parseTestExpr"),
+        error.UnexpectedToken, error.UnexpectedEOF, error.InvalidSyntax => @panic("parse error in parseTestExpr"),
+    };
+    const mod = try parser.parseModule();
+    const decl = mod.declarations[0];
+    const rhs = decl.FunBind.equations[0].rhs;
+    return rhs.UnGuarded;
+}
+
+test "infix: precedence — 1 + 2 * 3 parses as 1 + (2 * 3)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const top = try parseTestExpr(&arena, "x = 1 + 2 * 3");
+
+    // Top level: InfixApp(1, +, InfixApp(2, *, 3))
+    try std.testing.expect(top == .InfixApp);
+    try std.testing.expectEqualStrings("+", top.InfixApp.op.name);
+
+    // Left: literal 1
+    try std.testing.expect(top.InfixApp.left.* == .Lit);
+
+    // Right: InfixApp(2, *, 3)
+    const right = top.InfixApp.right.*;
+    try std.testing.expect(right == .InfixApp);
+    try std.testing.expectEqualStrings("*", right.InfixApp.op.name);
+}
+
+test "infix: left associativity — 1 + 2 + 3 parses as (1 + 2) + 3" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const top = try parseTestExpr(&arena, "x = 1 + 2 + 3");
+
+    // Top: InfixApp(InfixApp(1, +, 2), +, 3)
+    try std.testing.expect(top == .InfixApp);
+    try std.testing.expectEqualStrings("+", top.InfixApp.op.name);
+
+    // Right: literal 3
+    try std.testing.expect(top.InfixApp.right.* == .Lit);
+
+    // Left: InfixApp(1, +, 2)
+    const left = top.InfixApp.left.*;
+    try std.testing.expect(left == .InfixApp);
+    try std.testing.expectEqualStrings("+", left.InfixApp.op.name);
+}
+
+test "infix: right associativity — a ++ b ++ c parses as a ++ (b ++ c)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const top = try parseTestExpr(&arena, "x = a ++ b ++ c");
+
+    // Top: InfixApp(a, ++, InfixApp(b, ++, c))
+    try std.testing.expect(top == .InfixApp);
+    try std.testing.expectEqualStrings("++", top.InfixApp.op.name);
+
+    // Left: Var "a"
+    try std.testing.expect(top.InfixApp.left.* == .Var);
+
+    // Right: InfixApp(b, ++, c)
+    const right = top.InfixApp.right.*;
+    try std.testing.expect(right == .InfixApp);
+    try std.testing.expectEqualStrings("++", right.InfixApp.op.name);
+}
+
+test "infix: mixed precedence — 1 + 2 * 3 + 4 parses as (1 + (2 * 3)) + 4" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const top = try parseTestExpr(&arena, "x = 1 + 2 * 3 + 4");
+
+    // Top: InfixApp(InfixApp(1, +, InfixApp(2, *, 3)), +, 4)
+    try std.testing.expect(top == .InfixApp);
+    try std.testing.expectEqualStrings("+", top.InfixApp.op.name);
+
+    // Right: literal 4
+    try std.testing.expect(top.InfixApp.right.* == .Lit);
+
+    // Left: InfixApp(1, +, InfixApp(2, *, 3))
+    const left = top.InfixApp.left.*;
+    try std.testing.expect(left == .InfixApp);
+    try std.testing.expectEqualStrings("+", left.InfixApp.op.name);
+    try std.testing.expect(left.InfixApp.right.* == .InfixApp);
+    try std.testing.expectEqualStrings("*", left.InfixApp.right.InfixApp.op.name);
+}
+
+test "infix: function application binds tighter — f x + g y" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const top = try parseTestExpr(&arena, "z = f x + g y");
+
+    // Top: InfixApp(App(f, x), +, App(g, y))
+    try std.testing.expect(top == .InfixApp);
+    try std.testing.expectEqualStrings("+", top.InfixApp.op.name);
+
+    // Left: App(f, x)
+    try std.testing.expect(top.InfixApp.left.* == .App);
+
+    // Right: App(g, y)
+    try std.testing.expect(top.InfixApp.right.* == .App);
+}
+
+test "infix: dollar has lowest precedence — f $ x + y" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const top = try parseTestExpr(&arena, "z = f $ x + y");
+
+    // Top: InfixApp(f, $, InfixApp(x, +, y))
+    try std.testing.expect(top == .InfixApp);
+    try std.testing.expectEqualStrings("$", top.InfixApp.op.name);
+
+    // Left: Var "f"
+    try std.testing.expect(top.InfixApp.left.* == .Var);
+
+    // Right: InfixApp(x, +, y)
+    const right = top.InfixApp.right.*;
+    try std.testing.expect(right == .InfixApp);
+    try std.testing.expectEqualStrings("+", right.InfixApp.op.name);
+}
+
+test "infix: negation as prefix — -x binds as Negate" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const top = try parseTestExpr(&arena, "z = -x");
+
+    // Top: Negate(Var "x")
+    try std.testing.expect(top == .Negate);
+    try std.testing.expect(top.Negate.* == .Var);
+}
+
+test "infix: unknown operator defaults to infixl 9" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const top = try parseTestExpr(&arena, "z = a <+> b");
+
+    // Top: InfixApp(a, <+>, b)
+    try std.testing.expect(top == .InfixApp);
+    try std.testing.expectEqualStrings("<+>", top.InfixApp.op.name);
+}
+
+test "infix: parenthesized subexpression — (1 + 2) * 3" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const top = try parseTestExpr(&arena, "x = (1 + 2) * 3");
+
+    // Top: InfixApp(Paren(InfixApp(1, +, 2)), *, 3)
+    try std.testing.expect(top == .InfixApp);
+    try std.testing.expectEqualStrings("*", top.InfixApp.op.name);
+
+    // Left: Paren
+    try std.testing.expect(top.InfixApp.left.* == .Paren);
+    // Inside paren: InfixApp(1, +, 2)
+    const inner = top.InfixApp.left.Paren.*;
+    try std.testing.expect(inner == .InfixApp);
+    try std.testing.expectEqualStrings("+", inner.InfixApp.op.name);
+}
+
+test "infix: exponentiation is right-assoc prec 8 — 2 ^ 3 ^ 4" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const top = try parseTestExpr(&arena, "x = 2 ^ 3 ^ 4");
+
+    // Top: InfixApp(2, ^, InfixApp(3, ^, 4)) — right-assoc
+    try std.testing.expect(top == .InfixApp);
+    try std.testing.expectEqualStrings("^", top.InfixApp.op.name);
+    try std.testing.expect(top.InfixApp.left.* == .Lit);
+    const right = top.InfixApp.right.*;
+    try std.testing.expect(right == .InfixApp);
+    try std.testing.expectEqualStrings("^", right.InfixApp.op.name);
+}
+
+test "infix: exponentiation binds tighter than multiply — 2 * 3 ^ 4" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const top = try parseTestExpr(&arena, "x = 2 * 3 ^ 4");
+
+    // Top: InfixApp(2, *, InfixApp(3, ^, 4))
+    try std.testing.expect(top == .InfixApp);
+    try std.testing.expectEqualStrings("*", top.InfixApp.op.name);
+    try std.testing.expect(top.InfixApp.left.* == .Lit);
+    const right = top.InfixApp.right.*;
+    try std.testing.expect(right == .InfixApp);
+    try std.testing.expectEqualStrings("^", right.InfixApp.op.name);
 }
