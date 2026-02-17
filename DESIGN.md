@@ -343,3 +343,5 @@ comptime when the concrete allocator type is known).
 | 23 | Runtime system written in Zig | Single language for entire project; leverages Zig's C interop | 2026-02-15 |
 | 24 | Tree-walking interpreter before codegen | Validate frontend pipeline before tackling backend complexity | 2026-02-15 |
 | 25 | GitHub Actions CI via Nix flake | Reproducible builds from the start | 2026-02-15 |
+
+| 26 | Stress-test parser with real Haskell code (Epic #11) | After Epic #4 completion, incrementally test GHC test programs to (1) drive golden test infrastructure, (2) discover parser gaps → new issues under Epic #4, (3) improve error diagnostics, and (4) build CLI parse-checker interface | 2026-02-17 |

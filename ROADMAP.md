@@ -51,7 +51,7 @@
 | [#62](https://github.com/adinapoli/rusholme/issues/62) | Set up Zig test harness and project test structure | — | :green_circle: |
 | [#63](https://github.com/adinapoli/rusholme/issues/63) | Implement golden/snapshot test runner | [#62](https://github.com/adinapoli/rusholme/issues/62) | :white_circle: |
 | [#64](https://github.com/adinapoli/rusholme/issues/64) | Implement end-to-end test runner (compile + run + check stdout) | [#63](https://github.com/adinapoli/rusholme/issues/63) | :white_circle: |
-| [#65](https://github.com/adinapoli/rusholme/issues/65) | Research and import simple test programs from GHC's testsuite | [#63](https://github.com/adinapoli/rusholme/issues/63) | :white_circle: |
+| [#65](https://github.com/adinapoli/rusholme/issues/65) | Research and import simple test programs from GHC's testsuite | [#63](https://github.com/adinapoli/rusholme/issues/63) | :yellow_circle: |
 
 ### Epic [#106](https://github.com/adinapoli/rusholme/issues/106): Zero-Leak Compiler
 
@@ -89,6 +89,14 @@
 | [#32](https://github.com/adinapoli/rusholme/issues/32) | Implement parser: type expressions | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
 | [#33](https://github.com/adinapoli/rusholme/issues/33) | Implement parser: class and instance declarations, deriving | [#29](https://github.com/adinapoli/rusholme/issues/29), [#32](https://github.com/adinapoli/rusholme/issues/32) | :green_circle: |
 | [#82](https://github.com/adinapoli/rusholme/issues/82) | #23: Define lexer token types for Haskell | — | :green_circle: |
+| [#133](https://github.com/adinapoli/rusholme/issues/133) | Implement parser: list literals | [#29](https://github.com/adinapoli/rusholme/issues/29) | :white_circle: |
+| [#134](https://github.com/adinapoli/rusholme/issues/134) | Implement parser: tuple types and expressions | [#29](https://github.com/adinapoli/rusholme/issues/29) | :white_circle: |
+| [#135](https://github.com/adinapoli/rusholme/issues/135) | Implement parser: record syntax | [#29](https://github.com/adinapoli/rusholme/issues/29) | :white_circle: |
+| [#136](https://github.com/adinapoli/rusholme/issues/136) | Implement parser: list comprehensions | [#29](https://github.com/adinapoli/rusholme/issues/29), [#133](https://github.com/adinapoli/rusholme/issues/133) | :white_circle: |
+| [#137](https://github.com/adinapoli/rusholme/issues/137) | Implement parser: type operators | [#29](https://github.com/adinapoli/rusholme/issues/29), [#32](https://github.com/adinapoli/rusholme/issues/32) | :white_circle: |
+| [#138](https://github.com/adinapoli/rusholme/issues/138) | Implement parser: bang patterns | [#29](https://github.com/adinapoli/rusholme/issues/29), [#31](https://github.com/adinapoli/rusholme/issues/31) | :white_circle: |
+| [#139](https://github.com/adinapoli/rusholme/issues/139) | Implement parser: field selectors | [#29](https://github.com/adinapoli/rusholme/issues/29), [#135](https://github.com/adinapoli/rusholme/issues/135) | :white_circle: |
+| [#140](https://github.com/adinapoli/rusholme/issues/140) | Implement parser: overloaded literals | [#29](https://github.com/adinapoli/rusholme/issues/29), [#32](https://github.com/adinapoli/rusholme/issues/32) | :white_circle: |
 
 ### Research: Cross-cutting Decisions
 
