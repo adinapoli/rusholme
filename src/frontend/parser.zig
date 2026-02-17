@@ -1040,25 +1040,348 @@ pub const Parser = struct {
         return null;
     }
 
-    // ── Minimal type parsing ───────────────────────────────────────────
-    // (Full type parsing is issue #32; this is enough for declarations)
+    // ── Type parsing ───────────────────────────────────────────────────
+    // (Issue #32: Type expressions)
 
+    /// Parse a complete type, including optional forall quantification
+    /// and type class constraints.
+    ///
+    /// Grammar:
+    ///   type        -> forall . type | context=> type | ty
+    ///   forall      -> forall tyvars . type
+    ///   context     -> ( constraints ) => | constraint =>
+    ///   constraints -> constraint , constraints | constraint
+    ///   constraint  -> qtycon tyvar_1 ... tyvar_n | ( type )
+    ///   ty          -> tyapps (-> ty)*
+    ///   tyapps      -> tyapp tyapp*
+    ///   tyapp       -> atype
+    ///   atype       -> gtycon | tyvar | ( ty ) | ( tys ) | [ ty ]
+    ///   tys         -> ty , tys | ty
+    ///
+    /// Precedence:
+    ///   forall:   outermost, binds over context
+    ///   context:  binds over -> and type application
+    ///   function: right-associative, lowest precedence in type expressions
+    ///   app:      left-associative
     fn parseType(self: *Parser) ParseError!ast_mod.Type {
+        // forall quantification: forall a b. Type
+        if (try self.check(.kw_forall)) {
+            return try self.parseForall();
+        }
+
+        // context: (Eq a, Show a) => Type OR Eq a => Type
+        // Check for parenthesized context first
+        if (try self.parseContextOptional()) |ctx| {
+            // Consumed the context and =>, now parse the type
+            const ty = try self.parseTy();
+            return .{
+                .Forall = .{
+                    .tyvars = &.{},
+                    .context = ctx,
+                    .type = try self.allocNode(ast_mod.Type, ty),
+                },
+            };
+        }
+
+        // Check for single constraint without parentheses: Eq a => Type
+        if (try self.check(.conid)) {
+            // This might be a context: ConId => Type
+            // Use lookahead to see if after the conid and types we see =>
+            if (try self.lookaheadForSingleContextConstraint()) {
+                return try self.parseSingleContextType();
+            }
+        }
+
+        return try self.parseTy();
+    }
+
+    /// Look ahead to check if we have a single constraint context: ConId ... =>
+    fn lookaheadForSingleContextConstraint(self: *Parser) ParseError!bool {
+        // Current token is conid (already checked by caller)
+        // Peek ahead: conid + types + =>
+        var offset: u32 = 1;
+
+        // Skip past type applications (conid, varid, or parenthesized types)
+        while (true) {
+            const tok = try self.peekAt(offset);
+            offset += 1;
+            switch (std.meta.activeTag(tok.token)) {
+                .varid => {}, // type variable, continue
+                .conid => {}, // type constructor, continue
+                .open_paren => {
+                    // Skip over parenthesized type
+                    var depth: u32 = 1;
+                    while (depth > 0) {
+                        const p = try self.peekAt(offset);
+                        offset += 1;
+                        switch (std.meta.activeTag(p.token)) {
+                            .open_paren => depth += 1,
+                            .close_paren => depth -= 1,
+                            .eof => return false,
+                            else => {},
+                        }
+                    }
+                },
+                .open_bracket => {
+                    // Skip over list type
+                    var depth: u32 = 1;
+                    while (depth > 0) {
+                        const b = try self.peekAt(offset);
+                        offset += 1;
+                        switch (std.meta.activeTag(b.token)) {
+                            .open_bracket => depth += 1,
+                            .close_bracket => depth -= 1,
+                            .eof => return false,
+                            else => {},
+                        }
+                    }
+                },
+                .darrow => return true, // Found =>, this is a context!
+                else => return false, // Found something else, not a context
+            }
+        }
+    }
+
+    /// Parse a type with a single (non-parenthesized) constraint: Eq a => Type
+    fn parseSingleContextType(self: *Parser) ParseError!ast_mod.Type {
+        // Parse the single constraint
+        const class_tok = try self.expect(.conid);
+
+        // Parse the type applications for this constraint
+        var types: std.ArrayListUnmanaged(ast_mod.Type) = .empty;
+        while (try self.isTypeStart()) {
+            const ty = try self.parseTypeApp();
+            try types.append(self.allocator, ty);
+        }
+
+        // Expect =>
+        _ = try self.expect(.darrow);
+
+        // Parse the actual type
+        const ty = try self.parseTy();
+
+        return .{
+            .Forall = .{
+                .tyvars = &.{},
+                .context = .{
+                    .constraints = try self.allocSlice(ast_mod.Assertion, &.{
+                        .{
+                            .class_name = class_tok.token.conid,
+                            .types = try types.toOwnedSlice(self.allocator),
+                        },
+                    }),
+                },
+                .type = try self.allocNode(ast_mod.Type, ty),
+            },
+        };
+    }
+
+    /// Parse forall quantification: `forall a b c. Type`
+    fn parseForall(self: *Parser) ParseError!ast_mod.Type {
+        _ = try self.expect(.kw_forall);
+
+        // Parse type variables
+        var tyvars: std.ArrayListUnmanaged([]const u8) = .empty;
+        while (try self.check(.varid)) {
+            const tv = try self.advance();
+            try tyvars.append(self.allocator, tv.token.varid);
+        }
+
+        // Expect dot (lexed as varsym)
+        const dot_tok = try self.expect(.varsym);
+        if (!std.mem.eql(u8, dot_tok.token.varsym, ".")) {
+            try self.emitErrorMsg(dot_tok.span, "expected '.' after type variables in forall quantification");
+            return error.UnexpectedToken;
+        }
+
+        // Parse optional context (can be parenthesized or single)
+        var context: ?ast_mod.Context = null;
+        if (try self.parseContextOptional()) |ctx| {
+            context = ctx;
+        } else if (try self.check(.conid) and try self.lookaheadForSingleContextConstraint()) {
+            context = .{
+                .constraints = try self.parseSingleContextConstraints(),
+            };
+        }
+
+        // Parse the type
+        const ty = try self.parseTy();
+
+        return .{
+            .Forall = .{
+                .tyvars = try tyvars.toOwnedSlice(self.allocator),
+                .context = context,
+                .type = try self.allocNode(ast_mod.Type, ty),
+            },
+        };
+    }
+
+    /// Parse single context constraints (without parentheses but WITH =>) for use in forall
+    /// Returns just the constraints slice
+    fn parseSingleContextConstraints(self: *Parser) ParseError![]const ast_mod.Assertion {
+        var constraints: std.ArrayListUnmanaged(ast_mod.Assertion) = .empty;
+
+        const class_tok = try self.expect(.conid);
+
+        // Parse the type applications for this constraint
+        var types: std.ArrayListUnmanaged(ast_mod.Type) = .empty;
+        while (try self.isTypeStart()) {
+            const ty = try self.parseTypeApp();
+            try types.append(self.allocator, ty);
+        }
+
+        try constraints.append(self.allocator, .{
+            .class_name = class_tok.token.conid,
+            .types = try types.toOwnedSlice(self.allocator),
+        });
+
+        // Consume the =>
+        _ = try self.expect(.darrow);
+
+        return try constraints.toOwnedSlice(self.allocator);
+    }
+
+    /// Parse optional context: `(Eq a, Show a) =>`
+    /// Returns null if no context is present.
+    ///
+    /// This function uses extensive lookahead to disambiguate between:
+    ///   (Eq a) => b    - context
+    ///   (a) -> b       - parenthesized type
+    ///   (Int, String)  - tuple type
+    fn parseContextOptional(self: *Parser) ParseError!?ast_mod.Context {
+        if (!try self.check(.open_paren)) return null;
+
+        // Look ahead to see if we have context pattern: ( ... ) =>
+        // We need to peek at enough tokens to determine if this is a context
+        // Pattern: open_paren conid ... close_paren darrow
+
+        // Token 0: open_paren (already checked)
+        // Token 1: should be conid (type class) for context
+        const tok1 = try self.peekAt(1);
+        if (std.meta.activeTag(tok1.token) != .conid) {
+            // Not starting with a conid, can't be a context
+            return null;
+        }
+
+        // Look ahead for the closing paren and =>
+        // Scan forward to find ) followed by =>
+        var depth: u32 = 1;
+        var offset: u32 = 1;
+
+        while (depth > 0) {
+            offset += 1;
+            const tok = try self.peekAt(offset);
+
+            switch (std.meta.activeTag(tok.token)) {
+                .open_paren => depth += 1,
+                .close_paren => depth -= 1,
+                .eof => return null, // EOF found before context complete, not a context
+                else => {},
+            }
+        }
+
+        // Now we're at the token after the closing paren
+        offset += 1;
+        const after_paren = try self.peekAt(offset);
+
+        if (std.meta.activeTag(after_paren.token) == .darrow) {
+            // This is a context! Parse it.
+            _ = try self.currentSpan();
+
+            _ = try self.advance(); // consume (
+
+            const constraints = try self.parseConstraints();
+
+            // Check for closing paren
+            _ = try self.expect(.close_paren);
+
+            // Check for =>
+            _ = try self.expect(.darrow);
+
+            return ast_mod.Context{ .constraints = constraints };
+        }
+
+        // No => found, not a context
+        return null;
+    }
+
+    /// Parse context constraints: `Eq a, Show b`, where we already know this is a context
+    /// Assumes we've consumed the opening paren and confirmed the first token is conid
+    fn parseConstraints(self: *Parser) ParseError![]const ast_mod.Assertion {
+        var constraints: std.ArrayListUnmanaged(ast_mod.Assertion) = .empty;
+
+        // Parse first constraint
+        const first = try self.parseConstraint();
+        try constraints.append(self.allocator, first);
+
+        // Parse additional constraints separated by commas
+        while (try self.match(.comma) != null) {
+            const constraint = try self.parseConstraint();
+            try constraints.append(self.allocator, constraint);
+        }
+
+        return try constraints.toOwnedSlice(self.allocator);
+    }
+
+    /// Parse a single constraint: `Eq a`, `Show Int`, `Monad m`
+    /// assumes the first token is a conid (already checked by caller)
+    fn parseConstraint(self: *Parser) ParseError!ast_mod.Assertion {
+        // Class name (must be a conid)
+        const class_tok = try self.expect(.conid);
+
+        // Parse the type applications: could be a single tyvar or a more complex type
+        var types: std.ArrayListUnmanaged(ast_mod.Type) = .empty;
+
+        while (try self.isTypeStart()) {
+            const ty = try self.parseTypeApp();
+            try types.append(self.allocator, ty);
+        }
+
+        // If no types were parsed, we need at least one
+        if (types.items.len == 0) {
+            try self.emitErrorMsg(class_tok.span, "type constraint requires at least one type argument");
+            return error.UnexpectedToken;
+        }
+
+        return ast_mod.Assertion{
+            .class_name = class_tok.token.conid,
+            .types = try types.toOwnedSlice(self.allocator),
+        };
+    }
+
+    /// Check if current token can start a type
+    fn isTypeStart(self: *Parser) ParseError!bool {
+        const tag = try self.peekTag();
+        return switch (tag) {
+            .varid, .conid, .open_paren, .open_bracket => true,
+            else => false,
+        };
+    }
+
+    /// Parse a type without forall or context (the base type expressions)
+    fn parseTy(self: *Parser) ParseError!ast_mod.Type {
         const ty = try self.parseTypeApp();
 
-        // Function arrow: a -> b -> c
+        // Function arrow: a -> b -> c (right-associative)
         if (try self.check(.arrow_right)) {
-            var parts: std.ArrayListUnmanaged(*const ast_mod.Type) = .empty;
-            const first = try self.allocNode(ast_mod.Type, ty);
-            try parts.append(self.allocator, first);
-            while (try self.match(.arrow_right) != null) {
-                const next = try self.parseTypeApp();
-                try parts.append(self.allocator, try self.allocNode(ast_mod.Type, next));
-            }
-            return .{ .Fun = try parts.toOwnedSlice(self.allocator) };
+            return try self.parseFunType(ty);
         }
 
         return ty;
+    }
+
+    /// Parse a function type: `ty -> ty -> ty` (right-associative)
+    fn parseFunType(self: *Parser, first_ty: ast_mod.Type) ParseError!ast_mod.Type {
+        var parts: std.ArrayListUnmanaged(*const ast_mod.Type) = .empty;
+        const first = try self.allocNode(ast_mod.Type, first_ty);
+        try parts.append(self.allocator, first);
+
+        while (try self.match(.arrow_right) != null) {
+            const next = try self.parseTy();
+            try parts.append(self.allocator, try self.allocNode(ast_mod.Type, next));
+        }
+
+        return .{ .Fun = try parts.toOwnedSlice(self.allocator) };
     }
 
     fn parseTypeApp(self: *Parser) ParseError!ast_mod.Type {
@@ -2011,4 +2334,271 @@ test "infix: exponentiation binds tighter than multiply — 2 * 3 ^ 4" {
     const right = top.InfixApp.right.*;
     try std.testing.expect(right == .InfixApp);
     try std.testing.expectEqualStrings("^", right.InfixApp.op.name);
+}
+
+// ── Type expression tests (Issue #32) ───────────────────────────────────
+
+/// Helper function to parse a type from a simple signature
+fn parseTestType(allocator: std.mem.Allocator, signature: []const u8) !ast_mod.Type {
+    var lexer: Lexer = undefined;
+    var layout: LayoutProcessor = undefined;
+    var diags: DiagnosticCollector = undefined;
+    var parser = initTestParser(allocator, signature, &lexer, &layout, &diags);
+    defer parser.deinit();
+    defer layout.deinit();
+    defer diags.deinit(allocator);
+
+    const module = try parser.parseModule();
+    if (module.declarations.len == 0)
+        return error.UnexpectedToken;
+
+    const decl = module.declarations[0];
+    if (decl != .TypeSig)
+        return error.UnexpectedToken;
+
+    return decl.TypeSig.type;
+}
+
+test "type: type variable" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ty = try parseTestType(arena.allocator(), "foo :: a");
+    try std.testing.expect(ty == .Var);
+    try std.testing.expectEqualStrings("a", ty.Var);
+}
+
+test "type: type constructor" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ty = try parseTestType(arena.allocator(), "foo :: Int");
+    try std.testing.expect(ty == .Con);
+    try std.testing.expectEqualStrings("Int", ty.Con.name);
+}
+
+test "type: qualified type constructor" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ty = try parseTestType(arena.allocator(), "foo :: Data.Map.Map");
+    try std.testing.expect(ty == .Con);
+    // For now, qualified names are stored as a single conid token (the full name)
+    // Future work could split this into module_name and name components
+    try std.testing.expectEqualStrings("Data.Map.Map", ty.Con.name);
+}
+
+test "type: type application" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ty = try parseTestType(arena.allocator(), "foo :: Maybe Int");
+    try std.testing.expect(ty == .App);
+    try std.testing.expectEqual(2, ty.App.len);
+    try std.testing.expect(ty.App[0].* == .Con);
+    try std.testing.expectEqualStrings("Maybe", ty.App[0].Con.name);
+    try std.testing.expect(ty.App[1].* == .Con);
+    try std.testing.expectEqualStrings("Int", ty.App[1].Con.name);
+}
+
+test "type: type application with multiple args" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ty = try parseTestType(arena.allocator(), "foo :: Either String Int");
+    try std.testing.expect(ty == .App);
+    try std.testing.expectEqual(3, ty.App.len);
+}
+
+test "type: nested type application" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ty = try parseTestType(arena.allocator(), "foo :: Maybe [Int]");
+    try std.testing.expect(ty == .App);
+    try std.testing.expectEqual(2, ty.App.len);
+    try std.testing.expect(ty.App[0].* == .Con);
+    try std.testing.expectEqualStrings("Maybe", ty.App[0].Con.name);
+    try std.testing.expect(ty.App[1].* == .List);
+}
+
+test "type: simple function type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ty = try parseTestType(arena.allocator(), "foo :: Int -> String");
+    try std.testing.expect(ty == .Fun);
+    try std.testing.expectEqual(2, ty.Fun.len);
+    try std.testing.expect(ty.Fun[0].* == .Con);
+    try std.testing.expectEqualStrings("Int", ty.Fun[0].Con.name);
+    try std.testing.expect(ty.Fun[1].* == .Con);
+    try std.testing.expectEqualStrings("String", ty.Fun[1].Con.name);
+}
+
+test "type: multi-argument function (right-associative)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ty = try parseTestType(arena.allocator(), "foo :: Int -> Int -> Int");
+    try std.testing.expect(ty == .Fun);
+    // Int -> (Int -> Int) is right-associative, so 2 elements at top level
+    try std.testing.expectEqual(2, ty.Fun.len);
+    try std.testing.expect(ty.Fun[0].* == .Con);
+    try std.testing.expectEqualStrings("Int", ty.Fun[0].Con.name);
+    try std.testing.expect(ty.Fun[1].* == .Fun);
+    try std.testing.expectEqual(2, ty.Fun[1].Fun.len);
+}
+
+test "type: unit type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ty = try parseTestType(arena.allocator(), "foo :: ()");
+    try std.testing.expect(ty == .Tuple);
+    try std.testing.expectEqual(0, ty.Tuple.len);
+}
+
+test "type: tuple type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ty = try parseTestType(arena.allocator(), "foo :: (Int, String)");
+    try std.testing.expect(ty == .Tuple);
+    try std.testing.expectEqual(2, ty.Tuple.len);
+    try std.testing.expect(ty.Tuple[0].* == .Con);
+    try std.testing.expectEqualStrings("Int", ty.Tuple[0].Con.name);
+    try std.testing.expect(ty.Tuple[1].* == .Con);
+    try std.testing.expectEqualStrings("String", ty.Tuple[1].Con.name);
+}
+
+test "type: triple tuple" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ty = try parseTestType(arena.allocator(), "foo :: (Int, String, Bool)");
+    try std.testing.expect(ty == .Tuple);
+    try std.testing.expectEqual(3, ty.Tuple.len);
+}
+
+test "type: list type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ty = try parseTestType(arena.allocator(), "foo :: [Int]");
+    try std.testing.expect(ty == .List);
+    try std.testing.expect(ty.List.* == .Con);
+    try std.testing.expectEqualStrings("Int", ty.List.Con.name);
+}
+
+test "type: nested list type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ty = try parseTestType(arena.allocator(), "foo :: [[Int]]");
+    try std.testing.expect(ty == .List);
+    try std.testing.expect(ty.List.* == .List);
+}
+
+test "type: parenthesized type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ty = try parseTestType(arena.allocator(), "foo :: (Maybe Int)");
+    try std.testing.expect(ty == .Paren);
+    try std.testing.expect(ty.Paren.* == .App);
+}
+
+test "type: forall quantification" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ty = try parseTestType(arena.allocator(), "foo :: forall a. a -> a");
+    try std.testing.expect(ty == .Forall);
+    try std.testing.expectEqual(1, ty.Forall.tyvars.len);
+    try std.testing.expectEqualStrings("a", ty.Forall.tyvars[0]);
+    try std.testing.expect(ty.Forall.type.* == .Fun);
+}
+
+test "type: forall with multiple type variables" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ty = try parseTestType(arena.allocator(), "foo :: forall a b. a -> b -> a");
+    try std.testing.expect(ty == .Forall);
+    try std.testing.expectEqual(2, ty.Forall.tyvars.len);
+    try std.testing.expectEqualStrings("a", ty.Forall.tyvars[0]);
+    try std.testing.expectEqualStrings("b", ty.Forall.tyvars[1]);
+}
+
+test "type: type context with single constraint" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ty = try parseTestType(arena.allocator(), "foo :: Eq a => a -> a");
+    try std.testing.expect(ty == .Forall);
+    try std.testing.expect(ty.Forall.context != null);
+    const ctx = ty.Forall.context.?;
+    try std.testing.expectEqual(1, ctx.constraints.len);
+    try std.testing.expectEqualStrings("Eq", ctx.constraints[0].class_name);
+    try std.testing.expectEqual(1, ctx.constraints[0].types.len);
+    try std.testing.expect(ctx.constraints[0].types[0] == .Var);
+}
+
+test "type: type context with multiple constraints" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ty = try parseTestType(arena.allocator(), "foo :: (Eq a, Show a) => a -> String");
+    try std.testing.expect(ty == .Forall);
+    try std.testing.expect(ty.Forall.context != null);
+    const ctx = ty.Forall.context.?;
+    try std.testing.expectEqual(2, ctx.constraints.len);
+    try std.testing.expectEqualStrings("Eq", ctx.constraints[0].class_name);
+    try std.testing.expectEqualStrings("Show", ctx.constraints[1].class_name);
+}
+
+test "type: type context with forall" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ty = try parseTestType(arena.allocator(), "foo :: forall a. Eq a => a -> a");
+    try std.testing.expect(ty == .Forall);
+    try std.testing.expectEqual(1, ty.Forall.tyvars.len);
+    try std.testing.expect(ty.Forall.context != null);
+}
+
+test "type: complex type: forall with context and nested types" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ty = try parseTestType(arena.allocator(), "foo :: forall m a. (Monad m) => m a -> m a");
+    try std.testing.expect(ty == .Forall);
+    try std.testing.expectEqual(2, ty.Forall.tyvars.len);
+    try std.testing.expect(ty.Forall.context != null);
+
+    const ctx = ty.Forall.context.?;
+    try std.testing.expectEqual(1, ctx.constraints.len);
+    try std.testing.expectEqualStrings("Monad", ctx.constraints[0].class_name);
+
+    // Inner type: m a -> m a
+    const inner = ty.Forall.type.*;
+    try std.testing.expect(inner == .Fun);
+    try std.testing.expectEqual(2, inner.Fun.len);
+}
+
+test "type: constraint with type application" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const ty = try parseTestType(arena.allocator(), "foo :: Functor f => f a -> b");
+    try std.testing.expect(ty == .Forall);
+    try std.testing.expect(ty.Forall.context != null);
+    const ctx = ty.Forall.context.?;
+    try std.testing.expectEqual(1, ctx.constraints.len);
+    try std.testing.expectEqualStrings("Functor", ctx.constraints[0].class_name);
+    // Constraint is "Functor f", so types[0] is a type variable
+    try std.testing.expect(ctx.constraints[0].types[0] == .Var);
+    try std.testing.expectEqualStrings("f", ctx.constraints[0].types[0].Var);
+    // The main type is a function type: f a -> b
+    try std.testing.expect(ty.Forall.type.* == .Fun);
 }
