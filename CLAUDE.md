@@ -7,19 +7,12 @@ Read this file in full before doing anything.
 
 1. Read `DESIGN.md` — it contains the full architecture, design decisions, mantras, and references.
 2. Read `ROADMAP.md` — it tracks all issues by milestone with their status and dependencies.
-3. Browse `issues/` — each epic has a subfolder (e.g. `issues/04-haskell-parser/`) containing
-   JSON files for individual tasks. Each JSON file has:
-   - `title`, `body` — what to do
-   - `depends_on` — local IDs of prerequisite tasks
-   - `depends_on_github` — GitHub issue numbers of prerequisites
-   - `github_issue` — the GitHub issue number
-   - `labels`, `milestone` — metadata
 
 ## 2. Preflight Check (before starting any issue)
 
 Before any agent (human or machine) begins work on a new issue, run a consistency
-check across the three sources of truth. **ROADMAP.md is the ultimate authority** —
-GitHub and `issues/` must agree with it, not the other way around.
+check across the three sources of truth. **Github is the ultimate authority** —
+`ROADMAP.md` must agree with it, not the other way around.
 
 ### What to check
 
@@ -29,26 +22,28 @@ GitHub and `issues/` must agree with it, not the other way around.
      (:green_circle: = closed, everything else = open).
    - Its title matches (minor wording differences are acceptable).
 
-2. **`issues/` JSON files** — for every issue in `ROADMAP.md`, verify:
-   - A corresponding JSON file exists under `issues/`.
-   - The `github_issue` field matches the issue number.
-   - The `depends_on_github` list matches the "Deps" column in the roadmap.
-
-3. **Cross-check** — flag any issue that:
-   - Appears in `issues/` but not in `ROADMAP.md` (orphaned JSON).
+2. **Cross-check** — flag any issue that:
    - Appears on GitHub but not in `ROADMAP.md` (orphaned issue).
    - Has dependency or status mismatches between the three sources.
 
 ### If inconsistencies are found
 
-Do **not** start the new issue. Instead:
+Do **not** start the new issue. Instead, ensure consistency is regained. What it might
+happen is that issues in the ROADMAP as still "in review" because the relevant PR is still
+open. However, if any issue in the ROADMAP is marked as "in review" but you spot that the relevant
+PR has been merged, then change the status in the roadmap to be "DONE".
+
+Remember: A closed or merged issue on Github is synonym with DONE, modulo exceptional cases we
+can disragard here.
+
+Finally:
 
 ```bash
 git checkout project-planning
 git rebase main
-# Fix ROADMAP.md, issues/ JSON files, and/or GitHub issue state to restore consistency.
+# Fix ROADMAP.md, and/or GitHub issue state to restore consistency.
 git add -A
-git commit -m "sync: Reconcile ROADMAP / issues / GitHub state"
+git commit -m "sync: Reconcile ROADMAP with GitHub state"
 git push origin project-planning
 # Open a PR for the sync, get it merged, then proceed with the original issue.
 ```
@@ -64,8 +59,7 @@ Proceed to "Pick an Issue" below.
    whose dependencies are incomplete.
 3. Prefer issues in earlier milestones (M0 before M1, M1 before M2, etc.).
 4. When multiple issues are available, prefer `priority:critical` > `priority:high` > `priority:medium` > `priority:low`.
-5. Read the full JSON file in `issues/` for the issue you pick — it contains detailed
-   deliverables and design notes.
+5. Read the full issue on Github, as it contains deliverables and design notes.
 
 ## 4. Work on the Issue
 
@@ -97,7 +91,7 @@ Always ensure the `project-planning` branch is up-to-date with `main` before sta
 zig build
 
 # Run all tests
-zig build test
+zig build test --summary all
 
 # Run a specific test (when available)
 zig build test -- --test-filter "test name"
@@ -107,7 +101,7 @@ The project uses a Nix flake for dependencies. If `zig` is not on PATH, use:
 
 ```bash
 nix develop --command zig build
-nix develop --command zig build test
+nix develop --command zig build test --summary all
 ```
 
 ### Coding Standards
@@ -120,7 +114,7 @@ nix develop --command zig build test
   built-in `test` blocks in the same file or a dedicated test file as appropriate.
 - **Keep changes focused.** Only change what the issue asks for. Don't refactor unrelated code,
   add features not requested, or "improve" things outside scope.
-- **Don't break existing tests.** Run `zig build test` before committing. If tests fail,
+- **Don't break existing tests.** Run `zig build test --summary all` before committing. If tests fail,
   fix them or understand why before proceeding.
 - **Write clear commit messages.** Use the format: `#<NUMBER>: <short description>`.
   Example: `#17: Define SourceSpan and SourcePos types`.
@@ -156,6 +150,10 @@ git push origin llm-agent/issue-<NUMBER>
 ```
 
 ### Open a Pull Request
+
+Important: when using `gh` to open a PR, sometimes there are problems with character
+interpolation in bash. Store the body of the PR in a temporary file, and then slurp that
+into `gh`.
 
 ```bash
 gh pr create \
