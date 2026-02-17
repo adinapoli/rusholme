@@ -84,7 +84,7 @@
 | [#87](https://github.com/adinapoli/rusholme/issues/87) | Parser: Infrastructure, Combinators and Error Recovery | [#26](https://github.com/adinapoli/rusholme/issues/26), [#19](https://github.com/adinapoli/rusholme/issues/19) | :green_circle: |
 | [#29](https://github.com/adinapoli/rusholme/issues/29) | Implement parser: module header, imports, and top-level declarations | [#26](https://github.com/adinapoli/rusholme/issues/26), [#27](https://github.com/adinapoli/rusholme/issues/27) | :green_circle: |
 | [#88](https://github.com/adinapoli/rusholme/issues/88) | Parser: Expression Precedence (Fixity-aware) | [#87](https://github.com/adinapoli/rusholme/issues/87), [#27](https://github.com/adinapoli/rusholme/issues/27) | :green_circle: |
-| [#30](https://github.com/adinapoli/rusholme/issues/30) | Implement parser: expressions | [#29](https://github.com/adinapoli/rusholme/issues/29), [#88](https://github.com/adinapoli/rusholme/issues/88) | :white_circle: |
+| [#30](https://github.com/adinapoli/rusholme/issues/30) | Implement parser: expressions | [#29](https://github.com/adinapoli/rusholme/issues/29), [#88](https://github.com/adinapoli/rusholme/issues/88) | :yellow_circle: |
 | [#31](https://github.com/adinapoli/rusholme/issues/31) | Implement parser: patterns | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
 | [#32](https://github.com/adinapoli/rusholme/issues/32) | Implement parser: type expressions | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
 | [#33](https://github.com/adinapoli/rusholme/issues/33) | Implement parser: class and instance declarations, deriving | [#29](https://github.com/adinapoli/rusholme/issues/29), [#32](https://github.com/adinapoli/rusholme/issues/32) | :white_circle: |
