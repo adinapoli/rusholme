@@ -103,7 +103,7 @@
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#34](https://github.com/adinapoli/rusholme/issues/34) | Define Core IR types (System F_C expressions, binders, types) | [#69](https://github.com/adinapoli/rusholme/issues/69) | :white_circle: |
+| [#34](https://github.com/adinapoli/rusholme/issues/34) | Define Core IR types (System F_C expressions, binders, types) | [#69](https://github.com/adinapoli/rusholme/issues/69) | :yellow_circle: |
 | [#35](https://github.com/adinapoli/rusholme/issues/35) | Implement Core IR pretty-printer | [#34](https://github.com/adinapoli/rusholme/issues/34) | :white_circle: |
 | [#36](https://github.com/adinapoli/rusholme/issues/36) | Implement Hindley-Milner type inference engine | [#34](https://github.com/adinapoli/rusholme/issues/34), [#18](https://github.com/adinapoli/rusholme/issues/18) | :white_circle: |
 | [#37](https://github.com/adinapoli/rusholme/issues/37) | Implement type class resolution and dictionary passing | [#36](https://github.com/adinapoli/rusholme/issues/36) | :white_circle: |
