@@ -108,13 +108,13 @@ pub const TerminalRenderer = struct {
 
         // Render each line with context
         for (lines[start_idx..end_idx], start_idx + 1..) |line, line_num| {
-            try writer.print("{s}{d:>[0]}.{s} {s}\n", .{
-                if (self.color_enabled) grey() else "",
-                line_num,
-                line_num_width,
-                if (self.color_enabled) reset() else "",
-                line,
-            });
+            try writer.writeAll(if (self.color_enabled) grey() else "");
+            try writeRightAligned(writer, line_num, line_num_width);
+            try writer.writeAll(".");
+            try writer.writeAll(if (self.color_enabled) reset() else "");
+            try writer.writeAll(" ");
+            try writer.writeAll(line);
+            try writer.writeByte('\n');
 
             // If this line is the first line of the error span, render the highlight
             if (line_num == span.start.line) {
@@ -143,13 +143,12 @@ pub const TerminalRenderer = struct {
         if (start_col >= line_len or end_col > line_len) return;
 
         // Build the highlight line
-        // Pad left for line number
-        try writer.print("{s}{s: >[0]}.{s} ", .{
-            if (self.color_enabled) grey() else "",
-            " ",
-            line_num_width,
-            if (self.color_enabled) reset() else "",
-        });
+        // Pad left for line number gutter
+        try writer.writeAll(if (self.color_enabled) grey() else "");
+        for (0..line_num_width) |_| try writer.writeByte(' ');
+        try writer.writeAll(".");
+        try writer.writeAll(if (self.color_enabled) reset() else "");
+        try writer.writeByte(' ');
 
         // Add spaces up to start column
         const highlight_color = if (self.color_enabled) brightRed() else "";
@@ -236,14 +235,14 @@ pub const TerminalRenderer = struct {
 
     /// Render severity and diagnostic code.
     fn renderSeverity(self: TerminalRenderer, writer: anytype, severity: Severity, code: DiagnosticCode) !void {
-        const color_fn = switch (severity) {
-            .@"error" => brightRed,
-            .warning => brightYellow,
-            .info => brightBlue,
-            .hint => brightMagenta,
+        const color_str: []const u8 = switch (severity) {
+            .@"error" => brightRed(),
+            .warning => brightYellow(),
+            .info => brightBlue(),
+            .hint => brightMagenta(),
         };
 
-        const severity_str = switch (severity) {
+        const severity_str: []const u8 = switch (severity) {
             .@"error" => "error",
             .warning => "warning",
             .info => "info",
@@ -251,7 +250,7 @@ pub const TerminalRenderer = struct {
         };
 
         if (self.color_enabled) {
-            try writer.print("{s}{s}[{s}]{s}", .{ color_fn(), severity_str, code.code(), reset() });
+            try writer.print("{s}{s}[{s}]{s}", .{ color_str, severity_str, code.code(), reset() });
         } else {
             try writer.print("{s}[{s}]", .{ severity_str, code.code() });
         }
@@ -275,6 +274,17 @@ fn parseLines(allocator: std.mem.Allocator, content: []const u8) ![][]const u8 {
     }
 
     return try lines.toOwnedSlice(allocator);
+}
+
+/// Write a number right-aligned to the given width.
+fn writeRightAligned(writer: anytype, value: usize, width: usize) !void {
+    const digits = lineNumStrLen(value);
+    if (width > digits) {
+        for (0..width - digits) |_| try writer.writeByte(' ');
+    }
+    var buf: [20]u8 = undefined;
+    const slice = std.fmt.bufPrint(&buf, "{d}", .{value}) catch unreachable;
+    try writer.writeAll(slice);
 }
 
 /// Calculate the number of characters needed to represent a line number.

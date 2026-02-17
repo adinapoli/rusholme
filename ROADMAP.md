@@ -98,6 +98,12 @@
 | [#139](https://github.com/adinapoli/rusholme/issues/139) | Implement parser: field selectors | [#29](https://github.com/adinapoli/rusholme/issues/29), [#135](https://github.com/adinapoli/rusholme/issues/135) | :white_circle: |
 | [#140](https://github.com/adinapoli/rusholme/issues/140) | Implement parser: overloaded literals | [#29](https://github.com/adinapoli/rusholme/issues/29), [#32](https://github.com/adinapoli/rusholme/issues/32) | :white_circle: |
 
+### CLI
+
+| # | Issue | Deps | Status |
+|---|-------|------|--------|
+| [#142](https://github.com/adinapoli/rusholme/issues/142) | Implement rhc CLI with parse subcommand | [#28](https://github.com/adinapoli/rusholme/issues/28), [#33](https://github.com/adinapoli/rusholme/issues/33), [#20](https://github.com/adinapoli/rusholme/issues/20) | :yellow_circle: |
+
 ### Research: Cross-cutting Decisions
 
 | # | Issue | Deps | Status |
