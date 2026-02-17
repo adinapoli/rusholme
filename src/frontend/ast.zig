@@ -424,6 +424,13 @@ pub const Type = union(enum) {
     }
 };
 
+/// Fixity information for operators.
+/// Stores the precedence (0–9, higher binds tighter) and associativity.
+pub const FixityInfo = struct {
+    precedence: u8,
+    fixity: Fixity,
+};
+
 /// Fixity declaration: infixl 6 +++
 pub const Fixity = enum {
     InfixL,
