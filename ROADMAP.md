@@ -114,7 +114,7 @@
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#40](https://github.com/adinapoli/rusholme/issues/40) | Define GRIN IR types (Modern GRIN dialect) | [#69](https://github.com/adinapoli/rusholme/issues/69) | :white_circle: |
+| [#40](https://github.com/adinapoli/rusholme/issues/40) | Define GRIN IR types (Modern GRIN dialect) | [#69](https://github.com/adinapoli/rusholme/issues/69) | :yellow_circle: |
 | [#41](https://github.com/adinapoli/rusholme/issues/41) | Implement GRIN IR pretty-printer | [#40](https://github.com/adinapoli/rusholme/issues/40) | :white_circle: |
 | [#42](https://github.com/adinapoli/rusholme/issues/42) | Research: Core to GRIN translation strategy | [#34](https://github.com/adinapoli/rusholme/issues/34), [#40](https://github.com/adinapoli/rusholme/issues/40) | :white_circle: |
 | [#43](https://github.com/adinapoli/rusholme/issues/43) | Implement Core to GRIN translation | [#42](https://github.com/adinapoli/rusholme/issues/42) | :white_circle: |
