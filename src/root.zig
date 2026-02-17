@@ -20,6 +20,11 @@ pub const frontend = struct {
     pub const pretty = @import("frontend/pretty.zig");
 };
 
+// Naming
+pub const naming = struct {
+    pub const unique = @import("naming/unique.zig");
+};
+
 // Type checking
 pub const typechecker = @import("typechecker.zig");
 
@@ -47,6 +52,9 @@ pub const FileId = diagnostics.span.FileId;
 pub const Diagnostic = diagnostics.diagnostic.Diagnostic;
 pub const DiagnosticCode = diagnostics.diagnostic.DiagnosticCode;
 pub const Severity = diagnostics.diagnostic.Severity;
+pub const Name = naming.unique.Name;
+pub const Unique = naming.unique.Unique;
+pub const UniqueSupply = naming.unique.UniqueSupply;
 
 // ── Test discovery ─────────────────────────────────────────────────────
 // Zig's test runner only discovers test blocks in transitively-referenced
@@ -59,6 +67,7 @@ test {
     // Nested struct modules need explicit referencing
     testing.refAllDecls(diagnostics);
     testing.refAllDecls(frontend);
+    testing.refAllDecls(naming);
     testing.refAllDecls(core);
     testing.refAllDecls(grin);
     testing.refAllDecls(backend);
