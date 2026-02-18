@@ -25,6 +25,11 @@ pub const naming = struct {
     pub const unique = @import("naming/unique.zig");
 };
 
+// Renamer
+pub const renamer = struct {
+    pub const renamer = @import("renamer/renamer.zig");
+};
+
 // Type checking
 pub const typechecker = @import("typechecker.zig");
 
@@ -74,6 +79,7 @@ test {
     testing.refAllDecls(diagnostics);
     testing.refAllDecls(frontend);
     testing.refAllDecls(naming);
+    testing.refAllDecls(renamer);
     testing.refAllDecls(core);
     testing.refAllDecls(grin);
     testing.refAllDecls(backend);
