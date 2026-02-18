@@ -1,6 +1,6 @@
 # Rusholme — Agent Instructions
 
-You are working on **Rusholme**, a toy Haskell compiler written in Zig.
+You are working on **Rusholme**, a Haskell compiler written in Zig.
 Read this file in full before doing anything.
 
 ## 1. Understand the Project
@@ -70,6 +70,35 @@ IMPORTANT: This is a zig project created primarily with the goal of learning Zig
 3. The code would use Zig's ecosystem best practices (de facto libraries, etc).
 
 Every time you write a single line of code, respect the three laws above.
+
+### Project Philosophy: Production Craft, Research Spirit
+
+Rusholme is described as a "toy" compiler in the sense that it is not yet
+production-deployed. **Do not let that word lower your standards.** The
+codebase is built to last — it may grow into a semi-serious compiler over time,
+and early architectural shortcuts compound into permanent constraints.
+
+Concretely, this means:
+
+- **Code as if it will be maintained for years.** Clean module boundaries, no
+  leaking abstractions, no "we'll fix this later" shortcuts that embed
+  themselves into the IR or the calling convention.
+- **Algorithm choices should be principled, not just expedient.** If a
+  well-studied algorithm from the literature fits, use it and cite the paper.
+  "Good enough for a toy" is not a valid reason to pick a weaker design.
+- **Be research-forward.** When there are multiple valid approaches, prefer the
+  more modern or theoretically interesting one — as long as it doesn't add
+  runaway complexity. This project is also a learning exercise in compiler
+  construction; exploring ideas like bidirectional typechecking, GRIN, or
+  ASAP-style deallocation is a feature, not a distraction.
+- **"Toy scope" applies to features, not to quality.** We may implement only a
+  subset of Haskell 2010 — that is a scope decision. Within that scope, the
+  implementation should be correct, well-tested, and well-structured. A small
+  compiler that works perfectly is far more valuable than a large one that
+  almost works.
+- **Do not defer correctness.** Source spans on every node, zero memory leaks,
+  structured diagnostics — these are not polish to add later. They are load-
+  bearing properties that everything downstream depends on.
 
 ### Branch for Project Planning
 
