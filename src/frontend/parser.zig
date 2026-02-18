@@ -991,62 +991,105 @@ pub const Parser = struct {
             try tyvars.append(self.allocator, tv.token.varid);
         }
 
-        // Parse methods with optional default implementations
-        var methods: std.ArrayListUnmanaged(ast_mod.ClassMethod) = .empty;
+        // Parse class body: type signatures and optional default implementations.
+        //
+        // A class body may contain two kinds of items (Haskell 2010 §4.3.1):
+        //   1. Type signatures:  `name :: Type`
+        //   2. Default equations: `name pat… = expr` (on a separate layout line)
+        //
+        // We collect type signatures and default equations independently,
+        // then merge them by method name into ClassMethod nodes.
+        //
+        // Maps are keyed by name ([]const u8) into their respective lists.
+        // We use parallel slices rather than a hash map to avoid dependency on
+        // external map libraries while keeping the code simple.
+        const MethodTypeSig = struct { name: []const u8, type: ast_mod.Type };
+        const MethodDefault = struct { name: []const u8, impl: ast_mod.Match };
+
+        var type_sigs: std.ArrayListUnmanaged(MethodTypeSig) = .empty;
+        var defaults: std.ArrayListUnmanaged(MethodDefault) = .empty;
+
         if (try self.match(.kw_where) != null) {
             _ = try self.expectOpenBrace();
             while (true) {
                 if (try self.checkCloseBrace()) break;
                 if (try self.atEnd()) break;
 
-                // Parse method declarations:
-                //   name :: Type
-                //   (op) :: Type
-                //   name :: Type = expr  (with default implementation)
+                // Determine the method name and whether this item is a type
+                // signature or a default equation.
+                //
+                // Type sig:   `name :: Type`  or  `(op) :: Type`
+                // Default eq: `name pats… = rhs`  (name followed by non-`::`).
 
-                // Check for parenthesized operator: (op) :: Type
-                const method_name: ?LocatedToken = if (try self.check(.open_paren)) blk: {
+                // Handle parenthesized operator name: (==) :: …
+                const item_name: []const u8 = if (try self.check(.open_paren)) blk: {
                     const tok1 = try self.peekAt(1);
                     if (std.meta.activeTag(tok1.token) == .varsym) {
                         const tok2 = try self.peekAt(2);
                         if (std.meta.activeTag(tok2.token) == .close_paren) {
                             _ = try self.advance(); // (
-                            const op = try self.advance(); // operator
+                            const op_tok = try self.advance(); // operator symbol
                             _ = try self.advance(); // )
-                            break :blk LocatedToken{
-                                .token = .{ .varid = op.token.varsym },
-                                .span = op.span,
-                            };
+                            break :blk op_tok.token.varsym;
                         }
                     }
-                    // Not a parenthesized operator, continue to check for varid
-                    // The open_paren token wasn't consumed, so it's still there
-                    break :blk null;
-                } else null;
+                    // Not an operator — unexpected open paren in class body.
+                    const got = try self.peek();
+                    try self.emitErrorMsg(got.span, "expected method name in class declaration");
+                    return error.UnexpectedToken;
+                } else if (try self.check(.varid)) blk: {
+                    break :blk (try self.advance()).token.varid;
+                } else {
+                    const got = try self.peek();
+                    try self.emitErrorMsg(got.span, "expected method name in class declaration");
+                    return error.UnexpectedToken;
+                };
 
-                const varid_tok = if (method_name == null)
-                    if (try self.check(.varid)) try self.advance() else return error.UnexpectedToken
-                else
-                    null;
+                if (try self.check(.dcolon)) {
+                    // Type signature: name :: Type
+                    _ = try self.advance(); // consume ::
+                    const ty = try self.parseType();
+                    try type_sigs.append(self.allocator, .{ .name = item_name, .type = ty });
+                } else {
+                    // Default equation: name pats… = rhs [where …]
+                    var pats: std.ArrayListUnmanaged(ast_mod.Pattern) = .empty;
+                    while (try self.tryParseArgPattern()) |pat| {
+                        try pats.append(self.allocator, pat);
+                    }
+                    const rhs = try self.parseRhs();
+                    const where_clause = try self.parseWhereClause();
+                    const impl = ast_mod.Match{
+                        .patterns = try pats.toOwnedSlice(self.allocator),
+                        .rhs = rhs,
+                        .where_clause = where_clause,
+                        .span = self.spanFrom(start),
+                    };
+                    try defaults.append(self.allocator, .{ .name = item_name, .impl = impl });
+                }
 
-                _ = try self.expect(.dcolon);
-                const ty = try self.parseType();
-
-                const rhs: ?ast_mod.Rhs = if (try self.match(.equals) != null)
-                    // Default implementation: = expr
-                    .{ .UnGuarded = try self.parseExpr() }
-                else
-                    null;
-
-                const actual_name = if (method_name) |t| t.token.varid else varid_tok.?.token.varid;
-                try methods.append(self.allocator, .{
-                    .name = actual_name,
-                    .type = ty,
-                    .default_implementation = rhs,
-                });
                 while (try self.matchSemi()) {}
             }
             _ = try self.expectCloseBrace();
+        }
+
+        // Merge type signatures and default equations into ClassMethod nodes.
+        // Every type signature becomes a method; a default equation without a
+        // corresponding type signature is silently dropped (ill-formed class).
+        var methods: std.ArrayListUnmanaged(ast_mod.ClassMethod) = .empty;
+        for (type_sigs.items) |sig| {
+            // Look up a matching default equation by name.
+            var default_impl: ?ast_mod.Match = null;
+            for (defaults.items) |def| {
+                if (std.mem.eql(u8, def.name, sig.name)) {
+                    default_impl = def.impl;
+                    break;
+                }
+            }
+            try methods.append(self.allocator, .{
+                .name = sig.name,
+                .type = sig.type,
+                .default_implementation = default_impl,
+            });
         }
 
         return .{ .Class = .{
@@ -1388,68 +1431,119 @@ pub const Parser = struct {
         return try constraints.toOwnedSlice(self.allocator);
     }
 
-    /// Parse optional context: `(Eq a, Show a) =>`
-    /// Returns null if no context is present.
+    /// Parse an optional context prefix, handling two forms (Haskell 2010 §4.1.3):
     ///
-    /// This function uses extensive lookahead to disambiguate between:
-    ///   (Eq a) => b    - context
-    ///   (a) -> b       - parenthesized type
-    ///   (Int, String)  - tuple type
+    ///   Parenthesized: `(Eq a, Show b) =>`  — one or more constraints in parens
+    ///   Bare single:   `Eq a =>`            — exactly one constraint, no parens
+    ///
+    /// Returns null if no context is present. Uses lookahead to distinguish a
+    /// context from the declaration head that follows it (e.g. the class name).
     fn parseContextOptional(self: *Parser) ParseError!?ast_mod.Context {
-        if (!try self.check(.open_paren)) return null;
+        const tag = try self.peekTag();
 
-        // Look ahead to see if we have context pattern: ( ... ) =>
-        // We need to peek at enough tokens to determine if this is a context
-        // Pattern: open_paren conid ... close_paren darrow
+        // ── Parenthesized context: ( constraints ) => ──────────────────────
+        if (tag == .open_paren) {
+            // Token 1 must be conid (class name) for a context.
+            const tok1 = try self.peekAt(1);
+            if (std.meta.activeTag(tok1.token) != .conid) return null;
 
-        // Token 0: open_paren (already checked)
-        // Token 1: should be conid (type class) for context
-        const tok1 = try self.peekAt(1);
-        if (std.meta.activeTag(tok1.token) != .conid) {
-            // Not starting with a conid, can't be a context
-            return null;
-        }
-
-        // Look ahead for the closing paren and =>
-        // Scan forward to find ) followed by =>
-        var depth: u32 = 1;
-        var offset: u32 = 1;
-
-        while (depth > 0) {
-            offset += 1;
-            const tok = try self.peekAt(offset);
-
-            switch (std.meta.activeTag(tok.token)) {
-                .open_paren => depth += 1,
-                .close_paren => depth -= 1,
-                .eof => return null, // EOF found before context complete, not a context
-                else => {},
+            // Scan forward through balanced parens to find ) followed by =>.
+            var depth: u32 = 1;
+            var offset: u32 = 1;
+            while (depth > 0) {
+                offset += 1;
+                const tok = try self.peekAt(offset);
+                switch (std.meta.activeTag(tok.token)) {
+                    .open_paren => depth += 1,
+                    .close_paren => depth -= 1,
+                    .eof => return null,
+                    else => {},
+                }
             }
-        }
+            offset += 1;
+            const after_paren = try self.peekAt(offset);
+            if (std.meta.activeTag(after_paren.token) != .darrow) return null;
 
-        // Now we're at the token after the closing paren
-        offset += 1;
-        const after_paren = try self.peekAt(offset);
-
-        if (std.meta.activeTag(after_paren.token) == .darrow) {
-            // This is a context! Parse it.
-            _ = try self.currentSpan();
-
-            _ = try self.advance(); // consume (
-
+            // Confirmed parenthesized context — consume it.
+            _ = try self.advance(); // (
             const constraints = try self.parseConstraints();
-
-            // Check for closing paren
             _ = try self.expect(.close_paren);
-
-            // Check for =>
             _ = try self.expect(.darrow);
-
             return ast_mod.Context{ .constraints = constraints };
         }
 
-        // No => found, not a context
+        // ── Bare single-constraint context: ClassName tyvar … => ───────────
+        // Only attempted when the caller is in a declaration-head position
+        // (class/instance head), where darrow cannot appear in the head itself.
+        // The lookahead is identical to lookaheadForSingleContextConstraint but
+        // restricted to tokens that could only appear in a type constraint
+        // (no arrow, no equals, no where, no braces).
+        if (tag == .conid) {
+            if (try self.lookaheadBareContext()) {
+                const constraint = try self.parseConstraint();
+                _ = try self.expect(.darrow);
+                const constraints = try self.allocSlice(ast_mod.Assertion, &.{constraint});
+                return ast_mod.Context{ .constraints = constraints };
+            }
+        }
+
         return null;
+    }
+
+    /// Lookahead check: is the current conid token the start of a bare
+    /// single-constraint context followed by `=>`?
+    ///
+    /// Scans forward skipping conids, varids, and balanced parens/brackets.
+    /// Returns true only if `=>` is found before any token that can only
+    /// appear in a declaration head (arrow `->`, `=`, `where`, braces, EOF).
+    ///
+    /// This is deliberately conservative: it returns false if it sees `->`,
+    /// which cannot appear inside a constraint but CAN appear in a type after
+    /// the constraint. This prevents misidentifying `Eq a -> b` as a context.
+    fn lookaheadBareContext(self: *Parser) ParseError!bool {
+        var offset: u32 = 1; // start past the already-peeked conid
+        while (true) {
+            const tok = try self.peekAt(offset);
+            switch (std.meta.activeTag(tok.token)) {
+                .darrow => return true,
+                // Tokens that terminate the bare constraint scan without darrow.
+                .arrow_right, .equals, .kw_where,
+                .open_brace, .v_open_brace, .close_brace, .v_close_brace,
+                .semi, .v_semi, .eof => return false,
+                .open_paren => {
+                    // Skip balanced parens (e.g. Monad (m a) =>)
+                    offset += 1;
+                    var depth: u32 = 1;
+                    while (depth > 0) {
+                        const inner = try self.peekAt(offset);
+                        offset += 1;
+                        switch (std.meta.activeTag(inner.token)) {
+                            .open_paren => depth += 1,
+                            .close_paren => depth -= 1,
+                            .eof => return false,
+                            else => {},
+                        }
+                    }
+                },
+                .open_bracket => {
+                    // Skip balanced brackets (e.g. Container [] =>)
+                    offset += 1;
+                    var depth: u32 = 1;
+                    while (depth > 0) {
+                        const inner = try self.peekAt(offset);
+                        offset += 1;
+                        switch (std.meta.activeTag(inner.token)) {
+                            .open_bracket => depth += 1,
+                            .close_bracket => depth -= 1,
+                            .eof => return false,
+                            else => {},
+                        }
+                    }
+                },
+                else => {}, // varid, conid, etc. — part of constraint
+            }
+            offset += 1;
+        }
     }
 
     /// Parse context constraints: `Eq a, Show b`, where we already know this is a context
@@ -3491,19 +3585,26 @@ test "decl: class with default implementation" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
+    // Default implementations are separate equations in the class body,
+    // not inlined after the type signature.
     const mod = try parseTestModule(allocator,
         \\module M where
-        \\class Eq a where
-        \\  (==) :: a -> a -> Bool = alwaysFalse
-        \\  alwaysFalse :: Bool = False
+        \\class Container f where
+        \\  toList :: f a -> [a]
+        \\  size :: f a -> Int
+        \\  size c = length (toList c)
     );
     try std.testing.expectEqual(1, mod.declarations.len);
 
     const class_decl = mod.declarations[0].Class;
     try std.testing.expectEqual(2, class_decl.methods.len);
-    try std.testing.expect(class_decl.methods[0].default_implementation != null);
-    try std.testing.expect(class_decl.methods[0].default_implementation.? == .UnGuarded);
-    try std.testing.expectEqualStrings("alwaysFalse", class_decl.methods[1].name);
+    try std.testing.expectEqualStrings("toList", class_decl.methods[0].name);
+    try std.testing.expect(class_decl.methods[0].default_implementation == null);
+    try std.testing.expectEqualStrings("size", class_decl.methods[1].name);
+    try std.testing.expect(class_decl.methods[1].default_implementation != null);
+    const impl = class_decl.methods[1].default_implementation.?;
+    try std.testing.expectEqual(1, impl.patterns.len); // pattern: c
+    try std.testing.expect(impl.rhs == .UnGuarded);
 }
 
 test "decl: instance declaration" {
