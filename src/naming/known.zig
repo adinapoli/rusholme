@@ -64,6 +64,9 @@ pub const Con = struct {
     pub const Nil = name("[]", 207);
     pub const Cons = name("(:)", 208);
     pub const Tuple2 = name("(,)", 209);
+    pub const Tuple3 = name("(,,)", 210);
+    pub const Tuple4 = name("(,,,)", 211);
+    pub const Tuple5 = name("(,,,,)", 212);
 };
 
 /// The start of the non-reserved unique ID range.
