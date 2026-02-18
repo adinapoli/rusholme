@@ -3,6 +3,10 @@
 > Auto-generated from GitHub issues. Each issue links to its tracker.
 > **Starting points** (zero dependencies): #1✓, #2✓, #17✓, #22✓, #24✓, #27✓, #53✓, #85✓, #58, #62⚡, #66, #68, #107✓
 
+**Recent Progress (2026-02-18):**
+- ✓ #160: Migrate TyEnv lookup to Unique IDs
+- ✓ #161: Wire built-ins to stable Unique IDs
+
 **Recent Progress (2026-02-16):**
 - ✓ #85: Lexer support for numeric literals (Dec, Hex, Oct, Bin, Float)
 - ✓ #86: Lexer support for string and character literals (Escapes, Gaps, Mnemonics)
@@ -128,12 +132,12 @@
 | [#151](https://github.com/adinapoli/rusholme/issues/151) | Implement Robinson unification with occurs check over HType | [#150](https://github.com/adinapoli/rusholme/issues/150) | :green_circle: |
 | [#152](https://github.com/adinapoli/rusholme/issues/152) | Implement TyEnv: scoped type environment for the typechecker | [#150](https://github.com/adinapoli/rusholme/issues/150) | :green_circle: |
 | [#153](https://github.com/adinapoli/rusholme/issues/153) | Implement Constraint Solver: equality constraints and substitution | [#151](https://github.com/adinapoli/rusholme/issues/151) | :green_circle: |
-| [#160](https://github.com/adinapoli/rusholme/issues/160) | TyEnv: migrate lookup key from base name string to unique ID after renamer | [#149](https://github.com/adinapoli/rusholme/issues/149), [#152](https://github.com/adinapoli/rusholme/issues/152) | :large_green_circle: |
-| [#161](https://github.com/adinapoli/rusholme/issues/161) | TyEnv: wire initBuiltins into renamer known-key table for stable Name values | [#149](https://github.com/adinapoli/rusholme/issues/149), [#160](https://github.com/adinapoli/rusholme/issues/160) | :large_green_circle: |
+| [#160](https://github.com/adinapoli/rusholme/issues/160) | TyEnv: migrate lookup key from base name string to unique ID after renamer | [#149](https://github.com/adinapoli/rusholme/issues/149), [#152](https://github.com/adinapoli/rusholme/issues/152) | :green_circle: |
+| [#161](https://github.com/adinapoli/rusholme/issues/161) | TyEnv: wire initBuiltins into renamer known-key table for stable Name values | [#149](https://github.com/adinapoli/rusholme/issues/149), [#160](https://github.com/adinapoli/rusholme/issues/160) | :green_circle: |
 | [#163](https://github.com/adinapoli/rusholme/issues/163) | Proper HType pretty-printer for diagnostic messages | [#153](https://github.com/adinapoli/rusholme/issues/153) | :white_circle: |
 | [#165](https://github.com/adinapoli/rusholme/issues/165) | Structured TypeError payload in Diagnostic (replace stringly-typed messages) | [#153](https://github.com/adinapoli/rusholme/issues/153), [#163](https://github.com/adinapoli/rusholme/issues/163) | :white_circle: |
 | [#166](https://github.com/adinapoli/rusholme/issues/166) | Add SourceSpan to ast.Pattern.Var to eliminate synthetic spans in renamer | [#149](https://github.com/adinapoli/rusholme/issues/149) | :green_circle: |
-| [#167](https://github.com/adinapoli/rusholme/issues/167) | Stable Unique values for built-in names across compilation units | [#149](https://github.com/adinapoli/rusholme/issues/149), [#161](https://github.com/adinapoli/rusholme/issues/161) | :white_circle: |
+| [#167](https://github.com/adinapoli/rusholme/issues/167) | Stable Unique values for built-in names across compilation units | [#149](https://github.com/adinapoli/rusholme/issues/149), [#161](https://github.com/adinapoli/rusholme/issues/161) | :green_circle: |
 | [#36](https://github.com/adinapoli/rusholme/issues/36) | Implement bidirectional typechecker (synth + check modes) | [#149](https://github.com/adinapoli/rusholme/issues/149), [#150](https://github.com/adinapoli/rusholme/issues/150), [#152](https://github.com/adinapoli/rusholme/issues/152) | :white_circle: |
 | [#37](https://github.com/adinapoli/rusholme/issues/37) | Implement type class resolution and dictionary passing | [#36](https://github.com/adinapoli/rusholme/issues/36), [#153](https://github.com/adinapoli/rusholme/issues/153) | :white_circle: |
 | [#38](https://github.com/adinapoli/rusholme/issues/38) | Implement desugarer / elaborator (typed AST → Core IR) | [#36](https://github.com/adinapoli/rusholme/issues/36), [#153](https://github.com/adinapoli/rusholme/issues/153) | :white_circle: |
