@@ -4,6 +4,8 @@
 > **Starting points** (zero dependencies): #1✓, #2✓, #17✓, #22✓, #24✓, #27✓, #53✓, #85✓, #58, #62⚡, #66, #68, #107✓
 
 **Recent Progress (2026-02-18):**
+- ✓ #36: Implement Hindley-Milner type inference engine (Algorithm W) with let-polymorphism
+- ✓ #174: Fix over-generalisation in generalisePtr (active-variables condition, Damas & Milner §3)
 - ✓ #160: Migrate TyEnv lookup to Unique IDs
 - ✓ #161: Wire built-ins to stable Unique IDs
 
@@ -139,7 +141,7 @@
 | [#166](https://github.com/adinapoli/rusholme/issues/166) | Add SourceSpan to ast.Pattern.Var to eliminate synthetic spans in renamer | [#149](https://github.com/adinapoli/rusholme/issues/149) | :green_circle: |
 | [#167](https://github.com/adinapoli/rusholme/issues/167) | Stable Unique values for built-in names across compilation units | [#149](https://github.com/adinapoli/rusholme/issues/149), [#161](https://github.com/adinapoli/rusholme/issues/161) | :green_circle: |
 | [#36](https://github.com/adinapoli/rusholme/issues/36) | Implement bidirectional typechecker (synth + check modes) | [#149](https://github.com/adinapoli/rusholme/issues/149), [#150](https://github.com/adinapoli/rusholme/issues/150), [#152](https://github.com/adinapoli/rusholme/issues/152) | :green_circle: |
-| [#174](https://github.com/adinapoli/rusholme/issues/174) | typechecker: generalisePtr passes empty env_types, risking over-generalisation | [#36](https://github.com/adinapoli/rusholme/issues/36) | :yellow_circle: |
+| [#174](https://github.com/adinapoli/rusholme/issues/174) | typechecker: generalisePtr passes empty env_types, risking over-generalisation | [#36](https://github.com/adinapoli/rusholme/issues/36) | :green_circle: |
 | [#175](https://github.com/adinapoli/rusholme/issues/175) | typechecker: type signatures are ignored during inference | [#36](https://github.com/adinapoli/rusholme/issues/36) | :white_circle: |
 | [#176](https://github.com/adinapoli/rusholme/issues/176) | typechecker: do-notation inference is hard-coded to IO, not generic Monad | [#36](https://github.com/adinapoli/rusholme/issues/36), [#37](https://github.com/adinapoli/rusholme/issues/37) | :white_circle: |
 | [#177](https://github.com/adinapoli/rusholme/issues/177) | typechecker: astTypeToHType incomplete — App, Paren, Forall, n-tuples not handled | [#36](https://github.com/adinapoli/rusholme/issues/36) | :white_circle: |
