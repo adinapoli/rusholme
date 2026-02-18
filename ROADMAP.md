@@ -124,7 +124,7 @@
 |---|-------|------|--------|
 | [#148](https://github.com/adinapoli/rusholme/issues/148) | Research: Typechecking approach (bidirectional TC + constraint elaboration) | — | :green_circle: |
 | [#149](https://github.com/adinapoli/rusholme/issues/149) | Implement Renamer: resolve AST names to unique Names and check scope | [#27](https://github.com/adinapoli/rusholme/issues/27), [#69](https://github.com/adinapoli/rusholme/issues/69) | :white_circle: |
-| [#150](https://github.com/adinapoli/rusholme/issues/150) | Define HType: internal typechecker type with unification metavariables | [#34](https://github.com/adinapoli/rusholme/issues/34) | :yellow_circle: |
+| [#150](https://github.com/adinapoli/rusholme/issues/150) | Define HType: internal typechecker type with unification metavariables | [#34](https://github.com/adinapoli/rusholme/issues/34) | :green_circle: |
 | [#151](https://github.com/adinapoli/rusholme/issues/151) | Implement Robinson unification with occurs check over HType | [#150](https://github.com/adinapoli/rusholme/issues/150) | :white_circle: |
 | [#152](https://github.com/adinapoli/rusholme/issues/152) | Implement TyEnv: scoped type environment for the typechecker | [#150](https://github.com/adinapoli/rusholme/issues/150) | :white_circle: |
 | [#153](https://github.com/adinapoli/rusholme/issues/153) | Implement Constraint Solver: equality constraints and substitution | [#151](https://github.com/adinapoli/rusholme/issues/151) | :white_circle: |
