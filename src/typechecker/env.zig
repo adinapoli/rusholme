@@ -301,6 +301,32 @@ pub const TyEnv = struct {
         try self.push();
         return .{ .env = self };
     }
+
+    // ── Free-metavar collection ────────────────────────────────────────
+
+    /// Collect the IDs of all free (unsolved) metavariables appearing in
+    /// every `TyScheme` currently in scope, across all frames.
+    ///
+    /// "Free" here means: the meta appears in a scheme body and is *not*
+    /// bound by that scheme's own `binders` list.  These are the metas that
+    /// must **not** be generalised at a nested `let`-binding site, because
+    /// they are still "active" in the ambient context.
+    ///
+    /// The caller is responsible for deiniting `out`.
+    pub fn collectFreeMetas(
+        self: *const TyEnv,
+        out: *std.AutoHashMapUnmanaged(u32, void),
+        alloc: std.mem.Allocator,
+    ) std.mem.Allocator.Error!void {
+        var frame: ?*Frame = self.current;
+        while (frame) |f| {
+            var it = f.bindings.valueIterator();
+            while (it.next()) |scheme| {
+                try collectSchemeFreeMetas(scheme, out, alloc);
+            }
+            frame = f.outer;
+        }
+    }
 };
 
 /// RAII scope handle.  Returned by `TyEnv.enterScope`; call `exit` to pop.
@@ -311,6 +337,45 @@ pub const Scope = struct {
         self.env.pop();
     }
 };
+
+// ── Free-metavar helpers ───────────────────────────────────────────────
+
+/// Collect free (unsolved) meta IDs from a single `TyScheme`.
+///
+/// A meta is "free" in the scheme if it appears in the body and its ID is
+/// not listed in `scheme.binders` (those are bound rigids, not free metas).
+/// In practice, after generalisation the body contains only rigids, but
+/// during inference a monomorphic scheme's body may hold unsolved metas.
+fn collectSchemeFreeMetas(
+    scheme: *const TyScheme,
+    out: *std.AutoHashMapUnmanaged(u32, void),
+    alloc: std.mem.Allocator,
+) std.mem.Allocator.Error!void {
+    // Collect all metas from the body, then remove any that are bound by the
+    // scheme's own binders.  Since binders are rigid IDs (u64) and meta IDs
+    // are u32, there is no overlap — binders never appear as free metas.
+    // We can therefore collect directly without filtering.
+    try collectHTypeFreeMetas(scheme.body, out, alloc);
+}
+
+/// Recursively collect unsolved meta IDs from an `HType`, chasing solutions.
+fn collectHTypeFreeMetas(
+    ty: HType,
+    out: *std.AutoHashMapUnmanaged(u32, void),
+    alloc: std.mem.Allocator,
+) std.mem.Allocator.Error!void {
+    const current = ty.chase();
+    switch (current) {
+        .Meta => |mv| try out.put(alloc, mv.id, {}),
+        .Rigid => {},
+        .Con => |c| for (c.args) |arg| try collectHTypeFreeMetas(arg, out, alloc),
+        .Fun => |f| {
+            try collectHTypeFreeMetas(f.arg.*, out, alloc);
+            try collectHTypeFreeMetas(f.res.*, out, alloc);
+        },
+        .ForAll => |fa| try collectHTypeFreeMetas(fa.body.*, out, alloc),
+    }
+}
 
 // ── Built-in environment ───────────────────────────────────────────────
 

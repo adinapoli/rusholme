@@ -276,24 +276,29 @@ fn collectFreeMetas(
 
 /// Generalise the type at `ty_node` over its free metavariables.
 ///
-/// After calling this, every free metavar in `ty_node.*` that is not in
-/// `env_types` will have been solved to a fresh rigid variable, and
-/// `ty_node.*` (after chasing) will contain only rigid variables.
+/// A metavar is generalised only if it does not appear in `env_metas` —
+/// the set of metavariables that are free in the ambient type environment
+/// at the point of the binding (the "active type variables" condition of
+/// Damas & Milner 1982, §3).
 ///
-/// Returns a `TyScheme` whose `body` is `ty_node.*` and whose `binders`
-/// list the unique IDs of the newly-introduced rigid variables.
+/// Callers must snapshot the env free metas *before* adding the current
+/// binder's mono pre-binding to the env (so the binder's own unsolved
+/// meta is not included in `env_metas`).  See `inferLetDecl`.
+///
+/// After calling this, every generalisable free metavar in `ty_node.*`
+/// will have been solved to a fresh rigid variable, and `ty_node.*`
+/// (after chasing) will contain only rigids for those variables.
+///
+/// Returns a `TyScheme` whose `body` is the chased `ty_node.*` and whose
+/// `binders` list the unique IDs of the newly-introduced rigid variables.
 pub fn generalisePtr(
     ctx: *InferCtx,
     ty_node: *HType,
-    env_types: []const HType,
+    env_metas: *const std.AutoHashMapUnmanaged(u32, void),
 ) std.mem.Allocator.Error!TyScheme {
     var ty_metas = std.AutoHashMapUnmanaged(u32, void){};
     defer ty_metas.deinit(ctx.alloc);
     try collectFreeMetas(ty_node.*, &ty_metas, ctx.alloc);
-
-    var env_metas = std.AutoHashMapUnmanaged(u32, void){};
-    defer env_metas.deinit(ctx.alloc);
-    for (env_types) |et| try collectFreeMetas(et, &env_metas, ctx.alloc);
 
     var binder_ids = std.ArrayListUnmanaged(u64){};
 
@@ -822,6 +827,13 @@ fn inferStmt(ctx: *InferCtx, stmt: RStmt) std.mem.Allocator.Error!*HType {
 fn inferLetDecl(ctx: *InferCtx, decl: RDecl) std.mem.Allocator.Error!void {
     switch (decl) {
         .FunBind => |fb| {
+            // Snapshot env free metas *before* adding the mono pre-binding.
+            // This excludes the binder's own unsolved meta from the active
+            // set, so it is not spuriously protected from generalisation.
+            var env_metas = std.AutoHashMapUnmanaged(u32, void){};
+            defer env_metas.deinit(ctx.alloc);
+            try ctx.env.collectFreeMetas(&env_metas, ctx.alloc);
+
             // Pre-allocate a meta node for the function (enables recursion).
             const fun_node = try ctx.freshMeta();
             try ctx.env.bindMono(fb.name, fun_node.*);
@@ -832,10 +844,8 @@ fn inferLetDecl(ctx: *InferCtx, decl: RDecl) std.mem.Allocator.Error!void {
                 try ctx.unifyNow(fun_node, eq_ty, fb.span);
             }
 
-            // Generalise and rebind.
-            // Note: env_types is empty — free metas in the ambient env are
-            // not subtracted.  See #174 for the correct fix.
-            const scheme = try generalisePtr(ctx, fun_node, &.{});
+            // Generalise using the pre-snapshot env metas and rebind.
+            const scheme = try generalisePtr(ctx, fun_node, &env_metas);
             try ctx.env.bind(fb.name, scheme);
         },
         .PatBind => |pb| {
@@ -885,6 +895,13 @@ fn inferMatch(ctx: *InferCtx, match: RMatch) std.mem.Allocator.Error!*HType {
 /// Returns a `ModuleTypes` mapping each top-level name's unique to its
 /// `TyScheme`.  Errors are collected in `ctx.diags`.
 pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Error!ModuleTypes {
+    // Snapshot env free metas before any top-level binders are added.
+    // All top-level bindings are mutually recursive peers, so they share
+    // this one snapshot for the active-variables check during generalisation.
+    var env_metas = std.AutoHashMapUnmanaged(u32, void){};
+    defer env_metas.deinit(ctx.alloc);
+    try ctx.env.collectFreeMetas(&env_metas, ctx.alloc);
+
     // Pass 1: allocate fresh meta nodes for all top-level binders.
     var top_metas = std.AutoHashMapUnmanaged(naming_mod.Unique, *HType){};
     for (module.declarations) |decl| {
@@ -908,8 +925,7 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
                     const eq_ty = try inferMatch(ctx, eq);
                     try ctx.unifyNow(fun_node, eq_ty, fb.span);
                 }
-                // See #174: env_types is empty (over-generalisation risk).
-                const scheme = try generalisePtr(ctx, fun_node, &.{});
+                const scheme = try generalisePtr(ctx, fun_node, &env_metas);
                 try ctx.env.bind(fb.name, scheme);
             },
             .PatBind => |pb| {
@@ -1377,6 +1393,151 @@ test "infer: let id = \\x -> x in (id 1, id True) — let-polymorphism" {
     try testing.expectEqualStrings("Int", fst.Con.name.base);
     try testing.expect(snd == .Con);
     try testing.expectEqualStrings("Bool", snd.Con.name.base);
+}
+
+// ── Over-generalisation regression (#174) ─────────────────────────────
+//
+// Direct unit test of `generalisePtr`: a meta that is free in the ambient
+// env must NOT be generalised.
+//
+// Scenario: `?outer` is free in the env (simulating an outer lambda param).
+// We ask generalisePtr to generalise `?inner -> ?outer`.  Only `?inner`
+// should become a rigid binder; `?outer` must remain monomorphic.
+test "generalisePtr: meta free in env is not generalised" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = try TyEnv.init(alloc);
+    defer env.deinit();
+    var mv = MetaVarSupply{};
+    var us = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
+
+    // Simulate an outer lambda parameter `x` bound as a mono type in env.
+    const x_name = testName("x", 9000);
+    const outer_meta = try ctx.freshMeta(); // ?outer — the "ambient" meta
+    try ctx.env.bindMono(x_name, outer_meta.*);
+
+    // The type to generalise: ?inner -> ?outer  (simulating \y -> x)
+    const inner_meta = try ctx.freshMeta(); // ?inner — local to the let-rhs
+    const ty_node = try ctx.alloc_ty(HType{ .Fun = .{
+        .arg = inner_meta,
+        .res = outer_meta,
+    } });
+
+    // Snapshot env metas before adding any pre-binding (as inferLetDecl does).
+    var env_metas = std.AutoHashMapUnmanaged(u32, void){};
+    defer env_metas.deinit(alloc);
+    try ctx.env.collectFreeMetas(&env_metas, alloc);
+
+    // env_metas must contain ?outer (it is free in the env via x's binding).
+    try testing.expect(env_metas.contains(outer_meta.Meta.id));
+    // env_metas must NOT contain ?inner (it is purely local).
+    try testing.expect(!env_metas.contains(inner_meta.Meta.id));
+
+    const scheme = try generalisePtr(&ctx, ty_node, &env_metas);
+
+    // Only ?inner should have been generalised — exactly one binder.
+    try testing.expectEqual(@as(usize, 1), scheme.binders.len);
+
+    // The body should be: rigid_a -> ?outer (where ?outer stays unsolved).
+    const body = scheme.body.chase();
+    try testing.expect(body == .Fun);
+    try testing.expect(body.Fun.arg.*.chase() == .Rigid); // ?inner → rigid
+    try testing.expect(body.Fun.res.*.chase() == .Meta);  // ?outer stays meta
+}
+
+test "infer: genuine let-polymorphism still works in nested scopes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = try TyEnv.init(alloc);
+    defer env.deinit();
+    var mv = MetaVarSupply{};
+    var us = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+    try env_mod.initBuiltins(&env, alloc, &us);
+
+    var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
+
+    // let id = \x -> x in
+    //   let const_ = \a -> \b -> a in
+    //     (id 1, const_ True 42)
+    //
+    // Both id and const_ are genuinely polymorphic — their metas are fully
+    // local and must still be generalised correctly even with the fix.
+    const id_name = testName("id", 9100);
+    const const_name = testName("const_", 9101);
+    const xa = testName("xa", 9102);
+    const a_name = testName("a", 9103);
+    const b_name = testName("b", 9104);
+
+    // \xa -> xa
+    const xa_ref = RExpr{ .Var = .{ .name = xa, .span = testSpan() } };
+    const id_lam = RExpr{ .Lambda = .{
+        .params = &.{xa},
+        .param_spans = &.{testSpan()},
+        .body = &xa_ref,
+    } };
+    const id_decl = RDecl{ .FunBind = .{
+        .name = id_name,
+        .equations = &.{.{ .patterns = &.{}, .rhs = .{ .UnGuarded = id_lam }, .span = testSpan() }},
+        .span = testSpan(),
+    } };
+
+    // \a -> \b -> a
+    const a_ref = RExpr{ .Var = .{ .name = a_name, .span = testSpan() } };
+    const inner_lam = RExpr{ .Lambda = .{
+        .params = &.{b_name},
+        .param_spans = &.{testSpan()},
+        .body = &a_ref,
+    } };
+    const const_lam = RExpr{ .Lambda = .{
+        .params = &.{a_name},
+        .param_spans = &.{testSpan()},
+        .body = &inner_lam,
+    } };
+    const const_decl = RDecl{ .FunBind = .{
+        .name = const_name,
+        .equations = &.{.{ .patterns = &.{}, .rhs = .{ .UnGuarded = const_lam }, .span = testSpan() }},
+        .span = testSpan(),
+    } };
+
+    // id 1
+    const id_ref = RExpr{ .Var = .{ .name = id_name, .span = testSpan() } };
+    const one = RExpr{ .Lit = .{ .Int = .{ .value = 1, .span = testSpan() } } };
+    const id_app = RExpr{ .App = .{ .fn_expr = &id_ref, .arg_expr = &one } };
+
+    // const_ True 42
+    const const_ref = RExpr{ .Var = .{ .name = const_name, .span = testSpan() } };
+    const true_expr = RExpr{ .Var = .{ .name = Known.Con.True, .span = testSpan() } };
+    const forty_two = RExpr{ .Lit = .{ .Int = .{ .value = 42, .span = testSpan() } } };
+    const const_app1 = RExpr{ .App = .{ .fn_expr = &const_ref, .arg_expr = &true_expr } };
+    const const_app2 = RExpr{ .App = .{ .fn_expr = &const_app1, .arg_expr = &forty_two } };
+
+    // (id 1, const_ True 42)
+    const tuple = RExpr{ .Tuple = &.{ id_app, const_app2 } };
+
+    // let const_ = ... in (...)
+    const inner_let = RExpr{ .Let = .{ .binds = &.{const_decl}, .body = &tuple } };
+    // let id = ... in let const_ = ... in ...
+    const outer_let = RExpr{ .Let = .{ .binds = &.{id_decl}, .body = &inner_let } };
+
+    const ty = try infer(&ctx, outer_let);
+    try testing.expect(!diags.hasErrors());
+
+    // Result should be (Int, Bool)
+    const chased = ty.chase();
+    try testing.expect(chased == .Con);
+    try testing.expectEqual(@as(usize, 2), chased.Con.args.len);
+    try testing.expectEqualStrings("Int", chased.Con.args[0].chase().Con.name.base);
+    try testing.expectEqualStrings("Bool", chased.Con.args[1].chase().Con.name.base);
 }
 
 // ── Occurs check ──────────────────────────────────────────────────────
