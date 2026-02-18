@@ -906,13 +906,32 @@ pub const Lexer = struct {
             return LocatedToken.init(.{ .lex_error = msg }, span_mod.SourceSpan.init(start_pos, end_pos));
         }
 
-        const val = std.fmt.parseInt(i64, lit_str, radix) catch {
-            const msg = "invalid integer literal or overflow";
-            self.emitError(span_mod.SourceSpan.init(start_pos, end_pos), msg);
-            return LocatedToken.init(.{ .lex_error = msg }, span_mod.SourceSpan.init(start_pos, end_pos));
+        // Try to parse as i64 first; on overflow clamp to i64 bounds and emit
+        // a warning.  This keeps parsing alive for programs that use `Integer`
+        // (arbitrary-precision) literals — a full bignum AST representation is
+        // tracked by a follow-up issue.
+        const span = span_mod.SourceSpan.init(start_pos, end_pos);
+        const val: i64 = std.fmt.parseInt(i64, lit_str, radix) catch |err| switch (err) {
+            error.Overflow => blk: {
+                // Parse via u128 to decide the clamped direction.
+                const big = std.fmt.parseInt(u128, lit_str, radix) catch {
+                    self.emitError(span, "invalid integer literal");
+                    return LocatedToken.init(.{ .lex_error = "invalid integer literal" }, span);
+                };
+                const clamped: i64 = if (big > std.math.maxInt(i64))
+                    std.math.maxInt(i64)
+                else
+                    std.math.minInt(i64);
+                self.emitWarning(span, "integer literal overflows i64 — clamped (arbitrary-precision Integer not yet supported)");
+                break :blk clamped;
+            },
+            error.InvalidCharacter => {
+                self.emitError(span, "invalid character in integer literal");
+                return LocatedToken.init(.{ .lex_error = "invalid character in integer literal" }, span);
+            },
         };
 
-        return LocatedToken.init(.{ .lit_integer = val }, span_mod.SourceSpan.init(start_pos, end_pos));
+        return LocatedToken.init(.{ .lit_integer = val }, span);
     }
 
     fn scanDecimalOrFloat(self: *Lexer, start_pos: SourcePos) LocatedToken {
@@ -963,12 +982,26 @@ pub const Lexer = struct {
             };
             return LocatedToken.init(.{ .lit_float = val }, span_mod.SourceSpan.init(start_pos, end_pos));
         } else {
-            const val = std.fmt.parseInt(i64, lit_str, 10) catch {
-                const msg = "invalid integer literal or overflow";
-                self.emitError(span_mod.SourceSpan.init(start_pos, end_pos), msg);
-                return LocatedToken.init(.{ .lex_error = msg }, span_mod.SourceSpan.init(start_pos, end_pos));
+            const dec_span = span_mod.SourceSpan.init(start_pos, end_pos);
+            const val: i64 = std.fmt.parseInt(i64, lit_str, 10) catch |err| switch (err) {
+                error.Overflow => blk: {
+                    const big = std.fmt.parseInt(u128, lit_str, 10) catch {
+                        self.emitError(dec_span, "invalid integer literal");
+                        return LocatedToken.init(.{ .lex_error = "invalid integer literal" }, dec_span);
+                    };
+                    const clamped: i64 = if (big > std.math.maxInt(i64))
+                        std.math.maxInt(i64)
+                    else
+                        std.math.minInt(i64);
+                    self.emitWarning(dec_span, "integer literal overflows i64 — clamped (arbitrary-precision Integer not yet supported)");
+                    break :blk clamped;
+                },
+                error.InvalidCharacter => {
+                    self.emitError(dec_span, "invalid character in integer literal");
+                    return LocatedToken.init(.{ .lex_error = "invalid character in integer literal" }, dec_span);
+                },
             };
-            return LocatedToken.init(.{ .lit_integer = val }, span_mod.SourceSpan.init(start_pos, end_pos));
+            return LocatedToken.init(.{ .lit_integer = val }, dec_span);
         }
     }
 
@@ -976,6 +1009,17 @@ pub const Lexer = struct {
         if (self.diagnostics) |bag| {
             bag.add(self.allocator, .{
                 .severity = .@"error",
+                .code = .parse_error,
+                .span = span,
+                .message = message,
+            }) catch {}; // Ignore allocation errors for now
+        }
+    }
+
+    fn emitWarning(self: *Lexer, span: span_mod.SourceSpan, message: []const u8) void {
+        if (self.diagnostics) |bag| {
+            bag.add(self.allocator, .{
+                .severity = .warning,
                 .code = .parse_error,
                 .span = span,
                 .message = message,
