@@ -60,6 +60,9 @@ pub const Severity = diag_mod.Severity;
 pub const SourceSpan = span_mod.SourceSpan;
 pub const SourcePos = span_mod.SourcePos;
 
+const known_mod = @import("../naming/known.zig");
+const Known = known_mod;
+
 // ── Scope ──────────────────────────────────────────────────────────────
 
 /// A single scope frame: maps source names to unique `Name` values.
@@ -203,35 +206,63 @@ pub const RenameEnv = struct {
     /// unique across compilation units.  A stable built-in table (keyed by
     /// a known initial unique range) is tracked in follow-up issue #166.
     fn populateBuiltins(self: *RenameEnv) !void {
-        const builtins = [_][]const u8{
-            // Prelude functions
-            "putStrLn", "putStr",  "print",       "getLine",
-            "return",   "error",   "undefined",
-            // Numeric operations
-              "negate",
-            "abs",      "signum",  "fromInteger",
-            // Basic type constructors
-            "True",
-            "False",    "Nothing", "Just",        "Left",
-            "Right",
-            // List operations
-               "head",    "tail",        "null",
-            "length",   "map",     "filter",      "foldl",
-            "foldr",    "concat",  "zip",         "unzip",
-            // String / Show / Read
-            "show",     "read",
-            // Operators (as named functions)
-               "otherwise",
-            // Primitive types (used in type signatures)
-              "Int",
-            "Integer",  "Double",  "Float",       "Bool",
-            "Char",     "String",  "IO",          "Maybe",
-            "Either",   "[]",      "()",
-        };
-        for (builtins) |name| {
-            const n = self.supply.freshName(name);
-            try self.scope.bind(name, n);
-        }
+        // Prelude functions
+        try self.scope.bind("putStrLn", Known.Fn.putStrLn);
+        try self.scope.bind("putStr", Known.Fn.putStr);
+        try self.scope.bind("print", Known.Fn.print);
+        try self.scope.bind("getLine", Known.Fn.getLine);
+        try self.scope.bind("return", Known.Fn.@"return");
+        try self.scope.bind("error", Known.Fn.@"error");
+        try self.scope.bind("undefined", Known.Fn.undefined);
+        try self.scope.bind("negate", Known.Fn.negate);
+        try self.scope.bind("abs", Known.Fn.abs);
+        try self.scope.bind("signum", Known.Fn.signum);
+        try self.scope.bind("fromInteger", Known.Fn.fromInteger);
+        try self.scope.bind("head", Known.Fn.head);
+        try self.scope.bind("tail", Known.Fn.tail);
+        try self.scope.bind("null", Known.Fn.null_);
+        try self.scope.bind("length", Known.Fn.length);
+        try self.scope.bind("map", Known.Fn.map);
+        try self.scope.bind("filter", Known.Fn.filter);
+        try self.scope.bind("foldl", Known.Fn.foldl);
+        try self.scope.bind("foldr", Known.Fn.foldr);
+        try self.scope.bind("concat", Known.Fn.concat);
+        try self.scope.bind("zip", Known.Fn.zip);
+        try self.scope.bind("unzip", Known.Fn.unzip);
+        try self.scope.bind("show", Known.Fn.show);
+        try self.scope.bind("read", Known.Fn.read);
+        try self.scope.bind("otherwise", Known.Fn.otherwise);
+
+        // Primitive types
+        try self.scope.bind("Int", Known.Type.Int);
+        try self.scope.bind("Integer", Known.Type.Integer);
+        try self.scope.bind("Double", Known.Type.Double);
+        try self.scope.bind("Float", Known.Type.Float);
+        try self.scope.bind("Bool", Known.Type.Bool);
+        try self.scope.bind("Char", Known.Type.Char);
+        try self.scope.bind("String", Known.Type.String);
+        try self.scope.bind("IO", Known.Type.IO);
+        try self.scope.bind("Maybe", Known.Type.Maybe);
+        try self.scope.bind("Either", Known.Type.Either);
+        // Note: unified namespace for now, type "[]" and "()" win over constructors
+        // if they were different. In M1 we typically only use one at a time
+        // in a given context (type signature vs expression).
+        try self.scope.bind("[]", Known.Type.List);
+        try self.scope.bind("()", Known.Type.Unit);
+
+        // Data constructors
+        try self.scope.bind("True", Known.Con.True);
+        try self.scope.bind("False", Known.Con.False);
+        try self.scope.bind("Nothing", Known.Con.Nothing);
+        try self.scope.bind("Just", Known.Con.Just);
+        try self.scope.bind("Left", Known.Con.Left);
+        try self.scope.bind("Right", Known.Con.Right);
+
+        // Special cases for list/tuple constructors that might be used as identifiers
+        // (though often they are special syntactic forms).
+        // Since we have a unified namespace, we prefer the data constructor for (:)
+        try self.scope.bind("(:)", Known.Con.Cons);
+        try self.scope.bind("(,)", Known.Con.Tuple2);
     }
 };
 

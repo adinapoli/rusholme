@@ -37,7 +37,10 @@ pub const Unique = struct {
 /// Intentionally simple — no splitting, no namespacing. Splitting can be
 /// added later if parallel compilation requires independent supplies.
 pub const UniqueSupply = struct {
-    next: u64 = 0,
+    /// The next unique to be allocated.
+    /// Starts at 1000 to reserve [0, 999] for well-known IDs.
+    /// Keep this in sync with `reserved_range_end` in `src/naming/known.zig`.
+    next: u64 = 1000,
 
     /// Allocate a fresh unique.
     pub fn fresh(self: *UniqueSupply) Unique {
@@ -108,9 +111,9 @@ test "UniqueSupply.fresh: monotonically increasing" {
     const a = supply.fresh();
     const b = supply.fresh();
     const c = supply.fresh();
-    try std.testing.expectEqual(@as(u64, 0), a.value);
-    try std.testing.expectEqual(@as(u64, 1), b.value);
-    try std.testing.expectEqual(@as(u64, 2), c.value);
+    try std.testing.expectEqual(@as(u64, 1000), a.value);
+    try std.testing.expectEqual(@as(u64, 1001), b.value);
+    try std.testing.expectEqual(@as(u64, 1002), c.value);
 }
 
 test "UniqueSupply.fresh: successive calls return distinct uniques" {
@@ -124,7 +127,7 @@ test "UniqueSupply.freshName: produces correct Name" {
     var supply = UniqueSupply{};
     const name = supply.freshName("foo");
     try std.testing.expectEqualStrings("foo", name.base);
-    try std.testing.expectEqual(@as(u64, 0), name.unique.value);
+    try std.testing.expectEqual(@as(u64, 1000), name.unique.value);
 }
 
 test "Name.eql: same unique, different base — equal" {
