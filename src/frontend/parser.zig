@@ -1804,21 +1804,80 @@ pub const Parser = struct {
                 return .{ .Paren = try self.allocNode(ast_mod.Expr, result) };
             },
             .open_bracket => {
-                _ = try self.advance();
+                const open_tok = try self.advance();
                 if (try self.check(.close_bracket)) {
                     _ = try self.advance();
                     return .{ .List = &.{} };
                 }
-                var items: std.ArrayListUnmanaged(ast_mod.Expr) = .empty;
+
+                // Parse the first expression.
                 const first = try self.parseExpr();
+
+                // Arithmetic sequence: [e ..] or [e .. e']
+                if (try self.match(.dotdot)) |_| {
+                    if (try self.check(.close_bracket)) {
+                        // [e ..]  — EnumFrom
+                        const close_tok = try self.advance();
+                        const span = open_tok.span.merge(close_tok.span);
+                        return .{ .EnumFrom = .{
+                            .from = try self.allocNode(ast_mod.Expr, first),
+                            .span = span,
+                        } };
+                    } else {
+                        // [e .. e']  — EnumFromTo
+                        const to = try self.parseExpr();
+                        const close_tok = try self.expect(.close_bracket);
+                        const span = open_tok.span.merge(close_tok.span);
+                        return .{ .EnumFromTo = .{
+                            .from = try self.allocNode(ast_mod.Expr, first),
+                            .to = try self.allocNode(ast_mod.Expr, to),
+                            .span = span,
+                        } };
+                    }
+                }
+
+                // Either a list literal or [e, e' ..] / [e, e' .. e''].
+                // Consume optional comma-separated elements.
+                var items: std.ArrayListUnmanaged(ast_mod.Expr) = .empty;
                 try items.append(self.allocator, first);
+
                 while (try self.match(.comma) != null) {
                     if (try self.check(.close_bracket)) {
-                        // Trailing comma
+                        // Trailing comma — plain list
                         break;
                     }
                     const item = try self.parseExpr();
                     try items.append(self.allocator, item);
+
+                    // After the second element check for dotdot: [e, e' ..] or [e, e' .. e'']
+                    if (items.items.len == 2) {
+                        if (try self.match(.dotdot)) |_| {
+                            const e_from = items.items[0];
+                            const e_then = items.items[1];
+                            items.deinit(self.allocator);
+                            if (try self.check(.close_bracket)) {
+                                // [e, e' ..]  — EnumFromThen
+                                const close_tok = try self.advance();
+                                const span = open_tok.span.merge(close_tok.span);
+                                return .{ .EnumFromThen = .{
+                                    .from = try self.allocNode(ast_mod.Expr, e_from),
+                                    .then = try self.allocNode(ast_mod.Expr, e_then),
+                                    .span = span,
+                                } };
+                            } else {
+                                // [e, e' .. e'']  — EnumFromThenTo
+                                const e_to = try self.parseExpr();
+                                const close_tok = try self.expect(.close_bracket);
+                                const span = open_tok.span.merge(close_tok.span);
+                                return .{ .EnumFromThenTo = .{
+                                    .from = try self.allocNode(ast_mod.Expr, e_from),
+                                    .then = try self.allocNode(ast_mod.Expr, e_then),
+                                    .to = try self.allocNode(ast_mod.Expr, e_to),
+                                    .span = span,
+                                } };
+                            }
+                        }
+                    }
                 }
                 _ = try self.expect(.close_bracket);
                 return .{ .List = try items.toOwnedSlice(self.allocator) };

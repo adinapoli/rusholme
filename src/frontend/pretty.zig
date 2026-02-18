@@ -599,6 +599,34 @@ pub const PrettyPrinter = struct {
                 }
                 try self.write("]");
             },
+            .EnumFrom => |e| {
+                try self.write("[");
+                try self.printExpr(e.from.*);
+                try self.write(" ..]");
+            },
+            .EnumFromThen => |e| {
+                try self.write("[");
+                try self.printExpr(e.from.*);
+                try self.write(", ");
+                try self.printExpr(e.then.*);
+                try self.write(" ..]");
+            },
+            .EnumFromTo => |e| {
+                try self.write("[");
+                try self.printExpr(e.from.*);
+                try self.write(" .. ");
+                try self.printExpr(e.to.*);
+                try self.write("]");
+            },
+            .EnumFromThenTo => |e| {
+                try self.write("[");
+                try self.printExpr(e.from.*);
+                try self.write(", ");
+                try self.printExpr(e.then.*);
+                try self.write(" .. ");
+                try self.printExpr(e.to.*);
+                try self.write("]");
+            },
             .ListComp => |lc| {
                 try self.write("[");
                 try self.printExpr(lc.expr.*);
@@ -653,7 +681,7 @@ pub const PrettyPrinter = struct {
     /// application). Wraps compound expressions in parens.
     fn printExprAtom(self: *PrettyPrinter, expr: ast.Expr) Error!void {
         switch (expr) {
-            .Var, .Lit, .Tuple, .List, .Paren, .RecordCon => try self.printExpr(expr),
+            .Var, .Lit, .Tuple, .List, .EnumFrom, .EnumFromThen, .EnumFromTo, .EnumFromThenTo, .Paren, .RecordCon => try self.printExpr(expr),
             else => {
                 try self.write("(");
                 try self.printExpr(expr);
