@@ -687,6 +687,54 @@ pub const Parser = struct {
             } };
         }
 
+        // Infix function definition: pat1 `name` pat2 = rhs
+        // (Haskell 2010 §4.4.3: funlhs → pat varop pat)
+        // Detected by: varid already consumed, next token is backtick.
+        if (try self.check(.backtick)) {
+            // The already-consumed varid is the left-hand argument pattern.
+            const lhs_pat = ast_mod.Pattern{ .Var = .{ .name = name, .span = name_tok.span } };
+
+            _ = try self.advance(); // consume opening backtick
+
+            // Parse the function name (varid or conid in backticks)
+            const fn_name_tok = try self.peek();
+            const fn_name: []const u8 = switch (std.meta.activeTag(fn_name_tok.token)) {
+                .varid => blk: {
+                    _ = try self.advance();
+                    break :blk fn_name_tok.token.varid;
+                },
+                .conid => blk: {
+                    _ = try self.advance();
+                    break :blk fn_name_tok.token.conid;
+                },
+                else => {
+                    try self.emitErrorMsg(fn_name_tok.span, "expected function name in backtick infix definition");
+                    return error.UnexpectedToken;
+                },
+            };
+
+            _ = try self.expect(.backtick); // consume closing backtick
+
+            // Parse the right-hand argument pattern.
+            const rhs_pat = try self.parseArgPattern();
+
+            const rhs = try self.parseRhs();
+            const where_clause = try self.parseWhereClause();
+
+            const eq = ast_mod.Match{
+                .patterns = try self.allocSlice(ast_mod.Pattern, &.{ lhs_pat, rhs_pat }),
+                .rhs = rhs,
+                .where_clause = where_clause,
+                .span = self.spanFrom(start),
+            };
+
+            return .{ .FunBind = .{
+                .name = fn_name,
+                .equations = try self.allocSlice(ast_mod.Match, &.{eq}),
+                .span = self.spanFrom(start),
+            } };
+        }
+
         // Function binding: name [patterns] = expr [where ...]
         // or guarded: name [patterns] | guard = expr
         // Each argument is an apat (Haskell 2010 §3.17.2): an atomic pattern
@@ -1095,6 +1143,8 @@ pub const Parser = struct {
         }
 
         // Parse operator names and register them in the fixity environment.
+        // Names may be symbol operators (varsym/consym) or backtick-quoted
+        // identifiers (varid/conid inside backticks).
         while (true) {
             const tag = try self.peekTag();
             const op_name: []const u8 = if (tag == .varsym)
@@ -1103,7 +1153,27 @@ pub const Parser = struct {
                 (try self.advance()).token.consym
             else if (tag == .varid)
                 (try self.advance()).token.varid
-            else
+            else if (tag == .backtick) blk: {
+                // `name` — backtick-wrapped identifier in fixity declaration
+                _ = try self.advance(); // opening backtick
+                const id_tok = try self.peek();
+                const id_name: []const u8 = switch (std.meta.activeTag(id_tok.token)) {
+                    .varid => blk2: {
+                        _ = try self.advance();
+                        break :blk2 id_tok.token.varid;
+                    },
+                    .conid => blk2: {
+                        _ = try self.advance();
+                        break :blk2 id_tok.token.conid;
+                    },
+                    else => {
+                        try self.emitErrorMsg(id_tok.span, "expected identifier in backtick fixity declaration");
+                        return error.UnexpectedToken;
+                    },
+                };
+                _ = try self.expect(.backtick); // closing backtick
+                break :blk id_name;
+            } else
                 break;
 
             try self.registerFixity(op_name, fixity, prec);
@@ -1547,12 +1617,9 @@ pub const Parser = struct {
     // We use precedence climbing for the infixexp level.
 
     fn parseExpr(self: *Parser) ParseError!ast_mod.Expr {
-        const expr = try self.parseInfixExpr(0);
-        // Check for type annotation: expr :: type
-        if (try self.isTypeAnnotation()) {
-            return try self.parseTypeAnnotation(expr);
-        }
-        return expr;
+        // parseInfixExpr delegates to continueInfixExpr which handles
+        // both operator climbing and type annotations (expr :: Type).
+        return self.parseInfixExpr(0);
     }
 
     /// Check if we're looking at a type annotation (::)
@@ -1578,22 +1645,49 @@ pub const Parser = struct {
 
     /// Precedence climbing for infix operators.
     ///
-    /// At each level, first parses a function-application chain (fexp),
-    /// then looks for infix operators (varsym, consym, or binary minus)
-    /// and builds `InfixApp` nodes respecting precedence and associativity.
+    /// Parses a function-application chain (fexp) as the initial LHS, then
+    /// delegates to `continueInfixExpr` for the climbing loop. Handles
+    /// varsym, consym, binary minus, and backtick-enclosed identifiers.
+    ///
+    /// Backtick infix: `f`  →  InfixApp with op.name = "f"
+    /// (Haskell 2010 §3.4)
     fn parseInfixExpr(self: *Parser, min_prec: u8) ParseError!ast_mod.Expr {
-        var lhs = try self.parseAppExpr();
+        const lhs = try self.parseAppExpr();
+        return self.continueInfixExpr(lhs, min_prec);
+    }
+
+    /// Continue precedence climbing from an already-parsed LHS expression.
+    ///
+    /// This is the infix-climbing loop of `parseInfixExpr` factored out so
+    /// that callers (e.g. the parenthesised-expression parser) can provide
+    /// an LHS that was parsed by a different means (e.g. `parseAppExpr`) and
+    /// still get full operator support including backtick infix.
+    ///
+    /// Also handles type annotations (`expr :: Type`) which are not strictly
+    /// infix operators but appear in expression position.
+    fn continueInfixExpr(self: *Parser, initial_lhs: ast_mod.Expr, min_prec: u8) ParseError!ast_mod.Expr {
+        var lhs = initial_lhs;
 
         while (true) {
             const tag = try self.peekTag();
 
-            // Operators are varsym, consym, or the distinguished minus token.
             const is_sym = (tag == .varsym or tag == .consym);
             const is_minus = (tag == .minus);
-            if (!is_sym and !is_minus) break;
+            const is_backtick = (tag == .backtick);
+            if (!is_sym and !is_minus and !is_backtick) break;
 
-            const op_tok = try self.peek();
-            const op_name: []const u8 = if (is_minus)
+            const op_tok: LocatedToken = try self.peek();
+            const op_name: []const u8 = if (is_backtick) blk: {
+                const id_tok = try self.peekAt(1);
+                const id_name: []const u8 = switch (std.meta.activeTag(id_tok.token)) {
+                    .varid => id_tok.token.varid,
+                    .conid => id_tok.token.conid,
+                    else => break,
+                };
+                const close_tok = try self.peekAt(2);
+                if (std.meta.activeTag(close_tok.token) != .backtick) break;
+                break :blk id_name;
+            } else if (is_minus)
                 "-"
             else switch (op_tok.token) {
                 .varsym => |s| s,
@@ -1601,13 +1695,8 @@ pub const Parser = struct {
                 else => unreachable,
             };
 
-            // Look up fixity; unknown operators default to infixl 9.
             const info = self.getFixity(op_name) orelse default_fixity;
-
             if (info.precedence < min_prec) break;
-
-            // Non-associative operators at min_prec cannot chain:
-            // e.g. `a == b == c` is a parse error.
             if (info.fixity == .InfixN and info.precedence == min_prec and min_prec > 0) break;
 
             const next_prec: u8 = switch (info.fixity) {
@@ -1615,8 +1704,15 @@ pub const Parser = struct {
                 .InfixR => info.precedence,
             };
 
-            // Consume operator.
-            _ = try self.advance();
+            const op_span: SourceSpan = if (is_backtick) blk: {
+                const bt1 = try self.advance();
+                const id = try self.advance();
+                const bt2 = try self.advance();
+                break :blk bt1.span.merge(bt2.span).merge(id.span);
+            } else blk: {
+                _ = try self.advance();
+                break :blk op_tok.span;
+            };
 
             const rhs = try self.parseInfixExpr(next_prec);
 
@@ -1624,9 +1720,15 @@ pub const Parser = struct {
             const rhs_node = try self.allocNode(ast_mod.Expr, rhs);
             lhs = .{ .InfixApp = .{
                 .left = lhs_node,
-                .op = .{ .name = op_name, .span = op_tok.span },
+                .op = .{ .name = op_name, .span = op_span },
                 .right = rhs_node,
             } };
+        }
+
+        // Type annotation: expr :: Type
+        // Binds looser than all infix operators, so we check after the climbing loop.
+        if (try self.isTypeAnnotation()) {
+            return self.parseTypeAnnotation(lhs);
         }
 
         return lhs;
@@ -1686,7 +1788,7 @@ pub const Parser = struct {
                 const next_tag = try self.peekTag();
 
                 // Check for right operator section: (op expr) or (op)
-                // Right sections start with an operator
+                // Right sections start with a symbol operator or backtick identifier.
                 if (next_tag == .varsym or next_tag == .consym or next_tag == .minus) {
                     const op_tok = try self.advance();
                     const op_name: []const u8 = if (next_tag == .minus)
@@ -1700,8 +1802,7 @@ pub const Parser = struct {
                     // Right section with expression: (op expr)
                     if (try self.check(.close_paren)) {
                         _ = try self.advance();
-                        // Just the operator: (+), (+ +), etc.
-                        // This is just the operator as an expression
+                        // Just the operator: (+), (-), etc. — operator as expression.
                         return .{ .Var = .{ .name = op_name, .span = op_tok.span } };
                     }
 
@@ -1709,6 +1810,44 @@ pub const Parser = struct {
                     _ = try self.expect(.close_paren);
                     return .{ .RightSection = .{
                         .op = .{ .name = op_name, .span = op_tok.span },
+                        .expr = try self.allocNode(ast_mod.Expr, right_expr),
+                    } };
+                }
+
+                // Backtick right section: (`f` expr) or (`f`)
+                // (Haskell 2010 §3.5: operator section with backtick function)
+                if (next_tag == .backtick) {
+                    const bt1 = try self.advance(); // opening backtick
+                    const id_tok = try self.peek();
+                    const op_name: []const u8 = switch (std.meta.activeTag(id_tok.token)) {
+                        .varid => blk: {
+                            _ = try self.advance();
+                            break :blk id_tok.token.varid;
+                        },
+                        .conid => blk: {
+                            _ = try self.advance();
+                            break :blk id_tok.token.conid;
+                        },
+                        else => {
+                            // Not a backtick section — fall through to normal paren parsing.
+                            // Put backtick back by... we can't un-advance. Emit error.
+                            try self.emitErrorMsg(id_tok.span, "expected identifier after backtick in section");
+                            return error.UnexpectedToken;
+                        },
+                    };
+                    const bt2 = try self.expect(.backtick); // closing backtick
+                    const op_span = bt1.span.merge(bt2.span);
+
+                    if (try self.check(.close_paren)) {
+                        _ = try self.advance();
+                        // (`f`) — operator as expression
+                        return .{ .Var = .{ .name = op_name, .span = op_span } };
+                    }
+
+                    const right_expr = try self.parseExpr();
+                    _ = try self.expect(.close_paren);
+                    return .{ .RightSection = .{
+                        .op = .{ .name = op_name, .span = op_span },
                         .expr = try self.allocNode(ast_mod.Expr, right_expr),
                     } };
                 }
@@ -1744,11 +1883,12 @@ pub const Parser = struct {
                 }
 
                 // Check for left operator section: (expr op)
-                // by peeking ahead to see if we have operator followed by close_paren
+                // Handles symbol operators (varsym/consym/minus) and backtick
+                // identifiers, each followed immediately by close_paren.
                 const op_tag = try self.peekTag();
                 if (op_tag == .varsym or op_tag == .consym or op_tag == .minus) {
                     const after_op = try self.peekAt(1);
-                    if (after_op.token == .close_paren) {
+                    if (std.meta.activeTag(after_op.token) == .close_paren) {
                         // It's a left section: (expr op)
                         const op_tok = try self.advance();
                         const op_name: []const u8 = if (op_tag == .minus)
@@ -1765,45 +1905,40 @@ pub const Parser = struct {
                         } };
                     }
                 }
-
-                // Handle infix expressions in parentheses: (a + b)
-                // Now parse the full infix expression starting with `first`
-                var result = first;
-                while (true) {
-                    const infix_tag = try self.peekTag();
-                    const is_sym = (infix_tag == .varsym or infix_tag == .consym);
-                    const is_minus = (infix_tag == .minus);
-                    if (!is_sym and !is_minus) break;
-
-                    const op_tok = try self.peek();
-                    const op_name: []const u8 = if (is_minus)
-                        "-"
-                    else switch (op_tok.token) {
-                        .varsym => |s| s,
-                        .consym => |c| c,
-                        else => unreachable,
-                    };
-
-                    _ = try self.advance();
-                    const rhs = try self.parseAppExpr();
-
-                    // Check for type annotation after rhs
-                    const final_rhs = if (try self.isTypeAnnotation())
-                        try self.parseTypeAnnotation(rhs)
-                    else
-                        rhs;
-
-                    const lhs_node = try self.allocNode(ast_mod.Expr, result);
-                    const rhs_node = try self.allocNode(ast_mod.Expr, final_rhs);
-                    result = .{ .InfixApp = .{
-                        .left = lhs_node,
-                        .op = .{ .name = op_name, .span = op_tok.span },
-                        .right = rhs_node,
-                    } };
+                // Backtick left section: (expr `f`)
+                if (op_tag == .backtick) {
+                    const id_tok2 = try self.peekAt(1);
+                    const after_id = try self.peekAt(2);
+                    const is_id = std.meta.activeTag(id_tok2.token) == .varid or
+                        std.meta.activeTag(id_tok2.token) == .conid;
+                    const is_bt2 = std.meta.activeTag(after_id.token) == .backtick;
+                    const after_bt2 = try self.peekAt(3);
+                    if (is_id and is_bt2 and std.meta.activeTag(after_bt2.token) == .close_paren) {
+                        // Left section: (expr `f`)
+                        const bt1 = try self.advance(); // opening backtick
+                        const fn_id = try self.advance(); // identifier
+                        const bt2 = try self.advance(); // closing backtick
+                        _ = try self.expect(.close_paren);
+                        const bt_name: []const u8 = switch (std.meta.activeTag(fn_id.token)) {
+                            .varid => fn_id.token.varid,
+                            .conid => fn_id.token.conid,
+                            else => unreachable,
+                        };
+                        return .{ .LeftSection = .{
+                            .expr = try self.allocNode(ast_mod.Expr, first),
+                            .op = .{ .name = bt_name, .span = bt1.span.merge(bt2.span) },
+                        } };
+                    }
                 }
 
+                // Handle infix expressions inside parentheses: (a + b), (k `div` 2).
+                // Use continueInfixExpr which shares the precedence-climbing logic
+                // from parseInfixExpr (including backtick support) but accepts an
+                // already-parsed LHS, avoiding re-parsing `first` as an app-chain.
+                const paren_result = try self.continueInfixExpr(first, 0);
+
                 _ = try self.expect(.close_paren);
-                return .{ .Paren = try self.allocNode(ast_mod.Expr, result) };
+                return .{ .Paren = try self.allocNode(ast_mod.Expr, paren_result) };
             },
             .open_bracket => {
                 const open_tok = try self.advance();

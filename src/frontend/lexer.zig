@@ -136,6 +136,8 @@ pub const Token = union(enum) {
     underscore,
     /// - (distinguished from varsym for negation / layout)
     minus,
+    /// ` (backtick, used for infix function application: x `div` y)
+    backtick,
 
     // ── Other ──────────────────────────────────────────────────────────
     /// End of file
@@ -315,6 +317,7 @@ pub const Token = union(enum) {
             .darrow => try w.writeAll("=>"),
             .underscore => try w.writeAll("_"),
             .minus => try w.writeAll("-"),
+            .backtick => try w.writeAll("`"),
 
             // Other
             .eof => try w.writeAll("<eof>"),
@@ -391,6 +394,10 @@ pub const Lexer = struct {
             '}' => {
                 _ = self.advance();
                 return LocatedToken.init(.close_brace, span_mod.SourceSpan.init(start_pos, self.currentPos()));
+            },
+            '`' => {
+                _ = self.advance();
+                return LocatedToken.init(.backtick, span_mod.SourceSpan.init(start_pos, self.currentPos()));
             },
             else => {},
         }
