@@ -2,6 +2,7 @@
 //!
 //! Usage:
 //!   rhc parse <file.hs>    Parse a Haskell file and print the AST
+//!   rhc check <file.hs>    Parse, rename, and typecheck; print inferred types
 //!   rhc --help             Show this help message
 //!   rhc --version          Show version information
 
@@ -18,6 +19,9 @@ const PrettyPrinter = rusholme.frontend.pretty.PrettyPrinter;
 const TerminalRenderer = rusholme.diagnostics.terminal.TerminalRenderer;
 const DiagnosticCollector = rusholme.diagnostics.diagnostic.DiagnosticCollector;
 const FileId = rusholme.FileId;
+const renamer_mod = rusholme.renamer.renamer;
+const infer_mod = rusholme.tc.infer;
+const htype_mod = rusholme.tc.htype;
 
 const version = "0.1.0";
 
@@ -58,6 +62,18 @@ pub fn main(init: std.process.Init) !void {
         }
         const file_path = cmd_args[0];
         try cmdParse(allocator, io, file_path);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "check")) {
+        const cmd_args = user_args[1..];
+        if (cmd_args.len == 0) {
+            try writeStderr(io, "rhc check: missing file argument\n");
+            try writeStderr(io, "Usage: rhc check <file.hs>\n");
+            std.process.exit(1);
+        }
+        const file_path = cmd_args[0];
+        try cmdCheck(allocator, io, file_path);
         return;
     }
 
@@ -133,6 +149,97 @@ fn cmdParse(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     try stdout.flush();
 }
 
+/// Parse, rename, and typecheck a Haskell source file.
+/// Prints each top-level binding's inferred type to stdout as `name :: type`.
+/// Prints structured diagnostics to stderr on any error.
+fn cmdCheck(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
+    const source = readSourceFile(allocator, io, file_path) catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        switch (err) {
+            error.FileNotFound => try stderr.print("rhc: file not found: {s}\n", .{file_path}),
+            error.AccessDenied => try stderr.print("rhc: permission denied: {s}\n", .{file_path}),
+            else => try stderr.print("rhc: cannot read file '{s}': {}\n", .{ file_path, err }),
+        }
+        try stderr.flush();
+        std.process.exit(1);
+    };
+    defer allocator.free(source);
+
+    const file_id: FileId = 1;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    // ── Parse ──────────────────────────────────────────────────────────
+    var lexer = Lexer.init(arena_alloc, source, file_id);
+    var layout = LayoutProcessor.init(arena_alloc, &lexer);
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(arena_alloc);
+
+    var parser = Parser.init(arena_alloc, &layout, &diags) catch {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    };
+
+    const module = parser.parseModule() catch {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    };
+
+    if (diags.hasErrors()) {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    }
+
+    // ── Rename ─────────────────────────────────────────────────────────
+    var u_supply = rusholme.naming.unique.UniqueSupply{};
+    var rename_env = try renamer_mod.RenameEnv.init(arena_alloc, &u_supply, &diags);
+    defer rename_env.deinit();
+
+    const renamed = try renamer_mod.rename(module, &rename_env);
+
+    if (diags.hasErrors()) {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    }
+
+    // ── Typecheck ──────────────────────────────────────────────────────
+    var mv_supply = htype_mod.MetaVarSupply{};
+    var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
+    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
+
+    var infer_ctx = infer_mod.InferCtx.init(arena_alloc, &ty_env, &mv_supply, &u_supply, &diags);
+    var module_types = try infer_mod.inferModule(&infer_ctx, renamed);
+    defer module_types.deinit(arena_alloc);
+
+    if (diags.hasErrors()) {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    }
+
+    // ── Print results ──────────────────────────────────────────────────
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_fw: File.Writer = .init(.stdout(), io, &stdout_buf);
+    const stdout = &stdout_fw.interface;
+
+    // Walk declarations in source order to print types in a predictable order.
+    for (renamed.declarations) |decl| {
+        switch (decl) {
+            .FunBind => |fb| {
+                const scheme = module_types.get(fb.name.unique) orelse continue;
+                const ty_str = try htype_mod.prettyScheme(scheme, arena_alloc);
+                try stdout.print("{s} :: {s}\n", .{ fb.name.base, ty_str });
+            },
+            else => {},
+        }
+    }
+
+    try stdout.flush();
+}
+
 /// Render all collected diagnostics to stderr using the terminal renderer.
 fn renderDiagnostics(
     allocator: std.mem.Allocator,
@@ -195,6 +302,7 @@ fn printUsage(io: Io) !void {
         \\
         \\Usage:
         \\  rhc parse <file.hs>    Parse a Haskell file and pretty-print the AST
+        \\  rhc check <file.hs>    Parse, rename, and typecheck; print inferred types
         \\  rhc --help             Show this help message
         \\  rhc --version          Show version information
         \\
