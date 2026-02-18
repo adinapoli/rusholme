@@ -136,7 +136,7 @@
 | [#153](https://github.com/adinapoli/rusholme/issues/153) | Implement Constraint Solver: equality constraints and substitution | [#151](https://github.com/adinapoli/rusholme/issues/151) | :green_circle: |
 | [#160](https://github.com/adinapoli/rusholme/issues/160) | TyEnv: migrate lookup key from base name string to unique ID after renamer | [#149](https://github.com/adinapoli/rusholme/issues/149), [#152](https://github.com/adinapoli/rusholme/issues/152) | :green_circle: |
 | [#161](https://github.com/adinapoli/rusholme/issues/161) | TyEnv: wire initBuiltins into renamer known-key table for stable Name values | [#149](https://github.com/adinapoli/rusholme/issues/149), [#160](https://github.com/adinapoli/rusholme/issues/160) | :green_circle: |
-| [#163](https://github.com/adinapoli/rusholme/issues/163) | Proper HType pretty-printer for diagnostic messages | [#153](https://github.com/adinapoli/rusholme/issues/153) | :white_circle: |
+| [#163](https://github.com/adinapoli/rusholme/issues/163) | Proper HType pretty-printer for diagnostic messages | [#153](https://github.com/adinapoli/rusholme/issues/153) | :green_circle: |
 | [#165](https://github.com/adinapoli/rusholme/issues/165) | Structured TypeError payload in Diagnostic (replace stringly-typed messages) | [#153](https://github.com/adinapoli/rusholme/issues/153), [#163](https://github.com/adinapoli/rusholme/issues/163) | :white_circle: |
 | [#166](https://github.com/adinapoli/rusholme/issues/166) | Add SourceSpan to ast.Pattern.Var to eliminate synthetic spans in renamer | [#149](https://github.com/adinapoli/rusholme/issues/149) | :green_circle: |
 | [#167](https://github.com/adinapoli/rusholme/issues/167) | Stable Unique values for built-in names across compilation units | [#149](https://github.com/adinapoli/rusholme/issues/149), [#161](https://github.com/adinapoli/rusholme/issues/161) | :green_circle: |
@@ -146,7 +146,7 @@
 | [#176](https://github.com/adinapoli/rusholme/issues/176) | typechecker: do-notation inference is hard-coded to IO, not generic Monad | [#36](https://github.com/adinapoli/rusholme/issues/36), [#37](https://github.com/adinapoli/rusholme/issues/37) | :white_circle: |
 | [#183](https://github.com/adinapoli/rusholme/issues/183) | typechecker: let-binding type signatures are ignored | [#175](https://github.com/adinapoli/rusholme/issues/175) | :white_circle: |
 | [#184](https://github.com/adinapoli/rusholme/issues/184) | typechecker: bidirectional signature checking for rank-N polymorphism | [#175](https://github.com/adinapoli/rusholme/issues/175) | :white_circle: |
-| [#177](https://github.com/adinapoli/rusholme/issues/177) | typechecker: astTypeToHType incomplete — App, Paren, Forall, n-tuples not handled | [#36](https://github.com/adinapoli/rusholme/issues/36) | :white_circle: |
+| [#177](https://github.com/adinapoli/rusholme/issues/177) | typechecker: astTypeToHType incomplete — App, Paren, Forall, n-tuples not handled | [#36](https://github.com/adinapoli/rusholme/issues/36) | :green_circle: |
 | [#37](https://github.com/adinapoli/rusholme/issues/37) | Implement type class resolution and dictionary passing | [#36](https://github.com/adinapoli/rusholme/issues/36), [#153](https://github.com/adinapoli/rusholme/issues/153) | :white_circle: |
 | [#38](https://github.com/adinapoli/rusholme/issues/38) | Implement desugarer / elaborator (typed AST → Core IR) | [#36](https://github.com/adinapoli/rusholme/issues/36), [#153](https://github.com/adinapoli/rusholme/issues/153) | :white_circle: |
 
