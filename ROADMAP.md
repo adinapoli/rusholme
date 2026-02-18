@@ -51,7 +51,7 @@
 | [#62](https://github.com/adinapoli/rusholme/issues/62) | Set up Zig test harness and project test structure | — | :green_circle: |
 | [#63](https://github.com/adinapoli/rusholme/issues/63) | Implement golden/snapshot test runner | [#62](https://github.com/adinapoli/rusholme/issues/62) | :white_circle: |
 | [#64](https://github.com/adinapoli/rusholme/issues/64) | Implement end-to-end test runner (compile + run + check stdout) | [#63](https://github.com/adinapoli/rusholme/issues/63) | :white_circle: |
-| [#65](https://github.com/adinapoli/rusholme/issues/65) | Research and import simple test programs from GHC's testsuite | [#63](https://github.com/adinapoli/rusholme/issues/63) | :yellow_circle: |
+| [#65](https://github.com/adinapoli/rusholme/issues/65) | Research and import simple test programs from GHC's testsuite | [#63](https://github.com/adinapoli/rusholme/issues/63) | :green_circle: |
 
 ### Epic [#106](https://github.com/adinapoli/rusholme/issues/106): Zero-Leak Compiler
 
@@ -102,7 +102,7 @@
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#142](https://github.com/adinapoli/rusholme/issues/142) | Implement rhc CLI with parse subcommand | [#28](https://github.com/adinapoli/rusholme/issues/28), [#33](https://github.com/adinapoli/rusholme/issues/33), [#20](https://github.com/adinapoli/rusholme/issues/20) | :yellow_circle: |
+| [#142](https://github.com/adinapoli/rusholme/issues/142) | Implement rhc CLI with parse subcommand | [#28](https://github.com/adinapoli/rusholme/issues/28), [#33](https://github.com/adinapoli/rusholme/issues/33), [#20](https://github.com/adinapoli/rusholme/issues/20) | :green_circle: |
 | [#144](https://github.com/adinapoli/rusholme/issues/144) | Syntax highlighting for pretty-printed AST output | [#142](https://github.com/adinapoli/rusholme/issues/142) | :white_circle: |
 | [#145](https://github.com/adinapoli/rusholme/issues/145) | Shell completion (bash/zsh/fish) for rhc CLI | [#142](https://github.com/adinapoli/rusholme/issues/142) | :white_circle: |
 
