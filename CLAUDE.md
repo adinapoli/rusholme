@@ -73,10 +73,12 @@ Every time you write a single line of code, respect the three laws above.
 
 ### Project Philosophy: Production Craft, Research Spirit
 
-Rusholme is described as a "toy" compiler in the sense that it is not yet
-production-deployed. **Do not let that word lower your standards.** The
-codebase is built to last — it may grow into a semi-serious compiler over time,
-and early architectural shortcuts compound into permanent constraints.
+Rusholme calls itself a "toy" compiler in the sense that it targets a subset of
+Haskell and is not yet production-deployed. **Do not let that word lower your
+standards.** The codebase is built to last — it may grow into a serious compiler
+over time, and early architectural shortcuts compound into permanent constraints.
+Every design decision should be made as if it will still be in the codebase in
+five years, because it might be.
 
 Concretely, this means:
 

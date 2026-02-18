@@ -305,6 +305,44 @@ reflect the bidirectional approach and the new stage breakdown.
 
 ---
 
+## Known Future Refactor: AST Phase Parameterisation
+
+The one architectural risk not addressed by the typechecking algorithm choice
+is the AST itself. Currently `ast.zig` uses bare `[]const u8` for all
+identifiers, and several `Type` and `Pattern` nodes are missing `SourceSpan`
+(marked `unreachable` in `getSpan`). This was acceptable for the parser, but
+it creates friction for the renamer and typechecker.
+
+GHC solved this permanently by parameterising `HsSyn` over a *pass index*:
+
+```haskell
+data GhcPass (p :: Pass)  -- GhcPs | GhcRn | GhcTc
+type HsSyn p = ...        -- same tree, different annotation type per pass
+```
+
+This means the same AST type carries raw strings after parsing, unique names
+after renaming, and types after typechecking — with the compiler enforcing
+that you never use a renamed AST where a parsed AST is expected.
+
+**For Rusholme, this refactor is deferred but explicitly anticipated.** The
+renamer (issue #149) produces a parallel `RenamedModule` type as a pragmatic
+workaround. If the project grows beyond M2, parameterising the AST over a
+phase should be the next major structural refactor. When that time comes, the
+starting point is:
+
+1. Add `SourceSpan` to all `ast.Type` and `ast.Pattern` variants (fixing the
+   `unreachable` cases in `getSpan`).
+2. Introduce a `PassAnnotation` comptime parameter or a separate
+   `renamed/ast.zig` that mirrors `frontend/ast.zig` with `Name` in place of
+   `[]const u8`.
+3. Migrate the renamer to produce the parameterised type rather than a
+   parallel struct.
+
+Noting this here so future agents do not treat the current AST shape as a
+permanent invariant — it is a known interim design.
+
+---
+
 ## References
 
 - Dunfield & Krishnaswami, *"Complete and Easy Bidirectional Typechecking for
