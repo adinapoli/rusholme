@@ -38,6 +38,7 @@ pub const tc = struct {
     pub const unify = @import("typechecker/unify.zig");
     pub const env = @import("typechecker/env.zig");
     pub const solver = @import("typechecker/solver.zig");
+    pub const infer = @import("typechecker/infer.zig");
 };
 
 // IR representations

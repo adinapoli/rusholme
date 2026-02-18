@@ -54,8 +54,11 @@ const naming = @import("../naming/unique.zig");
 pub const Unique = naming.Unique;
 const Known = @import("../naming/known.zig");
 
-/// A single entry in an instantiation substitution: binder unique ID → fresh MetaVar.
-const SubstEntry = struct { id: u64, mv: MetaVar };
+/// A single entry in an instantiation substitution: binder unique ID → arena
+/// node for a fresh MetaVar.  Using a pointer ensures every occurrence of the
+/// same binder in the body maps to the *same* mutable cell, so that solving
+/// one occurrence automatically solves all others.
+const SubstEntry = struct { id: u64, node: *HType };
 
 // ── TyScheme ───────────────────────────────────────────────────────────
 
@@ -87,15 +90,20 @@ pub const TyScheme = struct {
     ) std.mem.Allocator.Error!HType {
         if (self.binders.len == 0) return self.body;
 
-        // Build a mapping from binder unique ID → fresh MetaVar.
+        // Build a mapping from binder unique ID → a single arena-allocated
+        // Meta node.  Every occurrence of the same binder in the body will
+        // receive the *same pointer*, so solving one occurrence propagates to
+        // all others through the shared mutable cell.
         // For small schemes (typically ≤ 4 binders) a linear scan is fine.
         const subst = try alloc.alloc(SubstEntry, self.binders.len);
         defer alloc.free(subst);
         for (self.binders, 0..) |id, i| {
-            subst[i] = .{ .id = id, .mv = supply.fresh() };
+            const node = try alloc.create(HType);
+            node.* = HType{ .Meta = supply.fresh() };
+            subst[i] = .{ .id = id, .node = node };
         }
 
-        return instantiateType(self.body, subst, alloc);
+        return (try instantiateType(self.body, subst, alloc)).*;
     }
 
     /// Convenience: build a monomorphic scheme (no binders).
@@ -105,37 +113,56 @@ pub const TyScheme = struct {
 };
 
 /// Recursively substitute rigid variables matching `subst` entries with
-/// their corresponding fresh metavars.
+/// their corresponding fresh metavar nodes.
+///
+/// Returns a `*HType` (arena pointer) so that binder occurrences can share
+/// the *same* arena node — essential for correct let-polymorphism: when the
+/// same type variable `a` appears in both `a -> a`, both positions must
+/// point to the same mutable MetaVar cell so that solving one (e.g. `a=Int`)
+/// automatically resolves the other.
 fn instantiateType(
     ty: HType,
     subst: []const SubstEntry,
     alloc: std.mem.Allocator,
-) std.mem.Allocator.Error!HType {
-    return switch (ty) {
-        .Meta => ty, // already a metavar — leave alone
-        .Rigid => |name| blk: {
-            // Check if this rigid is one of the binders being substituted.
-            for (subst) |s| {
-                if (name.unique.value == s.id)
-                    break :blk HType{ .Meta = s.mv };
-            }
-            break :blk ty; // free rigid — unchanged
+) std.mem.Allocator.Error!*HType {
+    switch (ty) {
+        .Meta => |mv| {
+            // Follow any solution chain before substituting.
+            if (mv.ref) |next| return instantiateType(next.*, subst, alloc);
+            // Unsolved metavar — allocate a fresh copy to preserve arena ownership.
+            const node = try alloc.create(HType);
+            node.* = ty;
+            return node;
         },
-        .Con => |c| blk: {
+        .Rigid => |name| {
+            // Check if this rigid is one of the binders being substituted.
+            // Return the shared binder node directly so all occurrences alias
+            // the same mutable cell.
+            for (subst) |s| {
+                if (name.unique.value == s.id) return s.node;
+            }
+            // Free rigid — copy onto arena unchanged.
+            const node = try alloc.create(HType);
+            node.* = ty;
+            return node;
+        },
+        .Con => |c| {
             const new_args = try alloc.alloc(HType, c.args.len);
             for (c.args, 0..) |arg, i| {
-                new_args[i] = try instantiateType(arg, subst, alloc);
+                new_args[i] = (try instantiateType(arg, subst, alloc)).*;
             }
-            break :blk HType{ .Con = .{ .name = c.name, .args = new_args } };
+            const node = try alloc.create(HType);
+            node.* = HType{ .Con = .{ .name = c.name, .args = new_args } };
+            return node;
         },
-        .Fun => |f| blk: {
-            const new_arg = try alloc.create(HType);
-            new_arg.* = try instantiateType(f.arg.*, subst, alloc);
-            const new_res = try alloc.create(HType);
-            new_res.* = try instantiateType(f.res.*, subst, alloc);
-            break :blk HType{ .Fun = .{ .arg = new_arg, .res = new_res } };
+        .Fun => |f| {
+            const new_arg = try instantiateType(f.arg.*, subst, alloc);
+            const new_res = try instantiateType(f.res.*, subst, alloc);
+            const node = try alloc.create(HType);
+            node.* = HType{ .Fun = .{ .arg = new_arg, .res = new_res } };
+            return node;
         },
-        .ForAll => |fa| blk: {
+        .ForAll => |fa| {
             // If the ForAll re-binds one of our substitution variables, that
             // binder shadows the outer one — skip substituting it inside.
             // This is the standard capture-avoidance for instantiation.
@@ -157,11 +184,12 @@ fn instantiateType(
                     break;
                 }
             }
-            const new_body = try alloc.create(HType);
-            new_body.* = try instantiateType(fa.body.*, inner_subst, alloc);
-            break :blk HType{ .ForAll = .{ .binder = fa.binder, .body = new_body } };
+            const new_body = try instantiateType(fa.body.*, inner_subst, alloc);
+            const node = try alloc.create(HType);
+            node.* = HType{ .ForAll = .{ .binder = fa.binder, .body = new_body } };
+            return node;
         },
-    };
+    }
 }
 
 // ── Frame ──────────────────────────────────────────────────────────────

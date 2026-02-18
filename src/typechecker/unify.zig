@@ -98,19 +98,24 @@ pub fn unify(alloc: std.mem.Allocator, a: *HType, b: *HType) UnifyError!void {
     if (lhs == .Meta and rhs == .Meta and lhs.Meta.eql(rhs.Meta))
         return;
 
-    // LHS is an unsolved metavar — bind it to rhs.
+    // Both are distinct unsolved metavars — link LHS → RHS using the actual
+    // RHS arena node pointer, avoiding a value copy that would sever the
+    // mutation chain.  We walk to the tail of `a`'s chain and point it at
+    // the tail of `b`'s chain directly.
+    if (lhs == .Meta and rhs == .Meta) {
+        const a_tail = tailPtr(a);
+        const b_tail = tailPtr(b);
+        a_tail.Meta.ref = b_tail;
+        return;
+    }
+
+    // LHS is an unsolved metavar — bind it to rhs (a non-Meta ground type).
     if (lhs == .Meta) {
-        // `a` after chasing is the unsolved metavar; find the actual node.
-        // Since `a.chase()` returned a Meta, `a` itself (after following any
-        // solved links) IS the unsolved node.  We need a pointer to the Meta
-        // field inside the `HType` that `chase` stopped at.  The simplest
-        // correct approach: follow `a`'s ref chain to find the last node and
-        // bind through it.
         try bindPtr(alloc, a, rhs);
         return;
     }
 
-    // RHS is an unsolved metavar — bind it to lhs.
+    // RHS is an unsolved metavar — bind it to lhs (a non-Meta ground type).
     if (rhs == .Meta) {
         try bindPtr(alloc, b, lhs);
         return;
@@ -170,8 +175,26 @@ pub fn unify(alloc: std.mem.Allocator, a: *HType, b: *HType) UnifyError!void {
     }
 }
 
+/// Walk a MetaVar chain to the last unsolved `Meta` node and return a pointer
+/// to it.  `node` must be a `.Meta` (possibly with solved links).
+fn tailPtr(node: *HType) *HType {
+    var cur: *HType = node;
+    while (true) {
+        switch (cur.*) {
+            .Meta => |mv| {
+                if (mv.ref) |next| {
+                    cur = next;
+                } else {
+                    return cur;
+                }
+            },
+            else => unreachable,
+        }
+    }
+}
+
 /// Follow the MetaVar chain in `node` to the last unsolved `Meta`, then bind
-/// that cell to `ty`.
+/// that cell to `ty` (which must be a non-Meta ground type).
 ///
 /// `node` must be an `HType` whose `chase()` returned an unsolved `.Meta`.
 /// We walk the `ref` chain manually (mirroring `chase`) so that we can write
