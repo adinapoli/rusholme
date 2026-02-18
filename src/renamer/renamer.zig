@@ -292,6 +292,11 @@ pub const RExpr = union(enum) {
     Do: []const RStmt,
     Tuple: []const RExpr,
     List: []const RExpr,
+    /// Arithmetic sequences (Haskell 2010 §3.10)
+    EnumFrom: struct { from: *const RExpr, span: SourceSpan },
+    EnumFromThen: struct { from: *const RExpr, then: *const RExpr, span: SourceSpan },
+    EnumFromTo: struct { from: *const RExpr, to: *const RExpr, span: SourceSpan },
+    EnumFromThenTo: struct { from: *const RExpr, then: *const RExpr, to: *const RExpr, span: SourceSpan },
     TypeAnn: struct { expr: *const RExpr, type: ast.Type },
     Negate: *const RExpr,
     Paren: *const RExpr,
@@ -681,6 +686,34 @@ fn renameExpr(expr: ast.Expr, env: *RenameEnv) RenameError!RExpr {
             const r = try env.alloc.create(RExpr);
             r.* = try renameExpr(e.*, env);
             break :blk RExpr{ .Paren = r };
+        },
+        .EnumFrom => |e| blk: {
+            const from_r = try env.alloc.create(RExpr);
+            from_r.* = try renameExpr(e.from.*, env);
+            break :blk RExpr{ .EnumFrom = .{ .from = from_r, .span = e.span } };
+        },
+        .EnumFromThen => |e| blk: {
+            const from_r = try env.alloc.create(RExpr);
+            from_r.* = try renameExpr(e.from.*, env);
+            const then_r = try env.alloc.create(RExpr);
+            then_r.* = try renameExpr(e.then.*, env);
+            break :blk RExpr{ .EnumFromThen = .{ .from = from_r, .then = then_r, .span = e.span } };
+        },
+        .EnumFromTo => |e| blk: {
+            const from_r = try env.alloc.create(RExpr);
+            from_r.* = try renameExpr(e.from.*, env);
+            const to_r = try env.alloc.create(RExpr);
+            to_r.* = try renameExpr(e.to.*, env);
+            break :blk RExpr{ .EnumFromTo = .{ .from = from_r, .to = to_r, .span = e.span } };
+        },
+        .EnumFromThenTo => |e| blk: {
+            const from_r = try env.alloc.create(RExpr);
+            from_r.* = try renameExpr(e.from.*, env);
+            const then_r = try env.alloc.create(RExpr);
+            then_r.* = try renameExpr(e.then.*, env);
+            const to_r = try env.alloc.create(RExpr);
+            to_r.* = try renameExpr(e.to.*, env);
+            break :blk RExpr{ .EnumFromThenTo = .{ .from = from_r, .then = then_r, .to = to_r, .span = e.span } };
         },
         // M1: ListComp, RecordCon, RecordUpdate, Field — not yet handled.
         // Emit an unbound-variable diagnostic for the sub-expressions we skip.

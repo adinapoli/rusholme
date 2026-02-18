@@ -854,6 +854,41 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
             break :blk int_node;
         },
 
+        // ── Arithmetic sequences (Haskell 2010 §3.10) ────────────────
+        //
+        // All four forms desugar to enumFrom*/enumFromThen* which require
+        // an Enum constraint.  At this stage we simply unify the element
+        // expressions and return [τ] — constraint solving is deferred to
+        // a later milestone.
+        .EnumFrom => |e| blk: {
+            const elem_ty = try infer(ctx, e.from.*);
+            const args = try ctx.alloc.dupe(HType, &.{elem_ty.*});
+            break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
+        },
+        .EnumFromThen => |e| blk: {
+            const from_ty = try infer(ctx, e.from.*);
+            const then_ty = try infer(ctx, e.then.*);
+            try ctx.unifyNow(from_ty, then_ty, syntheticSpan());
+            const args = try ctx.alloc.dupe(HType, &.{from_ty.*});
+            break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
+        },
+        .EnumFromTo => |e| blk: {
+            const from_ty = try infer(ctx, e.from.*);
+            const to_ty = try infer(ctx, e.to.*);
+            try ctx.unifyNow(from_ty, to_ty, syntheticSpan());
+            const args = try ctx.alloc.dupe(HType, &.{from_ty.*});
+            break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
+        },
+        .EnumFromThenTo => |e| blk: {
+            const from_ty = try infer(ctx, e.from.*);
+            const then_ty = try infer(ctx, e.then.*);
+            const to_ty = try infer(ctx, e.to.*);
+            try ctx.unifyNow(from_ty, then_ty, syntheticSpan());
+            try ctx.unifyNow(from_ty, to_ty, syntheticSpan());
+            const args = try ctx.alloc.dupe(HType, &.{from_ty.*});
+            break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
+        },
+
         // ── Paren ─────────────────────────────────────────────────────
         .Paren => |inner| infer(ctx, inner.*),
     };

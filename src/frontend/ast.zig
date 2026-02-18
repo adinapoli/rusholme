@@ -270,6 +270,14 @@ pub const Expr = union(enum) {
     Tuple: []const Expr,
     /// List: [1, 2, 3]
     List: []const Expr,
+    /// Arithmetic sequence: [e ..]  (Haskell 2010 §3.10)
+    EnumFrom: struct { from: *const Expr, span: SourceSpan },
+    /// Arithmetic sequence: [e, e' ..]
+    EnumFromThen: struct { from: *const Expr, then: *const Expr, span: SourceSpan },
+    /// Arithmetic sequence: [e .. e']
+    EnumFromTo: struct { from: *const Expr, to: *const Expr, span: SourceSpan },
+    /// Arithmetic sequence: [e, e' .. e'']
+    EnumFromThenTo: struct { from: *const Expr, then: *const Expr, to: *const Expr, span: SourceSpan },
     /// List comprehension: [x * 2 | x <- xs]
     ListComp: struct { expr: *const Expr, qualifiers: []const Qualifier },
     /// Type annotation: 5 :: Int
@@ -298,6 +306,10 @@ pub const Expr = union(enum) {
             .Case => |c| c.scrutinee.getSpan(),
             .If => |i| i.condition.getSpan().merge(i.else_expr.getSpan()),
             .Do, .Tuple, .List => unreachable, // Need span on container
+            .EnumFrom => |e| e.span,
+            .EnumFromThen => |e| e.span,
+            .EnumFromTo => |e| e.span,
+            .EnumFromThenTo => |e| e.span,
             .ListComp => |l| l.expr.getSpan(),
             .TypeAnn => |a| a.expr.getSpan(),
             .Negate, .Paren => |e| e.getSpan(),
