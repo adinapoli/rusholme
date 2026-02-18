@@ -4,17 +4,23 @@
 //! coloring. Designed to match rustc-style error format.
 //!
 //! Source code snippets are rendered with context lines and highlighting.
+//!
+//! Diagnostics with structured payloads (e.g., type errors) are rendered
+//! with enhanced formatting using the payload information.
 
 const std = @import("std");
 const Io = std.Io;
 const span_mod = @import("span.zig");
 const diag_mod = @import("diagnostic.zig");
+const type_error_mod = @import("../typechecker/type_error.zig");
 const SourceSpan = span_mod.SourceSpan;
 const SourcePos = span_mod.SourcePos;
 const Diagnostic = diag_mod.Diagnostic;
 const Severity = diag_mod.Severity;
 const DiagnosticCode = diag_mod.DiagnosticCode;
+const DiagnosticPayload = diag_mod.DiagnosticPayload;
 const Note = diag_mod.Note;
+const TypeError = type_error_mod.TypeError;
 const FileId = span_mod.FileId;
 
 /// ANSI color codes for terminal output
@@ -84,11 +90,100 @@ pub const TerminalRenderer = struct {
         try self.renderSeverity(writer, diag.severity, diag.code);
 
         // Primary message
-        try writer.print("{s}{s}{s}\x1b[0m\n", .{
-            if (self.color_enabled) brightMagenta() else "",
-            diag.message,
-            if (self.color_enabled) reset() else "",
-        });
+        try writer.writeByte('\n');
+
+        // If we have a type_error payload, render enhanced type information
+        if (diag.payload) |payload| {
+            switch (payload) {
+                .type_error => |te| try self.renderTypeError(writer, te),
+            }
+        } else {
+            // Fallback to simple message rendering
+            try writer.writeAll("    ");
+            try writer.print("{s}{s}{s}", .{
+                if (self.color_enabled) brightMagenta() else "",
+                diag.message,
+                if (self.color_enabled) reset() else "",
+            });
+            try writer.writeByte('\n');
+        }
+    }
+
+    /// Render a type error with enhanced formatting.
+    fn renderTypeError(self: TerminalRenderer, writer: anytype, te: TypeError) !void {
+        const indent = "    ";
+        const err_color = if (self.color_enabled) brightRed() else "";
+        const cyan_color = if (self.color_enabled) brightCyan() else "";
+        const yellow_color = if (self.color_enabled) brightYellow() else "";
+        const reset_color = if (self.color_enabled) reset() else "";
+
+        try writer.writeAll(indent);
+
+        switch (te) {
+            .mismatch => |m| {
+                try writer.print("{s}---{s} cannot unify types{c}", .{ err_color, reset_color, '\n' });
+                try writer.writeAll(indent);
+                try writer.print("   {s}expected:{s} ", .{ cyan_color, reset_color });
+
+                const lhs_str = try m.lhs.pretty(self.file_contents.allocator);
+                try writer.print("{s}`{s}`{s}\n", .{ yellow_color, lhs_str, reset_color });
+
+                try writer.writeAll(indent);
+                try writer.print("     {s}found:{s} ", .{ cyan_color, reset_color });
+
+                const rhs_str = try m.rhs.pretty(self.file_contents.allocator);
+                try writer.print("{s}`{s}`{s}\n", .{ err_color, rhs_str, reset_color });
+            },
+            .infinite_type => |it| {
+                try writer.print("{s}---{s} occurs check failed{c}", .{ err_color, reset_color, '\n' });
+                try writer.writeAll(indent);
+                try writer.print("   metavariable: {s}?{d}{s}\n", .{ yellow_color, it.meta.id, reset_color });
+
+                try writer.writeAll(indent);
+                try writer.print("     appears in: {s}", .{ cyan_color });
+                const ty_str = try it.ty.pretty(self.file_contents.allocator);
+                try writer.print("{s}`{s}`{s}\n", .{ yellow_color, ty_str, reset_color });
+            },
+            .arity_mismatch => |am| {
+                try writer.print("{s}---{s} arity mismatch{c}", .{ err_color, reset_color, '\n' });
+                try writer.writeAll(indent);
+                try writer.print("   constructor: {s}`{s}`{s}\n", .{
+                    yellow_color, am.name.base, reset_color,
+                });
+                try writer.writeAll(indent);
+                try writer.print("   {s}expected: {d} argument(s){s}\n", .{
+                    cyan_color, am.expected, reset_color,
+                });
+                try writer.writeAll(indent);
+                try writer.print("     {s}got: {d} argument(s){s}\n", .{
+                    cyan_color, am.got, reset_color,
+                });
+            },
+            .application_error => |ae| {
+                try writer.print("{s}---{s} non-function application{c}", .{ err_color, reset_color, '\n' });
+                try writer.writeAll(indent);
+                try writer.print("   function type: {s}", .{ cyan_color });
+                const fn_str = try ae.fn_ty.pretty(self.file_contents.allocator);
+                try writer.print("{s}`{s}`{s}\n", .{ yellow_color, fn_str, reset_color });
+
+                try writer.writeAll(indent);
+                try writer.print("   argument type: {s}", .{ cyan_color });
+                const arg_str = try ae.arg_ty.pretty(self.file_contents.allocator);
+                try writer.print("{s}`{s}`{s}\n", .{ err_color, arg_str, reset_color });
+            },
+            .pattern_mismatch => |pm| {
+                try writer.print("{s}---{s} pattern type mismatch{c}", .{ err_color, reset_color, '\n' });
+                try writer.writeAll(indent);
+                try writer.print("   pattern type: {s}", .{ cyan_color });
+                const pat_str = try pm.pat_ty.pretty(self.file_contents.allocator);
+                try writer.print("{s}`{s}`{s}\n", .{ yellow_color, pat_str, reset_color });
+
+                try writer.writeAll(indent);
+                try writer.print("   scrutinee type: {s}", .{ cyan_color });
+                const scrutinee_str = try pm.scrutinee_ty.pretty(self.file_contents.allocator);
+                try writer.print("{s}`{s}`{s}\n", .{ err_color, scrutinee_str, reset_color });
+            },
+        }
     }
 
     /// Render source code snippet with context and highlighting.

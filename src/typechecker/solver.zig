@@ -44,6 +44,7 @@ const htype_mod = @import("htype.zig");
 const unify_mod = @import("unify.zig");
 const diag_mod = @import("../diagnostics/diagnostic.zig");
 const span_mod = @import("../diagnostics/span.zig");
+const type_error_mod = @import("type_error.zig");
 
 pub const HType = htype_mod.HType;
 pub const MetaVar = htype_mod.MetaVar;
@@ -52,9 +53,11 @@ pub const UnifyError = unify_mod.UnifyError;
 pub const Diagnostic = diag_mod.Diagnostic;
 pub const DiagnosticCollector = diag_mod.DiagnosticCollector;
 pub const DiagnosticCode = diag_mod.DiagnosticCode;
+pub const DiagnosticPayload = diag_mod.DiagnosticPayload;
 pub const Severity = diag_mod.Severity;
 pub const SourceSpan = span_mod.SourceSpan;
 pub const SourcePos = span_mod.SourcePos;
+pub const TypeError = type_error_mod.TypeError;
 
 // ── Constraint ─────────────────────────────────────────────────────────
 
@@ -102,34 +105,63 @@ pub fn solve(
             error.TypeMismatch,
             error.RigidMismatch,
             => {
-                const msg = try formatMismatch(alloc, c.lhs, c.rhs);
+                const te = TypeError{ .mismatch = .{
+                    .lhs = c.lhs,
+                    .rhs = c.rhs,
+                } };
+                const msg = try type_error_mod.format(alloc, te);
                 try diags.emit(alloc, .{
                     .severity = .@"error",
                     .code = .type_error,
                     .span = c.span,
                     .message = msg,
+                    .payload = DiagnosticPayload{ .type_error = te },
                 });
             },
             error.InfiniteType => {
-                const msg = try formatInfiniteType(alloc, c.lhs, c.rhs);
+                // Extract the metavar from the lhs (should be a Meta)
+                const meta = if (c.lhs.chase() == .Meta)
+                    c.lhs.Meta
+                else
+                    blk: {
+                        // If lhs isn't a Meta, try rhs
+                        if (c.rhs.chase() == .Meta) break :blk c.rhs.Meta;
+                        // Fallback: create a placeholder (this shouldn't happen in normal operation)
+                        break :blk MetaVar{ .id = 0, .ref = null };
+                    };
+                const te = TypeError{ .infinite_type = .{
+                    .meta = meta,
+                    .ty = c.rhs,
+                } };
+                const msg = try type_error_mod.format(alloc, te);
                 try diags.emit(alloc, .{
                     .severity = .@"error",
                     .code = .type_error,
                     .span = c.span,
                     .message = msg,
+                    .payload = DiagnosticPayload{ .type_error = te },
                 });
             },
             error.ArityMismatch => {
-                const msg = try std.fmt.allocPrint(
-                    alloc,
-                    "type constructor arity mismatch",
-                    .{},
-                );
+                // For M1, we don't have detailed arity info from the unifier,
+                // so we use a generic payload. The message still provides
+                // useful information.
+                const unknown_name = @import("../naming/unique.zig").Name{
+                    .base = "<type>",
+                    .unique = .{ .value = 0 },
+                };
+                const te = TypeError{ .arity_mismatch = .{
+                    .name = unknown_name,
+                    .expected = 0,
+                    .got = 0,
+                } };
+                const msg = "type constructor arity mismatch";
                 try diags.emit(alloc, .{
                     .severity = .@"error",
                     .code = .type_error,
                     .span = c.span,
                     .message = msg,
+                    .payload = DiagnosticPayload{ .type_error = te },
                 });
             },
         };
@@ -138,31 +170,13 @@ pub fn solve(
 
 // ── Diagnostic message formatting ──────────────────────────────────────
 
-/// Format a human-readable type mismatch message.
-///
-/// For M1 this is a simple "cannot unify X with Y" string.  A richer
-/// pretty-printer (showing the full type tree) can replace this later.
-fn formatMismatch(alloc: std.mem.Allocator, lhs: HType, rhs: HType) std.mem.Allocator.Error![]const u8 {
-    const lhs_str = try formatHType(alloc, lhs);
-    const rhs_str = try formatHType(alloc, rhs);
-    return std.fmt.allocPrint(alloc, "cannot unify `{s}` with `{s}`", .{ lhs_str, rhs_str });
-}
-
-/// Format an infinite type error message.
-fn formatInfiniteType(alloc: std.mem.Allocator, lhs: HType, rhs: HType) std.mem.Allocator.Error![]const u8 {
-    const lhs_str = try formatHType(alloc, lhs);
-    const rhs_str = try formatHType(alloc, rhs);
-    return std.fmt.allocPrint(
-        alloc,
-        "infinite type: `{s}` ~ `{s}` (occurs check failed)",
-        .{ lhs_str, rhs_str },
-    );
-}
-
 /// Format an HType for diagnostic messages.
 ///
 /// Delegates to the canonical `HType.pretty` printer in `htype.zig`, which
 /// handles correct parenthesisation (issue #163).
+///
+/// Note: Most diagnostics now use `type_error.format()` instead, but this
+/// is kept for test compatibility.
 fn formatHType(alloc: std.mem.Allocator, ty: HType) std.mem.Allocator.Error![]const u8 {
     return ty.pretty(alloc);
 }
@@ -413,4 +427,69 @@ test "formatHType: solved Meta renders as solution" {
     const ty = HType{ .Meta = MetaVar{ .id = 0, .ref = &int_ty } };
     const s = try formatHType(alloc, ty);
     try testing.expectEqualStrings("Int", s);
+}
+
+// ── Payload round-trip tests ────────────────────────────────────────────
+
+test "solver: type mismatch diagnostic carries structured payload" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var constraints = [_]Constraint{.{
+        .lhs = con0("Int", 0),
+        .rhs = con0("Bool", 1),
+        .span = testSpan(),
+    }};
+    try solve(&constraints, alloc, &diags);
+    try testing.expect(diags.hasErrors());
+    try testing.expectEqual(@as(usize, 1), diags.errorCount());
+
+    const diag = diags.diagnostics.items[0];
+    try testing.expect(diag.payload != null);
+
+    switch (diag.payload.?) {
+        .type_error => |te| {
+            try testing.expect(te == .mismatch);
+            const m = te.mismatch;
+            try testing.expect(m.lhs == .Con);
+            try testing.expectEqualStrings("Int", m.lhs.Con.name.base);
+            try testing.expect(m.rhs == .Con);
+            try testing.expectEqualStrings("Bool", m.rhs.Con.name.base);
+        },
+    }
+}
+
+test "solver: infinite type diagnostic carries structured payload" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var supply = MetaVarSupply{};
+    const mv = supply.fresh();
+    const meta_ty = HType{ .Meta = mv };
+    const args = [_]HType{meta_ty};
+    var constraints = [_]Constraint{.{
+        .lhs = meta_ty,
+        .rhs = HType{ .Con = .{ .name = testName("[]", 99), .args = &args } },
+        .span = testSpan(),
+    }};
+    try solve(&constraints, alloc, &diags);
+    try testing.expect(diags.hasErrors());
+
+    const diag = diags.diagnostics.items[0];
+    try testing.expect(diag.payload != null);
+
+    switch (diag.payload.?) {
+        .type_error => |te| {
+            try testing.expect(te == .infinite_type);
+            const it = te.infinite_type;
+            try testing.expectEqual(mv.id, it.meta.id);
+            try testing.expect(it.ty == .Con);
+        },
+    }
 }
