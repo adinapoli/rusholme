@@ -1804,6 +1804,7 @@ pub const Parser = struct {
                 return .{ .Paren = try self.allocNode(ast_mod.Expr, result) };
             },
             .open_bracket => {
+                const open_tok = try self.currentSpan();
                 _ = try self.advance();
                 if (try self.check(.close_bracket)) {
                     _ = try self.advance();
@@ -1813,6 +1814,10 @@ pub const Parser = struct {
                 const first = try self.parseExpr();
                 try items.append(self.allocator, first);
                 while (try self.match(.comma) != null) {
+                    if (try self.check(.close_bracket)) {
+                        // Trailing comma
+                        break;
+                    }
                     const item = try self.parseExpr();
                     try items.append(self.allocator, item);
                 }
@@ -3066,6 +3071,86 @@ test "expr: tuple with trailing comma" {
     const expr = try parseTestExpr(&arena, "x = (1, 2, )");
     try std.testing.expect(expr == .Tuple);
     try std.testing.expectEqual(2, expr.Tuple.len);
+}
+
+test "expr: list literal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const expr = try parseTestExpr(&arena, "x = [1, 2, 3]");
+    try std.testing.expect(expr == .List);
+    try std.testing.expectEqual(3, expr.List.len);
+}
+
+test "expr: empty list" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const expr = try parseTestExpr(&arena, "x = []");
+    try std.testing.expect(expr == .List);
+    try std.testing.expectEqual(0, expr.List.len);
+}
+
+test "expr: list with trailing comma" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const expr = try parseTestExpr(&arena, "x = [1, 2, 3, ]");
+    try std.testing.expect(expr == .List);
+    try std.testing.expectEqual(3, expr.List.len);
+}
+
+test "expr: list single element" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const expr = try parseTestExpr(&arena, "x = [42]");
+    try std.testing.expect(expr == .List);
+    try std.testing.expectEqual(1, expr.List.len);
+    try std.testing.expect(expr.List[0] == .Lit);
+    try std.testing.expect(expr.List[0].Lit.Int.value == 42);
+}
+
+test "expr: list with string literals" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const expr = try parseTestExpr(&arena, "x = [\"a\", \"b\", \"c\"]");
+    try std.testing.expect(expr == .List);
+    try std.testing.expectEqual(3, expr.List.len);
+    try std.testing.expect(expr.List[0] == .Lit);
+    try std.testing.expectEqualStrings("a", expr.List[0].Lit.String.value);
+}
+
+test "expr: list with variables" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const expr = try parseTestExpr(&arena, "x = [Just x, Nothing, Just y]");
+    try std.testing.expect(expr == .List);
+    try std.testing.expectEqual(3, expr.List.len);
+}
+
+test "expr: nested lists" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const expr = try parseTestExpr(&arena, "x = [[1, 2], [3, 4]]");
+    try std.testing.expect(expr == .List);
+    try std.testing.expectEqual(2, expr.List.len);
+    try std.testing.expect(expr.List[0] == .List);
+    try std.testing.expectEqual(2, expr.List[0].List.len);
+}
+
+test "expr: nested lists with trailing commas" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const expr = try parseTestExpr(&arena, "x = [[1, 2, ], [3, 4, ]]");
+    try std.testing.expect(expr == .List);
+    try std.testing.expectEqual(2, expr.List.len);
+    try std.testing.expect(expr.List[0] == .List);
+    try std.testing.expectEqual(2, expr.List[0].List.len);
 }
 
 // ── Class, Instance, Deriving, GADT tests (Issue #33) ────────────────────
