@@ -52,6 +52,7 @@ pub const UniqueSupply = htype_mod.UniqueSupply;
 
 const naming = @import("../naming/unique.zig");
 pub const Unique = naming.Unique;
+const Known = @import("../naming/known.zig");
 
 /// A single entry in an instantiation substitution: binder unique ID → fresh MetaVar.
 const SubstEntry = struct { id: u64, mv: MetaVar };
@@ -292,125 +293,124 @@ pub const Scope = struct {
 /// After this call the env contains monomorphic and polymorphic bindings
 /// for the standard Prelude names used by M1 programs.
 pub fn initBuiltins(env: *TyEnv, alloc: std.mem.Allocator, supply: *UniqueSupply) std.mem.Allocator.Error!void {
-    // ── Type constructor helpers ───────────────────────────────────────
-    // These are HType values for common base types.  All are nullary Con
-    // nodes (no args) except IO and List which are used structurally below.
+    _ = supply; // reserved for future use if we need to mint fresh IDs for other built-ins
 
-    const char_ty = conTy("Char", supply);
-    const int_ty = conTy("Int", supply);
-    const bool_ty = conTy("Bool", supply);
-    const double_ty = conTy("Double", supply);
-    const unit_ty = conTy("()", supply);
+    // ── Type constructor helpers ───────────────────────────────────────
+    // These are HType values for common base types.
+
+    const char_ty = conTy(Known.Type.Char);
+    const int_ty = conTy(Known.Type.Int);
+    const bool_ty = conTy(Known.Type.Bool);
+    const double_ty = conTy(Known.Type.Double);
+    const unit_ty = conTy(Known.Type.Unit);
 
     // String = [Char].  Represented as `List Char`.
-    const string_ty = try applyTy("[]", supply, &.{char_ty}, alloc);
+    const string_ty = try applyTy(Known.Type.List, &.{char_ty}, alloc);
 
     // IO () — the type of main and putStrLn's return.
-    const io_unit = try applyTy("IO", supply, &.{unit_ty}, alloc);
-
-    // IO String — return type for getLine etc. (not needed for M1 but cheap to add)
-    const io_string = try applyTy("IO", supply, &.{string_ty}, alloc);
-    _ = io_string; // may be used in future
+    const io_unit = try applyTy(Known.Type.IO, &.{unit_ty}, alloc);
 
     // ── Monomorphic bindings ───────────────────────────────────────────
 
     // putStrLn : String -> IO ()
     const putStrLn_ty = try funTy(string_ty, io_unit, alloc);
-    try env.bindMono(supply.freshName("putStrLn"), putStrLn_ty);
+    try env.bindMono(Known.Fn.putStrLn, putStrLn_ty);
 
     // putStr : String -> IO ()
     const putStr_ty = try funTy(string_ty, io_unit, alloc);
-    try env.bindMono(supply.freshName("putStr"), putStr_ty);
+    try env.bindMono(Known.Fn.putStr, putStr_ty);
 
-    // Primitive types (bound as monomorphic Con types so the typechecker
-    // can resolve them when checking constructor patterns or literals).
-    try env.bindMono(char_ty.Con.name, char_ty);
-    try env.bindMono(int_ty.Con.name, int_ty);
-    try env.bindMono(bool_ty.Con.name, bool_ty);
-    try env.bindMono(double_ty.Con.name, double_ty);
+    // Primitive types
+    try env.bindMono(Known.Type.Char, char_ty);
+    try env.bindMono(Known.Type.Int, int_ty);
+    try env.bindMono(Known.Type.Bool, bool_ty);
+    try env.bindMono(Known.Type.Double, double_ty);
 
     // Data constructors: True, False
-    try env.bindMono(supply.freshName("True"), bool_ty);
-    try env.bindMono(supply.freshName("False"), bool_ty);
+    try env.bindMono(Known.Con.True, bool_ty);
+    try env.bindMono(Known.Con.False, bool_ty);
 
     // Unit constructor
-    try env.bindMono(unit_ty.Con.name, unit_ty);
+    try env.bindMono(Known.Con.Unit, unit_ty);
 
     // ── Polymorphic bindings ───────────────────────────────────────────
     // Each polymorphic binding is a TyScheme{ .binders = &[ids], .body }.
 
     // (:) : forall a. a -> [a] -> [a]
     {
-        const a = supply.fresh();
-        const a_ty = rigidTy("a", a);
-        const list_a = try applyTy("[]", supply, &.{a_ty}, alloc);
+        const a_id: u64 = 10000; // Rigid variables still need unique IDs; using a high range
+        const a_name = Name{ .base = "a", .unique = .{ .value = a_id } };
+        const a_ty = rigidTy(a_name);
+        const list_a = try applyTy(Known.Type.List, &.{a_ty}, alloc);
         const cons_ty = try funTy(a_ty, try funTy(list_a, list_a, alloc), alloc);
-        try env.bind(supply.freshName("(:)"), .{ .binders = try dupeIds(alloc, &.{a.value}), .body = cons_ty });
+        try env.bind(Known.Con.Cons, .{ .binders = try dupeIds(alloc, &.{a_id}), .body = cons_ty });
     }
 
     // [] : forall a. [a]
     {
-        const a = supply.fresh();
-        const a_ty = rigidTy("a", a);
-        const list_a = try applyTy("[]", supply, &.{a_ty}, alloc);
-        try env.bind(supply.freshName("[]"), .{ .binders = try dupeIds(alloc, &.{a.value}), .body = list_a });
+        const a_id: u64 = 10001;
+        const a_name = Name{ .base = "a", .unique = .{ .value = a_id } };
+        const a_ty = rigidTy(a_name);
+        const list_a = try applyTy(Known.Type.List, &.{a_ty}, alloc);
+        try env.bind(Known.Con.Nil, .{ .binders = try dupeIds(alloc, &.{a_id}), .body = list_a });
     }
 
     // (,) : forall a b. a -> b -> (a, b)
     {
-        const a = supply.fresh();
-        const b = supply.fresh();
-        const a_ty = rigidTy("a", a);
-        const b_ty = rigidTy("b", b);
-        const pair_ty = try applyTy("(,)", supply, &.{ a_ty, b_ty }, alloc);
+        const a_id: u64 = 10002;
+        const b_id: u64 = 10003;
+        const a_name = Name{ .base = "a", .unique = .{ .value = a_id } };
+        const b_name = Name{ .base = "b", .unique = .{ .value = b_id } };
+        const a_ty = rigidTy(a_name);
+        const b_ty = rigidTy(b_name);
+        const pair_ty = try applyTy(Known.Con.Tuple2, &.{ a_ty, b_ty }, alloc);
         const tuple_ty = try funTy(a_ty, try funTy(b_ty, pair_ty, alloc), alloc);
-        try env.bind(supply.freshName("(,)"), .{ .binders = try dupeIds(alloc, &.{ a.value, b.value }), .body = tuple_ty });
+        try env.bind(Known.Con.Tuple2, .{ .binders = try dupeIds(alloc, &.{ a_id, b_id }), .body = tuple_ty });
     }
 
-    // error : forall a. String -> a  (partial — type variable is polymorphic)
+    // error : forall a. String -> a
     {
-        const a = supply.fresh();
-        const a_ty = rigidTy("a", a);
+        const a_id: u64 = 10004;
+        const a_name = Name{ .base = "a", .unique = .{ .value = a_id } };
+        const a_ty = rigidTy(a_name);
         const error_ty = try funTy(string_ty, a_ty, alloc);
-        try env.bind(supply.freshName("error"), .{ .binders = try dupeIds(alloc, &.{a.value}), .body = error_ty });
+        try env.bind(Known.Fn.@"error", .{ .binders = try dupeIds(alloc, &.{a_id}), .body = error_ty });
     }
 
     // undefined : forall a. a
     {
-        const a = supply.fresh();
-        const a_ty = rigidTy("a", a);
-        try env.bind(supply.freshName("undefined"), .{ .binders = try dupeIds(alloc, &.{a.value}), .body = a_ty });
+        const a_id: u64 = 10005;
+        const a_name = Name{ .base = "a", .unique = .{ .value = a_id } };
+        const a_ty = rigidTy(a_name);
+        try env.bind(Known.Fn.undefined, .{ .binders = try dupeIds(alloc, &.{a_id}), .body = a_ty });
     }
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────
 
 /// Build a nullary `HType.Con` for a primitive type name.
-/// Uses a fresh `Unique` from `supply` for the name.
-fn conTy(base: []const u8, supply: *UniqueSupply) HType {
-    return HType{ .Con = .{ .name = supply.freshName(base), .args = &.{} } };
+fn conTy(name: Name) HType {
+    return HType{ .Con = .{ .name = name, .args = &.{} } };
 }
 
-/// Build a rigid type variable `HType.Rigid` with the given base and unique.
-fn rigidTy(base: []const u8, u: Unique) HType {
-    return HType{ .Rigid = .{ .base = base, .unique = u } };
+/// Build a rigid type variable `HType.Rigid` with the given name.
+fn rigidTy(name: Name) HType {
+    return HType{ .Rigid = name };
 }
 
 /// Build `HType.Fun{ arg, res }`, allocating `arg` and `res` on `alloc`.
 fn funTy(arg: HType, res: HType, alloc: std.mem.Allocator) std.mem.Allocator.Error!HType {
-    const arg_ptr = try alloc.create(HType);
-    arg_ptr.* = arg;
-    const res_ptr = try alloc.create(HType);
-    res_ptr.* = res;
-    return HType{ .Fun = .{ .arg = arg_ptr, .res = res_ptr } };
+    const p_arg = try alloc.create(HType);
+    p_arg.* = arg;
+    const p_res = try alloc.create(HType);
+    p_res.* = res;
+    return HType{ .Fun = .{ .arg = p_arg, .res = p_res } };
 }
 
-/// Build `HType.Con{ name, args }` for a type constructor applied to `args`.
-/// Allocates a copy of `args` on `alloc`.
-fn applyTy(base: []const u8, supply: *UniqueSupply, args: []const HType, alloc: std.mem.Allocator) std.mem.Allocator.Error!HType {
-    const name = supply.freshName(base);
-    const args_copy = try alloc.dupe(HType, args);
-    return HType{ .Con = .{ .name = name, .args = args_copy } };
+/// Build a `HType.Con` application: `Maybe Int`, `[Char]`, etc.
+fn applyTy(name: Name, args: []const HType, alloc: std.mem.Allocator) std.mem.Allocator.Error!HType {
+    const p_args = try alloc.dupe(HType, args);
+    return HType{ .Con = .{ .name = name, .args = p_args } };
 }
 
 /// Duplicate a slice of `u64` binder IDs onto `alloc`.
@@ -641,24 +641,17 @@ test "initBuiltins: putStrLn is in scope" {
 
     var env = try TyEnv.init(alloc);
     defer env.deinit();
-    var u_supply = UniqueSupply{};
+    var u_supply = UniqueSupply{}; // Starts at 1000
 
-    // We need to know what unique was assigned to "putStrLn".
-    // We can't easily, so we'll just check if ANYTHING is in scope
-    // and if the supply has moved.
+    // Since initBuiltins now uses stable IDs (0-999), it doesn't move the supply.
     try initBuiltins(&env, alloc, &u_supply);
 
-    try testing.expect(u_supply.next > 0);
+    try testing.expect(u_supply.next == 1000);
 
-    // Since initBuiltins is deterministic, we can recreate the names it minted.
-    // However, it's better to just test that the frame is not empty.
-    var frame: ?*Frame = env.current;
-    while (frame) |f| {
-        if (f.bindings.count() > 0) break;
-        frame = f.outer;
-    } else {
-        try testing.expect(false); // No bindings found
-    }
+    var mv_supply = MetaVarSupply{};
+    const ty = try env.lookup(Known.Fn.putStrLn.unique, alloc, &mv_supply);
+    try testing.expect(ty != null);
+    try testing.expect(ty.? == .Fun);
 }
 
 test "initBuiltins: True and False are bound" {
@@ -671,8 +664,15 @@ test "initBuiltins: True and False are bound" {
     var u_supply = UniqueSupply{};
     try initBuiltins(&env, alloc, &u_supply);
 
-    // Verify that we have a decent number of bindings
-    try testing.expect(env.current.bindings.count() > 10);
+    var mv_supply = MetaVarSupply{};
+    const true_ty = try env.lookup(Known.Con.True.unique, alloc, &mv_supply);
+    const false_ty = try env.lookup(Known.Con.False.unique, alloc, &mv_supply);
+
+    try testing.expect(true_ty != null);
+    try testing.expect(false_ty != null);
+    // Both should be Bool
+    try testing.expectEqualStrings("Bool", true_ty.?.Con.name.base);
+    try testing.expectEqualStrings("Bool", false_ty.?.Con.name.base);
 }
 
 test "initBuiltins: bindings are polymorphic where expected" {
