@@ -115,15 +115,29 @@
 | [#66](https://github.com/adinapoli/rusholme/issues/66) | Research: Calling convention (eval/apply vs push/enter vs CPS) | — | :green_circle: |
 | [#67](https://github.com/adinapoli/rusholme/issues/67) | Implement chosen calling convention in runtime and codegen | [#66](https://github.com/adinapoli/rusholme/issues/66), [#54](https://github.com/adinapoli/rusholme/issues/54) | :white_circle: |
 
+### Epic [#154](https://github.com/adinapoli/rusholme/issues/154): Typechecker, Renamer & Desugarer (AST → Core)
+
+> Architecture decision: **bidirectional typechecking + constraint-based elaboration**.
+> See `docs/decisions/005-typechecking-approach.md`.
+
+| # | Issue | Deps | Status |
+|---|-------|------|--------|
+| [#148](https://github.com/adinapoli/rusholme/issues/148) | Research: Typechecking approach (bidirectional TC + constraint elaboration) | — | :green_circle: |
+| [#149](https://github.com/adinapoli/rusholme/issues/149) | Implement Renamer: resolve AST names to unique Names and check scope | [#27](https://github.com/adinapoli/rusholme/issues/27), [#69](https://github.com/adinapoli/rusholme/issues/69) | :white_circle: |
+| [#150](https://github.com/adinapoli/rusholme/issues/150) | Define HType: internal typechecker type with unification metavariables | [#34](https://github.com/adinapoli/rusholme/issues/34) | :white_circle: |
+| [#151](https://github.com/adinapoli/rusholme/issues/151) | Implement Robinson unification with occurs check over HType | [#150](https://github.com/adinapoli/rusholme/issues/150) | :white_circle: |
+| [#152](https://github.com/adinapoli/rusholme/issues/152) | Implement TyEnv: scoped type environment for the typechecker | [#150](https://github.com/adinapoli/rusholme/issues/150) | :white_circle: |
+| [#153](https://github.com/adinapoli/rusholme/issues/153) | Implement Constraint Solver: equality constraints and substitution | [#151](https://github.com/adinapoli/rusholme/issues/151) | :white_circle: |
+| [#36](https://github.com/adinapoli/rusholme/issues/36) | Implement bidirectional typechecker (synth + check modes) | [#149](https://github.com/adinapoli/rusholme/issues/149), [#150](https://github.com/adinapoli/rusholme/issues/150), [#152](https://github.com/adinapoli/rusholme/issues/152) | :white_circle: |
+| [#37](https://github.com/adinapoli/rusholme/issues/37) | Implement type class resolution and dictionary passing | [#36](https://github.com/adinapoli/rusholme/issues/36), [#153](https://github.com/adinapoli/rusholme/issues/153) | :white_circle: |
+| [#38](https://github.com/adinapoli/rusholme/issues/38) | Implement desugarer / elaborator (typed AST → Core IR) | [#36](https://github.com/adinapoli/rusholme/issues/36), [#153](https://github.com/adinapoli/rusholme/issues/153) | :white_circle: |
+
 ### Epic [#5](https://github.com/adinapoli/rusholme/issues/5): Core IR (System F_C)
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#34](https://github.com/adinapoli/rusholme/issues/34) | Define Core IR types (System F_C expressions, binders, types) | [#69](https://github.com/adinapoli/rusholme/issues/69) | :green_circle: |
 | [#35](https://github.com/adinapoli/rusholme/issues/35) | Implement Core IR pretty-printer | [#34](https://github.com/adinapoli/rusholme/issues/34) | :white_circle: |
-| [#36](https://github.com/adinapoli/rusholme/issues/36) | Implement Hindley-Milner type inference engine | [#34](https://github.com/adinapoli/rusholme/issues/34), [#18](https://github.com/adinapoli/rusholme/issues/18) | :white_circle: |
-| [#37](https://github.com/adinapoli/rusholme/issues/37) | Implement type class resolution and dictionary passing | [#36](https://github.com/adinapoli/rusholme/issues/36) | :white_circle: |
-| [#38](https://github.com/adinapoli/rusholme/issues/38) | Implement desugarer (AST to Core translation) | [#36](https://github.com/adinapoli/rusholme/issues/36), [#27](https://github.com/adinapoli/rusholme/issues/27) | :white_circle: |
 | [#39](https://github.com/adinapoli/rusholme/issues/39) | Implement Core lint (type-check Core IR for internal consistency) | [#34](https://github.com/adinapoli/rusholme/issues/34) | :white_circle: |
 
 ### Epic [#6](https://github.com/adinapoli/rusholme/issues/6): GRIN IR and Core→GRIN Translation
