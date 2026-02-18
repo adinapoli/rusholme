@@ -30,6 +30,7 @@ pub const typechecker = @import("typechecker.zig");
 
 pub const tc = struct {
     pub const htype = @import("typechecker/htype.zig");
+    pub const unify = @import("typechecker/unify.zig");
 };
 
 // IR representations
