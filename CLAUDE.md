@@ -170,7 +170,57 @@ nix develop --command zig build test --summary all
 2. **Leverage battle-tested C libraries.** Zig has exceptional C interop — use strong,
    industrial-grade C libraries for hard tasks whenever possible, and source them via Nix.
 
-## 5. Submit for Review
+## 5. File Follow-up Issues for Known Shortcomings
+
+Before opening the PR, identify any deliberate shortcuts, interim designs, or
+known limitations introduced by the implementation. **Every shortcoming must
+become a GitHub issue** — do not leave it as a comment, a TODO, or a PR
+footnote that will be forgotten.
+
+### What counts as a shortcoming
+
+- An interim design that must change once a later issue is implemented
+  (e.g. "keyed on string until the renamer lands").
+- A missing invariant that the current code does not enforce but should.
+- A piece of functionality explicitly deferred from the issue scope.
+- Any place where you wrote "future refactor" or "known limitation" in a comment.
+
+### How to file them
+
+For each shortcoming:
+
+```bash
+# Store body in a temp file to avoid shell interpolation issues.
+cat > /tmp/issue-body.md << 'EOF'
+## Context
+<why this shortcoming exists — reference the PR/issue that introduced it>
+
+## Shortcoming
+<what is wrong or incomplete>
+
+## Deliverable
+<concrete steps to fix it, including which future issue it depends on>
+
+## References
+<relevant files, functions, design docs>
+EOF
+
+gh issue create \
+  --title "<short imperative description>" \
+  --body-file /tmp/issue-body.md \
+  --label "component:<X>,priority:<Y>,type:feature"
+```
+
+Then add the new issue number(s) to `ROADMAP.md` under the appropriate epic,
+with the correct dependency links, on the `project-planning` branch.
+
+### When to skip
+
+The only acceptable reason to skip filing a follow-up issue is if the shortcoming
+is already tracked by an existing open issue. In that case, add a cross-reference
+comment in the code pointing to that issue number.
+
+## 6. Submit for Review
 
 ### Commit and Push
 
@@ -218,7 +268,7 @@ git commit -m "#<NUMBER>: Update roadmap status to in-review"
 git push origin llm-agent/issue-<NUMBER>
 ```
 
-## 6. Status Legend (ROADMAP.md)
+## 7. Status Legend (ROADMAP.md)
 
 | Emoji | Meaning |
 |-------|---------|
@@ -227,7 +277,7 @@ git push origin llm-agent/issue-<NUMBER>
 | :yellow_circle: | In review (PR open) |
 | :green_circle: | Done (PR merged) |
 
-## 7. Research Issues
+## 8. Research Issues
 
 Some issues are `type:research` — their deliverable is a written document, not code.
 
@@ -238,7 +288,7 @@ Some issues are `type:research` — their deliverable is a written document, not
 4. Downstream implementation issues depend on the research decision — they cannot start
    until the research PR is merged.
 
-## 8. Common Pitfalls
+## 9. Common Pitfalls
 
 - **Don't start an issue with unmet dependencies.** The dependency graph exists for a reason.
   Check `depends_on_github` in the JSON file.
