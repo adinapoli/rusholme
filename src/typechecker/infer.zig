@@ -342,8 +342,8 @@ fn solveMetaInTree(node: *HType, target_id: u32, rigid: *HType) void {
 /// Convert an `ast.Type` annotation to an arena-allocated `*HType`.
 ///
 /// Intentionally minimal for M1 — handles the common cases.
-/// Known shortcoming: full `ast.Type → HType` conversion tracked as
-/// a follow-up issue.
+/// Known shortcoming: App, Paren, Forall, and n-ary Tuple not yet handled.
+/// See #177.
 fn astTypeToHType(
     ast_ty: @import("../frontend/ast.zig").Type,
     ctx: *InferCtx,
@@ -619,7 +619,7 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
 
         // ── Do ────────────────────────────────────────────────────────
         //
-        // M1: do-notation is in IO.
+        // M1: do-notation is hard-coded to IO.  See #176 for generic Monad.
         .Do => |stmts| blk: {
             if (stmts.len == 0) break :blk try ctx.freshMeta();
             try ctx.env.push();
@@ -833,6 +833,8 @@ fn inferLetDecl(ctx: *InferCtx, decl: RDecl) std.mem.Allocator.Error!void {
             }
 
             // Generalise and rebind.
+            // Note: env_types is empty — free metas in the ambient env are
+            // not subtracted.  See #174 for the correct fix.
             const scheme = try generalisePtr(ctx, fun_node, &.{});
             try ctx.env.bind(fb.name, scheme);
         },
@@ -842,7 +844,7 @@ fn inferLetDecl(ctx: *InferCtx, decl: RDecl) std.mem.Allocator.Error!void {
             try ctx.unifyNow(rhs_ty, pat_ty, pb.span);
         },
         .TypeSig => {
-            // Type signatures are not yet used to guide inference (future issue).
+            // Type signatures are not yet used to guide inference.  See #175.
         },
     }
 }
@@ -906,6 +908,7 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
                     const eq_ty = try inferMatch(ctx, eq);
                     try ctx.unifyNow(fun_node, eq_ty, fb.span);
                 }
+                // See #174: env_types is empty (over-generalisation risk).
                 const scheme = try generalisePtr(ctx, fun_node, &.{});
                 try ctx.env.bind(fb.name, scheme);
             },
