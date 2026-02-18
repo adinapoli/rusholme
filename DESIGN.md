@@ -84,6 +84,8 @@ Haskell Source
 
 ### What we skip (and why)
 
+- **Renaming pass** — GHC has a dedicated renamer between parsing and
+  typechecking. We may fold this into typechecking or keep it separate; TBD.
 - **STG** — replaced by GRIN, which handles laziness without baking in GHC's
   runtime assumptions.
 - **Cmm** — replaced by GRIN, which talks directly to backends.
@@ -146,71 +148,6 @@ diagnostics. Source spans are tracked from the lexer onwards.
 Goals beyond GHC:
 - Report errors for *all* modules, not just the first failure.
 - Avoid confusing cascading errors from layout rule ambiguity.
-
-## Typechecking Strategy
-
-The typechecker sits between the renamer and the desugarer. It elaborates the
-renamed AST into Core, attaching types to every node. Architecture decision
-recorded in full in `docs/decisions/005-typechecking-approach.md`.
-
-### Pipeline stages
-
-```
-Renamed AST
-  → Renamer           (#149)  — resolves names to unique Names, checks scope
-  → HType + MetaVar   (#150)  — internal type representation with mutable
-                                unification metavariables
-  → Unification       (#151)  — Robinson unification with occurs check
-  → TyEnv             (#152)  — scoped type environment (lexical scoping)
-  → Constraint solver (#153)  — equality constraints, substitution
-  → Bidirectional TC  (#36)   — synthesis (infer) + checking (verify) modes
-  → Elaborated Core           — fully-typed, metavar-free System F_C
-```
-
-### Algorithm: bidirectional type-checking
-
-We use **bidirectional type-checking** (Dunfield & Krishnaswami, ICFP 2013)
-rather than Algorithm W or full OutsideIn(X):
-
-- **Synthesis mode** (`synth`): infer a type bottom-up from the expression.
-- **Checking mode** (`check`): push a known type top-down and verify.
-
-Constraints are equality constraints only (for M1). The constraint solver
-drives unification; the bidirectional structure determines when inference is
-needed vs. when a type is already known from context.
-
-### HType vs CoreType
-
-The typechecker works over `HType` — an internal type with mutable
-unification metavariables (`?0`, `?1`, …). After solving all constraints,
-`HType.toCore()` elaborates a fully-solved `HType` into an immutable
-`CoreType`. Unsolved metavariables are a type error.
-
-### Renaming pass
-
-GHC has a dedicated renamer between parsing and typechecking. Rusholme follows
-the same design: the renamer (issue #149) is a distinct pipeline stage that
-resolves all names to globally unique `Name` values before typechecking begins.
-This clean separation means the typechecker never sees raw string identifiers.
-
-### Known future refactor: AST phase parameterisation
-
-GHC parameterises its surface AST (`HsSyn p`) over the compiler phase
-(`GhcPs` → `GhcRn` → `GhcTc`), so that different passes carry different
-annotations on the same node types. Rusholme currently uses a single `AST`
-type with renaming and type information grafted on separately, which is an
-interim design. A future refactor should introduce a phase parameter analogous
-to GHC's approach. See `docs/decisions/005-typechecking-approach.md` for the
-migration plan.
-
-### Key references
-
-- Dunfield & Krishnaswami, *"Complete and Easy Bidirectional Typechecking for
-  Higher-Rank Polymorphism"*, ICFP 2013.
-- Vytiniotis, Peyton Jones et al., *"OutsideIn(X)"*, JFP 2011 — GHC's
-  constraint-based extension (future reference for type classes).
-- Peyton Jones et al., *"Practical type inference for arbitrary-rank types"*,
-  JFP 2007.
 
 ## Backend Strategy
 
@@ -408,6 +345,3 @@ comptime when the concrete allocator type is known).
 | 25 | GitHub Actions CI via Nix flake | Reproducible builds from the start | 2026-02-15 |
 
 | 26 | Stress-test parser with real Haskell code (Epic #11) | After Epic #4 completion, incrementally test GHC test programs to (1) drive golden test infrastructure, (2) discover parser gaps → new issues under Epic #4, (3) improve error diagnostics, and (4) build CLI parse-checker interface | 2026-02-17 |
-| 27 | Bidirectional type-checking as the typechecking algorithm | Cleaner than Algorithm W for higher-rank types; used by Idris 2, Lean 4, Agda; separates inference (synth) from verification (check); maps cleanly to a future OutsideIn(X) constraint architecture | 2026-02-18 |
-| 28 | Mutable unification metavariables (`MetaVar.ref: ?*HType`) | Standard technique (GHC, Lean, Agda) — avoids threading an explicit substitution map; metavars are local to a typechecking pass and resolved before elaboration to Core | 2026-02-18 |
-| 29 | Separate renamer pass before typechecking (issue #149) | Mirrors GHC's architecture; ensures the typechecker only ever sees globally-unique `Name` values, never raw source strings; clean pipeline boundary | 2026-02-18 |
