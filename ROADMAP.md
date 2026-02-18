@@ -146,7 +146,7 @@
 | [#176](https://github.com/adinapoli/rusholme/issues/176) | typechecker: do-notation inference is hard-coded to IO, not generic Monad | [#36](https://github.com/adinapoli/rusholme/issues/36), [#37](https://github.com/adinapoli/rusholme/issues/37) | :white_circle: |
 | [#183](https://github.com/adinapoli/rusholme/issues/183) | typechecker: let-binding type signatures are ignored | [#175](https://github.com/adinapoli/rusholme/issues/175) | :white_circle: |
 | [#184](https://github.com/adinapoli/rusholme/issues/184) | typechecker: bidirectional signature checking for rank-N polymorphism | [#175](https://github.com/adinapoli/rusholme/issues/175) | :white_circle: |
-| [#177](https://github.com/adinapoli/rusholme/issues/177) | typechecker: astTypeToHType incomplete — App, Paren, Forall, n-tuples not handled | [#36](https://github.com/adinapoli/rusholme/issues/36) | :white_circle: |
+| [#177](https://github.com/adinapoli/rusholme/issues/177) | typechecker: astTypeToHType incomplete — App, Paren, Forall, n-tuples not handled | [#36](https://github.com/adinapoli/rusholme/issues/36) | :yellow_circle: |
 | [#37](https://github.com/adinapoli/rusholme/issues/37) | Implement type class resolution and dictionary passing | [#36](https://github.com/adinapoli/rusholme/issues/36), [#153](https://github.com/adinapoli/rusholme/issues/153) | :white_circle: |
 | [#38](https://github.com/adinapoli/rusholme/issues/38) | Implement desugarer / elaborator (typed AST → Core IR) | [#36](https://github.com/adinapoli/rusholme/issues/36), [#153](https://github.com/adinapoli/rusholme/issues/153) | :white_circle: |
 
