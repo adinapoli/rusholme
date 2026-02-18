@@ -147,6 +147,33 @@ pub fn build(b: *std.Build) void {
     });
     const run_golden_tests = b.addRunArtifact(golden_tests);
 
+    // Parser conformance test runner (should_compile / should_fail)
+    const parser_test_module = b.createModule(.{
+        .root_source_file = b.path("tests/parser_test_runner.zig"),
+        .target = target,
+        .imports = &.{.{ .name = "rusholme", .module = mod }},
+    });
+    const parser_tests = b.addTest(.{
+        .name = "parser-tests",
+        .root_module = parser_test_module,
+    });
+    const run_parser_tests = b.addRunArtifact(parser_tests);
+
+    // Diagnostic step — reports per-file parser errors for failing tests.
+    // Usage: zig build diag
+    const diag_module = b.createModule(.{
+        .root_source_file = b.path("tests/diagnose_runner.zig"),
+        .target = target,
+        .imports = &.{.{ .name = "rusholme", .module = mod }},
+    });
+    const diag_tests = b.addTest(.{
+        .name = "diag",
+        .root_module = diag_module,
+    });
+    const run_diag = b.addRunArtifact(diag_tests);
+    const diag_step = b.step("diag", "Diagnose parser conformance failures");
+    diag_step.dependOn(&run_diag.step);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
@@ -154,6 +181,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_golden_tests.step);
+    test_step.dependOn(&run_parser_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
