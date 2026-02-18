@@ -689,9 +689,11 @@ pub const Parser = struct {
 
         // Function binding: name [patterns] = expr [where ...]
         // or guarded: name [patterns] | guard = expr
+        // Each argument is an apat (Haskell 2010 §3.17.2): an atomic pattern
+        // optionally followed by @apat (as-pattern).
         var patterns: std.ArrayListUnmanaged(ast_mod.Pattern) = .empty;
         while (true) {
-            const pat = try self.tryParseAtomicPattern() orelse break;
+            const pat = try self.tryParseArgPattern() orelse break;
             try patterns.append(self.allocator, pat);
         }
 
@@ -2121,15 +2123,14 @@ pub const Parser = struct {
     fn parseConPattern(self: *Parser) ParseError!ast_mod.Pattern {
         const tok = try self.expect(.conid);
 
-        // Try to parse constructor arguments
+        // Try to parse constructor arguments.
+        // Each argument is an apat (Haskell 2010 §3.17.2): atomic pattern
+        // with optional as-pattern suffix, but no infix constructors.
         var args: std.ArrayListUnmanaged(ast_mod.Pattern) = .empty;
         defer args.deinit(self.allocator);
 
         while (try self.isPatternStart()) {
-            // For atomic patterns after conid, parse directly
-            // But we need to be careful not to parse infix constructors here
-            // Since we're left-associative, parse atomic patterns only
-            const arg = try self.parseAtomicPattern();
+            const arg = try self.parseArgPattern();
             try args.append(self.allocator, arg);
         }
 
@@ -2267,6 +2268,46 @@ pub const Parser = struct {
     fn tryParseAtomicPattern(self: *Parser) ParseError!?ast_mod.Pattern {
         if (try self.isPatternStart()) {
             return try self.parseAtomicPattern();
+        }
+        return null;
+    }
+
+    /// Parse an argument pattern (apat per Haskell 2010 §3.17.2).
+    ///
+    /// An apat is an atomic pattern with an optional as-pattern suffix:
+    ///   var [ @ apat ]   — as-pattern
+    ///   gcon             — constructor (nullary)
+    ///   literal
+    ///   _                — wildcard
+    ///   ( pat )          — parenthesized
+    ///   ( pat1, ... )    — tuple
+    ///   [ pat1, ... ]    — list
+    ///
+    /// Unlike `parsePattern`, this does NOT consume infix constructor operators
+    /// (`:`, `||`, etc.), making it safe to use for function arguments and
+    /// constructor arguments where the caller owns the infix level.
+    fn parseArgPattern(self: *Parser) ParseError!ast_mod.Pattern {
+        const atom = try self.parseAtomicPattern();
+
+        // Check for as-pattern: var@apat
+        if (atom == .Var and try self.check(.at)) {
+            _ = try self.advance(); // consume @
+            const rhs = try self.parseArgPattern();
+            return .{ .AsPar = .{
+                .name = atom.Var.name,
+                .name_span = atom.Var.span,
+                .pat = try self.allocNode(ast_mod.Pattern, rhs),
+                .span = atom.Var.span.merge(rhs.getSpan()),
+            } };
+        }
+
+        return atom;
+    }
+
+    /// Try to parse an argument pattern; returns null if no pattern starts here.
+    fn tryParseArgPattern(self: *Parser) ParseError!?ast_mod.Pattern {
+        if (try self.isPatternStart()) {
+            return try self.parseArgPattern();
         }
         return null;
     }
