@@ -66,6 +66,16 @@ pub const Note = struct {
     span: ?SourceSpan = null,
 };
 
+/// Structured payload for diagnostics with additional information.
+///
+/// Rich renderers can use this to provide enhanced output (e.g., type diffs,
+/// syntax highlighting, etc.). The `message` field is always populated for
+/// backward compatibility with plain-text sinks.
+pub const DiagnosticPayload = union(enum) {
+    /// Type error with structured type information.
+    type_error: @import("../typechecker/type_error.zig").TypeError,
+};
+
 /// A structured diagnostic message.
 ///
 /// Every diagnostic carries a severity, a machine-readable code, the
@@ -77,6 +87,12 @@ pub const Diagnostic = struct {
     span: SourceSpan,
     message: []const u8,
     notes: []const Note = &.{},
+    /// Optional structured payload for rich renderers.
+    ///
+    /// When present, renderers can extract type information, syntax details,
+    /// etc. to provide enhanced output (e.g., type diffs, highlighting).
+    /// The `message` field is always populated as fallback for plain-text output.
+    payload: ?DiagnosticPayload = null,
 };
 
 /// Accumulates diagnostics across compilation stages.
