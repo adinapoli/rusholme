@@ -342,30 +342,47 @@ fn solveMetaInTree(node: *HType, target_id: u32, rigid: *HType) void {
     }
 }
 
-// ── AST Type → HType conversion ────────────────────────────────────────
+// ── Type signature handling ────────────────────────────────────────────
+
+/// Mapping from type variable names (e.g., "a", "b") to their allocated `*HType` nodes.
+/// Used when converting `ast.Type` with bound type variables.
+const TypeVarMap = std.StringHashMapUnmanaged(*HType);
 
 /// Convert an `ast.Type` annotation to an arena-allocated `*HType`.
+///
+/// Handles type variables via the provided map: if a variable is already in the map,
+/// returns the existing node; otherwise allocates a fresh meta and adds it to the map.
+/// This allows type signatures like `a -> a` to correctly represent the type as
+/// using the same type variable in multiple positions.
 ///
 /// Intentionally minimal for M1 — handles the common cases.
 /// Known shortcoming: App, Paren, Forall, and n-ary Tuple not yet handled.
 /// See #177.
-fn astTypeToHType(
+fn astTypeToHTypeWithScope(
     ast_ty: @import("../frontend/ast.zig").Type,
     ctx: *InferCtx,
+    scope: *TypeVarMap,
 ) std.mem.Allocator.Error!*HType {
     return switch (ast_ty) {
-        .Var => ctx.freshMeta(),
+        .Var => |name| blk: {
+            if (scope.get(name)) |existing| {
+                break :blk existing;
+            }
+            const meta = try ctx.freshMeta();
+            try scope.put(ctx.alloc, name, meta);
+            break :blk meta;
+        },
         .Con => |qname| blk: {
             if (knownTypeByName(qname.name)) |ty| break :blk ctx.alloc_ty(ty);
             break :blk ctx.freshMeta();
         },
         .Fun => |parts| blk: {
             if (parts.len < 2) break :blk ctx.freshMeta();
-            var result = try astTypeToHType(parts[parts.len - 1].*, ctx);
+            var result = try astTypeToHTypeWithScope(parts[parts.len - 1].*, ctx, scope);
             var i = parts.len - 1;
             while (i > 0) {
                 i -= 1;
-                const arg_p = try astTypeToHType(parts[i].*, ctx);
+                const arg_p = try astTypeToHTypeWithScope(parts[i].*, ctx, scope);
                 const res_p = try ctx.alloc.create(HType);
                 res_p.* = result.*;
                 const node = try ctx.alloc.create(HType);
@@ -376,22 +393,41 @@ fn astTypeToHType(
         },
         .App => ctx.freshMeta(), // simplified for M1
         .List => |inner| blk: {
-            const inner_p = try astTypeToHType(inner.*, ctx);
+            const inner_p = try astTypeToHTypeWithScope(inner.*, ctx, scope);
             const args = try ctx.alloc.dupe(HType, &.{inner_p.*});
             break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
         },
         .Tuple => |parts| blk: {
             if (parts.len == 2) {
-                const a = try astTypeToHType(parts[0].*, ctx);
-                const b = try astTypeToHType(parts[1].*, ctx);
+                const a = try astTypeToHTypeWithScope(parts[0].*, ctx, scope);
+                const b = try astTypeToHTypeWithScope(parts[1].*, ctx, scope);
                 const args = try ctx.alloc.dupe(HType, &.{ a.*, b.* });
                 break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Con.Tuple2, .args = args } });
             }
             break :blk ctx.freshMeta();
         },
-        .Forall, .Paren, .IParam => ctx.freshMeta(),
+        .Paren => |inner| astTypeToHTypeWithScope(inner.*, ctx, scope),
+        .Forall => |fa| astTypeToHTypeWithScope(fa.type.*, ctx, scope), // Ignore binders, let scope handle it
+        .IParam => ctx.freshMeta(),
     };
 }
+
+/// Simple wrapper for callers that don't need type variable scope sharing.
+fn astTypeToHType(
+    ast_ty: @import("../frontend/ast.zig").Type,
+    ctx: *InferCtx,
+) std.mem.Allocator.Error!*HType {
+    var scope = TypeVarMap{};
+    defer scope.deinit(ctx.alloc);
+    return astTypeToHTypeWithScope(ast_ty, ctx, &scope);
+}
+
+/// Type signature entry: maps a Name to its declared `*HType`.
+const TypeSigEntry = struct {
+    name: Name,
+    ty: *HType,
+    loc: SourceSpan, // For error reporting
+};
 
 fn knownTypeByName(name: []const u8) ?HType {
     if (std.mem.eql(u8, name, "Int")) return HType{ .Con = .{ .name = Known.Type.Int, .args = &.{} } };
@@ -583,7 +619,9 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
         .Let => |let| blk: {
             try ctx.env.push();
             defer ctx.env.pop();
-            for (let.binds) |decl| try inferLetDecl(ctx, decl);
+            // TODO(#175): Collect TypeSig declarations first and check signatures.
+            // For now, pass null for sig since we don't support checking signatures in this context yet.
+            for (let.binds) |decl| try inferLetDecl(ctx, decl, null);
             break :blk try infer(ctx, let.body.*);
         },
 
@@ -812,7 +850,9 @@ fn inferStmt(ctx: *InferCtx, stmt: RStmt) std.mem.Allocator.Error!*HType {
             break :blk inner;
         },
         .LetStmt => |decls| blk: {
-            for (decls) |decl| try inferLetDecl(ctx, decl);
+            // TODO(#175): Collect TypeSig declarations first and check signatures.
+            // For now, pass null for sig since we don't support checking signatures in this context yet.
+            for (decls) |decl| try inferLetDecl(ctx, decl, null);
             break :blk ctx.freshMeta();
         },
     };
@@ -824,7 +864,19 @@ fn inferStmt(ctx: *InferCtx, stmt: RStmt) std.mem.Allocator.Error!*HType {
 ///
 /// Allocates a fresh meta node for the binder, infers each equation (or the
 /// RHS), unifies through the node, flushes, then generalises.
-fn inferLetDecl(ctx: *InferCtx, decl: RDecl) std.mem.Allocator.Error!void {
+///
+/// If a type signature (`TypeSig`) is provided, the inferred type is unified
+/// against the signature to ensure they match.
+///
+/// TODO(#175): Type signatures should be collected in a separate pass before
+/// any inference, so that mutually recursive bindings with signatures can be
+/// handled correctly. The current implementation checks signatures after
+/// inference, which works for single-binding cases but not for mutual recursion.
+fn inferLetDecl(
+    ctx: *InferCtx,
+    decl: RDecl,
+    sig: ?*const TypeSigEntry,
+) std.mem.Allocator.Error!void {
     switch (decl) {
         .FunBind => |fb| {
             // Snapshot env free metas *before* adding the mono pre-binding.
@@ -844,6 +896,11 @@ fn inferLetDecl(ctx: *InferCtx, decl: RDecl) std.mem.Allocator.Error!void {
                 try ctx.unifyNow(fun_node, eq_ty, fb.span);
             }
 
+            // If there's a type signature, check the inferred type against it.
+            if (sig) |s| {
+                try ctx.unifyNow(fun_node, s.ty, fb.span);
+            }
+
             // Generalise using the pre-snapshot env metas and rebind.
             const scheme = try generalisePtr(ctx, fun_node, &env_metas);
             try ctx.env.bind(fb.name, scheme);
@@ -854,7 +911,7 @@ fn inferLetDecl(ctx: *InferCtx, decl: RDecl) std.mem.Allocator.Error!void {
             try ctx.unifyNow(rhs_ty, pat_ty, pb.span);
         },
         .TypeSig => {
-            // Type signatures are not yet used to guide inference.  See #175.
+            // Type signatures are collected separately and not processed here.
         },
     }
 }
@@ -895,6 +952,30 @@ fn inferMatch(ctx: *InferCtx, match: RMatch) std.mem.Allocator.Error!*HType {
 /// Returns a `ModuleTypes` mapping each top-level name's unique to its
 /// `TyScheme`.  Errors are collected in `ctx.diags`.
 pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Error!ModuleTypes {
+    // Pass 0: Collect type signatures and convert them to HType.
+    var sigs = std.AutoHashMapUnmanaged(naming_mod.Unique, TypeSigEntry){};
+    defer sigs.deinit(ctx.alloc);
+
+    for (module.declarations) |decl| {
+        if (decl != .TypeSig) continue;
+        const ts = decl.TypeSig;
+
+        var scope = TypeVarMap{};
+        defer scope.deinit(ctx.alloc);
+
+        // Convert AST type to HType with shared type variables
+        const ty = try astTypeToHTypeWithScope(ts.type, ctx, &scope);
+
+        // Bind for all names in the signature (Haskell allows multiple names per signature)
+        for (ts.names) |name| {
+            try sigs.put(ctx.alloc, name.unique, .{
+                .name = name,
+                .ty = ty,
+                .loc = ts.span,
+            });
+        }
+    }
+
     // Snapshot env free metas before any top-level binders are added.
     // All top-level bindings are mutually recursive peers, so they share
     // this one snapshot for the active-variables check during generalisation.
@@ -921,12 +1002,31 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
         switch (decl) {
             .FunBind => |fb| {
                 const fun_node = top_metas.get(fb.name.unique) orelse continue;
+                const sig_entry = sigs.get(fb.name.unique);
+
                 for (fb.equations) |eq| {
                     const eq_ty = try inferMatch(ctx, eq);
-                    try ctx.unifyNow(fun_node, eq_ty, fb.span);
+
+                    if (sig_entry) |s| {
+                        // If there's a signature, unify the inferred type against it.
+                        try ctx.unifyNow(eq_ty, s.ty, fb.span);
+                    } else {
+                        // Otherwise, unify against the fresh meta node.
+                        try ctx.unifyNow(fun_node, eq_ty, fb.span);
+                    }
                 }
-                const scheme = try generalisePtr(ctx, fun_node, &env_metas);
-                try ctx.env.bind(fb.name, scheme);
+
+                if (sig_entry) |_| {
+                    // For bindings with signatures, create a scheme from the signature type.
+                    // The signature is the authority, not the inferred type.
+                    // We need to generalise the signature type (which contains fresh metas).
+                    const scheme = try generalisePtr(ctx, sig_entry.?.ty, &env_metas);
+                    try ctx.env.bind(fb.name, scheme);
+                } else {
+                    // For bindings without signatures, generalise the inferred type.
+                    const scheme = try generalisePtr(ctx, fun_node, &env_metas);
+                    try ctx.env.bind(fb.name, scheme);
+                }
             },
             .PatBind => |pb| {
                 const rhs_ty = try inferRhs(ctx, pb.rhs);
@@ -1823,4 +1923,197 @@ test "inferModule: two independent definitions" {
     const g_ty = module_types.get(g_name.unique).?.body.chase();
     try testing.expectEqualStrings("Int", f_ty.Con.name.base);
     try testing.expectEqualStrings("Char", g_ty.Con.name.base);
+}
+
+// ── Type Signature Tests (issue #175) ─────────────────────────────────
+
+test "inferModule: signature matches inferred type" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = try TyEnv.init(alloc);
+    defer env.deinit();
+    var mv = MetaVarSupply{};
+    var us = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+    try env_mod.initBuiltins(&env, alloc, &us);
+
+    var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
+
+    // f :: Int -> Int
+    // f x = x
+    const f_name = testName("f", 9000);
+    const x_name = testName("x", 9001);
+
+    const AstType = @import("../frontend/ast.zig").Type;
+
+    // Construct AST type: Int -> Int
+    const int_ptr = try alloc.create(AstType);
+    int_ptr.* = AstType{ .Con = .{ .name = "Int", .span = testSpan() } };
+
+    const fun_args = try alloc.alloc(*const AstType, 2);
+    fun_args[0] = int_ptr;
+    fun_args[1] = int_ptr;
+
+    const fun_type = AstType{ .Fun = fun_args };
+
+    // Create the signature declaration
+    const sig = RDecl{ .TypeSig = .{
+        .names = &.{f_name},
+        .type = fun_type,
+        .span = testSpan(),
+    } };
+
+    // Create the FunBind: f x = x (represented as f = \\x -> x for simplicity)
+    const body = RExpr{ .Var = .{ .name = x_name, .span = testSpan() } };
+    const lam = RExpr{ .Lambda = .{
+        .params = &.{x_name},
+        .param_spans = &.{testSpan()},
+        .body = &body,
+    } };
+    const funbind = RDecl{ .FunBind = .{
+        .name = f_name,
+        .equations = &.{.{ .patterns = &.{}, .rhs = .{ .UnGuarded = lam }, .span = testSpan() }},
+        .span = testSpan(),
+    } };
+
+    const module = RenamedModule{
+        .module_name = "SigTest",
+        .declarations = &.{ sig, funbind },
+        .span = testSpan(),
+    };
+
+    var module_types = try inferModule(&ctx, module);
+    defer module_types.deinit(alloc);
+
+    // Should have no errors (signature matches)
+    try testing.expect(!diags.hasErrors());
+
+    // Check that the binding has the correct type
+    const scheme = module_types.get(f_name.unique).?;
+    const ty = scheme.body.chase();
+    try testing.expect(ty == .Fun);
+    const arg = ty.Fun.arg.chase();
+    try testing.expect(arg == .Con);
+    try testing.expectEqualStrings("Int", arg.Con.name.base);
+}
+
+test "inferModule: signature mismatch produces error" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = try TyEnv.init(alloc);
+    defer env.deinit();
+    var mv = MetaVarSupply{};
+    var us = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+    try env_mod.initBuiltins(&env, alloc, &us);
+
+    var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
+
+    // f :: Int
+    // f = True
+    // This should produce a type error: Int vs Bool
+    const f_name = testName("f", 9100);
+
+    const AstType = @import("../frontend/ast.zig").Type;
+
+    // Construct AST type: Int
+    const int_type = AstType{ .Con = .{ .name = "Int", .span = testSpan() } };
+
+    const sig = RDecl{ .TypeSig = .{
+        .names = &.{f_name},
+        .type = int_type,
+        .span = testSpan(),
+    } };
+
+    const true_lit = RExpr{ .Var = .{ .name = Known.Con.True, .span = testSpan() } };
+    const funbind = RDecl{ .FunBind = .{
+        .name = f_name,
+        .equations = &.{.{ .patterns = &.{}, .rhs = .{ .UnGuarded = true_lit }, .span = testSpan() }},
+        .span = testSpan(),
+    } };
+
+    const module = RenamedModule{
+        .module_name = "SigMismatch",
+        .declarations = &.{ sig, funbind },
+        .span = testSpan(),
+    };
+
+    var module_types = try inferModule(&ctx, module);
+    defer module_types.deinit(alloc);
+
+    try testing.expect(diags.hasErrors());
+}
+
+test "inferModule: type variables in signature are scoped correctly" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = try TyEnv.init(alloc);
+    defer env.deinit();
+    var mv = MetaVarSupply{};
+    var us = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+    try env_mod.initBuiltins(&env, alloc, &us);
+
+    var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
+
+    // f :: a -> a
+    // f x = x
+    const f_name = testName("f", 9200);
+    const x_name = testName("x", 9201);
+
+    const AstType = @import("../frontend/ast.zig").Type;
+
+    // Construct AST type: a -> a
+    const a_var_p1 = try alloc.create(AstType);
+    a_var_p1.* = AstType{ .Var = "a" };
+
+    const a_var_p2 = try alloc.create(AstType);
+    a_var_p2.* = AstType{ .Var = "a" };
+
+    const fun_args = try alloc.alloc(*const AstType, 2);
+    fun_args[0] = a_var_p1;
+    fun_args[1] = a_var_p2;
+
+    const fun_type = AstType{ .Fun = fun_args };
+
+    const sig = RDecl{ .TypeSig = .{
+        .names = &.{f_name},
+        .type = fun_type,
+        .span = testSpan(),
+    } };
+
+    const body = RExpr{ .Var = .{ .name = x_name, .span = testSpan() } };
+    const lam = RExpr{ .Lambda = .{
+        .params = &.{x_name},
+        .param_spans = &.{testSpan()},
+        .body = &body,
+    } };
+    const funbind = RDecl{ .FunBind = .{
+        .name = f_name,
+        .equations = &.{.{ .patterns = &.{}, .rhs = .{ .UnGuarded = lam }, .span = testSpan() }},
+        .span = testSpan(),
+    } };
+
+    const module = RenamedModule{
+        .module_name = "PolySig",
+        .declarations = &.{ sig, funbind },
+        .span = testSpan(),
+    };
+
+    var module_types = try inferModule(&ctx, module);
+    defer module_types.deinit(alloc);
+
+    try testing.expect(!diags.hasErrors());
+
+    const scheme = module_types.get(f_name.unique).?;
+    try testing.expectEqual(@as(usize, 1), scheme.binders.len);
 }
