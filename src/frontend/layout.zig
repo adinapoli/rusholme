@@ -51,6 +51,11 @@ pub const LayoutProcessor = struct {
     pub fn nextToken(self: *LayoutProcessor) !LocatedToken {
         if (self.pending.items.len > 0) {
             const p = self.pending.orderedRemove(0);
+            // Layout-triggering keywords in the pending queue still need to
+            // set `layout_pending` so the next token opens a new context.
+            if (self.isLayoutKeyword(p.token)) {
+                self.layout_pending = true;
+            }
             return p;
         }
 
@@ -113,16 +118,62 @@ pub const LayoutProcessor = struct {
             }
         }
 
-        // 7. Handle layout-triggering keywords (Section 10.3, case 4).
+        // 7. Handle existing layout context BEFORE dispatching keywords
+        //    (Haskell 2010 Report §10.3, cases 5 & 6).
+        //
+        //    This must precede the layout-keyword check (step 8) so that a
+        //    layout-triggering keyword at a *lower* indentation level correctly
+        //    closes the enclosing implicit context before being returned.
+        //    Example:
+        //      do          -- opens do-context at col 5
+        //        let x = 1 -- opens let-context at col 9
+        //        let y = 2  -- 'let' at col 5: must close let-context (v_}) first
+        //
+        //    `kw_in` is handled specially: it closes contexts eagerly via the
+        //    pending queue, so we skip the ordinary column comparison for it.
+        if (tok.token != .kw_in) {
+            const n = tok.span.start.column;
+            while (self.peek()) |m| {
+                if (m == 0) break; // Explicit context — never auto-closed here
+                if (n == m) {
+                    // Same column: insert a virtual semicolon (case 5).
+                    if (self.context_just_opened) {
+                        // Suppress the semicolon for the very first token in a
+                        // freshly-opened context (already handled by push).
+                        self.context_just_opened = false;
+                        break;
+                    }
+                    try self.pending.append(self.allocator, tok);
+                    return LocatedToken.init(.v_semi, tok.span);
+                } else if (n < m) {
+                    // Less indentation: close this context (case 6).
+                    _ = self.pop();
+                    self.peeked_token = tok;
+                    return LocatedToken.init(.v_close_brace, tok.span);
+                } else {
+                    break; // n > m — token is further right; nothing to close
+                }
+            }
+
+            // Clear the just_opened flag once we are safely past the first token.
+            if (self.peek()) |m| {
+                if (n > m or m == 0) {
+                    self.context_just_opened = false;
+                }
+            }
+        }
+
+        // 8. Handle layout-triggering keywords (§10.3, case 4).
+        //    Reached only after any necessary context closures above.
         if (self.isLayoutKeyword(tok.token)) {
             self.layout_pending = true;
             return tok;
         }
 
-        // 8. Special case: 'in' keyword.
+        // 9. Special case: 'in' keyword closes all implicit contexts opened
+        //    since the matching 'let'.  We pop eagerly and queue the closures
+        //    so the parser sees them before 'in'.
         if (tok.token == .kw_in) {
-            // Pop as long as we have more than one implicit context.
-            // This ensures we close contexts started after 'let' but don't close the module context.
             while (self.stack.items.len > 1) {
                 if (self.peek() == 0) break; // Explicit context
                 _ = self.pop();
@@ -133,36 +184,6 @@ pub const LayoutProcessor = struct {
                 return self.pending.orderedRemove(0);
             }
             return tok;
-        }
-
-        // 9. Handle existing layout context (Section 10.3, case 5 & 6).
-        const n = tok.span.start.column;
-        while (self.peek()) |m| {
-            if (m == 0) break; // Explicit context
-            if (n == m) {
-                // Same column: semicolon insertion (Case 5).
-                if (self.context_just_opened) {
-                    self.context_just_opened = false;
-                    break;
-                }
-                try self.pending.append(self.allocator, tok);
-                return LocatedToken.init(.v_semi, tok.span);
-            } else if (n < m) {
-                // Less indentation: close context (Case 6).
-                _ = self.pop();
-                self.peeked_token = tok;
-                return LocatedToken.init(.v_close_brace, tok.span);
-            } else {
-                break; // n > m, nothing to do
-            }
-        }
-
-        // If we reached here without returning, we are returning the original token.
-        // Make sure to clear the just_opened flag if we are at the same level.
-        if (self.peek()) |m| {
-            if (n > m or m == 0) {
-                self.context_just_opened = false;
-            }
         }
 
         return tok;

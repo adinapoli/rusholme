@@ -1964,6 +1964,22 @@ pub const Parser = struct {
         var stmts: std.ArrayListUnmanaged(ast_mod.Stmt) = .empty;
 
         while (true) {
+            // Consume any leading semicolons (empty statements from layout).
+            while (try self.matchSemi()) {}
+            if (try self.checkCloseBrace()) break;
+            if (try self.atEnd()) break;
+
+            // Haskell 2010 §3.14: a do-statement is one of:
+            //   let decls     — LetStmt (no "in"!)
+            //   pat <- exp    — Generator
+            //   exp           — plain statement
+            if (try self.check(.kw_let)) {
+                const let_stmt = try self.parseDoLet();
+                try stmts.append(self.allocator, let_stmt);
+                _ = try self.match(.semi);
+                continue;
+            }
+
             if (try self.isExprStart()) {
                 // Could be a bind or a plain expression
                 const expr = try self.parseExpr();
@@ -1991,6 +2007,29 @@ pub const Parser = struct {
         }
         _ = try self.expectCloseBrace();
         return .{ .Do = try stmts.toOwnedSlice(self.allocator) };
+    }
+
+    /// Parse `let decls` as a do-statement (Haskell 2010 §3.14).
+    ///
+    /// Unlike the let-expression form (`let decls in expr`), a let-statement
+    /// inside a do-block has no `in`.  The layout rule opens and closes the
+    /// binding group via virtual braces, just like a let-expression binding
+    /// group.
+    fn parseDoLet(self: *Parser) ParseError!ast_mod.Stmt {
+        _ = try self.expect(.kw_let);
+        _ = try self.expectOpenBrace();
+
+        var binds: std.ArrayListUnmanaged(ast_mod.Decl) = .empty;
+        while (true) {
+            if (try self.checkCloseBrace()) break;
+            if (try self.atEnd()) break;
+            const decl = try self.parseTopDecl() orelse break;
+            try binds.append(self.allocator, decl);
+            while (try self.matchSemi()) {}
+        }
+        _ = try self.expectCloseBrace();
+
+        return .{ .LetStmt = try binds.toOwnedSlice(self.allocator) };
     }
 
     /// Check if current token could start an expression
