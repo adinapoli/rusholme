@@ -28,6 +28,10 @@ pub const naming = struct {
 // Type checking
 pub const typechecker = @import("typechecker.zig");
 
+pub const tc = struct {
+    pub const htype = @import("typechecker/htype.zig");
+};
+
 // IR representations
 pub const core = struct {
     pub const ir = @import("core/ir.zig");
@@ -71,4 +75,5 @@ test {
     testing.refAllDecls(core);
     testing.refAllDecls(grin);
     testing.refAllDecls(backend);
+    testing.refAllDecls(tc);
 }
