@@ -1804,7 +1804,6 @@ pub const Parser = struct {
                 return .{ .Paren = try self.allocNode(ast_mod.Expr, result) };
             },
             .open_bracket => {
-                const open_tok = try self.currentSpan();
                 _ = try self.advance();
                 if (try self.check(.close_bracket)) {
                     _ = try self.advance();
