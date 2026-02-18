@@ -185,6 +185,26 @@ pub const HType = union(enum) {
         };
     }
 
+    // ── Pretty-printing ────────────────────────────────────────────────
+
+    /// Pretty-print an `HType` to a human-readable string.
+    ///
+    /// Parenthesisation follows standard Haskell conventions:
+    /// - Function types are right-associative: `a -> b -> c` needs no parens.
+    /// - A `Fun` in argument position needs parens: `(a -> b) -> c`.
+    /// - A `Con` argument that is itself applied needs parens: `Maybe (Maybe Int)`.
+    /// - `forall` binds loosest: `forall a. a -> a` needs no outer parens.
+    ///
+    /// Solved `Meta` chains are followed transparently.
+    /// Unsolved metas render as `?N`.
+    ///
+    /// The returned slice is allocated from `alloc` and owned by the caller.
+    pub fn pretty(self: HType, alloc: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+        return prettyPrec(self, alloc, 0);
+    }
+
+    // ── Tests ──────────────────────────────────────────────────────────
+
     // ── Conversion ─────────────────────────────────────────────────────
 
     /// Convert a fully-solved `HType` to `CoreType`.
@@ -225,6 +245,210 @@ pub const HType = union(enum) {
         };
     }
 };
+
+// ── Pretty-printing helpers ────────────────────────────────────────────
+
+/// Precedence levels for parenthesisation.
+///
+/// Higher value = tighter binding.
+///   0  top-level / after `forall.` — nothing needs parens
+///   1  fun arg position   — `Fun` needs parens, applied `Con` needs parens
+///   2  con arg position   — `Fun` needs parens, applied `Con` needs parens
+const PREC_TOP: u8 = 0; // forall body, right of ->
+const PREC_FUN_ARG: u8 = 1; // left of ->
+const PREC_CON_ARG: u8 = 2; // argument to a type constructor
+
+/// Wrap `inner` in parentheses if `cond` is true, otherwise return it.
+fn parenIf(alloc: std.mem.Allocator, cond: bool, inner: []const u8) std.mem.Allocator.Error![]const u8 {
+    if (!cond) return inner;
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    try buf.append(alloc, '(');
+    try buf.appendSlice(alloc, inner);
+    try buf.append(alloc, ')');
+    return buf.toOwnedSlice(alloc);
+}
+
+/// Pretty-print `ty` at the given precedence level.
+///
+/// `prec` is the minimum precedence needed without parens:
+/// - `PREC_TOP`     → nothing requires parens at this position
+/// - `PREC_FUN_ARG` → a `Fun` type needs parens (it's in arg position of `->`)
+/// - `PREC_CON_ARG` → a `Fun` *or* an applied `Con` needs parens
+fn prettyPrec(ty: HType, alloc: std.mem.Allocator, prec: u8) std.mem.Allocator.Error![]const u8 {
+    const empty = std.AutoHashMapUnmanaged(u64, []const u8).empty;
+    return prettyPrecSubst(ty, alloc, prec, &empty);
+}
+
+/// Like `prettyPrec` but applies `subst` when rendering `Rigid` nodes:
+/// if a rigid's unique ID is in `subst`, its display name is used instead
+/// of the internally-stored name.  Used by `prettyScheme` to assign
+/// canonical alphabetic names to quantified type variables.
+fn prettyPrecSubst(
+    ty: HType,
+    alloc: std.mem.Allocator,
+    prec: u8,
+    subst: *const std.AutoHashMapUnmanaged(u64, []const u8),
+) std.mem.Allocator.Error![]const u8 {
+    const chased = ty.chase();
+    switch (chased) {
+        .Meta => |mv| return std.fmt.allocPrint(alloc, "?{d}", .{mv.id}),
+
+        .Rigid => |name| {
+            if (subst.get(name.unique.value)) |display| {
+                return std.fmt.allocPrint(alloc, "{s}", .{display});
+            }
+            return std.fmt.allocPrint(alloc, "{s}", .{name.base});
+        },
+
+        .Con => |c| {
+            if (c.args.len == 0) {
+                return std.fmt.allocPrint(alloc, "{s}", .{c.name.base});
+            }
+            // Special-case list: `[] a` → `[a]`
+            if (std.mem.eql(u8, c.name.base, "[]") and c.args.len == 1) {
+                const arg_str = try prettyPrecSubst(c.args[0], alloc, PREC_TOP, subst);
+                return std.fmt.allocPrint(alloc, "[{s}]", .{arg_str});
+            }
+            // Special-case 2-tuple: `(,) a b` → `(a, b)`
+            if (std.mem.eql(u8, c.name.base, "(,)") and c.args.len == 2) {
+                const a_str = try prettyPrecSubst(c.args[0], alloc, PREC_TOP, subst);
+                const b_str = try prettyPrecSubst(c.args[1], alloc, PREC_TOP, subst);
+                return std.fmt.allocPrint(alloc, "({s}, {s})", .{ a_str, b_str });
+            }
+            // General applied Con: `F a b …` — each arg at CON_ARG prec
+            var buf = std.ArrayListUnmanaged(u8).empty;
+            try buf.appendSlice(alloc, c.name.base);
+            for (c.args) |arg| {
+                try buf.append(alloc, ' ');
+                const arg_str = try prettyPrecSubst(arg, alloc, PREC_CON_ARG, subst);
+                try buf.appendSlice(alloc, arg_str);
+            }
+            const inner = try buf.toOwnedSlice(alloc);
+            // Applied cons need parens in con-arg position
+            return parenIf(alloc, prec >= PREC_CON_ARG, inner);
+        },
+
+        .Fun => |f| {
+            // arg at FUN_ARG prec (left of ->) so `(a -> b) -> c` parens correctly
+            const arg_str = try prettyPrecSubst(f.arg.*, alloc, PREC_FUN_ARG, subst);
+            // res at TOP prec — right of -> is right-assoc, no parens needed
+            const res_str = try prettyPrecSubst(f.res.*, alloc, PREC_TOP, subst);
+            const inner = try std.fmt.allocPrint(alloc, "{s} -> {s}", .{ arg_str, res_str });
+            // Fun needs parens in both fun-arg and con-arg positions
+            return parenIf(alloc, prec >= PREC_FUN_ARG, inner);
+        },
+
+        .ForAll => |fa| {
+            // Collect all binders for `forall a b. body` style output
+            var binders = std.ArrayListUnmanaged([]const u8).empty;
+            const fa_display = subst.get(fa.binder.unique.value) orelse fa.binder.base;
+            try binders.append(alloc, fa_display);
+            var body = fa.body.*;
+            while (body == .ForAll) {
+                const b_display = subst.get(body.ForAll.binder.unique.value) orelse body.ForAll.binder.base;
+                try binders.append(alloc, b_display);
+                body = body.ForAll.body.*;
+            }
+            const body_str = try prettyPrecSubst(body, alloc, PREC_TOP, subst);
+            var buf = std.ArrayListUnmanaged(u8).empty;
+            try buf.appendSlice(alloc, "forall");
+            for (binders.items) |b| {
+                try buf.append(alloc, ' ');
+                try buf.appendSlice(alloc, b);
+            }
+            try buf.appendSlice(alloc, ". ");
+            try buf.appendSlice(alloc, body_str);
+            return buf.toOwnedSlice(alloc);
+        },
+    }
+}
+
+/// Collect `Rigid` names from `ty` whose unique IDs appear in `binder_ids`,
+/// in the order they appear in `binder_ids`.
+///
+/// Used by `prettyScheme` to recover display names for the `forall` prefix.
+fn collectRigidNames(
+    ty: HType,
+    binder_ids: []const u64,
+    out: [][]const u8, // pre-allocated, one slot per binder; filled by unique ID match
+) void {
+    const chased = ty.chase();
+    switch (chased) {
+        .Rigid => |name| {
+            for (binder_ids, 0..) |id, i| {
+                if (name.unique.value == id and out[i].len == 0) {
+                    out[i] = name.base;
+                }
+            }
+        },
+        .Con => |c| {
+            for (c.args) |arg| collectRigidNames(arg, binder_ids, out);
+        },
+        .Fun => |f| {
+            collectRigidNames(f.arg.*, binder_ids, out);
+            collectRigidNames(f.res.*, binder_ids, out);
+        },
+        .ForAll => |fa| {
+            for (binder_ids, 0..) |id, i| {
+                if (fa.binder.unique.value == id and out[i].len == 0) {
+                    out[i] = fa.binder.base;
+                }
+            }
+            collectRigidNames(fa.body.*, binder_ids, out);
+        },
+        .Meta => {},
+    }
+}
+
+/// Pretty-print a `TyScheme` as `forall a b. body` (or just `body` if monomorphic).
+///
+/// `scheme` must have fields `binders: []const u64` and `body: HType`.
+///
+/// Binders are displayed with fresh alphabetic names (`a`, `b`, … `z`,
+/// `a1`, `b1`, …) assigned in binder-list order, regardless of the internal
+/// rigid name stored in the body.  This produces readable output even when
+/// generalisation names all rigids `"a"` internally.  A substitution map is
+/// built from internal unique ID → display name, and the body is printed
+/// with those substitutions applied.
+pub fn prettyScheme(scheme: anytype, alloc: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+    if (scheme.binders.len == 0) {
+        return scheme.body.pretty(alloc);
+    }
+
+    // Assign display letters a, b, c, … to binders in order.
+    const display_names = try alloc.alloc([]const u8, scheme.binders.len);
+    defer alloc.free(display_names);
+    for (display_names, 0..) |*dn, i| {
+        const letter: u8 = @intCast('a' + (i % 26));
+        const suffix = i / 26;
+        if (suffix == 0) {
+            const s = try alloc.alloc(u8, 1);
+            s[0] = letter;
+            dn.* = s;
+        } else {
+            dn.* = try std.fmt.allocPrint(alloc, "{c}{d}", .{ letter, suffix });
+        }
+    }
+
+    // Build unique-id → display-name map for body substitution.
+    var subst = std.AutoHashMapUnmanaged(u64, []const u8).empty;
+    defer subst.deinit(alloc);
+    for (scheme.binders, display_names) |uid, dn| {
+        try subst.put(alloc, uid, dn);
+    }
+
+    const body_str = try prettyPrecSubst(scheme.body, alloc, PREC_TOP, &subst);
+
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    try buf.appendSlice(alloc, "forall");
+    for (display_names) |dn| {
+        try buf.append(alloc, ' ');
+        try buf.appendSlice(alloc, dn);
+    }
+    try buf.appendSlice(alloc, ". ");
+    try buf.appendSlice(alloc, body_str);
+    return buf.toOwnedSlice(alloc);
+}
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
@@ -548,4 +772,163 @@ test "HType.toCore: nested Fun with solved Meta" {
     try testing.expect(ct == .FunTy);
     try testing.expectEqualStrings("Int", ct.FunTy.arg.TyCon.name.base);
     try testing.expectEqualStrings("Bool", ct.FunTy.res.TyCon.name.base);
+}
+
+// ── HType.pretty ───────────────────────────────────────────────────────
+
+test "pretty: nullary Con" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const s = try con0("Int", 0).pretty(arena.allocator());
+    try testing.expectEqualStrings("Int", s);
+}
+
+test "pretty: unsolved Meta" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ty = HType{ .Meta = MetaVar{ .id = 7, .ref = null } };
+    const s = try ty.pretty(arena.allocator());
+    try testing.expectEqualStrings("?7", s);
+}
+
+test "pretty: solved Meta renders solution" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var int_ty = con0("Int", 0);
+    const ty = HType{ .Meta = MetaVar{ .id = 0, .ref = &int_ty } };
+    const s = try ty.pretty(alloc);
+    try testing.expectEqualStrings("Int", s);
+}
+
+test "pretty: simple Fun — no parens needed" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const int_ty = con0("Int", 0);
+    const bool_ty = con0("Bool", 1);
+    const ty = HType{ .Fun = .{ .arg = &int_ty, .res = &bool_ty } };
+    const s = try ty.pretty(alloc);
+    try testing.expectEqualStrings("Int -> Bool", s);
+}
+
+test "pretty: right-assoc Fun — no parens" {
+    // Int -> Bool -> Int  (right-assoc, no parens needed)
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const int_ty = con0("Int", 0);
+    const bool_ty = con0("Bool", 1);
+    const int_ty2 = con0("Int", 0);
+    const inner = HType{ .Fun = .{ .arg = &bool_ty, .res = &int_ty2 } };
+    const ty = HType{ .Fun = .{ .arg = &int_ty, .res = &inner } };
+    const s = try ty.pretty(alloc);
+    try testing.expectEqualStrings("Int -> Bool -> Int", s);
+}
+
+test "pretty: Fun in arg position gets parens" {
+    // (Int -> Bool) -> Int
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const int_ty = con0("Int", 0);
+    const bool_ty = con0("Bool", 1);
+    const int_ty2 = con0("Int", 0);
+    const inner = HType{ .Fun = .{ .arg = &int_ty, .res = &bool_ty } };
+    const ty = HType{ .Fun = .{ .arg = &inner, .res = &int_ty2 } };
+    const s = try ty.pretty(alloc);
+    try testing.expectEqualStrings("(Int -> Bool) -> Int", s);
+}
+
+test "pretty: applied Con in con-arg position gets parens" {
+    // Maybe (Maybe Int)
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const int_ty = con0("Int", 0);
+    const args_inner = [_]HType{int_ty};
+    const maybe_int = HType{ .Con = .{ .name = testName("Maybe", 1), .args = &args_inner } };
+    const args_outer = [_]HType{maybe_int};
+    const ty = HType{ .Con = .{ .name = testName("Maybe", 1), .args = &args_outer } };
+    const s = try ty.pretty(alloc);
+    try testing.expectEqualStrings("Maybe (Maybe Int)", s);
+}
+
+test "pretty: list type" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const char_ty = con0("Char", 0);
+    const args = [_]HType{char_ty};
+    const ty = HType{ .Con = .{ .name = testName("[]", 99), .args = &args } };
+    const s = try ty.pretty(alloc);
+    try testing.expectEqualStrings("[Char]", s);
+}
+
+test "pretty: 2-tuple type" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const int_ty = con0("Int", 0);
+    const bool_ty = con0("Bool", 1);
+    const args = [_]HType{ int_ty, bool_ty };
+    const ty = HType{ .Con = .{ .name = testName("(,)", 99), .args = &args } };
+    const s = try ty.pretty(alloc);
+    try testing.expectEqualStrings("(Int, Bool)", s);
+}
+
+test "pretty: forall with single binder" {
+    // forall a. a -> a
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const a = testName("a", 1);
+    const rigid_a = HType{ .Rigid = a };
+    const rigid_a2 = HType{ .Rigid = a };
+    const fun_ty = HType{ .Fun = .{ .arg = &rigid_a, .res = &rigid_a2 } };
+    const ty = HType{ .ForAll = .{ .binder = a, .body = &fun_ty } };
+    const s = try ty.pretty(alloc);
+    try testing.expectEqualStrings("forall a. a -> a", s);
+}
+
+test "pretty: forall with two binders (nested ForAll)" {
+    // forall a b. a -> b -> a
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const a = testName("a", 1);
+    const b = testName("b", 2);
+    const ra = HType{ .Rigid = a };
+    const rb = HType{ .Rigid = b };
+    const ra2 = HType{ .Rigid = a };
+    const inner_fun = HType{ .Fun = .{ .arg = &rb, .res = &ra2 } };
+    const outer_fun = HType{ .Fun = .{ .arg = &ra, .res = &inner_fun } };
+    const inner_all = HType{ .ForAll = .{ .binder = b, .body = &outer_fun } };
+    const ty = HType{ .ForAll = .{ .binder = a, .body = &inner_all } };
+    const s = try ty.pretty(alloc);
+    try testing.expectEqualStrings("forall a b. a -> b -> a", s);
+}
+
+// ── prettyScheme ───────────────────────────────────────────────────────
+
+test "prettyScheme: monomorphic scheme" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scheme = .{ .binders = &[_]u64{}, .body = con0("Int", 0) };
+    const s = try prettyScheme(scheme, arena.allocator());
+    try testing.expectEqualStrings("Int", s);
+}
+
+test "prettyScheme: polymorphic — forall a. a -> a" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const a = testName("a", 42);
+    const ra = HType{ .Rigid = a };
+    const ra2 = HType{ .Rigid = a };
+    const fun_ty = HType{ .Fun = .{ .arg = &ra, .res = &ra2 } };
+    const binders = [_]u64{42};
+    const scheme = .{ .binders = &binders, .body = fun_ty };
+    const s = try prettyScheme(scheme, alloc);
+    try testing.expectEqualStrings("forall a. a -> a", s);
 }

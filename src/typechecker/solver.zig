@@ -159,47 +159,12 @@ fn formatInfiniteType(alloc: std.mem.Allocator, lhs: HType, rhs: HType) std.mem.
     );
 }
 
-/// Minimal HType formatter for diagnostic messages.
+/// Format an HType for diagnostic messages.
 ///
-/// This is intentionally simple — a proper pretty-printer will be added as
-/// part of issue #35 (Core IR pretty-printer) or a dedicated HType printer.
-/// For now, names are rendered as their base string and metavars as `?N`.
-///
-/// Known shortcoming: tracked in follow-up issue #163.
+/// Delegates to the canonical `HType.pretty` printer in `htype.zig`, which
+/// handles correct parenthesisation (issue #163).
 fn formatHType(alloc: std.mem.Allocator, ty: HType) std.mem.Allocator.Error![]const u8 {
-    const chased = ty.chase();
-    return switch (chased) {
-        .Meta => |mv| std.fmt.allocPrint(alloc, "?{d}", .{mv.id}),
-        .Rigid => |name| std.fmt.allocPrint(alloc, "{s}", .{name.base}),
-        .Con => |c| blk: {
-            if (c.args.len == 0) {
-                break :blk std.fmt.allocPrint(alloc, "{s}", .{c.name.base});
-            }
-            // Special-case list: `[] a` → `[a]`
-            if (std.mem.eql(u8, c.name.base, "[]") and c.args.len == 1) {
-                const arg_str = try formatHType(alloc, c.args[0]);
-                break :blk std.fmt.allocPrint(alloc, "[{s}]", .{arg_str});
-            }
-            // General: `F a b`
-            var buf: std.ArrayListUnmanaged(u8) = .empty;
-            try buf.appendSlice(alloc, c.name.base);
-            for (c.args) |arg| {
-                try buf.append(alloc, ' ');
-                const arg_str = try formatHType(alloc, arg);
-                try buf.appendSlice(alloc, arg_str);
-            }
-            break :blk try buf.toOwnedSlice(alloc);
-        },
-        .Fun => |f| blk: {
-            const arg_str = try formatHType(alloc, f.arg.*);
-            const res_str = try formatHType(alloc, f.res.*);
-            break :blk std.fmt.allocPrint(alloc, "{s} -> {s}", .{ arg_str, res_str });
-        },
-        .ForAll => |fa| blk: {
-            const body_str = try formatHType(alloc, fa.body.*);
-            break :blk std.fmt.allocPrint(alloc, "forall {s}. {s}", .{ fa.binder.base, body_str });
-        },
-    };
+    return ty.pretty(alloc);
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
