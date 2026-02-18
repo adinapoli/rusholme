@@ -24,7 +24,7 @@ fn isBindingForPreviousSig(prev: ast.Decl, current: ast.Decl) bool {
     const bind_name: []const u8 = switch (current) {
         .FunBind => |fb| fb.name,
         .PatBind => |pb| switch (pb.pattern) {
-            .Var => |v| v,
+            .Var => |v| v.name,
             else => return false,
         },
         else => return false,
@@ -715,7 +715,7 @@ pub const PrettyPrinter = struct {
 
     pub fn printPattern(self: *PrettyPrinter, pat: *const ast.Pattern) Error!void {
         switch (pat.*) {
-            .Var => |name| try self.write(name),
+            .Var => |v| try self.write(v.name),
             .Con => |con| {
                 try self.printQName(con.name);
                 for (con.args) |*arg| {
@@ -730,17 +730,17 @@ pub const PrettyPrinter = struct {
                 try self.write("@");
                 try self.printPatternAtom(as_.pat);
             },
-            .Tuple => |pats| {
+            .Tuple => |t| {
                 try self.write("(");
-                for (pats, 0..) |*p, i| {
+                for (t.patterns, 0..) |*p, i| {
                     if (i > 0) try self.write(", ");
                     try self.printPattern(p);
                 }
                 try self.write(")");
             },
-            .List => |pats| {
+            .List => |l| {
                 try self.write("[");
-                for (pats, 0..) |*p, i| {
+                for (l.patterns, 0..) |*p, i| {
                     if (i > 0) try self.write(", ");
                     try self.printPattern(p);
                 }
@@ -753,18 +753,18 @@ pub const PrettyPrinter = struct {
                 try self.writeByte(' ');
                 try self.printPattern(infix.right);
             },
-            .Negate => |inner| {
+            .Negate => |n| {
                 try self.write("-");
-                try self.printPatternAtom(inner);
+                try self.printPatternAtom(n.pat);
             },
-            .Paren => |inner| {
+            .Paren => |p| {
                 try self.write("(");
-                try self.printPattern(inner);
+                try self.printPattern(p.pat);
                 try self.write(")");
             },
-            .Bang => |inner| {
+            .Bang => |b| {
                 try self.write("!");
-                try self.printPatternAtom(inner);
+                try self.printPatternAtom(b.pat);
             },
             .NPlusK => |npk| {
                 try self.write(npk.name);
@@ -971,6 +971,10 @@ fn testSpan() SourceSpan {
     return SourceSpan.init(SourcePos.init(1, 1, 1), SourcePos.init(1, 1, 1));
 }
 
+fn testPatternVar(name: []const u8) ast.Pattern {
+    return .{ .Var = .{ .name = name, .span = testSpan() } };
+}
+
 test "printModule: simple module with no exports" {
     var pp = PrettyPrinter.init(std.testing.allocator);
     defer pp.deinit();
@@ -1102,7 +1106,7 @@ test "printExpr: lambda" {
     defer pp.deinit();
 
     const body = ast.Expr{ .Var = .{ .name = "x", .span = testSpan() } };
-    try pp.printExpr(.{ .Lambda = .{ .patterns = &.{.{ .Var = "x" }}, .body = &body } });
+    try pp.printExpr(.{ .Lambda = .{ .patterns = &.{testPatternVar("x")}, .body = &body } });
     const result = try pp.toOwnedSlice();
     defer allocator.free(result);
 
@@ -1144,7 +1148,8 @@ test "printPattern: constructor pattern" {
 
     const pat = ast.Pattern{ .Con = .{
         .name = .{ .name = "Just", .span = testSpan() },
-        .args = &.{.{ .Var = "x" }},
+        .args = &.{testPatternVar("x")},
+        .span = testSpan(),
     } };
     try pp.printPattern(&pat);
     const result = try pp.toOwnedSlice();
@@ -1163,6 +1168,25 @@ test "printPattern: wildcard" {
     defer std.testing.allocator.free(result);
 
     try std.testing.expectEqualStrings("_", result);
+}
+
+test "printExpr: do notation with generator" {
+    const allocator = std.testing.allocator;
+
+    var pp = PrettyPrinter.init(allocator);
+    defer pp.deinit();
+
+    const expr = ast.Expr{ .Do = &.{
+        .{ .Generator = .{ .pat = testPatternVar("y"), .expr = .{ .Var = .{ .name = "getLine", .span = testSpan() } } } },
+    } };
+    try pp.printExpr(expr);
+    const result = try pp.toOwnedSlice();
+    defer allocator.free(result);
+
+    try std.testing.expectEqualStrings("do\n  y <- getLine\n", result);
+    const gen_pat = expr.Do[0].Generator.pat;
+    try std.testing.expect(gen_pat == .Var);
+    try std.testing.expectEqualStrings("y", gen_pat.Var.name);
 }
 
 test "printType: function type" {

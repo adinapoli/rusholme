@@ -341,38 +341,44 @@ pub const Qualifier = union(enum) {
 /// Patterns
 pub const Pattern = union(enum) {
     /// Variable pattern: x
-    Var: []const u8,
+    Var: struct { name: []const u8, span: SourceSpan },
     /// Constructor pattern: Just x
-    Con: struct { name: QName, args: []const Pattern },
+    Con: struct { name: QName, args: []const Pattern, span: SourceSpan },
     /// Literal pattern: 42
     Lit: Literal,
     /// Wildcard pattern: _
     Wild: SourceSpan,
     /// As-pattern: p@(Just x)
-    AsPar: struct { name: []const u8, pat: *const Pattern },
+    AsPar: struct { name: []const u8, name_span: SourceSpan, pat: *const Pattern, span: SourceSpan },
     /// Tuple pattern: (x, y)
-    Tuple: []const Pattern,
+    Tuple: struct { patterns: []const Pattern, span: SourceSpan },
     /// List pattern: [x, y, xs]
-    List: []const Pattern,
+    List: struct { patterns: []const Pattern, span: SourceSpan },
     /// Infix constructor pattern: x : xs
     InfixCon: struct { left: *const Pattern, con: QName, right: *const Pattern },
-    /// Negation pattern: -5
-    Negate: *const Pattern,
+    /// Negation pattern: struct { pat: *const Pattern, span: SourceSpan }
+    Negate: struct { pat: *const Pattern, span: SourceSpan },
     /// Parenthesized pattern: (Just x)
-    Paren: *const Pattern,
+    Paren: struct { pat: *const Pattern, span: SourceSpan },
     /// Bang pattern: !x (GHC extension)
-    Bang: *const Pattern,
+    Bang: struct { pat: *const Pattern, span: SourceSpan },
     /// N+K pattern (deprecated)
-    NPlusK: struct { name: []const u8, k: i32 },
+    NPlusK: struct { name: []const u8, name_span: SourceSpan, k: i32, span: SourceSpan },
 
     pub fn getSpan(self: Pattern) SourceSpan {
         return switch (self) {
-            .Con => |c| c.name.span,
-            .Var => unreachable, // Simple variable patterns don't carry span (TODO)
-            .AsPar, .Tuple, .List, .InfixCon, .NPlusK => unreachable, // TODO: Add span to these variants
+            .Var => |v| v.span,
+            .Con => |c| c.span,
             .Lit => |l| l.getSpan(),
             .Wild => |s| s,
-            .Negate, .Paren, .Bang => |p| p.getSpan(),
+            .AsPar => |a| a.span,
+            .Tuple => |t| t.span,
+            .List => |l| l.span,
+            .InfixCon => |ic| ic.left.getSpan().merge(ic.right.getSpan()),
+            .Negate => |n| n.span,
+            .Paren => |p| p.span,
+            .Bang => |b| b.span,
+            .NPlusK => |npk| npk.span,
         };
     }
 };

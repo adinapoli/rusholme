@@ -205,27 +205,28 @@ pub const RenameEnv = struct {
     fn populateBuiltins(self: *RenameEnv) !void {
         const builtins = [_][]const u8{
             // Prelude functions
-            "putStrLn", "putStr", "print", "getLine",
-            "return",   "error",  "undefined",
+            "putStrLn", "putStr",  "print",       "getLine",
+            "return",   "error",   "undefined",
             // Numeric operations
-            "negate", "abs", "signum", "fromInteger",
+              "negate",
+            "abs",      "signum",  "fromInteger",
             // Basic type constructors
-            "True",    "False",
-            "Nothing", "Just",
-            "Left",    "Right",
+            "True",
+            "False",    "Nothing", "Just",        "Left",
+            "Right",
             // List operations
-            "head",   "tail",   "null",   "length",
-            "map",    "filter", "foldl",  "foldr",
-            "concat", "zip",    "unzip",
+               "head",    "tail",        "null",
+            "length",   "map",     "filter",      "foldl",
+            "foldr",    "concat",  "zip",         "unzip",
             // String / Show / Read
-            "show", "read",
+            "show",     "read",
             // Operators (as named functions)
-            "otherwise",
+               "otherwise",
             // Primitive types (used in type signatures)
-            "Int",    "Integer", "Double", "Float",
-            "Bool",   "Char",    "String",
-            "IO",     "Maybe",   "Either",
-            "[]",     "()",
+              "Int",
+            "Integer",  "Double",  "Float",       "Bool",
+            "Char",     "String",  "IO",          "Maybe",
+            "Either",   "[]",      "()",
         };
         for (builtins) |name| {
             const n = self.supply.freshName(name);
@@ -337,14 +338,6 @@ pub const RenamedModule = struct {
 
 /// A synthetic source span for compiler-generated binders that have no
 /// corresponding source location (e.g. pattern variables whose span is not
-/// yet tracked in the AST).  Uses `SourcePos.invalid()` to bypass the
-/// line > 0 / column > 0 assertions in `SourcePos.init`.
-///
-/// Known shortcoming: tracked in follow-up issue #166 — once the AST
-/// carries spans on all pattern nodes, this helper can be removed.
-fn syntheticSpan() SourceSpan {
-    return SourceSpan.init(SourcePos.invalid(), SourcePos.invalid());
-}
 
 // ── Error set ─────────────────────────────────────────────────────────
 
@@ -713,12 +706,10 @@ fn renameStmt(stmt: ast.Stmt, env: *RenameEnv) RenameError!RStmt {
 /// Rename a pattern, binding newly-introduced variables into the current scope.
 fn renamePat(pat: ast.Pattern, env: *RenameEnv) RenameError!RPat {
     return switch (pat) {
-        .Var => |src_name| blk: {
-            const n = env.freshName(src_name);
-            // Use a synthetic span (pattern vars in the AST carry no span yet).
-            const sp = syntheticSpan();
-            try env.scope.bind(src_name, n);
-            break :blk RPat{ .Var = .{ .name = n, .span = sp } };
+        .Var => |v| blk: {
+            const n = env.freshName(v.name);
+            try env.scope.bind(v.name, n);
+            break :blk RPat{ .Var = .{ .name = n, .span = v.span } };
         },
         .Con => |c| blk: {
             const con_name = try env.resolve(c.name.name, c.name.span);
@@ -734,20 +725,19 @@ fn renamePat(pat: ast.Pattern, env: *RenameEnv) RenameError!RPat {
         .Wild => |s| RPat{ .Wild = s },
         .AsPar => |ap| blk: {
             const n = env.freshName(ap.name);
-            const sp = syntheticSpan();
             try env.scope.bind(ap.name, n);
             const inner = try env.alloc.create(RPat);
             inner.* = try renamePat(ap.pat.*, env);
-            break :blk RPat{ .AsPat = .{ .name = n, .span = sp, .pat = inner } };
+            break :blk RPat{ .AsPat = .{ .name = n, .span = ap.name_span, .pat = inner } };
         },
-        .Tuple => |pats| blk: {
+        .Tuple => |t| blk: {
             var rpats = std.ArrayListUnmanaged(RPat){};
-            for (pats) |p| try rpats.append(env.alloc, try renamePat(p, env));
+            for (t.patterns) |p| try rpats.append(env.alloc, try renamePat(p, env));
             break :blk RPat{ .Tuple = try rpats.toOwnedSlice(env.alloc) };
         },
-        .List => |pats| blk: {
+        .List => |l| blk: {
             var rpats = std.ArrayListUnmanaged(RPat){};
-            for (pats) |p| try rpats.append(env.alloc, try renamePat(p, env));
+            for (l.patterns) |p| try rpats.append(env.alloc, try renamePat(p, env));
             break :blk RPat{ .List = try rpats.toOwnedSlice(env.alloc) };
         },
         .InfixCon => |ic| blk: {
@@ -763,28 +753,27 @@ fn renamePat(pat: ast.Pattern, env: *RenameEnv) RenameError!RPat {
                 .right = right_r,
             } };
         },
-        .Negate => |p| blk: {
+        .Negate => |n| blk: {
             const r = try env.alloc.create(RPat);
-            r.* = try renamePat(p.*, env);
+            r.* = try renamePat(n.pat.*, env);
             break :blk RPat{ .Negate = r };
         },
         .Paren => |p| blk: {
             const r = try env.alloc.create(RPat);
-            r.* = try renamePat(p.*, env);
+            r.* = try renamePat(p.pat.*, env);
             break :blk RPat{ .Paren = r };
         },
-        .Bang => |p| blk: {
+        .Bang => |b| blk: {
             // GHC extension, not Haskell 2010 — treat as transparent wrapper.
             const r = try env.alloc.create(RPat);
-            r.* = try renamePat(p.*, env);
+            r.* = try renamePat(b.pat.*, env);
             break :blk RPat{ .Paren = r };
         },
         .NPlusK => |npk| blk: {
             // Deprecated syntax: treat the name as a plain variable.
             const n = env.freshName(npk.name);
-            const sp = syntheticSpan();
             try env.scope.bind(npk.name, n);
-            break :blk RPat{ .Var = .{ .name = n, .span = sp } };
+            break :blk RPat{ .Var = .{ .name = n, .span = npk.name_span } };
         },
     };
 }
@@ -802,10 +791,10 @@ fn collectPatBinders(
     out: *std.ArrayListUnmanaged(PatBinder),
 ) RenameError!void {
     switch (pat) {
-        .Var => |src| {
-            const n = env.freshName(src);
-            try env.scope.bind(src, n);
-            try out.append(env.alloc, .{ .src = src, .name = n });
+        .Var => |v| {
+            const n = env.freshName(v.name);
+            try env.scope.bind(v.name, n);
+            try out.append(env.alloc, .{ .src = v.name, .name = n });
         },
         .Con => |c| for (c.args) |a| try collectPatBinders(a, env, out),
         .AsPar => |ap| {
@@ -814,13 +803,15 @@ fn collectPatBinders(
             try out.append(env.alloc, .{ .src = ap.name, .name = n });
             try collectPatBinders(ap.pat.*, env, out);
         },
-        .Tuple => |pats| for (pats) |p| try collectPatBinders(p, env, out),
-        .List => |pats| for (pats) |p| try collectPatBinders(p, env, out),
+        .Tuple => |t| for (t.patterns) |p| try collectPatBinders(p, env, out),
+        .List => |l| for (l.patterns) |p| try collectPatBinders(p, env, out),
         .InfixCon => |ic| {
             try collectPatBinders(ic.left.*, env, out);
             try collectPatBinders(ic.right.*, env, out);
         },
-        .Negate, .Paren, .Bang => |p| try collectPatBinders(p.*, env, out),
+        .Negate => |n| try collectPatBinders(n.pat.*, env, out),
+        .Paren => |p| try collectPatBinders(p.pat.*, env, out),
+        .Bang => |b| try collectPatBinders(b.pat.*, env, out),
         .Lit, .Wild, .NPlusK => {},
     }
 }
@@ -834,28 +825,26 @@ fn collectPatBindersToScope(
     spans: *std.ArrayListUnmanaged(SourceSpan),
 ) RenameError!void {
     switch (pat) {
-        .Var => |src| {
-            const n = env.freshName(src);
-            const sp = syntheticSpan();
-            try env.scope.bind(src, n);
+        .Var => |v| {
+            const n = env.freshName(v.name);
+            try env.scope.bind(v.name, n);
             try names.append(env.alloc, n);
-            try spans.append(env.alloc, sp);
+            try spans.append(env.alloc, v.span);
         },
-        .Wild => {
+        .Wild => |sp| {
             // Wildcard — bind a synthetic name so the lambda arity is right.
             const n = env.freshName("_");
-            const sp = syntheticSpan();
             try names.append(env.alloc, n);
             try spans.append(env.alloc, sp);
         },
-        .Paren => |p| try collectPatBindersToScope(p.*, env, names, spans),
+        .Paren => |p| try collectPatBindersToScope(p.pat.*, env, names, spans),
         // Complex patterns in lambda position: rename as a full pattern and
         // just extract any variable binders.
         else => {
             var binders: std.ArrayListUnmanaged(PatBinder) = .empty;
             defer binders.deinit(env.alloc);
             try collectPatBinders(pat, env, &binders);
-            const sp = syntheticSpan();
+            const sp = pat.getSpan();
             for (binders.items) |b| {
                 try names.append(env.alloc, b.name);
                 try spans.append(env.alloc, sp);
@@ -874,6 +863,10 @@ fn testSpan() SourceSpan {
 
 fn testQName(name: []const u8) ast.QName {
     return .{ .name = name, .span = testSpan() };
+}
+
+fn testPatternVar(name: []const u8) ast.Pattern {
+    return .{ .Var = .{ .name = name, .span = testSpan() } };
 }
 
 fn makeModule(decls: []const ast.Decl) ast.Module {
@@ -1031,7 +1024,7 @@ test "rename: lambda parameters are in scope in body" {
 
     // `f = \x -> x`
     const body = ast.Expr{ .Var = testQName("x") };
-    const lam = ast.Expr{ .Lambda = .{ .patterns = &.{.{ .Var = "x" }}, .body = &body } };
+    const lam = ast.Expr{ .Lambda = .{ .patterns = &.{testPatternVar("x")}, .body = &body } };
     const decls = [_]ast.Decl{.{ .FunBind = .{
         .name = "f",
         .equations = &.{.{ .patterns = &.{}, .rhs = .{ .UnGuarded = lam }, .where_clause = null, .span = testSpan() }},
@@ -1058,7 +1051,7 @@ test "rename: lambda parameter does not leak out of body" {
     // `f = \x -> x`
     // `g = x`  ← x not in scope here
     const body = ast.Expr{ .Var = testQName("x") };
-    const lam = ast.Expr{ .Lambda = .{ .patterns = &.{.{ .Var = "x" }}, .body = &body } };
+    const lam = ast.Expr{ .Lambda = .{ .patterns = &.{testPatternVar("x")}, .body = &body } };
     const rhs_g = ast.Expr{ .Var = testQName("x") };
     const decls = [_]ast.Decl{
         .{ .FunBind = .{
@@ -1120,7 +1113,7 @@ test "rename: function equation patterns introduce binders" {
     const decls = [_]ast.Decl{.{ .FunBind = .{
         .name = "f",
         .equations = &.{.{
-            .patterns = &.{.{ .Var = "x" }},
+            .patterns = &.{testPatternVar("x")},
             .rhs = .{ .UnGuarded = body },
             .where_clause = null,
             .span = testSpan(),
@@ -1156,12 +1149,12 @@ test "rename: mutual recursion — both names visible" {
     const decls = [_]ast.Decl{
         .{ .FunBind = .{
             .name = "even",
-            .equations = &.{.{ .patterns = &.{.{ .Var = "n" }}, .rhs = .{ .UnGuarded = rhs_even }, .where_clause = null, .span = testSpan() }},
+            .equations = &.{.{ .patterns = &.{testPatternVar("n")}, .rhs = .{ .UnGuarded = rhs_even }, .where_clause = null, .span = testSpan() }},
             .span = testSpan(),
         } },
         .{ .FunBind = .{
             .name = "odd",
-            .equations = &.{.{ .patterns = &.{.{ .Var = "n" }}, .rhs = .{ .UnGuarded = rhs_odd }, .where_clause = null, .span = testSpan() }},
+            .equations = &.{.{ .patterns = &.{testPatternVar("n")}, .rhs = .{ .UnGuarded = rhs_odd }, .where_clause = null, .span = testSpan() }},
             .span = testSpan(),
         } },
     };

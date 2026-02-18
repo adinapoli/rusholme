@@ -1840,7 +1840,7 @@ pub const Parser = struct {
         while (!try self.check(.arrow_right)) {
             const name_tok = try self.expect(.varid);
             // Lambda patterns are only simple variable patterns
-            try pats.append(self.allocator, .{ .Var = name_tok.token.varid });
+            try pats.append(self.allocator, .{ .Var = .{ .name = name_tok.token.varid, .span = name_tok.span } });
         }
         _ = try self.expect(.arrow_right);
         const body = try self.parseExpr();
@@ -1969,7 +1969,7 @@ pub const Parser = struct {
                     const action = try self.parseExpr();
                     // Extract pattern from the expression (should be a variable)
                     const binding_pat: ast_mod.Pattern = switch (expr) {
-                        .Var => |q| .{ .Var = q.name },
+                        .Var => |q| .{ .Var = .{ .name = q.name, .span = q.span } },
                         else => {
                             try self.emitErrorMsg(expr.getSpan(), "bind pattern must be a variable");
                             return error.InvalidSyntax;
@@ -1993,9 +1993,7 @@ pub const Parser = struct {
     fn isExprStart(self: *Parser) ParseError!bool {
         const tag = try self.peekTag();
         return switch (tag) {
-            .varid, .conid, .lit_integer, .lit_float, .lit_string, .lit_char,
-            .open_paren, .open_bracket, .minus, .backslash,
-            .kw_if, .kw_let, .kw_case, .kw_do => true,
+            .varid, .conid, .lit_integer, .lit_float, .lit_string, .lit_char, .open_paren, .open_bracket, .minus, .backslash, .kw_if, .kw_let, .kw_case, .kw_do => true,
             else => false,
         };
     }
@@ -2009,9 +2007,12 @@ pub const Parser = struct {
 
         // Handle negated pattern: -x, -5, -Just 5
         if (try self.check(.minus)) {
-            _ = try self.advance();
+            const minus_tok = try self.advance();
             const pat = try self.parsePattern();
-            return .{ .Negate = try self.allocNode(ast_mod.Pattern, pat) };
+            return .{ .Negate = .{
+                .pat = try self.allocNode(ast_mod.Pattern, pat),
+                .span = minus_tok.span.merge(pat.getSpan()),
+            } };
         }
 
         const pat = try self.parseAtomicPattern();
@@ -2021,17 +2022,20 @@ pub const Parser = struct {
             _ = try self.advance();
             const right_pat = try self.parsePattern();
             // Get the variable name from the left pattern (must be a varid)
-            const name = switch (pat) {
-                .Var => |n| n,
+            switch (pat) {
+                .Var => |v| {
+                    return .{ .AsPar = .{
+                        .name = v.name,
+                        .name_span = v.span,
+                        .pat = try self.allocNode(ast_mod.Pattern, right_pat),
+                        .span = v.span.merge(right_pat.getSpan()),
+                    } };
+                },
                 else => {
                     try self.emitErrorMsg(start, "as-pattern requires a variable name on the left of @");
                     return error.InvalidSyntax;
                 },
-            };
-            return .{ .AsPar = .{
-                .name = name,
-                .pat = try self.allocNode(ast_mod.Pattern, right_pat),
-            } };
+            }
         }
 
         // Handle infix constructor pattern: x : xs, True && True
@@ -2066,15 +2070,7 @@ pub const Parser = struct {
     fn isPatternStart(self: *Parser) ParseError!bool {
         const tag = try self.peekTag();
         return switch (tag) {
-            .varid,
-            .conid,
-            .underscore,
-            .lit_integer,
-            .lit_char,
-            .lit_string,
-            .minus,
-            .open_paren,
-            .open_bracket => true,
+            .varid, .conid, .underscore, .lit_integer, .lit_char, .lit_string, .minus, .open_paren, .open_bracket => true,
             else => false,
         };
     }
@@ -2114,7 +2110,7 @@ pub const Parser = struct {
     /// Parse variable pattern: x, foo, bar'
     fn parseVarPattern(self: *Parser) ParseError!ast_mod.Pattern {
         const tok = try self.expect(.varid);
-        return .{ .Var = tok.token.varid };
+        return .{ .Var = .{ .name = tok.token.varid, .span = tok.span } };
     }
 
     /// Parse constructor pattern: Just x, Nothing, True
@@ -2134,9 +2130,11 @@ pub const Parser = struct {
         }
 
         const args_slice = try self.allocSlice(ast_mod.Pattern, args.items);
+        const end_span = if (args.items.len > 0) args.items[args.items.len - 1].getSpan() else tok.span;
         return .{ .Con = .{
             .name = .{ .name = tok.token.conid, .span = tok.span },
             .args = args_slice,
+            .span = tok.span.merge(end_span),
         } };
     }
 
@@ -2168,12 +2166,12 @@ pub const Parser = struct {
 
     /// Parse parenthesized pattern or tuple: (Just x), (a, b, c), ()
     fn parseParenOrTuplePattern(self: *Parser) ParseError!ast_mod.Pattern {
-        _ = try self.expect(.open_paren);
+        const open_tok = try self.expect(.open_paren);
 
         // Check for unit pattern: ()
         if (try self.check(.close_paren)) {
-            _ = try self.advance();
-            return .{ .Tuple = &.{} };
+            const close_tok = try self.advance();
+            return .{ .Tuple = .{ .patterns = &.{}, .span = open_tok.span.merge(close_tok.span) } };
         }
 
         // Parse first pattern
@@ -2191,23 +2189,29 @@ pub const Parser = struct {
                 try patterns.append(self.allocator, pat);
             }
 
-            _ = try self.expect(.close_paren);
-            return .{ .Tuple = try self.allocSlice(ast_mod.Pattern, patterns.items) };
+            const close_tok = try self.expect(.close_paren);
+            return .{ .Tuple = .{
+                .patterns = try self.allocSlice(ast_mod.Pattern, patterns.items),
+                .span = open_tok.span.merge(close_tok.span),
+            } };
         }
 
         // Single parenthesized pattern: (Just x)
-        _ = try self.expect(.close_paren);
-        return .{ .Paren = try self.allocNode(ast_mod.Pattern, first) };
+        const close_tok = try self.expect(.close_paren);
+        return .{ .Paren = .{
+            .pat = try self.allocNode(ast_mod.Pattern, first),
+            .span = open_tok.span.merge(close_tok.span),
+        } };
     }
 
     /// Parse list pattern: [], [x, y], [x:xs]
     fn parseListPattern(self: *Parser) ParseError!ast_mod.Pattern {
-        _ = try self.expect(.open_bracket);
+        const open_tok = try self.expect(.open_bracket);
 
         // Check for empty list: []
         if (try self.check(.close_bracket)) {
-            _ = try self.advance();
-            return .{ .List = &.{} };
+            const close_tok = try self.advance();
+            return .{ .List = .{ .patterns = &.{}, .span = open_tok.span.merge(close_tok.span) } };
         }
 
         // Parse first pattern
@@ -2223,6 +2227,7 @@ pub const Parser = struct {
                 _ = try self.expect(.close_bracket);
 
                 // Create an InfixCon pattern with : operator
+                // Note: InfixCon derives its span from left/right
                 return .{ .InfixCon = .{
                     .left = try self.allocNode(ast_mod.Pattern, first),
                     .con = .{ .name = ":", .span = cons_tok.span },
@@ -2246,8 +2251,11 @@ pub const Parser = struct {
             try patterns.append(self.allocator, pat);
         }
 
-        _ = try self.expect(.close_bracket);
-        return .{ .List = try self.allocSlice(ast_mod.Pattern, patterns.items) };
+        const close_tok = try self.expect(.close_bracket);
+        return .{ .List = .{
+            .patterns = try self.allocSlice(ast_mod.Pattern, patterns.items),
+            .span = open_tok.span.merge(close_tok.span),
+        } };
     }
 
     /// Legacy function for backward compatibility. Tries to parse an atomic pattern.
@@ -3002,7 +3010,7 @@ test "expr: lambda with single parameter" {
     const expr = try parseTestExpr(&arena, "x = \\y -> y + 1");
     try std.testing.expect(expr == .Lambda);
     try std.testing.expectEqual(1, expr.Lambda.patterns.len);
-    try std.testing.expectEqualStrings("y", expr.Lambda.patterns[0].Var);
+    try std.testing.expectEqualStrings("y", expr.Lambda.patterns[0].Var.name);
     try std.testing.expect(expr.Lambda.body.* == .InfixApp);
 }
 
@@ -3013,9 +3021,9 @@ test "expr: lambda with multiple parameters" {
     const expr = try parseTestExpr(&arena, "x = \\a b c -> a + b + c");
     try std.testing.expect(expr == .Lambda);
     try std.testing.expectEqual(3, expr.Lambda.patterns.len);
-    try std.testing.expectEqualStrings("a", expr.Lambda.patterns[0].Var);
-    try std.testing.expectEqualStrings("b", expr.Lambda.patterns[1].Var);
-    try std.testing.expectEqualStrings("c", expr.Lambda.patterns[2].Var);
+    try std.testing.expectEqualStrings("a", expr.Lambda.patterns[0].Var.name);
+    try std.testing.expectEqualStrings("b", expr.Lambda.patterns[1].Var.name);
+    try std.testing.expectEqualStrings("c", expr.Lambda.patterns[2].Var.name);
 }
 
 test "expr: if then else" {
@@ -3037,7 +3045,9 @@ test "expr: do notation with binding" {
     try std.testing.expect(expr == .Do);
     try std.testing.expectEqual(2, expr.Do.len);
     try std.testing.expect(expr.Do[0] == .Generator);
-    try std.testing.expectEqualStrings("y", expr.Do[0].Generator.pat.Var);
+    const gen_pat = expr.Do[0].Generator.pat;
+    try std.testing.expect(gen_pat == .Var);
+    try std.testing.expectEqualStrings("y", gen_pat.Var.name);
 }
 
 test "expr: tuple expression" {
@@ -3201,9 +3211,7 @@ test "decl: deriving clause with multiple classes" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const mod = try parseTestModule(allocator,
-        "module M where data X = X deriving (Eq, Show, Ord)"
-    );
+    const mod = try parseTestModule(allocator, "module M where data X = X deriving (Eq, Show, Ord)");
     try std.testing.expectEqual(1, mod.declarations.len);
 
     const data_decl = mod.declarations[0].Data;
@@ -3273,4 +3281,3 @@ test "decl: multiple declarations in module" {
     try std.testing.expect(mod.declarations[1] == .Data);
     try std.testing.expect(mod.declarations[2] == .Instance);
 }
-
