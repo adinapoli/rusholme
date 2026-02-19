@@ -674,6 +674,30 @@ pub const Parser = struct {
             .kw_infixl, .kw_infixr, .kw_infix => try self.parseFixityDecl(),
             .varid => try self.parseValueDecl(),
             .open_paren => try self.parseValueDecl(),
+            // Bang pattern binding: !y = expr (pattern binding with strictness)
+            .varsym => {
+                const tok = try self.peek();
+                if (std.mem.eql(u8, tok.token.varsym, "!")) {
+                    // This is a pattern binding with a bang pattern
+                    return try self.parsePatBindDecl();
+                }
+                try self.emitErrorMsg(tok.span, "expected declaration");
+                return error.UnexpectedToken;
+            },
+            // Patterns starting with conid: Just x = expr
+            .conid => {
+                // Could be a pattern binding or function binding
+                // Let's check if this should be handled as PatBind
+                return try self.parsePatBindDecl();
+            },
+            // Wildcard binding: _ = expr
+            .underscore => try self.parsePatBindDecl(),
+            // Literal pattern binding: 42 = expr
+            .lit_integer, .lit_char, .lit_string => try self.parsePatBindDecl(),
+            // Negative literal pattern: -42 = expr
+            .minus => try self.parsePatBindDecl(),
+            // List pattern binding: [x] = expr
+            .open_bracket => try self.parsePatBindDecl(),
             .eof, .v_close_brace, .close_brace => null,
             else => {
                 const got = try self.peek();
@@ -767,59 +791,65 @@ pub const Parser = struct {
         const next_for_infix = try self.peek();
         const next_tag = std.meta.activeTag(next_for_infix.token);
         if (next_tag == .backtick or next_tag == .varsym or next_tag == .consym) {
-            // The already-consumed varid is the left-hand argument pattern.
-            const lhs_pat = ast_mod.Pattern{ .Var = .{ .name = name, .span = name_tok.span } };
+            // Special case: "!" is a bang pattern, not an infix operator
+            if (next_tag == .varsym and std.mem.eql(u8, next_for_infix.token.varsym, "!")) {
+                // This is a strict argument pattern: foo !x = ..., not infix
+                // Fall through to the regular function binding case below
+            } else {
+                // The already-consumed varid is the left-hand argument pattern.
+                const lhs_pat = ast_mod.Pattern{ .Var = .{ .name = name, .span = name_tok.span } };
 
-            const fn_name: []const u8 = switch (next_tag) {
-                .backtick => blk: {
-                    _ = try self.advance(); // consume opening backtick
-                    const fn_name_tok = try self.peek();
-                    const n: []const u8 = switch (std.meta.activeTag(fn_name_tok.token)) {
-                        .varid => inner: {
-                            _ = try self.advance();
-                            break :inner fn_name_tok.token.varid;
-                        },
-                        .conid => inner: {
-                            _ = try self.advance();
-                            break :inner fn_name_tok.token.conid;
-                        },
-                        else => {
-                            try self.emitErrorMsg(fn_name_tok.span, "expected function name in backtick infix definition");
-                            return error.UnexpectedToken;
-                        },
-                    };
-                    _ = try self.expect(.backtick); // consume closing backtick
-                    break :blk n;
-                },
-                .varsym => inner: {
-                    _ = try self.advance();
-                    break :inner next_for_infix.token.varsym;
-                },
-                .consym => inner: {
-                    _ = try self.advance();
-                    break :inner next_for_infix.token.consym;
-                },
-                else => unreachable,
-            };
+                const fn_name: []const u8 = switch (next_tag) {
+                    .backtick => blk: {
+                        _ = try self.advance(); // consume opening backtick
+                        const fn_name_tok = try self.peek();
+                        const n: []const u8 = switch (std.meta.activeTag(fn_name_tok.token)) {
+                            .varid => inner: {
+                                _ = try self.advance();
+                                break :inner fn_name_tok.token.varid;
+                            },
+                            .conid => inner: {
+                                _ = try self.advance();
+                                break :inner fn_name_tok.token.conid;
+                            },
+                            else => {
+                                try self.emitErrorMsg(fn_name_tok.span, "expected function name in backtick infix definition");
+                                return error.UnexpectedToken;
+                            },
+                        };
+                        _ = try self.expect(.backtick); // consume closing backtick
+                        break :blk n;
+                    },
+                    .varsym => inner: {
+                        _ = try self.advance();
+                        break :inner next_for_infix.token.varsym;
+                    },
+                    .consym => inner: {
+                        _ = try self.advance();
+                        break :inner next_for_infix.token.consym;
+                    },
+                    else => unreachable,
+                };
 
-            // Parse the right-hand argument pattern.
-            const rhs_pat = try self.parseArgPattern();
+                // Parse the right-hand argument pattern.
+                const rhs_pat = try self.parseArgPattern();
 
-            const rhs = try self.parseRhs();
-            const where_clause = try self.parseWhereClause();
+                const rhs = try self.parseRhs();
+                const where_clause = try self.parseWhereClause();
 
-            const eq = ast_mod.Match{
-                .patterns = try self.allocSlice(ast_mod.Pattern, &.{ lhs_pat, rhs_pat }),
-                .rhs = rhs,
-                .where_clause = where_clause,
-                .span = self.spanFrom(start),
-            };
+                const eq = ast_mod.Match{
+                    .patterns = try self.allocSlice(ast_mod.Pattern, &.{ lhs_pat, rhs_pat }),
+                    .rhs = rhs,
+                    .where_clause = where_clause,
+                    .span = self.spanFrom(start),
+                };
 
-            return .{ .FunBind = .{
-                .name = fn_name,
-                .equations = try self.allocSlice(ast_mod.Match, &.{eq}),
-                .span = self.spanFrom(start),
-            } };
+                return .{ .FunBind = .{
+                    .name = fn_name,
+                    .equations = try self.allocSlice(ast_mod.Match, &.{eq}),
+                    .span = self.spanFrom(start),
+                } };
+            }
         }
 
         // Function binding: name [patterns] = expr [where ...]
@@ -871,6 +901,39 @@ pub const Parser = struct {
             });
         }
         return .{ .Guarded = try arms.toOwnedSlice(self.allocator) };
+    }
+
+    /// Parse a pattern binding: `pat = expr` or `pat | guards = expr`.
+    /// This is used for let bindings where the left-hand side is a pattern
+    /// (e.g., `let !x = expr` or `let (Just y) = expr`).
+    fn parsePatBindDecl(self: *Parser) ParseError!ast_mod.Decl {
+        const start = try self.currentSpan();
+        const pat = try self.parsePattern();
+
+        const rhs = if (try self.check(.pipe)) blk: {
+            const guard_list = try self.parseGuardList();
+            _ = try self.expect(.equals);
+            const rhs_expr = try self.parseExpr();
+            const guards = try self.allocator.alloc(ast_mod.GuardedRhs, 1);
+            guards[0] = .{
+                .guards = guard_list,
+                .rhs = rhs_expr,
+            };
+            break :blk ast_mod.Rhs{ .Guarded = guards };
+        } else blk: {
+            _ = try self.expect(.equals);
+            const expr = try self.parseExpr();
+            break :blk ast_mod.Rhs{ .UnGuarded = expr };
+        };
+
+        const where_clause = try self.parseWhereClause();
+
+        return .{ .PatBind = .{
+            .pattern = pat,
+            .rhs = rhs,
+            .where_clause = where_clause,
+            .span = self.spanFrom(start),
+        } };
     }
 
     /// Parse a guarded case alternative RHS: `| g1, g2, ... -> expr`.
@@ -1179,8 +1242,25 @@ pub const Parser = struct {
         } else {
             // Regular constructor: Con t1 t2 ...
             // Parse fields as atomic types (constructor arguments)
+            // Support strict field annotations: !Type
             while (true) {
-                const ty = try self.tryParseAtomicType() orelse break;
+                var strict = false;
+                if (try self.check(.varsym)) {
+                    const tok = try self.peek();
+                    if (std.mem.eql(u8, tok.token.varsym, "!")) {
+                        _ = try self.advance(); // consume "!"
+                        strict = true;
+                    }
+                }
+                const ty = try self.tryParseAtomicType() orelse {
+                    if (strict) {
+                        // Expected a type after !
+                        try self.emitErrorMsg(self.last_span, "expected type after !");
+                        return error.UnexpectedToken;
+                    }
+                    break;
+                };
+                // TODO: Store strictness in FieldDecl when needed for codegen
                 try fields.append(self.allocator, .{ .Plain = ty });
             }
         }
@@ -2905,7 +2985,7 @@ pub const Parser = struct {
     // ── Pattern parsing ─────────────────────────────────────────────────
 
     /// Main entry point for pattern parsing.
-    /// Handles: as-patterns, negation, infix constructors, and atomic patterns.
+    /// Handles: as-patterns, negation, infix constructors, bang patterns, and atomic patterns.
     pub fn parsePattern(self: *Parser) ParseError!ast_mod.Pattern {
         const start = try self.currentSpan();
 
@@ -2975,6 +3055,11 @@ pub const Parser = struct {
         const tag = try self.peekTag();
         return switch (tag) {
             .varid, .conid, .underscore, .lit_integer, .lit_char, .lit_string, .minus, .open_paren, .open_bracket => true,
+            .varsym => {
+                // Only "!" (bang pattern) starts a pattern, not other operators
+                const tok = try self.peek();
+                return std.mem.eql(u8, tok.token.varsym, "!");
+            },
             else => false,
         };
     }
@@ -2995,6 +3080,21 @@ pub const Parser = struct {
 
     /// Parse an atomic pattern (no as-pattern, no infix, no negation).
     fn parseAtomicPattern(self: *Parser) ParseError!ast_mod.Pattern {
+        const start = try self.currentSpan();
+
+        // Handle bang pattern: !x, !(Just y) (GHC extension - strictness annotation)
+        if (try self.check(.varsym)) {
+            const tok = try self.peek();
+            if (std.mem.eql(u8, tok.token.varsym, "!")) {
+                _ = try self.advance(); // consume "!"
+                const pat = try self.parseAtomicPattern();
+                return .{ .Bang = .{
+                    .pat = try self.allocNode(ast_mod.Pattern, pat),
+                    .span = start.merge(pat.getSpan()),
+                } };
+            }
+        }
+
         const tag = try self.peekTag();
         return switch (tag) {
             .varid => try self.parseVarPattern(),
