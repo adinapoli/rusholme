@@ -2067,6 +2067,19 @@ pub const Parser = struct {
                     }
                 }
 
+                // List comprehension: [e | qual, qual, ...]
+                // The pipe token is `.pipe` (|).
+                if (try self.check(.pipe)) {
+                    _ = try self.advance(); // consume '|'
+                    const qualifiers = try self.parseQualifiers();
+                    const close_tok = try self.expect(.close_bracket);
+                    _ = close_tok;
+                    return .{ .ListComp = .{
+                        .expr = try self.allocNode(ast_mod.Expr, first),
+                        .qualifiers = qualifiers,
+                    } };
+                }
+
                 // Either a list literal or [e, e' ..] / [e, e' .. e''].
                 // Consume optional comma-separated elements.
                 var items: std.ArrayListUnmanaged(ast_mod.Expr) = .empty;
@@ -2297,6 +2310,165 @@ pub const Parser = struct {
         }
         _ = try self.expectCloseBrace();
         return .{ .Do = try stmts.toOwnedSlice(self.allocator) };
+    }
+
+    /// Parse a list of list-comprehension qualifiers separated by commas.
+    ///
+    /// qualifier → pat <- expr   (generator)
+    ///           | let decls     (let qualifier, no 'in')
+    ///           | expr          (boolean guard)
+    ///
+    /// Haskell 2010 §3.11
+    fn parseQualifiers(self: *Parser) ParseError![]const ast_mod.Qualifier {
+        var qualifiers: std.ArrayListUnmanaged(ast_mod.Qualifier) = .empty;
+        const first = try self.parseQualifier();
+        try qualifiers.append(self.allocator, first);
+        while (try self.match(.comma) != null) {
+            const q = try self.parseQualifier();
+            try qualifiers.append(self.allocator, q);
+        }
+        return qualifiers.toOwnedSlice(self.allocator);
+    }
+
+    /// Parse a single list-comprehension qualifier.
+    ///
+    /// We disambiguate generator vs. guard using lookahead:
+    ///   - `let` keyword → let qualifier
+    ///   - parse expression, then if followed by `<-` it is a generator
+    ///
+    /// The let qualifier opens a layout block (like do-let) but without `in`.
+    fn parseQualifier(self: *Parser) ParseError!ast_mod.Qualifier {
+        // Let qualifier: let { decls }
+        if (try self.check(.kw_let)) {
+            _ = try self.advance(); // consume 'let'
+            _ = try self.expectOpenBrace();
+            var binds: std.ArrayListUnmanaged(ast_mod.Decl) = .empty;
+            while (true) {
+                if (try self.checkCloseBrace()) break;
+                if (try self.atEnd()) break;
+                const decl = try self.parseTopDecl() orelse break;
+                try binds.append(self.allocator, decl);
+                while (try self.matchSemi()) {}
+            }
+            _ = try self.expectCloseBrace();
+            // A let qualifier desugars to a let expression with the
+            // bound names in scope for subsequent qualifiers. We
+            // represent it as a Guard wrapping a Let with a unit body,
+            // which is sufficient for parsing purposes. The renamer/
+            // desugarer will handle it properly.
+            //
+            // Per Haskell 2010 §3.11, let qualifiers are a first-class
+            // construct; we store them as a special Guard expression.
+            // Since the AST Qualifier union only has Generator and
+            // Qualifier (guard), we represent a let-qualifier as a
+            // guard whose expression is a Let with a unit body. A
+            // follow-up issue will add LetQualifier to ast.Qualifier.
+            // See: https://github.com/adinapoli/rusholme/issues/216
+            const unit = ast_mod.Expr{ .Tuple = &.{} };
+            const let_expr = ast_mod.Expr{ .Let = .{
+                .binds = try binds.toOwnedSlice(self.allocator),
+                .body = try self.allocNode(ast_mod.Expr, unit),
+            } };
+            return .{ .Qualifier = let_expr };
+        }
+
+        // Generator or guard: parse an expression first, then check for `<-`.
+        //
+        // For generators the left-hand side is a pattern, but since patterns
+        // and expressions overlap syntactically for variable/constructor names
+        // we parse an expression and convert it. Simple variables and
+        // constructor patterns can be recovered from Expr nodes.
+        const expr_or_pat = try self.parseExpr();
+
+        if (try self.check(.arrow_left)) {
+            _ = try self.advance(); // consume '<-'
+            const gen_expr = try self.parseExpr();
+            // Convert the expression to a pattern.  The common cases are:
+            //   Var → Pattern.Var
+            //   Con with args → Pattern.Con
+            //   Tuple of vars → Pattern.Tuple
+            //   Wildcard (_) is parsed as a Var named "_" — handle below.
+            const gen_pat = try self.exprToPattern(expr_or_pat);
+            return .{ .Generator = .{ .pat = gen_pat, .expr = gen_expr } };
+        }
+
+        // Plain boolean guard
+        return .{ .Qualifier = expr_or_pat };
+    }
+
+    /// Convert an expression node to a pattern node for generator qualifiers.
+    ///
+    /// This is a best-effort conversion for the common cases that appear in
+    /// list comprehension generators:
+    ///   Var name   → Pattern.Var
+    ///   Tuple      → Pattern.Tuple
+    ///   Lit        → Pattern.Lit
+    ///   Paren expr → Pattern.Paren
+    ///   Con (App)  → Pattern.Con (constructor application)
+    ///
+    /// Complex patterns that require explicit pattern syntax (e.g. `(x:xs)`)
+    /// must appear in a proper pattern position in a generator; those will
+    /// naturally be parsed as expressions wrapping Paren which contains an
+    /// InfixApp. Such cases are left for a future parser improvement.
+    fn exprToPattern(self: *Parser, expr: ast_mod.Expr) ParseError!ast_mod.Pattern {
+        return switch (expr) {
+            .Var => |q| .{ .Var = .{ .name = q.name, .span = q.span } },
+            .Lit => |l| .{ .Lit = l },
+            .Tuple => |exprs| blk: {
+                var pats: std.ArrayListUnmanaged(ast_mod.Pattern) = .empty;
+                for (exprs) |e| {
+                    const p = try self.exprToPattern(e);
+                    try pats.append(self.allocator, p);
+                }
+                const span = if (exprs.len > 0)
+                    exprs[0].getSpan().merge(exprs[exprs.len - 1].getSpan())
+                else
+                    self.last_span;
+                break :blk .{ .Tuple = .{
+                    .patterns = try pats.toOwnedSlice(self.allocator),
+                    .span = span,
+                } };
+            },
+            .Paren => |inner| blk: {
+                const inner_pat = try self.exprToPattern(inner.*);
+                break :blk .{ .Paren = .{
+                    .pat = try self.allocNode(ast_mod.Pattern, inner_pat),
+                    .span = inner.getSpan(),
+                } };
+            },
+            .App => |app| blk: {
+                // Constructor application: Con arg1 arg2
+                // fn_expr must be a Var (constructor name).
+                switch (app.fn_expr.*) {
+                    .Var => |q| {
+                        const arg_pat = try self.exprToPattern(app.arg_expr.*);
+                        break :blk .{ .Con = .{
+                            .name = q,
+                            .args = try self.allocSlice(ast_mod.Pattern, &.{arg_pat}),
+                            .span = app.fn_expr.getSpan().merge(app.arg_expr.getSpan()),
+                        } };
+                    },
+                    else => {
+                        try self.emitErrorMsg(app.fn_expr.getSpan(), "expected constructor pattern in generator");
+                        return error.InvalidSyntax;
+                    },
+                }
+            },
+            .InfixApp => |infix| blk: {
+                // Infix constructor: p : ps
+                const left_pat = try self.exprToPattern(infix.left.*);
+                const right_pat = try self.exprToPattern(infix.right.*);
+                break :blk .{ .InfixCon = .{
+                    .left = try self.allocNode(ast_mod.Pattern, left_pat),
+                    .con = infix.op,
+                    .right = try self.allocNode(ast_mod.Pattern, right_pat),
+                } };
+            },
+            else => {
+                try self.emitErrorMsg(expr.getSpan(), "invalid pattern in list comprehension generator");
+                return error.InvalidSyntax;
+            },
+        };
     }
 
     /// Parse `let decls` as a do-statement (Haskell 2010 §3.14).
