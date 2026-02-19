@@ -547,12 +547,27 @@ pub const Parser = struct {
             const tok = try self.advance();
             return .{ .Var = tok.token.varid };
         }
-        // ( varsym ) — operator export
+        // ( varsym ) or ( consym ) — operator export
+        // Haskell 2010 §5.2: exports include operator names in parentheses
         if (try self.check(.open_paren)) {
             _ = try self.advance();
-            const op_tok = try self.expect(.varsym);
+            const op_tok = try self.peek();
+            const op_name = switch (std.meta.activeTag(op_tok.token)) {
+                .varsym => blk: {
+                    _ = try self.advance();
+                    break :blk op_tok.token.varsym;
+                },
+                .consym => blk: {
+                    _ = try self.advance();
+                    break :blk op_tok.token.consym;
+                },
+                else => {
+                    try self.emitErrorMsg(op_tok.span, "expected operator symbol in export list");
+                    return error.UnexpectedToken;
+                },
+            };
             _ = try self.expect(.close_paren);
-            return .{ .Var = op_tok.token.varsym };
+            return .{ .Var = op_name };
         }
         const got = try self.peek();
         try self.emitErrorMsg(got.span, "expected export specification");
@@ -648,25 +663,59 @@ pub const Parser = struct {
 
     /// Parse a value-level declaration. This handles both type signatures
     /// and function/pattern bindings by lookahead:
-    ///   - `name :: type`  → TypeSig
-    ///   - `name pats = expr` → FunBind
-    ///   - `( op ) :: type` → TypeSig for operator
+    ///   - `name :: type`         → TypeSig
+    ///   - `name pats = expr`     → FunBind
+    ///   - `( op ) :: type`       → TypeSig for operator (varsym or consym)
+    ///   - `( op ) pats = expr`   → FunBind for operator (varsym or consym)
     fn parseValueDecl(self: *Parser) ParseError!?ast_mod.Decl {
-        // Check for operator type sig: ( op ) :: ...
+        // Check for operator declaration: ( varsym-or-consym ) ...
+        // Haskell 2010 §4.4.2: funlhs → ( op ) apat*
         if (try self.check(.open_paren)) {
             const tok1 = try self.peekAt(1);
-            if (std.meta.activeTag(tok1.token) == .varsym) {
+            const is_op = std.meta.activeTag(tok1.token) == .varsym or
+                std.meta.activeTag(tok1.token) == .consym;
+            if (is_op) {
                 const tok2 = try self.peekAt(2);
                 if (std.meta.activeTag(tok2.token) == .close_paren) {
+                    const start = (try self.peek()).span;
                     _ = try self.advance(); // (
-                    const op = try self.advance(); // operator
+                    const op_tok = try self.advance(); // operator
                     _ = try self.advance(); // )
-                    _ = try self.expect(.dcolon);
-                    const ty = try self.parseType();
-                    return .{ .TypeSig = .{
-                        .names = try self.allocSlice([]const u8, &.{op.token.varsym}),
-                        .type = ty,
-                        .span = self.spanFrom(op.span),
+                    const op_name = switch (std.meta.activeTag(op_tok.token)) {
+                        .varsym => op_tok.token.varsym,
+                        .consym => op_tok.token.consym,
+                        else => unreachable,
+                    };
+
+                    // Type signature: ( op ) :: type
+                    if (try self.check(.dcolon)) {
+                        _ = try self.advance();
+                        const ty = try self.parseType();
+                        return .{ .TypeSig = .{
+                            .names = try self.allocSlice([]const u8, &.{op_name}),
+                            .type = ty,
+                            .span = self.spanFrom(start),
+                        } };
+                    }
+
+                    // Function binding: ( op ) pat* = rhs [where ...]
+                    var patterns: std.ArrayListUnmanaged(ast_mod.Pattern) = .empty;
+                    while (true) {
+                        const pat = try self.tryParseArgPattern() orelse break;
+                        try patterns.append(self.allocator, pat);
+                    }
+                    const rhs = try self.parseRhs();
+                    const where_clause = try self.parseWhereClause();
+                    const eq = ast_mod.Match{
+                        .patterns = try patterns.toOwnedSlice(self.allocator),
+                        .rhs = rhs,
+                        .where_clause = where_clause,
+                        .span = self.spanFrom(start),
+                    };
+                    return .{ .FunBind = .{
+                        .name = op_name,
+                        .equations = try self.allocSlice(ast_mod.Match, &.{eq}),
+                        .span = self.spanFrom(start),
                     } };
                 }
             }
@@ -687,33 +736,47 @@ pub const Parser = struct {
             } };
         }
 
-        // Infix function definition: pat1 `name` pat2 = rhs
+        // Infix function definition: pat1 varop pat2 = rhs
         // (Haskell 2010 §4.4.3: funlhs → pat varop pat)
-        // Detected by: varid already consumed, next token is backtick.
-        if (try self.check(.backtick)) {
+        // varop is either a backtick-quoted name or a varsym/consym directly.
+        // Detected by: varid already consumed, next token is backtick, varsym, or consym.
+        const next_for_infix = try self.peek();
+        const next_tag = std.meta.activeTag(next_for_infix.token);
+        if (next_tag == .backtick or next_tag == .varsym or next_tag == .consym) {
             // The already-consumed varid is the left-hand argument pattern.
             const lhs_pat = ast_mod.Pattern{ .Var = .{ .name = name, .span = name_tok.span } };
 
-            _ = try self.advance(); // consume opening backtick
-
-            // Parse the function name (varid or conid in backticks)
-            const fn_name_tok = try self.peek();
-            const fn_name: []const u8 = switch (std.meta.activeTag(fn_name_tok.token)) {
-                .varid => blk: {
+            const fn_name: []const u8 = switch (next_tag) {
+                .backtick => blk: {
+                    _ = try self.advance(); // consume opening backtick
+                    const fn_name_tok = try self.peek();
+                    const n: []const u8 = switch (std.meta.activeTag(fn_name_tok.token)) {
+                        .varid => inner: {
+                            _ = try self.advance();
+                            break :inner fn_name_tok.token.varid;
+                        },
+                        .conid => inner: {
+                            _ = try self.advance();
+                            break :inner fn_name_tok.token.conid;
+                        },
+                        else => {
+                            try self.emitErrorMsg(fn_name_tok.span, "expected function name in backtick infix definition");
+                            return error.UnexpectedToken;
+                        },
+                    };
+                    _ = try self.expect(.backtick); // consume closing backtick
+                    break :blk n;
+                },
+                .varsym => inner: {
                     _ = try self.advance();
-                    break :blk fn_name_tok.token.varid;
+                    break :inner next_for_infix.token.varsym;
                 },
-                .conid => blk: {
+                .consym => inner: {
                     _ = try self.advance();
-                    break :blk fn_name_tok.token.conid;
+                    break :inner next_for_infix.token.consym;
                 },
-                else => {
-                    try self.emitErrorMsg(fn_name_tok.span, "expected function name in backtick infix definition");
-                    return error.UnexpectedToken;
-                },
+                else => unreachable,
             };
-
-            _ = try self.expect(.backtick); // consume closing backtick
 
             // Parse the right-hand argument pattern.
             const rhs_pat = try self.parseArgPattern();
@@ -3911,4 +3974,85 @@ test "decl: multiple declarations in module" {
     try std.testing.expect(mod.declarations[0] == .Class);
     try std.testing.expect(mod.declarations[1] == .Data);
     try std.testing.expect(mod.declarations[2] == .Instance);
+}
+
+test "decl: operator type signature (varsym)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\(|>) :: a -> (a -> b) -> b
+    );
+    try std.testing.expectEqual(1, mod.declarations.len);
+    try std.testing.expect(mod.declarations[0] == .TypeSig);
+    const sig = mod.declarations[0].TypeSig;
+    try std.testing.expectEqual(1, sig.names.len);
+    try std.testing.expectEqualStrings("|>", sig.names[0]);
+}
+
+test "decl: operator type signature (consym)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\(+++) :: String -> String -> String
+    );
+    try std.testing.expectEqual(1, mod.declarations.len);
+    try std.testing.expect(mod.declarations[0] == .TypeSig);
+    const sig = mod.declarations[0].TypeSig;
+    try std.testing.expectEqual(1, sig.names.len);
+    try std.testing.expectEqualStrings("+++", sig.names[0]);
+}
+
+test "decl: operator function definition (varsym prefix form)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\(|>) x f = f x
+    );
+    try std.testing.expectEqual(1, mod.declarations.len);
+    try std.testing.expect(mod.declarations[0] == .FunBind);
+    const bind = mod.declarations[0].FunBind;
+    try std.testing.expectEqualStrings("|>", bind.name);
+    try std.testing.expectEqual(2, bind.equations[0].patterns.len);
+}
+
+test "decl: operator function definition (infix style)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // x |> f = f x  — infix funlhs: pat1 op pat2
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\x |> f = f x
+    );
+    try std.testing.expectEqual(1, mod.declarations.len);
+    try std.testing.expect(mod.declarations[0] == .FunBind);
+    const bind = mod.declarations[0].FunBind;
+    try std.testing.expectEqualStrings("|>", bind.name);
+    // lhs pat (x) + rhs pat (f) = 2 patterns
+    try std.testing.expectEqual(2, bind.equations[0].patterns.len);
+}
+
+test "decl: operator export in export list (consym)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M ((+++)) where
+        \\(+++) x y = x
+    );
+    try std.testing.expect(mod.exports != null);
+    try std.testing.expectEqual(1, mod.exports.?.len);
+    try std.testing.expect(mod.exports.?[0] == .Var);
+    try std.testing.expectEqualStrings("+++", mod.exports.?[0].Var);
 }
