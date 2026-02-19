@@ -1844,9 +1844,20 @@ pub const Parser = struct {
     /// delegates to `continueInfixExpr` for the climbing loop. Handles
     /// varsym, consym, binary minus, and backtick-enclosed identifiers.
     ///
+    /// Also handles prefix negation (lexp → - infixexp, Haskell 2010 §3.4).
+    /// Prefix `-` has precedence 6 (same as binary `-`).
+    ///
     /// Backtick infix: `f`  →  InfixApp with op.name = "f"
     /// (Haskell 2010 §3.4)
     fn parseInfixExpr(self: *Parser, min_prec: u8) ParseError!ast_mod.Expr {
+        // Prefix negation: lexp → - infixexp.  Negation has precedence 6.
+        // Handled here (lexp level) rather than in tryParseAtomicExpr (aexp level)
+        // so that `f - x` correctly parses as infix subtraction, not App(f, Negate(x)).
+        if (try self.check(.minus)) {
+            _ = try self.advance();
+            const inner = try self.parseInfixExpr(7); // right-recursive: prec 6+1
+            return .{ .Negate = try self.allocNode(ast_mod.Expr, inner) };
+        }
         const lhs = try self.parseAppExpr();
         return self.continueInfixExpr(lhs, min_prec);
     }
@@ -2226,11 +2237,6 @@ pub const Parser = struct {
                 }
                 _ = try self.expect(.close_bracket);
                 return .{ .List = try items.toOwnedSlice(self.allocator) };
-            },
-            .minus => {
-                _ = try self.advance();
-                const inner = try self.parseAtomicExpr();
-                return .{ .Negate = try self.allocNode(ast_mod.Expr, inner) };
             },
             .backslash => return try self.parseLambda(),
             .kw_if => return try self.parseIf(),
@@ -4161,4 +4167,112 @@ test "decl: multiline function application in rhs" {
     );
     try std.testing.expectEqual(1, mod.declarations.len);
     try std.testing.expect(mod.declarations[0] == .FunBind);
+}
+
+// ── Operator section tests (Issue #202) ──────────────────────────────────
+
+test "expr: left section with consym operator (p ++)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const expr = try parseTestExpr(&arena, "f p = map (p ++) xs");
+    // map (p ++) xs → App(App(map, LeftSection(p, ++)), xs)
+    try std.testing.expect(expr == .App);
+    const inner = expr.App.fn_expr.*;
+    try std.testing.expect(inner == .App);
+    const section = inner.App.arg_expr.*;
+    try std.testing.expect(section == .LeftSection);
+    try std.testing.expectEqualStrings("p", section.LeftSection.expr.*.Var.name);
+    try std.testing.expectEqualStrings("++", section.LeftSection.op.name);
+}
+
+test "expr: left section with cons operator (0 :)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const expr = try parseTestExpr(&arena, "f = (0 :)");
+    try std.testing.expect(expr == .LeftSection);
+    try std.testing.expect(expr.LeftSection.expr.* == .Lit);
+    try std.testing.expectEqualStrings(":", expr.LeftSection.op.name);
+}
+
+test "expr: left section with minus operator (10 -)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const expr = try parseTestExpr(&arena, "f = (10 -)");
+    try std.testing.expect(expr == .LeftSection);
+    try std.testing.expect(expr.LeftSection.expr.* == .Lit);
+    try std.testing.expectEqualStrings("-", expr.LeftSection.op.name);
+}
+
+test "expr: case expression with multiple alternatives" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const expr = try parseTestExpr(&arena,
+        \\f x = case x of
+        \\    Nothing -> 0
+        \\    Just y  -> y
+    );
+    try std.testing.expect(expr == .Case);
+    try std.testing.expectEqual(2, expr.Case.alts.len);
+}
+
+test "expr: left section with string consym (\"Hello, \" ++)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const expr = try parseTestExpr(&arena,
+        \\f = ("Hello, " ++)
+    );
+    try std.testing.expect(expr == .LeftSection);
+    try std.testing.expect(expr.LeftSection.expr.* == .Lit);
+    try std.testing.expectEqualStrings("++", expr.LeftSection.op.name);
+}
+
+test "expr: right section with consym (++ \"!\")" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const expr = try parseTestExpr(&arena,
+        \\f = (++ "!")
+    );
+    try std.testing.expect(expr == .RightSection);
+    try std.testing.expectEqualStrings("++", expr.RightSection.op.name);
+    try std.testing.expect(expr.RightSection.expr.* == .Lit);
+}
+
+test "module: sc009 lambda — case alts, sections, and list types" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const mod = try parseTestModule(allocator,
+        \\module Sc009Lambda where
+        \\double :: Int -> Int
+        \\double = \x -> x * 2
+        \\mapMaybe :: (a -> b) -> Maybe a -> Maybe b
+        \\mapMaybe f = \m -> case m of
+        \\    Nothing -> Nothing
+        \\    Just x  -> Just (f x)
+        \\increment :: [Int] -> [Int]
+        \\increment = map (+ 1)
+        \\prefix :: String -> [String] -> [String]
+        \\prefix p = map (p ++)
+    );
+    try std.testing.expectEqual(8, mod.declarations.len);
+}
+
+test "module: sc033 sections — consym, minus, backtick left sections" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const mod = try parseTestModule(allocator,
+        \\module Sc033SectionsOperators where
+        \\appendBang :: [String] -> [String]
+        \\appendBang = map (++ "!")
+        \\subtractFrom10 :: [Int] -> [Int]
+        \\subtractFrom10 = map (10 -)
+        \\divides :: Int -> Int -> Bool
+        \\n `divides` m = m `mod` n == 0
+        \\prependZero :: [Int] -> [Int]
+        \\prependZero = (0 :)
+        \\greet :: String -> String
+        \\greet = ("Hello, " ++)
+    );
+    try std.testing.expectEqual(10, mod.declarations.len);
 }
