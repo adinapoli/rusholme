@@ -231,7 +231,9 @@ pub const GuardedRhs = struct {
 };
 
 pub const Guard = union(enum) {
-    PatGuard: []const Pattern,
+    /// Pattern guard: pat <- expr
+    PatGuard: struct { pattern: Pattern, expr: Expr },
+    /// Boolean guard: condition (expression evaluating to Bool)
     ExprGuard: Expr,
 };
 

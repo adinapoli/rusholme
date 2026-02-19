@@ -1003,6 +1003,11 @@ fn inferRhs(ctx: *InferCtx, rhs: RRhs) std.mem.Allocator.Error!*HType {
                             const bool_node = try ctx.alloc_ty(boolTy());
                             try ctx.unifyNow(gt, bool_node, syntheticSpan());
                         },
+                        .PatGuard => |pg| {
+                            const action_ty = try infer(ctx, pg.expr);
+                            const pat_ty = try inferPat(ctx, pg.pat);
+                            try ctx.unifyNow(action_ty, pat_ty, syntheticSpan());
+                        },
                     }
                 }
                 const rhs_ty = try infer(ctx, g.rhs);
