@@ -327,6 +327,14 @@ pub const FieldUpdate = struct {
     expr: Expr,
 };
 
+/// Field pattern in record patterns: Point { x = a }
+/// Field punning is supported: Point { x } is equivalent to Point { x = x }
+pub const FieldPattern = struct {
+    field_name: []const u8,
+    /// None for field punning (x -> x = x), Some for explicit pattern (x = p)
+    pat: ?Pattern,
+};
+
 /// Case alternative
 pub const Alt = struct {
     pattern: Pattern,
@@ -379,6 +387,9 @@ pub const Pattern = union(enum) {
     Bang: struct { pat: *const Pattern, span: SourceSpan },
     /// N+K pattern (deprecated)
     NPlusK: struct { name: []const u8, name_span: SourceSpan, k: i32, span: SourceSpan },
+    /// Record pattern: Point { x = a, y = b }
+    /// Field punning is supported: Point { x } is equivalent to Point { x = x }
+    RecPat: struct { con: QName, fields: []const FieldPattern, span: SourceSpan },
 
     pub fn getSpan(self: Pattern) SourceSpan {
         return switch (self) {
@@ -394,6 +405,7 @@ pub const Pattern = union(enum) {
             .Paren => |p| p.span,
             .Bang => |b| b.span,
             .NPlusK => |npk| npk.span,
+            .RecPat => |rp| rp.span,
         };
     }
 };

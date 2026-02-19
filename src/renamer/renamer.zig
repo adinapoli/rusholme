@@ -316,6 +316,16 @@ pub const RPat = union(enum) {
     InfixCon: struct { left: *const RPat, con: Name, con_span: SourceSpan, right: *const RPat },
     Negate: *const RPat,
     Paren: *const RPat,
+    /// Record pattern: Point { x = a, y = b }
+    /// Field punning is supported: Point { x } is equivalent to Point { x = x }
+    RecPat: struct { con: Name, con_span: SourceSpan, fields: []const RFieldPat, span: SourceSpan },
+};
+
+/// Field pattern in renamed record patterns.
+pub const RFieldPat = struct {
+    field_name: []const u8,
+    /// None for field punning (x -> x = x), Some for explicit pattern (x = p)
+    pat: ?*RPat,
 };
 
 /// A renamed right-hand side.
@@ -1003,6 +1013,32 @@ fn renamePat(pat: ast.Pattern, env: *RenameEnv) RenameError!RPat {
             try env.scope.bind(npk.name, n);
             break :blk RPat{ .Var = .{ .name = n, .span = npk.name_span } };
         },
+        .RecPat => |rp| blk: {
+            const con_name = try env.resolve(rp.con.name, rp.con.span);
+            var rfields = std.ArrayListUnmanaged(RFieldPat){};
+            for (rp.fields) |f| {
+                var rpat: ?*RPat = null;
+                if (f.pat) |p| {
+                    rpat = try env.alloc.create(RPat);
+                    rpat.?.* = try renamePat(p, env);
+                } else {
+                    // Field pun: bind the field name as a variable
+                    // No pattern is created - pat remains null
+                    const n = env.freshName(f.field_name);
+                    try env.scope.bind(f.field_name, n);
+                }
+                try rfields.append(env.alloc, .{
+                    .field_name = f.field_name,
+                    .pat = rpat,
+                });
+            }
+            break :blk RPat{ .RecPat = .{
+                .con = con_name,
+                .con_span = rp.con.span,
+                .fields = try rfields.toOwnedSlice(env.alloc),
+                .span = rp.span,
+            } };
+        },
     };
 }
 
@@ -1040,6 +1076,18 @@ fn collectPatBinders(
         .Negate => |n| try collectPatBinders(n.pat.*, env, out),
         .Paren => |p| try collectPatBinders(p.pat.*, env, out),
         .Bang => |b| try collectPatBinders(b.pat.*, env, out),
+        .RecPat => |rp| {
+            for (rp.fields) |f| {
+                if (f.pat) |p| {
+                    try collectPatBinders(p, env, out);
+                } else {
+                    // Field pun: the field name is bound as a variable
+                    const n = env.freshName(f.field_name);
+                    try env.scope.bind(f.field_name, n);
+                    try out.append(env.alloc, .{ .src = f.field_name, .name = n });
+                }
+            }
+        },
         .Lit, .Wild, .NPlusK => {},
     }
 }
