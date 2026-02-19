@@ -772,18 +772,56 @@ pub const Parser = struct {
     }
 
     fn parseGuardedRhs(self: *Parser) ParseError!ast_mod.Rhs {
-        var guards: std.ArrayListUnmanaged(ast_mod.GuardedRhs) = .empty;
+        var arms: std.ArrayListUnmanaged(ast_mod.GuardedRhs) = .empty;
         while (try self.check(.pipe)) {
             _ = try self.advance(); // consume |
-            const guard_expr = try self.parseExpr();
+            const guard_list = try self.parseGuardList();
             _ = try self.expect(.equals);
             const rhs_expr = try self.parseExpr();
-            try guards.append(self.allocator, .{
-                .guards = try self.allocSlice(ast_mod.Guard, &.{.{ .ExprGuard = guard_expr }}),
+            try arms.append(self.allocator, .{
+                .guards = guard_list,
                 .rhs = rhs_expr,
             });
         }
-        return .{ .Guarded = try guards.toOwnedSlice(self.allocator) };
+        return .{ .Guarded = try arms.toOwnedSlice(self.allocator) };
+    }
+
+    /// Parse a guarded case alternative RHS: `| g1, g2, ... -> expr`.
+    ///
+    /// Case alternatives use `->` as the separator rather than `=`
+    /// (Haskell 2010 §3.13).
+    fn parseGuardedAltRhs(self: *Parser) ParseError!ast_mod.Rhs {
+        var arms: std.ArrayListUnmanaged(ast_mod.GuardedRhs) = .empty;
+        while (try self.check(.pipe)) {
+            _ = try self.advance(); // consume |
+            const guard_list = try self.parseGuardList();
+            _ = try self.expect(.arrow_right);
+            const rhs_expr = try self.parseExpr();
+            try arms.append(self.allocator, .{
+                .guards = guard_list,
+                .rhs = rhs_expr,
+            });
+        }
+        return .{ .Guarded = try arms.toOwnedSlice(self.allocator) };
+    }
+
+    /// Parse a comma-separated list of guard conditions: `g1, g2, g3`.
+    ///
+    /// Each condition is an expression guard (boolean expression).
+    /// Pattern guards (`pat <- expr`) are represented in the AST as
+    /// `Guard.PatGuard` but require a separate AST change to carry the
+    /// RHS expression; they are tracked by a follow-up issue.
+    ///
+    /// Haskell 2010 §3.13, §4.4.2.
+    fn parseGuardList(self: *Parser) ParseError![]const ast_mod.Guard {
+        var guards: std.ArrayListUnmanaged(ast_mod.Guard) = .empty;
+        const first = try self.parseExpr();
+        try guards.append(self.allocator, .{ .ExprGuard = first });
+        while (try self.match(.comma) != null) {
+            const g = try self.parseExpr();
+            try guards.append(self.allocator, .{ .ExprGuard = g });
+        }
+        return guards.toOwnedSlice(self.allocator);
     }
 
     fn parseWhereClause(self: *Parser) ParseError!?[]const ast_mod.Decl {
@@ -2223,7 +2261,8 @@ pub const Parser = struct {
         var alts: std.ArrayListUnmanaged(ast_mod.Alt) = .empty;
         const first_alt = try self.parseAlt();
         try alts.append(self.allocator, first_alt);
-        while (try self.match(.semi) != null) {
+        // matchSemi handles both explicit ';' and virtual ';' emitted by the layout rule.
+        while (try self.matchSemi()) {
             if (try self.tryParseAlt()) |alt| {
                 try alts.append(self.allocator, alt);
             } else {
@@ -2238,16 +2277,27 @@ pub const Parser = struct {
         } };
     }
 
-    /// Parse a single case alternative: pattern -> expr where binds
+    /// Parse a single case alternative: `pat -> expr [where binds]`
+    /// or a guarded alternative: `pat | g1, g2 -> expr [where binds]`.
+    ///
+    /// Haskell 2010 §3.13.
     fn parseAlt(self: *Parser) ParseError!ast_mod.Alt {
         const pat = try self.parsePattern();
-        const arrow_tok = try self.expect(.arrow_right);
-        const start = pat.getSpan().merge(arrow_tok.span);
-        const rhs = try self.parseRhs();
+        const start = pat.getSpan();
+        const rhs = if (try self.check(.pipe))
+            // Guarded alternative: pat | g1, g2 -> e | g3 -> e2 ...
+            try self.parseGuardedAltRhs()
+        else blk: {
+            // Unguarded alternative: pat -> expr
+            _ = try self.expect(.arrow_right);
+            const expr = try self.parseExpr();
+            break :blk ast_mod.Rhs{ .UnGuarded = expr };
+        };
+        const where_clause = try self.parseWhereClause();
         return .{
             .pattern = pat,
             .rhs = rhs,
-            .where_clause = null,
+            .where_clause = where_clause,
             .span = start,
         };
     }
