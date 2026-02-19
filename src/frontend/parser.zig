@@ -1724,7 +1724,7 @@ pub const Parser = struct {
     fn isTypeStart(self: *Parser) ParseError!bool {
         const tag = try self.peekTag();
         return switch (tag) {
-            .varid, .conid, .open_paren, .open_bracket => true,
+            .varid, .conid, .varsym, .consym, .open_paren, .open_bracket => true,
             else => false,
         };
     }
@@ -1790,6 +1790,22 @@ pub const Parser = struct {
                 const tok = try self.advance();
                 return .{ .Con = .{
                     .name = tok.token.conid,
+                    .span = tok.span,
+                } };
+            },
+            .varsym => {
+                // Type operator (non-colon-starting): e.g., `->`, `++`
+                const tok = try self.advance();
+                return .{ .Con = .{
+                    .name = tok.token.varsym,
+                    .span = tok.span,
+                } };
+            },
+            .consym => {
+                // Constructor operator (colon-starting): e.g., `:`, `:+:`
+                const tok = try self.advance();
+                return .{ .Con = .{
+                    .name = tok.token.consym,
                     .span = tok.span,
                 } };
             },
