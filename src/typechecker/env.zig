@@ -43,12 +43,14 @@
 
 const std = @import("std");
 const htype_mod = @import("htype.zig");
+const class_env_mod = @import("class_env.zig");
 
 pub const HType = htype_mod.HType;
 pub const MetaVar = htype_mod.MetaVar;
 pub const MetaVarSupply = htype_mod.MetaVarSupply;
 pub const Name = htype_mod.Name;
 pub const UniqueSupply = htype_mod.UniqueSupply;
+pub const ClassConstraint = class_env_mod.ClassConstraint;
 
 const naming = @import("../naming/unique.zig");
 pub const Unique = naming.Unique;
@@ -74,22 +76,36 @@ pub const TyScheme = struct {
     /// Slice into the typechecker arena — not owned by `TyScheme`.
     binders: []const u64,
 
+    /// Class constraints on the type variables.
+    /// For `Eq a => a -> a`, this contains `[ClassConstraint(Eq, Rigid(a))]`.
+    /// Slice into the typechecker arena — not owned by `TyScheme`.
+    constraints: []const ClassConstraint,
+
     /// The body of the scheme. Rigid variables matching `binders[i]` will
     /// be substituted with fresh metavars on instantiation.
     body: HType,
+
+    /// Result of instantiation: the instantiated type plus wanted constraints.
+    pub const InstantiateResult = struct {
+        /// The instantiated HType with fresh metavars replacing binders.
+        ty: HType,
+        /// Wanted class constraints (with their types instantiated too).
+        wanted: []const ClassConstraint,
+    };
 
     /// Instantiate the scheme: replace each binder with a fresh metavar.
     ///
     /// `alloc` is used to allocate the substituted `HType` nodes (Con args,
     /// Fun/ForAll children).  It should be the typechecker's arena.
     /// `supply` provides fresh metavar IDs.
+    ///
+    /// Returns both the instantiated type and the wanted constraints
+    /// (class constraints with fresh metavars that the solver must discharge).
     pub fn instantiate(
         self: TyScheme,
         alloc: std.mem.Allocator,
         supply: *MetaVarSupply,
-    ) std.mem.Allocator.Error!HType {
-        if (self.binders.len == 0) return self.body;
-
+    ) std.mem.Allocator.Error!InstantiateResult {
         // Build a mapping from binder unique ID → a single arena-allocated
         // Meta node.  Every occurrence of the same binder in the body will
         // receive the *same pointer*, so solving one occurrence propagates to
@@ -103,14 +119,54 @@ pub const TyScheme = struct {
             subst[i] = .{ .id = id, .node = node };
         }
 
-        return (try instantiateType(self.body, subst, alloc)).*;
+        const ty = (try instantiateType(self.body, subst, alloc)).*;
+
+        // Instantiate constraints: substitute binders with fresh metas.
+        var wanted = try alloc.alloc(ClassConstraint, self.constraints.len);
+        var found_any_rigid = false;
+        for (self.constraints, 0..) |c, i| {
+            const inst_ty = try instantiateType(c.ty, subst, alloc);
+            wanted[i] = .{
+                .class_name = c.class_name,
+                .ty = inst_ty.*,
+                .span = c.span,
+            };
+            // Track if any constraints contain rigid binders (for backward compat)
+            if (!found_any_rigid) {
+                // Check if the constraint type has any rigids from binders
+                if (containsAnyRigid(wanted[i].ty, self.binders)) {
+                    found_any_rigid = true;
+                }
+            }
+        }
+
+        return .{ .ty = ty, .wanted = wanted };
     }
 
-    /// Convenience: build a monomorphic scheme (no binders).
+    /// Convenience: build a monomorphic scheme (no binders, no constraints).
     pub fn mono(ty: HType) TyScheme {
-        return .{ .binders = &.{}, .body = ty };
+        return .{ .binders = &.{}, .constraints = &.{}, .body = ty };
     }
 };
+
+/// Check if `ty` contains any rigid with ID in `binder_ids`.
+fn containsAnyRigid(ty: HType, binder_ids: []const u64) bool {
+    return switch (ty) {
+        .Meta => |mv| if (mv.ref) |next| containsAnyRigid(next.*, binder_ids) else false,
+        .Rigid => |name| blk: {
+            for (binder_ids) |id| if (id == name.unique.value) break :blk true;
+            break :blk false;
+        },
+        .Con => |c| {
+            for (c.args) |arg| {
+                if (containsAnyRigid(arg, binder_ids)) return true;
+            }
+            return false;
+        },
+        .Fun => |f| containsAnyRigid(f.arg.*, binder_ids) or containsAnyRigid(f.res.*, binder_ids),
+        .ForAll => |fa| containsAnyRigid(fa.body.*, binder_ids),
+    };
+}
 
 /// Recursively substitute rigid variables matching `subst` entries with
 /// their corresponding fresh metavar nodes.
@@ -264,12 +320,30 @@ pub const TyEnv = struct {
     ///
     /// Returns `null` if the name is not in scope.
     /// Returns an instantiated monomorphic `HType` on success.
+    /// Note: Class constraints from the scheme are currently discarded.
+    /// For full class support, use `lookupWithConstraints`.
     pub fn lookup(
         self: *const TyEnv,
         unique: Unique,
         alloc: std.mem.Allocator,
         supply: *MetaVarSupply,
     ) std.mem.Allocator.Error!?HType {
+        const scheme = self.lookupScheme(unique) orelse return null;
+        const result = try scheme.instantiate(alloc, supply);
+        // For backward compatibility, ignore constraints
+        _ = result.wanted;
+        return result.ty;
+    }
+
+    /// Look up `name` and instantiate its scheme, returning both type and constraints.
+    ///
+    /// Returns `null` if the name is not in scope.
+    pub fn lookupWithConstraints(
+        self: *const TyEnv,
+        unique: Unique,
+        alloc: std.mem.Allocator,
+        supply: *MetaVarSupply,
+    ) std.mem.Allocator.Error!?TyScheme.InstantiateResult {
         const scheme = self.lookupScheme(unique) orelse return null;
         return try scheme.instantiate(alloc, supply);
     }
@@ -436,7 +510,7 @@ pub fn initBuiltins(env: *TyEnv, alloc: std.mem.Allocator, supply: *UniqueSupply
         const a_ty = rigidTy(a_name);
         const list_a = try applyTy(Known.Type.List, &.{a_ty}, alloc);
         const cons_ty = try funTy(a_ty, try funTy(list_a, list_a, alloc), alloc);
-        try env.bind(Known.Con.Cons, .{ .binders = try dupeIds(alloc, &.{a_id}), .body = cons_ty });
+        try env.bind(Known.Con.Cons, .{ .binders = try dupeIds(alloc, &.{a_id}), .constraints = &.{}, .body = cons_ty });
     }
 
     // [] : forall a. [a]
@@ -445,7 +519,7 @@ pub fn initBuiltins(env: *TyEnv, alloc: std.mem.Allocator, supply: *UniqueSupply
         const a_name = Name{ .base = "a", .unique = .{ .value = a_id } };
         const a_ty = rigidTy(a_name);
         const list_a = try applyTy(Known.Type.List, &.{a_ty}, alloc);
-        try env.bind(Known.Con.Nil, .{ .binders = try dupeIds(alloc, &.{a_id}), .body = list_a });
+        try env.bind(Known.Con.Nil, .{ .binders = try dupeIds(alloc, &.{a_id}), .constraints = &.{}, .body = list_a });
     }
 
     // (,) : forall a b. a -> b -> (a, b)
@@ -458,7 +532,7 @@ pub fn initBuiltins(env: *TyEnv, alloc: std.mem.Allocator, supply: *UniqueSupply
         const b_ty = rigidTy(b_name);
         const pair_ty = try applyTy(Known.Con.Tuple2, &.{ a_ty, b_ty }, alloc);
         const tuple_ty = try funTy(a_ty, try funTy(b_ty, pair_ty, alloc), alloc);
-        try env.bind(Known.Con.Tuple2, .{ .binders = try dupeIds(alloc, &.{ a_id, b_id }), .body = tuple_ty });
+        try env.bind(Known.Con.Tuple2, .{ .binders = try dupeIds(alloc, &.{ a_id, b_id }), .constraints = &.{}, .body = tuple_ty });
     }
 
     // error : forall a. String -> a
@@ -467,7 +541,7 @@ pub fn initBuiltins(env: *TyEnv, alloc: std.mem.Allocator, supply: *UniqueSupply
         const a_name = Name{ .base = "a", .unique = .{ .value = a_id } };
         const a_ty = rigidTy(a_name);
         const error_ty = try funTy(string_ty, a_ty, alloc);
-        try env.bind(Known.Fn.@"error", .{ .binders = try dupeIds(alloc, &.{a_id}), .body = error_ty });
+        try env.bind(Known.Fn.@"error", .{ .binders = try dupeIds(alloc, &.{a_id}), .constraints = &.{}, .body = error_ty });
     }
 
     // undefined : forall a. a
@@ -475,7 +549,7 @@ pub fn initBuiltins(env: *TyEnv, alloc: std.mem.Allocator, supply: *UniqueSupply
         const a_id: u64 = 10005;
         const a_name = Name{ .base = "a", .unique = .{ .value = a_id } };
         const a_ty = rigidTy(a_name);
-        try env.bind(Known.Fn.undefined, .{ .binders = try dupeIds(alloc, &.{a_id}), .body = a_ty });
+        try env.bind(Known.Fn.undefined, .{ .binders = try dupeIds(alloc, &.{a_id}), .constraints = &.{}, .body = a_ty });
     }
 }
 
@@ -643,8 +717,8 @@ test "TyScheme.instantiate: monomorphic scheme returns body unchanged" {
     const scheme = TyScheme.mono(int_ty);
     var supply = MetaVarSupply{};
     const result = try scheme.instantiate(arena.allocator(), &supply);
-    try testing.expect(result == .Con);
-    try testing.expectEqualStrings("Int", result.Con.name.base);
+    try testing.expect(result.ty == .Con);
+    try testing.expectEqualStrings("Int", result.ty.Con.name.base);
 }
 
 test "TyScheme.instantiate: polymorphic scheme replaces binder with fresh Meta" {
@@ -655,12 +729,12 @@ test "TyScheme.instantiate: polymorphic scheme replaces binder with fresh Meta" 
     // Scheme: forall a. a   (identity-like, binder id = 99)
     const a_ty = HType{ .Rigid = testName("a", 99) };
     const binders = [_]u64{99};
-    const scheme = TyScheme{ .binders = &binders, .body = a_ty };
+    const scheme = TyScheme{ .binders = &binders, .body = a_ty, .constraints = &.{} };
 
     var supply = MetaVarSupply{};
     const result = try scheme.instantiate(alloc, &supply);
     // The rigid `a` (id 99) should be replaced with a fresh Meta.
-    try testing.expect(result == .Meta);
+    try testing.expect(result.ty == .Meta);
 }
 
 test "TyScheme.instantiate: two instantiations produce distinct metavars" {
@@ -670,16 +744,16 @@ test "TyScheme.instantiate: two instantiations produce distinct metavars" {
 
     const a_ty = HType{ .Rigid = testName("a", 99) };
     const binders = [_]u64{99};
-    const scheme = TyScheme{ .binders = &binders, .body = a_ty };
+    const scheme = TyScheme{ .binders = &binders, .body = a_ty, .constraints = &.{} };
 
     var supply = MetaVarSupply{};
     const r1 = try scheme.instantiate(alloc, &supply);
     const r2 = try scheme.instantiate(alloc, &supply);
 
-    try testing.expect(r1 == .Meta);
-    try testing.expect(r2 == .Meta);
+    try testing.expect(r1.ty == .Meta);
+    try testing.expect(r2.ty == .Meta);
     // Each instantiation should yield a distinct metavar ID.
-    try testing.expect(r1.Meta.id != r2.Meta.id);
+    try testing.expect(r1.ty.Meta.id != r2.ty.Meta.id);
 }
 
 test "TyScheme.instantiate: free rigid not in binders is preserved" {
@@ -690,13 +764,13 @@ test "TyScheme.instantiate: free rigid not in binders is preserved" {
     // Scheme: forall a. b   — `b` (id 100) is free, `a` (id 99) is bound.
     const b_ty = HType{ .Rigid = testName("b", 100) };
     const binders = [_]u64{99};
-    const scheme = TyScheme{ .binders = &binders, .body = b_ty };
+    const scheme = TyScheme{ .binders = &binders, .body = b_ty, .constraints = &.{} };
 
     var supply = MetaVarSupply{};
     const result = try scheme.instantiate(alloc, &supply);
     // `b` is free — should remain Rigid.
-    try testing.expect(result == .Rigid);
-    try testing.expectEqual(@as(u64, 100), result.Rigid.unique.value);
+    try testing.expect(result.ty == .Rigid);
+    try testing.expectEqual(@as(u64, 100), result.ty.Rigid.unique.value);
 }
 
 test "TyScheme.instantiate: Fun type with binder instantiated correctly" {
@@ -713,16 +787,16 @@ test "TyScheme.instantiate: Fun type with binder instantiated correctly" {
     a_ptr.* = a_ty;
     const fun_ty = HType{ .Fun = .{ .arg = a_ptr, .res = int_ptr } };
     const binders = [_]u64{1};
-    const scheme = TyScheme{ .binders = &binders, .body = fun_ty };
+    const scheme = TyScheme{ .binders = &binders, .body = fun_ty, .constraints = &.{} };
 
     var supply = MetaVarSupply{};
     const result = try scheme.instantiate(alloc, &supply);
-    try testing.expect(result == .Fun);
+    try testing.expect(result.ty == .Fun);
     // arg should be Meta (was rigid `a`)
-    try testing.expect(result.Fun.arg.* == .Meta);
+    try testing.expect(result.ty.Fun.arg.* == .Meta);
     // res should still be Int
-    try testing.expect(result.Fun.res.* == .Con);
-    try testing.expectEqualStrings("Int", result.Fun.res.Con.name.base);
+    try testing.expect(result.ty.Fun.res.* == .Con);
+    try testing.expectEqualStrings("Int", result.ty.Fun.res.Con.name.base);
 }
 
 // ── Built-in environment ───────────────────────────────────────────────
