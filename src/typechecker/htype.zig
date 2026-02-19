@@ -108,6 +108,12 @@ pub const HType = union(enum) {
     /// A nullary constructor like `Int` has `args == &.{}`.
     Con: struct { name: Name, args: []const HType },
 
+    /// Type application with a possibly-unknown constructor: `m a` where `m` is a metavariable.
+    /// This is used to represent monadic types where the specific monad is to be inferred.
+    /// For example, in `do { x <- action; ... }`, the type is `m a` with fresh metas for both `m` and `a`.
+    /// Uses pointers to avoid HType depending on itself.
+    AppTy: struct { head: *const HType, arg: *const HType },
+
     /// Function type: `a -> b`.
     Fun: struct { arg: *const HType, res: *const HType },
 
@@ -156,6 +162,7 @@ pub const HType = union(enum) {
                 }
                 break :blk true;
             },
+            .AppTy => |at| at.head.isMono() and at.arg.isMono(),
             .Fun => |f| f.arg.isMono() and f.res.isMono(),
             .ForAll => false,
         };
@@ -180,6 +187,7 @@ pub const HType = union(enum) {
                 }
                 break :blk false;
             },
+            .AppTy => |at| at.head.occursIn(id) or at.arg.occursIn(id),
             .Fun => |f| f.arg.occursIn(id) or f.res.occursIn(id),
             .ForAll => |fa| fa.body.occursIn(id),
         };
@@ -229,6 +237,39 @@ pub const HType = union(enum) {
                     core_args[i] = try arg.toCore(alloc);
                 }
                 return CoreType{ .TyCon = .{ .name = c.name, .args = core_args } };
+            },
+            .AppTy => |at| blk: {
+                // Convert head to Core, then apply arg to it
+                const head_core = try at.head.toCore(alloc);
+                const arg_core = try alloc.create(CoreType);
+                arg_core.* = try at.arg.toCore(alloc);
+
+                // Head should be a type constructor (after solving)
+                switch (head_core) {
+                    .TyCon => |tc| {
+                        // Combine the existing args with the new arg
+                        const combined_args = try alloc.alloc(CoreType, tc.args.len + 1);
+                        for (tc.args, 0..) |arg, i| {
+                            combined_args[i] = arg;
+                        }
+                        combined_args[tc.args.len] = arg_core.*;
+                        break :blk CoreType{ .TyCon = .{ .name = tc.name, .args = combined_args } };
+                    },
+                    .TyVar => {
+                        // Type variable applied to argument - this could happen if
+                        // the monad type wasn't solved. For now, error out.
+                        std.debug.panic(
+                            "HType.toCore: unsolved monad type variable {s} — cannot apply to argument",
+                            .{head_core.TyVar.base},
+                        );
+                    },
+                    else => {
+                        std.debug.panic(
+                            "HType.toCore: AppTy head must be a type constructor, got {any}",
+                            .{head_core},
+                        );
+                    },
+                }
             },
             .Fun => |f| {
                 const core_arg = try alloc.create(CoreType);
@@ -328,6 +369,20 @@ fn prettyPrecSubst(
             return parenIf(alloc, prec >= PREC_CON_ARG, inner);
         },
 
+        .AppTy => |at| {
+            // Render as `head arg` with appropriate parentheses
+            const head_str = try prettyPrecSubst(at.head.*, alloc, PREC_TOP, subst);
+            const arg_str = try prettyPrecSubst(at.arg.*, alloc, PREC_CON_ARG, subst);
+            // Need to check if arg needs parentheses based on its type
+            const arg_needs_parens = (at.arg.chase() == .Fun) or
+                (at.arg.chase() == .Con and at.arg.chase().Con.args.len > 0) or
+                (at.arg.chase() == .AppTy);
+            if (arg_needs_parens) {
+                return try std.fmt.allocPrint(alloc, "{s} ({s})", .{ head_str, arg_str });
+            }
+            return try std.fmt.allocPrint(alloc, "{s} {s}", .{ head_str, arg_str });
+        },
+
         .Fun => |f| {
             // arg at FUN_ARG prec (left of ->) so `(a -> b) -> c` parens correctly
             const arg_str = try prettyPrecSubst(f.arg.*, alloc, PREC_FUN_ARG, subst);
@@ -383,6 +438,10 @@ fn collectRigidNames(
         },
         .Con => |c| {
             for (c.args) |arg| collectRigidNames(arg, binder_ids, out);
+        },
+        .AppTy => |at| {
+            collectRigidNames(at.head.*, binder_ids, out);
+            collectRigidNames(at.arg.*, binder_ids, out);
         },
         .Fun => |f| {
             collectRigidNames(f.arg.*, binder_ids, out);

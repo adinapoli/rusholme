@@ -147,6 +147,21 @@ pub fn unify(alloc: std.mem.Allocator, a: *HType, b: *HType) UnifyError!void {
                     for (lc.args, rc.args) |*la, *ra|
                         try unify(alloc, @constCast(la), @constCast(ra));
                 },
+                .AppTy => |ra| {
+                    // Con(c, [arg]) ~ AppTy(?h, ?a)
+                    // Symmetric to the case in .AppTy branch
+                    if (lc.args.len != 1) return UnifyError.TypeMismatch;
+
+                    // First, unify the arguments: arg ~ ?a
+                    const lhs_arg_ptr = @constCast(&lc.args[0]);
+                    try unify(alloc, lhs_arg_ptr, @constCast(ra.arg));
+
+                    // Bind the head: Con(c, []) ~ ?h
+                    const constructor = HType{ .Con = .{ .name = lc.name, .args = &.{} } };
+                    const constructor_ptr = try alloc.create(HType);
+                    constructor_ptr.* = constructor;
+                    try unify(alloc, constructor_ptr, @constCast(ra.head));
+                },
                 else => return UnifyError.TypeMismatch,
             }
         },
@@ -155,6 +170,31 @@ pub fn unify(alloc: std.mem.Allocator, a: *HType, b: *HType) UnifyError!void {
                 .Fun => |rf| {
                     try unify(alloc, @constCast(lf.arg), @constCast(rf.arg));
                     try unify(alloc, @constCast(lf.res), @constCast(rf.res));
+                },
+                else => return UnifyError.TypeMismatch,
+            }
+        },
+        .AppTy => |lat| {
+            switch (rhs) {
+                .AppTy => |rat| {
+                    try unify(alloc, @constCast(lat.head), @constCast(rat.head));
+                    try unify(alloc, @constCast(lat.arg), @constCast(rat.arg));
+                },
+                .Con => |rc| {
+                    // AppTy(?h, ?a) ~ Con(c, [arg])
+                    // This supports generic monad inference: AppTy(?0, ?1) unifies with IO ()
+                    // For M1, only single-argument constructors are handled (e.g. IO, Maybe, [])
+                    if (rc.args.len != 1) return UnifyError.TypeMismatch;
+
+                    // First, unify the arguments: ?a ~ arg
+                    try unify(alloc, @constCast(lat.arg), @constCast(&rc.args[0]));
+
+                    // After argument unification, bind the head to the constructor
+                    // ?h ~ Con(c, [])
+                    const constructor = HType{ .Con = .{ .name = rc.name, .args = &.{} } };
+                    const constructor_ptr = try alloc.create(HType);
+                    constructor_ptr.* = constructor;
+                    try unify(alloc, @constCast(lat.head), constructor_ptr);
                 },
                 else => return UnifyError.TypeMismatch,
             }

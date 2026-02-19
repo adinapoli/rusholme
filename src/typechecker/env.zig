@@ -163,6 +163,7 @@ fn containsAnyRigid(ty: HType, binder_ids: []const u64) bool {
             }
             return false;
         },
+        .AppTy => |at| containsAnyRigid(at.head.*, binder_ids) or containsAnyRigid(at.arg.*, binder_ids),
         .Fun => |f| containsAnyRigid(f.arg.*, binder_ids) or containsAnyRigid(f.res.*, binder_ids),
         .ForAll => |fa| containsAnyRigid(fa.body.*, binder_ids),
     };
@@ -209,6 +210,13 @@ fn instantiateType(
             }
             const node = try alloc.create(HType);
             node.* = HType{ .Con = .{ .name = c.name, .args = new_args } };
+            return node;
+        },
+        .AppTy => |at| {
+            const new_head = try instantiateType(at.head.*, subst, alloc);
+            const new_arg = try instantiateType(at.arg.*, subst, alloc);
+            const node = try alloc.create(HType);
+            node.* = HType{ .AppTy = .{ .head = new_head, .arg = new_arg } };
             return node;
         },
         .Fun => |f| {
@@ -443,6 +451,10 @@ fn collectHTypeFreeMetas(
         .Meta => |mv| try out.put(alloc, mv.id, {}),
         .Rigid => {},
         .Con => |c| for (c.args) |arg| try collectHTypeFreeMetas(arg, out, alloc),
+        .AppTy => |at| {
+            try collectHTypeFreeMetas(at.head.*, out, alloc);
+            try collectHTypeFreeMetas(at.arg.*, out, alloc);
+        },
         .Fun => |f| {
             try collectHTypeFreeMetas(f.arg.*, out, alloc);
             try collectHTypeFreeMetas(f.res.*, out, alloc);

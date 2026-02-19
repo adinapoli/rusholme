@@ -118,6 +118,13 @@ pub const InferCtx = struct {
     u_supply: *UniqueSupply,
     diags: *DiagnosticCollector,
 
+    /// The current monad type constructor for do-notation inference.
+    /// When inferring a do-block, this is set to a fresh meta representing `m`,
+    /// and all statements in the block use the same `m`. After the do-block,
+    /// this is reset to null.
+    /// See #176.
+    monad_type: ?*HType = null,
+
     pub fn init(
         alloc: std.mem.Allocator,
         env: *TyEnv,
@@ -131,6 +138,7 @@ pub const InferCtx = struct {
             .mv_supply = mv_supply,
             .u_supply = u_supply,
             .diags = diags,
+            .monad_type = null,
         };
     }
 
@@ -240,6 +248,18 @@ fn fmtHType(alloc: std.mem.Allocator, ty: HType) std.mem.Allocator.Error![]const
             }
             break :blk buf.toOwnedSlice(alloc);
         },
+        .AppTy => |at| blk: {
+            const head_str = try fmtHType(alloc, at.head.*);
+            const arg_str = try fmtHType(alloc, at.arg.*);
+            const arg_chased = at.arg.chase();
+            const arg_needs_parens = (arg_chased == .Fun) or
+                (arg_chased == .Con and arg_chased.Con.args.len > 0) or
+                (arg_chased == .AppTy);
+            if (arg_needs_parens) {
+                break :blk std.fmt.allocPrint(alloc, "{s} ({s})", .{ head_str, arg_str });
+            }
+            break :blk std.fmt.allocPrint(alloc, "{s} {s}", .{ head_str, arg_str });
+        },
         .Fun => |f| blk: {
             const a = try fmtHType(alloc, f.arg.*);
             const b = try fmtHType(alloc, f.res.*);
@@ -264,6 +284,10 @@ fn collectFreeMetas(
         .Meta => |mv| try out.put(alloc, mv.id, {}),
         .Rigid => {},
         .Con => |c| for (c.args) |arg| try collectFreeMetas(arg, out, alloc),
+        .AppTy => |at| {
+            try collectFreeMetas(at.head.*, out, alloc);
+            try collectFreeMetas(at.arg.*, out, alloc);
+        },
         .Fun => |f| {
             try collectFreeMetas(f.arg.*, out, alloc);
             try collectFreeMetas(f.res.*, out, alloc);
@@ -334,6 +358,10 @@ fn solveMetaInTree(node: *HType, target_id: u32, rigid: *HType) void {
         },
         .Rigid => {},
         .Con => |c| for (c.args) |arg| solveMetaInTree(@constCast(&arg), target_id, rigid),
+        .AppTy => |at| {
+            solveMetaInTree(@constCast(at.head), target_id, rigid);
+            solveMetaInTree(@constCast(at.arg), target_id, rigid);
+        },
         .Fun => |f| {
             solveMetaInTree(@constCast(f.arg), target_id, rigid);
             solveMetaInTree(@constCast(f.res), target_id, rigid);
@@ -728,14 +756,34 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
 
         // ── Do ────────────────────────────────────────────────────────
         //
-        // M1: do-notation is hard-coded to IO.  See #176 for generic Monad.
+        // Generic monad support (#176): do-notation is inferred as a generic
+        // monad `m` constraint. Each statement type is `m a` for some inner type `a`.
+        // The final result of the do-block is `m a` where `a` is the inner type
+        // of the last statement.
         .Do => |stmts| blk: {
             if (stmts.len == 0) break :blk try ctx.freshMeta();
+
+            // Set up the monad type context for this do-block
+            // The monad_type is a fresh meta that will unify with the actual monad used
+            const prev_monad = ctx.monad_type;
+            defer {
+                ctx.monad_type = prev_monad;
+            }
+            // Use the existing monad_type if already set (nested do-blocks share the monad),
+            // otherwise create a fresh one
+            const monad_ty = prev_monad orelse try ctx.freshMeta();
+            ctx.monad_type = monad_ty;
+
             try ctx.env.push();
             defer ctx.env.pop();
+
+            // Infer each statement, tracking the inner type `a` of the last statement
             var last_inner: *HType = try ctx.freshMeta();
             for (stmts) |stmt| last_inner = try inferStmt(ctx, stmt);
-            break :blk last_inner;
+
+            // The result type of the do-block is `m a`, not just `a`
+            // Wrap the last inner type in the monadic type
+            break :blk try monadTy(ctx, last_inner);
         },
 
         // ── Tuple ─────────────────────────────────────────────────────
@@ -935,29 +983,28 @@ fn inferRhs(ctx: *InferCtx, rhs: RRhs) std.mem.Allocator.Error!*HType {
 
 // ── Statement inference (do-notation) ──────────────────────────────────
 
-/// Infer the inner type of a do-statement (the `a` in `IO a`).
+/// Infer the inner type of a do-statement (the `a` in `m a`).
 fn inferStmt(ctx: *InferCtx, stmt: RStmt) std.mem.Allocator.Error!*HType {
     return switch (stmt) {
         .Generator => |g| blk: {
             const action_ty = try infer(ctx, g.expr);
             const pat_ty = try inferPat(ctx, g.pat);
-            const io_pat = try ioTy(pat_ty.*, ctx.alloc);
-            const io_node = try ctx.alloc_ty(io_pat);
-            try ctx.unifyNow(action_ty, io_node, syntheticSpan());
+            const monad_pat = try monadTy(ctx, pat_ty);
+            try ctx.unifyNow(action_ty, monad_pat, syntheticSpan());
             break :blk pat_ty;
         },
         .Qualifier => |e| blk: {
             const ty = try infer(ctx, e);
             const inner = try ctx.freshMeta();
-            const io_inner = try ctx.alloc_ty(try ioTy(inner.*, ctx.alloc));
-            try ctx.unifyNow(ty, io_inner, syntheticSpan());
+            const monad_inner = try monadTy(ctx, inner);
+            try ctx.unifyNow(ty, monad_inner, syntheticSpan());
             break :blk inner;
         },
         .Stmt => |e| blk: {
             const ty = try infer(ctx, e);
             const inner = try ctx.freshMeta();
-            const io_inner = try ctx.alloc_ty(try ioTy(inner.*, ctx.alloc));
-            try ctx.unifyNow(ty, io_inner, syntheticSpan());
+            const monad_inner = try monadTy(ctx, inner);
+            try ctx.unifyNow(ty, monad_inner, syntheticSpan());
             break :blk inner;
         },
         .LetStmt => |decls| blk: {
@@ -1242,6 +1289,30 @@ fn stringTy() HType {
 fn ioTy(inner: HType, alloc: std.mem.Allocator) std.mem.Allocator.Error!HType {
     const args = try alloc.dupe(HType, &.{inner});
     return HType{ .Con = .{ .name = Known.Type.IO, .args = args } };
+}
+
+/// Build a monadic type `m a` using the current monad type context.
+///
+/// If we're in a do-block (monad_type is set), uses that monad type.
+/// Otherwise, falls back to IO for backward compatibility (M1 limitation).
+/// See #176 for the correct generic approach.
+fn monadTy(ctx: *InferCtx, inner: *const HType) std.mem.Allocator.Error!*HType {
+    if (ctx.monad_type) |m| {
+        // Use the current monad type - construct AppTy(m, inner)
+        // Don't copy m - use it directly so that solving it propagates
+        // Copy inner since different statements have different inner types
+        // The arg needs to be allocated on arena for proper mutation
+        const arg_copy = try ctx.alloc.create(HType);
+        arg_copy.* = inner.*;
+        return ctx.alloc_ty(HType{ .AppTy = .{
+            .head = m,
+            .arg = arg_copy,
+        } });
+    } else {
+        // Fallback to IO for backward compatibility (M1)
+        const args = try ctx.alloc.dupe(HType, &.{inner.*});
+        return ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.IO, .args = args } });
+    }
 }
 
 /// Synthetic span for constraints generated during desugaring.
