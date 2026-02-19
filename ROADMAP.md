@@ -4,6 +4,9 @@
 > **Starting points** (zero dependencies): #1✓, #2✓, #17✓, #22✓, #24✓, #27✓, #53✓, #85✓, #58, #62⚡, #66, #68, #107✓
 
 **Recent Progress (2026-02-19):**
+- ✓ #198: parser: operator function definitions and type signatures ((|>) x y = ...)
+- ✓ #202: parser: fix operator sections with consym operators ((p ++) fails)
+- ✓ #203: parser: fix where-clause after do-block (layout rule closes do context incorrectly)
 - ✓ #193: lexer+parser: backtick infix operator syntax (`f`)
 - ✓ #195: parser: superclass context in class declarations (class (Eq a) => ...)
 - ✓ #204: parser: default method implementations in class declarations
@@ -124,18 +127,20 @@
 | [#195](https://github.com/adinapoli/rusholme/issues/195) | parser: implement superclass context in class declarations (class (Eq a) => ...) | [#33](https://github.com/adinapoli/rusholme/issues/33) | :green_circle: |
 | [#196](https://github.com/adinapoli/rusholme/issues/196) | parser: implement as-patterns (x@pat) in case alternatives and function args | [#31](https://github.com/adinapoli/rusholme/issues/31) | :green_circle: |
 | [#197](https://github.com/adinapoli/rusholme/issues/197) | parser: implement functional dependencies in class declarations (\| a -> b) | [#33](https://github.com/adinapoli/rusholme/issues/33) | :white_circle: |
-| [#198](https://github.com/adinapoli/rusholme/issues/198) | parser: implement operator function definitions and type signatures ((|>) x y = ...) | [#29](https://github.com/adinapoli/rusholme/issues/29), [#30](https://github.com/adinapoli/rusholme/issues/30) | :yellow_circle: |
+| [#198](https://github.com/adinapoli/rusholme/issues/198) | parser: implement operator function definitions and type signatures ((|>) x y = ...) | [#29](https://github.com/adinapoli/rusholme/issues/29), [#30](https://github.com/adinapoli/rusholme/issues/30) | :green_circle: |
 | [#199](https://github.com/adinapoli/rusholme/issues/199) | parser: implement constrained and existential GADT constructors (forall / Class a =>) | [#29](https://github.com/adinapoli/rusholme/issues/29), [#32](https://github.com/adinapoli/rusholme/issues/32) | :white_circle: |
 | [#200](https://github.com/adinapoli/rusholme/issues/200) | parser: implement multi-condition guards (\| g1, g2 = e) and pattern guards | [#30](https://github.com/adinapoli/rusholme/issues/30) | :green_circle: |
 | [#201](https://github.com/adinapoli/rusholme/issues/201) | parser: fix negative float literal parsing (-3.14 fails with 'expected expression') | [#30](https://github.com/adinapoli/rusholme/issues/30) | :green_circle: |
-| [#202](https://github.com/adinapoli/rusholme/issues/202) | parser: fix operator sections with consym operators ((p ++) fails) | [#30](https://github.com/adinapoli/rusholme/issues/30) | :yellow_circle: |
-| [#203](https://github.com/adinapoli/rusholme/issues/203) | parser: fix where-clause after do-block (layout rule closes do context incorrectly) | [#26](https://github.com/adinapoli/rusholme/issues/26), [#30](https://github.com/adinapoli/rusholme/issues/30) | :yellow_circle: |
+| [#202](https://github.com/adinapoli/rusholme/issues/202) | parser: fix operator sections with consym operators ((p ++) fails) | [#30](https://github.com/adinapoli/rusholme/issues/30) | :green_circle: |
+| [#203](https://github.com/adinapoli/rusholme/issues/203) | parser: fix where-clause after do-block (layout rule closes do context incorrectly) | [#26](https://github.com/adinapoli/rusholme/issues/26), [#30](https://github.com/adinapoli/rusholme/issues/30) | :green_circle: |
 | [#204](https://github.com/adinapoli/rusholme/issues/204) | parser: implement default method implementations in class declarations | [#33](https://github.com/adinapoli/rusholme/issues/33) | :green_circle: |
 | [#220](https://github.com/adinapoli/rusholme/issues/220) | ast/parser: class default methods only store first equation | [#204](https://github.com/adinapoli/rusholme/issues/204) | :white_circle: |
 | [#205](https://github.com/adinapoli/rusholme/issues/205) | parser: implement record syntax in newtype declarations (depends on #135) | [#135](https://github.com/adinapoli/rusholme/issues/135) | :white_circle: |
 | [#206](https://github.com/adinapoli/rusholme/issues/206) | parser: implement infix type constructors in data declaration heads (data a :+: b = ...) | [#29](https://github.com/adinapoli/rusholme/issues/29), [#137](https://github.com/adinapoli/rusholme/issues/137) | :white_circle: |
 | [#207](https://github.com/adinapoli/rusholme/issues/207) | parser: layout rule too permissive — bad indentation accepted instead of rejected | [#26](https://github.com/adinapoli/rusholme/issues/26) | :white_circle: |
 | [#230](https://github.com/adinapoli/rusholme/issues/230) | parser: fix guarded case alternatives (\| guard -> expr uses wrong arrow) | [#202](https://github.com/adinapoli/rusholme/issues/202) | :white_circle: |
+| [#212](https://github.com/adinapoli/rusholme/issues/212) | lexer+ast: replace i64 integer literals with arbitrary-precision representation | [#85](https://github.com/adinapoli/rusholme/issues/85), [#27](https://github.com/adinapoli/rusholme/issues/27) | :white_circle: |
+| [#232](https://github.com/adinapoli/rusholme/issues/232) | pattern guards: AST and parser incomplete for pat <- expr in guards | [#200](https://github.com/adinapoli/rusholme/issues/200) | :white_circle: |
 
 ### CLI
 
