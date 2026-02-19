@@ -4106,3 +4106,59 @@ test "decl: operator export in export list (consym)" {
     try std.testing.expect(mod.exports.?[0] == .Var);
     try std.testing.expectEqualStrings("+++", mod.exports.?[0].Var);
 }
+
+test "decl: where clause after do block" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\f = do
+        \\    g
+        \\    h
+        \\  where
+        \\    g = return ()
+        \\    h = return ()
+    );
+    try std.testing.expectEqual(1, mod.declarations.len);
+    try std.testing.expect(mod.declarations[0] == .FunBind);
+    const bind = mod.declarations[0].FunBind;
+    try std.testing.expect(bind.equations[0].where_clause != null);
+    try std.testing.expectEqual(2, bind.equations[0].where_clause.?.len);
+}
+
+test "decl: multiline type signature" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Type sig where name and :: are on different lines (Haskell 2010 §4.4.1)
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\multilineSig
+        \\    :: Int
+        \\    -> String
+        \\    -> Bool
+        \\multilineSig _ _ = True
+    );
+    try std.testing.expectEqual(2, mod.declarations.len);
+    try std.testing.expect(mod.declarations[0] == .TypeSig);
+    try std.testing.expect(mod.declarations[1] == .FunBind);
+}
+
+test "decl: multiline function application in rhs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\longApp = foldr
+        \\    (+)
+        \\    0
+        \\    [1,2,3]
+    );
+    try std.testing.expectEqual(1, mod.declarations.len);
+    try std.testing.expect(mod.declarations[0] == .FunBind);
+}
