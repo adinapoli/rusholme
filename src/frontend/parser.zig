@@ -917,15 +917,70 @@ pub const Parser = struct {
 
     // ── Data declarations ──────────────────────────────────────────────
 
+    /// Check if we have an infix type constructor following: `tyvar (varsym|consym) tyvar`
+    /// E.g., `data a :+: b = ...` where `:+:` is the infix type constructor.
+    fn isInfixTypeConstructor(self: *Parser) ParseError!bool {
+        if (!try self.check(.varid)) return false;
+
+        // Check if followed by (varsym | consym)
+        const tok1 = try self.peekAt(1);
+        const tag1 = std.meta.activeTag(tok1.token);
+        if (tag1 != .varsym and tag1 != .consym) return false;
+
+        // Check if followed by another varid
+        const tok2 = try self.peekAt(2);
+        return std.meta.activeTag(tok2.token) == .varid;
+    }
+
+    /// Parse an infix type constructor head: e.g., `a :+: b` returns `:+:` and `[a, b]`
+    fn parseInfixTypeHead(self: *Parser) ParseError!struct { name: []const u8, tyvars: []const []const u8, span: SourceSpan } {
+        const first_tok = try self.expect(.varid);
+        const first_tyvar = first_tok.token.varid;
+
+        // Expect varsym or consym (the constructor name)
+        const con_tok = try self.advance();
+        const con_name = switch (con_tok.token) {
+            .varsym => |s| s,
+            .consym => |c| c,
+            else => unreachable, // Checked by isInfixTypeConstructor
+        };
+
+        // Expect the second type variable
+        const second_tok = try self.expect(.varid);
+        const second_tyvar = second_tok.token.varid;
+
+        // Allocate slice of type variables
+        const tyvars = try self.allocator.alloc([]const u8, 2);
+        tyvars[0] = first_tyvar;
+        tyvars[1] = second_tyvar;
+
+        return .{
+            .name = con_name,
+            .tyvars = tyvars,
+            .span = first_tok.span.merge(second_tok.span),
+        };
+    }
+
     fn parseDataDecl(self: *Parser) ParseError!?ast_mod.Decl {
         const start = (try self.expect(.kw_data)).span;
-        const name_tok = try self.expect(.conid);
+
+        // Check for infix type constructor: `data a :+: b = ...`
+        const infix_head = if (try self.isInfixTypeConstructor()) try self.parseInfixTypeHead() else null;
+
+        const name_tok = if (infix_head != null) null else try self.expect(.conid);
 
         // Type variables
         var tyvars: std.ArrayListUnmanaged([]const u8) = .empty;
-        while (try self.check(.varid)) {
-            const tv = try self.advance();
-            try tyvars.append(self.allocator, tv.token.varid);
+
+        // For infix head, we already have the type variables
+        if (infix_head) |h| {
+            try tyvars.appendSlice(self.allocator, h.tyvars);
+        } else {
+            // Standard form: T a b c
+            while (try self.check(.varid)) {
+                const tv = try self.advance();
+                try tyvars.append(self.allocator, tv.token.varid);
+            }
         }
 
         // Check for GADT-style declaration: data T a where { ... }
@@ -961,7 +1016,7 @@ pub const Parser = struct {
         const deriving = try self.parseDerivingClause();
 
         return .{ .Data = .{
-            .name = name_tok.token.conid,
+            .name = if (infix_head) |h| h.name else name_tok.?.token.conid,
             .tyvars = try tyvars.toOwnedSlice(self.allocator),
             .constructors = try constructors.toOwnedSlice(self.allocator),
             .deriving = deriving,
@@ -1057,14 +1112,35 @@ pub const Parser = struct {
 
     // ── Newtype declarations ───────────────────────────────────────────
 
+    /// Check if at start of type: can be used for newtype head parsing
+    fn isInfixTypeStart(self: *Parser) ParseError!bool {
+        // Either a conid (standard form) or varid followed by varsym/consym (infix form)
+        const tag = try self.peekTag();
+        if (tag == .conid) return false; // Standard form - handled by current code
+
+        // Check for infix form: varid followed by varsym/consym followed by varid
+        return try self.isInfixTypeConstructor();
+    }
+
     fn parseNewtypeDecl(self: *Parser) ParseError!?ast_mod.Decl {
         const start = (try self.expect(.kw_newtype)).span;
-        const name_tok = try self.expect(.conid);
+
+        // Check for infix type constructor: `newtype a :-> b = ...`
+        const infix_head = if (try self.isInfixTypeStart()) try self.parseInfixTypeHead() else null;
+
+        const name_tok = if (infix_head != null) null else try self.expect(.conid);
 
         var tyvars: std.ArrayListUnmanaged([]const u8) = .empty;
-        while (try self.check(.varid)) {
-            const tv = try self.advance();
-            try tyvars.append(self.allocator, tv.token.varid);
+
+        // For infix head, we already have the type variables
+        if (infix_head) |h| {
+            try tyvars.appendSlice(self.allocator, h.tyvars);
+        } else {
+            // Standard form: T a b c
+            while (try self.check(.varid)) {
+                const tv = try self.advance();
+                try tyvars.append(self.allocator, tv.token.varid);
+            }
         }
 
         _ = try self.expect(.equals);
@@ -1072,7 +1148,7 @@ pub const Parser = struct {
         const deriving = try self.parseDerivingClause();
 
         return .{ .Newtype = .{
-            .name = name_tok.token.conid,
+            .name = if (infix_head) |h| h.name else name_tok.?.token.conid,
             .tyvars = try tyvars.toOwnedSlice(self.allocator),
             .constructor = constructor,
             .deriving = deriving,
@@ -1084,19 +1160,30 @@ pub const Parser = struct {
 
     fn parseTypeAliasDecl(self: *Parser) ParseError!?ast_mod.Decl {
         const start = (try self.expect(.kw_type)).span;
-        const name_tok = try self.expect(.conid);
+
+        // Check for infix type constructor: `type a ~> b = ...`
+        const infix_head = if (try self.isInfixTypeStart()) try self.parseInfixTypeHead() else null;
+
+        const name_tok = if (infix_head != null) null else try self.expect(.conid);
 
         var tyvars: std.ArrayListUnmanaged([]const u8) = .empty;
-        while (try self.check(.varid)) {
-            const tv = try self.advance();
-            try tyvars.append(self.allocator, tv.token.varid);
+
+        // For infix head, we already have the type variables
+        if (infix_head) |h| {
+            try tyvars.appendSlice(self.allocator, h.tyvars);
+        } else {
+            // Standard form: T a b c
+            while (try self.check(.varid)) {
+                const tv = try self.advance();
+                try tyvars.append(self.allocator, tv.token.varid);
+            }
         }
 
         _ = try self.expect(.equals);
         const ty = try self.parseType();
 
         return .{ .Type = .{
-            .name = name_tok.token.conid,
+            .name = if (infix_head) |h| h.name else name_tok.?.token.conid,
             .tyvars = try tyvars.toOwnedSlice(self.allocator),
             .type = ty,
             .span = self.spanFrom(start),
