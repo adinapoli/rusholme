@@ -986,16 +986,45 @@ pub const Parser = struct {
         };
     }
 
-    // Parse standard (H98) constructor declaration: Con t1 t2 ...
+    // Parse standard (H98) constructor declaration: Con t1 t2 ... | Con { f1 :: T1, f2 :: T2 }
     fn parseConDecl(self: *Parser) ParseError!ast_mod.ConDecl {
         const start = try self.currentSpan();
         const name_tok = try self.expect(.conid);
 
         var fields: std.ArrayListUnmanaged(ast_mod.FieldDecl) = .empty;
-        // Parse fields as atomic types (constructor arguments)
-        while (true) {
-            const ty = try self.tryParseAtomicType() orelse break;
-            try fields.append(self.allocator, .{ .Plain = ty });
+
+        // Check for record syntax: Con { field :: Type, ... }
+        if (try self.match(.open_brace)) |_| {
+            while (true) {
+                if (try self.match(.close_brace)) |_| break;
+
+                // Parse field name (varid)
+                const field_tok = try self.expect(.varid);
+                const field_name = field_tok.token.varid;
+
+                // Parse :: Type
+                _ = try self.expect(.dcolon);
+                const field_type = try self.parseType();
+
+                try fields.append(self.allocator, .{
+                    .Record = .{ .name = field_name, .type = field_type },
+                });
+
+                // Check for comma separator
+                if (try self.match(.comma) == null) {
+                    if (!try self.check(.close_brace)) {
+                        try self.emitErrorMsg(field_tok.span, "expected ',' or '}' in record declaration");
+                        return error.UnexpectedToken;
+                    }
+                }
+            }
+        } else {
+            // Regular constructor: Con t1 t2 ...
+            // Parse fields as atomic types (constructor arguments)
+            while (true) {
+                const ty = try self.tryParseAtomicType() orelse break;
+                try fields.append(self.allocator, .{ .Plain = ty });
+            }
         }
 
         return ast_mod.ConDecl{
@@ -1951,6 +1980,12 @@ pub const Parser = struct {
             func = .{ .App = .{ .fn_expr = fn_node, .arg_expr = arg_node } };
         }
 
+        // Check for record update: expr { field = value, ... }
+        // This can follow any expression, e.g., `point { x = 10 }` or `f point { x = 10 }`
+        if (try self.check(.open_brace)) {
+            return try self.parseRecordUpdate(func);
+        }
+
         return func;
     }
 
@@ -1971,6 +2006,10 @@ pub const Parser = struct {
             },
             .conid => {
                 const tok = try self.advance();
+                // Check for record construction: Con { ... }
+                if (try self.check(.open_brace)) {
+                    return try self.parseRecordCon(tok.token.conid, tok.span);
+                }
                 return .{ .Var = .{ .name = tok.token.conid, .span = tok.span } };
             },
             .lit_integer => {
@@ -2738,8 +2777,14 @@ pub const Parser = struct {
     }
 
     /// Parse constructor pattern: Just x, Nothing, True
+    /// Also handles record patterns: Point { x = a, y = b }
     fn parseConPattern(self: *Parser) ParseError!ast_mod.Pattern {
         const tok = try self.expect(.conid);
+
+        // Check for record pattern: Con { field = pat, ... }
+        if (try self.check(.open_brace)) {
+            return try self.parseRecordPat(tok.token.conid, tok.span);
+        }
 
         // Try to parse constructor arguments.
         // Each argument is an apat (Haskell 2010 §3.17.2): atomic pattern
@@ -2878,6 +2923,138 @@ pub const Parser = struct {
         return .{ .List = .{
             .patterns = try self.allocSlice(ast_mod.Pattern, patterns.items),
             .span = open_tok.span.merge(close_tok.span),
+        } };
+    }
+
+    /// Parse record pattern: Con { field = pat, ... }
+    /// Supports field punning: `Point { x, y = 5 }` where x is equivalent to `x = x`
+    fn parseRecordPat(self: *Parser, con_name: []const u8, con_span: SourceSpan) ParseError!ast_mod.Pattern {
+        _ = try self.expect(.open_brace);
+
+        var fields: std.ArrayListUnmanaged(ast_mod.FieldPattern) = .empty;
+        while (true) {
+            // Check for end of record pattern
+            if (try self.match(.close_brace)) |_| break;
+
+            // Parse field name (varid)
+            const field_tok = try self.expect(.varid);
+            const field_name = field_tok.token.varid;
+
+            // Check for field punning or explicit pattern
+            const field_pat: ?ast_mod.Pattern = if (try self.match(.equals)) |_| blk: {
+                // Explicit pattern: field = pat
+                const pat = try self.parseArgPattern();
+                break :blk pat;
+            } else null;
+            // Field punning (field_pat == null): field -> binds variable `field`
+
+            try fields.append(self.allocator, .{
+                .field_name = field_name,
+                .pat = field_pat,
+            });
+
+            // Check for comma separator
+            if (try self.match(.comma) == null) {
+                // No comma, but we haven't seen close brace yet - error
+                if (!try self.check(.close_brace)) {
+                    try self.emitErrorMsg(field_tok.span, "expected ',' or '}' in record pattern");
+                    return error.UnexpectedToken;
+                }
+            }
+        }
+
+        const close_span = try self.currentSpan();
+        const qname = ast_mod.QName{ .name = con_name, .span = con_span };
+        return .{ .RecPat = .{
+            .con = qname,
+            .fields = try fields.toOwnedSlice(self.allocator),
+            .span = con_span.merge(close_span),
+        } };
+    }
+
+    /// Parse record construction: Con { field = expr, ... }
+    /// Supports field punning: `Person { name, age = 25 }`
+    fn parseRecordCon(self: *Parser, con_name: []const u8, con_span: SourceSpan) ParseError!ast_mod.Expr {
+        _ = try self.expect(.open_brace);
+
+        var fields: std.ArrayListUnmanaged(ast_mod.FieldUpdate) = .empty;
+        while (true) {
+            // Check for end of record
+            if (try self.match(.close_brace)) |_| break;
+
+            // Parse field name (varid)
+            const field_tok = try self.expect(.varid);
+            const field_name = field_tok.token.varid;
+
+            // Check for field punning or explicit value
+            const field_val = if (try self.check(.equals)) blk: {
+                _ = try self.advance(); // consume equals
+                // Explicit value: field = expr
+                const expr = try self.parseExpr();
+                break :blk expr;
+            } else blk: {
+                // Field punning: field -> field
+                // The field value is a variable with the same name
+                break :blk ast_mod.Expr{ .Var = .{ .name = field_name, .span = field_tok.span } };
+            };
+
+            try fields.append(self.allocator, .{
+                .field_name = field_name,
+                .expr = field_val,
+            });
+
+            // Check for comma separator
+            if (try self.match(.comma) == null) {
+                // No comma, but we haven't seen close brace yet - error
+                if (!try self.check(.close_brace)) {
+                    try self.emitErrorMsg(field_tok.span, "expected ',' or '}' in record");
+                    return error.UnexpectedToken;
+                }
+            }
+        }
+
+        const qname = ast_mod.QName{ .name = con_name, .span = con_span };
+        return .{ .RecordCon = .{
+            .con = qname,
+            .fields = try fields.toOwnedSlice(self.allocator),
+        } };
+    }
+
+    /// Parse record update: expr { field = value, ... }
+    /// The opening brace has already been consumed.
+    fn parseRecordUpdate(self: *Parser, rec_expr: ast_mod.Expr) ParseError!ast_mod.Expr {
+        _ = try self.expect(.open_brace);
+
+        var fields: std.ArrayListUnmanaged(ast_mod.FieldUpdate) = .empty;
+        while (true) {
+            if (try self.match(.close_brace)) |_| break;
+
+            // Parse field name (varid)
+            const field_tok = try self.expect(.varid);
+            const field_name = field_tok.token.varid;
+
+            // Record update doesn't support field punning - must have explicit value
+            _ = try self.expect(.equals);
+            const expr = try self.parseExpr();
+
+            try fields.append(self.allocator, .{
+                .field_name = field_name,
+                .expr = expr,
+            });
+
+            // Check for comma separator
+            if (try self.match(.comma) == null) {
+                if (!try self.check(.close_brace)) {
+                    try self.emitErrorMsg(field_tok.span, "expected ',' or '}' in record update");
+                    return error.UnexpectedToken;
+                }
+            }
+        }
+
+        const rec_node = try self.allocNode(ast_mod.Expr, rec_expr);
+        return .{ .RecordUpdate = .{
+            .expr = rec_node,
+            .fields = try fields.toOwnedSlice(self.allocator),
         } };
     }
 

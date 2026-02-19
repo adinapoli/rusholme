@@ -289,9 +289,33 @@ pub const PrettyPrinter = struct {
 
     fn printConDecl(self: *PrettyPrinter, con: ast.ConDecl) Error!void {
         try self.write(con.name);
-        for (con.fields) |field| {
-            try self.writeByte(' ');
-            try self.printFieldDecl(field);
+        if (con.fields.len == 0) return;
+
+        // Check if all fields are Record type - if so, print as a single record block
+        const all_records = for (con.fields) |field| {
+            if (field != .Record) break false;
+        } else true;
+
+        if (all_records) {
+            try self.write(" { ");
+            for (con.fields, 0..) |field, i| {
+                if (i > 0) try self.write(", ");
+                switch (field) {
+                    .Record => |r| {
+                        try self.write(r.name);
+                        try self.write(" :: ");
+                        try self.printType(r.type);
+                    },
+                    .Plain => unreachable, // Already checked all_records
+                }
+            }
+            try self.write(" }");
+        } else {
+            // Regular constructor: print fields with spaces
+            for (con.fields) |field| {
+                try self.writeByte(' ');
+                try self.printFieldDecl(field);
+            }
         }
     }
 
@@ -810,6 +834,19 @@ pub const PrettyPrinter = struct {
                 var int_buf: [20]u8 = undefined;
                 const int_str = std.fmt.bufPrint(&int_buf, "{d}", .{npk.k}) catch unreachable;
                 try self.write(int_str);
+            },
+            .RecPat => |rp| {
+                try self.printQName(rp.con);
+                try self.write(" {");
+                for (rp.fields, 0..) |f, i| {
+                    if (i > 0) try self.write(", ");
+                    try self.write(f.field_name);
+                    if (f.pat) |p| {
+                        try self.write(" = ");
+                        try self.printPatternAtom(&p);
+                    }
+                }
+                try self.write("}");
             },
         }
     }

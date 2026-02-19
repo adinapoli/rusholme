@@ -629,6 +629,38 @@ pub fn inferPat(ctx: *InferCtx, pat: RPat) std.mem.Allocator.Error!*HType {
             break :blk int_node;
         },
         .Paren => |inner| inferPat(ctx, inner.*),
+        .RecPat => |rp| blk: {
+            // For M1, treat record patterns like constructor patterns
+            // The constructor is looked up and each field pattern is inferred
+            const scheme = ctx.env.lookupScheme(rp.con.unique) orelse {
+                const msg = try std.fmt.allocPrint(
+                    ctx.alloc,
+                    "unknown constructor `{s}`",
+                    .{rp.con.base},
+                );
+                break :blk try ctx.recoverWithFreshMeta(msg, rp.con_span);
+            };
+            const inst_res = try scheme.instantiate(ctx.alloc, ctx.mv_supply);
+            const inst_ty = try ctx.alloc_ty(inst_res.ty);
+
+            // Infer each field pattern
+            for (rp.fields) |f| {
+                if (f.pat) |p| {
+                    const pat_ty = try inferPat(ctx, p.*);
+                    // For now, we can't do much with the field - we don't know
+                    // the record's field types without more structural info.
+                    // This is a limitation, but should allow basic patterns to work.
+                    _ = pat_ty;
+                } else {
+                    // Field pun: this binds a variable, but since no pattern
+                    // is given, there's no type to infer. The variable binding
+                    // is handled by the renamer, and typer should infer it
+                    // from the record's field type. For now, we can't do this
+                    // properly without record type information.
+                }
+            }
+            break :blk inst_ty;
+        },
     };
 }
 
@@ -1242,6 +1274,14 @@ fn assignPatMetas(
         },
         .Paren => |inner| try assignPatMetas(ctx, inner.*, out),
         .Negate => |inner| try assignPatMetas(ctx, inner.*, out),
+        .RecPat => |rp| {
+            // For field patterns with explicit patterns, assign metas to them
+            for (rp.fields) |f| {
+                if (f.pat) |p| try assignPatMetas(ctx, p.*, out);
+                // Field puns have no pattern - the variable binding is handled
+                // during renaming, and get their type from record inference
+            }
+        },
         .Lit, .Wild => {},
     }
 }
