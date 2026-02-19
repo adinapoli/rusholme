@@ -478,10 +478,18 @@ pub const PrettyPrinter = struct {
 
     // ── Right-hand side & where ────────────────────────────────────────
 
+    /// Print an RHS separator: '=' for function bindings, '->' for case alternatives
+    const RhsSeparator = enum { equals, arrow };
+
     fn printRhs(self: *PrettyPrinter, rhs: ast.Rhs) Error!void {
+        try self.printRhsWithSep(rhs, .equals);
+    }
+
+    fn printRhsWithSep(self: *PrettyPrinter, rhs: ast.Rhs, sep: RhsSeparator) Error!void {
+        const sep_str = if (sep == .equals) " = " else " -> ";
         switch (rhs) {
             .UnGuarded => |expr| {
-                try self.write(" = ");
+                try self.write(sep_str);
                 try self.printExpr(expr);
             },
             .Guarded => |guards| {
@@ -494,7 +502,7 @@ pub const PrettyPrinter = struct {
                         if (i > 0) try self.write(", ");
                         try self.printGuard(guard);
                     }
-                    try self.write(" = ");
+                    try self.write(sep_str);
                     try self.printExpr(grhs.rhs);
                     try self.newline();
                 }
@@ -732,7 +740,7 @@ pub const PrettyPrinter = struct {
 
     fn printAlt(self: *PrettyPrinter, alt_: ast.Alt) Error!void {
         try self.printPattern(&alt_.pattern);
-        try self.printRhs(alt_.rhs);
+        try self.printRhsWithSep(alt_.rhs, .arrow);
         if (alt_.where_clause) |wc| {
             try self.printWhereClause(wc);
         }
