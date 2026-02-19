@@ -340,6 +340,9 @@ pub const RGuardedRhs = struct {
 };
 
 pub const RGuard = union(enum) {
+    /// Pattern guard: pat <- expr
+    PatGuard: struct { pat: RPat, expr: RExpr },
+    /// Boolean guard: condition (expression evaluating to Bool)
     ExprGuard: RExpr,
 };
 
@@ -701,22 +704,37 @@ fn renameMatch(match: ast.Match, env: *RenameEnv) RenameError!RMatch {
 fn renameRhs(rhs: ast.Rhs, env: *RenameEnv) RenameError!RRhs {
     return switch (rhs) {
         .UnGuarded => |e| RRhs{ .UnGuarded = try renameExpr(e, env) },
-        .Guarded => |grhs_list| blk: {
+        .Guarded => |grhs_list| guarded_blk: {
             var rgrhs = std.ArrayListUnmanaged(RGuardedRhs){};
             for (grhs_list) |g| {
                 var guards = std.ArrayListUnmanaged(RGuard){};
                 for (g.guards) |guard| {
                     switch (guard) {
                         .ExprGuard => |ge| try guards.append(env.alloc, .{ .ExprGuard = try renameExpr(ge, env) }),
-                        .PatGuard => {}, // M1: skip pat guards
+                        .PatGuard => |pg| {
+                            // Pattern guard: pat <- expr
+                            // Bindings from the pattern are in scope for subsequent guards
+                            try env.scope.push();
+                            const rpat = try renamePat(pg.pattern, env);
+                            const rexpr = try renameExpr(pg.expr, env);
+                            try guards.append(env.alloc, .{ .PatGuard = .{ .pat = rpat, .expr = rexpr } });
+                        },
                     }
                 }
+                const g_rhs = try renameExpr(g.rhs, env);
                 try rgrhs.append(env.alloc, .{
                     .guards = try guards.toOwnedSlice(env.alloc),
-                    .rhs = try renameExpr(g.rhs, env),
+                    .rhs = g_rhs,
                 });
+                // Pop the scope for guards after processing all guards in this guarded rhs
+                // The guard bindings are in scope for subsequent guards but not for the rhs
+                for (g.guards) |guard| {
+                    if (guard == .PatGuard) {
+                        env.scope.pop();
+                    }
+                }
             }
-            break :blk RRhs{ .Guarded = try rgrhs.toOwnedSlice(env.alloc) };
+            break :guarded_blk RRhs{ .Guarded = try rgrhs.toOwnedSlice(env.alloc) };
         },
     };
 }

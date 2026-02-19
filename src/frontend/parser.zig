@@ -870,21 +870,47 @@ pub const Parser = struct {
 
     /// Parse a comma-separated list of guard conditions: `g1, g2, g3`.
     ///
-    /// Each condition is an expression guard (boolean expression).
-    /// Pattern guards (`pat <- expr`) are represented in the AST as
-    /// `Guard.PatGuard` but require a separate AST change to carry the
-    /// RHS expression; they are tracked by a follow-up issue.
+    /// Each condition is either a pattern guard (`pat <- expr`) or an
+    /// expression guard (boolean expression).
+    ///
+    /// We disambiguate using lookahead after parsing an expression:
+    ///   - `<-` → pattern guard
+    ///   - otherwise → expression guard
     ///
     /// Haskell 2010 §3.13, §4.4.2.
     fn parseGuardList(self: *Parser) ParseError![]const ast_mod.Guard {
         var guards: std.ArrayListUnmanaged(ast_mod.Guard) = .empty;
-        const first = try self.parseExpr();
-        try guards.append(self.allocator, .{ .ExprGuard = first });
+
+        // Parse first guard
+        const expr_or_pat = try self.parseExpr();
+        const first_guard = try self.parseGuardFromExpr(expr_or_pat);
+        try guards.append(self.allocator, first_guard);
+
+        // Parse additional comma-separated guards
         while (try self.match(.comma) != null) {
-            const g = try self.parseExpr();
-            try guards.append(self.allocator, .{ .ExprGuard = g });
+            const g_expr_or_pat = try self.parseExpr();
+            const g = try self.parseGuardFromExpr(g_expr_or_pat);
+            try guards.append(self.allocator, g);
         }
+
         return guards.toOwnedSlice(self.allocator);
+    }
+
+    /// Parse a single guard after parsing its left part as an expression.
+    ///
+    /// The expression may represent a pattern (followed by `<-`) or a
+    /// boolean guard (not followed by `<-`).
+    fn parseGuardFromExpr(self: *Parser, expr_or_pat: ast_mod.Expr) ParseError!ast_mod.Guard {
+        if (try self.check(.arrow_left)) {
+            _ = try self.advance(); // consume '<-'
+            const guard_expr = try self.parseExpr();
+            // Convert the expression to a pattern (same approach as in parseQualifier)
+            const guard_pat = try self.exprToPattern(expr_or_pat);
+            return .{ .PatGuard = .{ .pattern = guard_pat, .expr = guard_expr } };
+        }
+
+        // Plain boolean guard
+        return .{ .ExprGuard = expr_or_pat };
     }
 
     fn parseWhereClause(self: *Parser) ParseError!?[]const ast_mod.Decl {

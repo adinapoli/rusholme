@@ -505,11 +505,10 @@ pub const PrettyPrinter = struct {
 
     fn printGuard(self: *PrettyPrinter, guard: ast.Guard) Error!void {
         switch (guard) {
-            .PatGuard => |pats| {
-                for (pats, 0..) |*pat, i| {
-                    if (i > 0) try self.write(", ");
-                    try self.printPattern(pat);
-                }
+            .PatGuard => |pg| {
+                try self.printPattern(&pg.pattern);
+                try self.write(" <- ");
+                try self.printExpr(pg.expr);
             },
             .ExprGuard => |expr| try self.printExpr(expr),
         }
