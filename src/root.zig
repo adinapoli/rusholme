@@ -39,6 +39,7 @@ pub const tc = struct {
     pub const env = @import("typechecker/env.zig");
     pub const solver = @import("typechecker/solver.zig");
     pub const infer = @import("typechecker/infer.zig");
+    pub const class_env = @import("typechecker/class_env.zig");
 };
 
 // IR representations

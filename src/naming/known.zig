@@ -53,6 +53,20 @@ pub const Type = struct {
     pub const Unit = name("()", 111);
 };
 
+/// Well-known type class names (IDs 300–399).
+pub const Class = struct {
+    pub const Eq = name("Eq", 300);
+    pub const Ord = name("Ord", 301);
+    pub const Show = name("Show", 302);
+    pub const Read = name("Read", 303);
+    pub const Num = name("Num", 304);
+    pub const Enum = name("Enum", 305);
+    pub const Bounded = name("Bounded", 306);
+    pub const Monad = name("Monad", 307);
+    pub const Functor = name("Functor", 308);
+    pub const Applicative = name("Applicative", 309);
+};
+
 pub const Con = struct {
     pub const True = name("True", 200);
     pub const False = name("False", 201);

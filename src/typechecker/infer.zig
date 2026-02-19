@@ -318,7 +318,7 @@ pub fn generalisePtr(
     const binders = try binder_ids.toOwnedSlice(ctx.alloc);
     // Chase ty_node to the root so that the scheme body does not contain an
     // intermediate Meta that instantiateType would leave unresolved.
-    return TyScheme{ .binders = binders, .body = ty_node.chase() };
+    return TyScheme{ .binders = binders, .constraints = &.{}, .body = ty_node.chase() };
 }
 
 /// Mutate every unsolved meta with `id == target_id` in the tree rooted
@@ -539,7 +539,8 @@ pub fn inferPat(ctx: *InferCtx, pat: RPat) std.mem.Allocator.Error!*HType {
                 );
                 break :blk try ctx.recoverWithFreshMeta(msg, c.con_span);
             };
-            var inst_ty = try ctx.alloc_ty(try scheme.instantiate(ctx.alloc, ctx.mv_supply));
+            var inst_res = try scheme.instantiate(ctx.alloc, ctx.mv_supply);
+            var inst_ty = try ctx.alloc_ty(inst_res.ty);
 
             for (c.args) |arg_pat| {
                 const arg_ty = try inferPat(ctx, arg_pat);
@@ -782,7 +783,7 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
         .InfixApp => |ia| blk: {
             const op_scheme = ctx.env.lookupScheme(ia.op.unique);
             const op_ty = if (op_scheme) |s|
-                try ctx.alloc_ty(try s.instantiate(ctx.alloc, ctx.mv_supply))
+                try ctx.alloc_ty((try s.instantiate(ctx.alloc, ctx.mv_supply)).ty)
             else blk2: {
                 const msg = try std.fmt.allocPrint(ctx.alloc, "unknown operator `{s}`", .{ia.op.base});
                 break :blk2 try ctx.recoverWithFreshMeta(msg, ia.op_span);
@@ -803,7 +804,7 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
         .LeftSection => |ls| blk: {
             const op_scheme = ctx.env.lookupScheme(ls.op.unique);
             const op_ty = if (op_scheme) |s|
-                try ctx.alloc_ty(try s.instantiate(ctx.alloc, ctx.mv_supply))
+                try ctx.alloc_ty((try s.instantiate(ctx.alloc, ctx.mv_supply)).ty)
             else
                 try ctx.freshMeta();
 
@@ -820,7 +821,7 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
         .RightSection => |rs| blk: {
             const op_scheme = ctx.env.lookupScheme(rs.op.unique);
             const op_ty = if (op_scheme) |s|
-                try ctx.alloc_ty(try s.instantiate(ctx.alloc, ctx.mv_supply))
+                try ctx.alloc_ty((try s.instantiate(ctx.alloc, ctx.mv_supply)).ty)
             else
                 try ctx.freshMeta();
 
@@ -1023,6 +1024,12 @@ fn inferLetDecl(
         .TypeSig => {
             // Type signatures are collected separately and not processed here.
         },
+        .ClassDecl => {
+            // Class declarations are handled separately during pass 1.
+        },
+        .InstanceDecl => {
+            // Instance declarations are handled separately during pass 1.
+        },
     }
 }
 
@@ -1104,6 +1111,8 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
             },
             .PatBind => |pb| try assignPatMetas(ctx, pb.pattern, &top_metas),
             .TypeSig => {},
+            .ClassDecl => {}, // Classes are handled separately
+            .InstanceDecl => {}, // Instances are handled separately
         }
     }
 
@@ -1144,6 +1153,8 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
                 try ctx.unifyNow(rhs_ty, pat_ty, pb.span);
             },
             .TypeSig => {},
+            .ClassDecl => {}, // Classes are handled separately (class registration)
+            .InstanceDecl => {}, // Instances are handled separately (instance resolution)
         }
     }
 

@@ -183,6 +183,49 @@ pub const TerminalRenderer = struct {
                 const scrutinee_str = try pm.scrutinee_ty.pretty(self.file_contents.allocator);
                 try writer.print("{s}`{s}`{s}\n", .{ err_color, scrutinee_str, reset_color });
             },
+            .missing_instance => |mi| {
+                try writer.print("{s}---{s} no instance for type class{c}", .{ err_color, reset_color, '\n' });
+                try writer.writeAll(indent);
+                try writer.print("   class: {s}`{s}`{s}\n", .{ yellow_color, mi.class_name.base, reset_color });
+                try writer.writeAll(indent);
+                try writer.print("   type: {s}", .{ cyan_color });
+                const ty_str = try mi.ty.pretty(self.file_contents.allocator);
+                try writer.print("{s}`{s}`{s}\n", .{ yellow_color, ty_str, reset_color });
+            },
+            .overlapping_instances => |oi| {
+                try writer.print("{s}---{s} overlapping instances{c}", .{ err_color, reset_color, '\n' });
+                try writer.writeAll(indent);
+                try writer.print("   class: {s}`{s}`{s}\n", .{ yellow_color, oi.class_name.base, reset_color });
+                try writer.writeAll(indent);
+                try writer.print("   type: {s}", .{ cyan_color });
+                const ty_str = try oi.ty.pretty(self.file_contents.allocator);
+                try writer.print("{s}`{s}`{s}\n", .{ yellow_color, ty_str, reset_color });
+            },
+            .ambiguous_type => |at| {
+                try writer.print("{s}---{s} ambiguous type variable{c}", .{ err_color, reset_color, '\n' });
+                try writer.writeAll(indent);
+                try writer.print("   class: {s}`{s}`{s}\n", .{ yellow_color, at.class_name.base, reset_color });
+                try writer.writeAll(indent);
+                try writer.print("   type: {s}", .{ cyan_color });
+                const ty_str = try at.ty.pretty(self.file_contents.allocator);
+                try writer.print("{s}`{s}`{s}\n", .{ yellow_color, ty_str, reset_color });
+            },
+            .no_such_class => |nc| {
+                try writer.print("{s}---{s} not a type class{c}", .{ err_color, reset_color, '\n' });
+                try writer.writeAll(indent);
+                try writer.print("   name: {s}`{s}`{s}\n", .{ yellow_color, nc.name.base, reset_color });
+            },
+            .missing_method => |mm| {
+                try writer.print("{s}---{s} missing method implementation{c}", .{ err_color, reset_color, '\n' });
+                try writer.writeAll(indent);
+                try writer.print("   class: {s}`{s}`{s}\n", .{ yellow_color, mm.class_name.base, reset_color });
+                try writer.writeAll(indent);
+                try writer.print("   method: {s}`{s}`{s}\n", .{ yellow_color, mm.method_name.base, reset_color });
+                try writer.writeAll(indent);
+                try writer.print("   instance type: {s}", .{ cyan_color });
+                const ty_str = try mm.instance_ty.pretty(self.file_contents.allocator);
+                try writer.print("{s}`{s}`{s}\n", .{ yellow_color, ty_str, reset_color });
+            },
         }
     }
 

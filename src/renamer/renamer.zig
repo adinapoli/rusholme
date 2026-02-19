@@ -363,6 +363,48 @@ pub const RDecl = union(enum) {
     PatBind: struct { pattern: RPat, rhs: RRhs, span: SourceSpan },
     /// Type signature — kept for the typechecker; names resolved.
     TypeSig: struct { names: []const Name, type: ast.Type, span: SourceSpan },
+    /// Type class declaration.
+    ClassDecl: RClassDecl,
+    /// Type class instance declaration.
+    InstanceDecl: RInstanceDecl,
+};
+
+/// A renamed type class assertion: `ClassName type1 type2 ...`.
+pub const RAssertion = struct {
+    class_name: Name,
+    types: []const ast.Type,
+};
+
+/// A renamed class method signature (with optional default).
+pub const RClassMethod = struct {
+    name: Name,
+    type: ast.Type,
+    default_impl: ?RMatch,
+};
+
+/// A renamed type class declaration.
+pub const RClassDecl = struct {
+    name: Name,
+    tyvar: Name,
+    superclasses: []const RAssertion,
+    methods: []const RClassMethod,
+    span: SourceSpan,
+};
+
+/// A renamed instance method binding.
+pub const RInstanceBinding = struct {
+    name: Name,
+    equations: []const RMatch,
+    span: SourceSpan,
+};
+
+/// A renamed type class instance declaration.
+pub const RInstanceDecl = struct {
+    class_name: Name,
+    instance_type: ast.Type,
+    context: []const RAssertion,
+    bindings: []const RInstanceBinding,
+    span: SourceSpan,
 };
 
 /// A fully-renamed module.
@@ -433,7 +475,34 @@ pub fn rename(module: ast.Module, env: *RenameEnv) !RenamedModule {
                 // their names will be looked up in pass 2.
                 _ = ts;
             },
-            else => {}, // Data/type/class decls: M1 — skip binder extraction
+            .Class => |cd| {
+                // Register class name in scope.
+                if (env.scope.boundInCurrentFrame(cd.class_name)) {
+                    const msg = try std.fmt.allocPrint(
+                        env.alloc,
+                        "duplicate class: `{s}`",
+                        .{cd.class_name},
+                    );
+                    try env.diags.emit(env.alloc, .{
+                        .severity = .@"error",
+                        .code = .duplicate_definition,
+                        .span = cd.span,
+                        .message = msg,
+                    });
+                } else {
+                    const n = env.freshName(cd.class_name);
+                    try env.scope.bind(cd.class_name, n);
+                    try top_names.put(env.alloc, cd.class_name, n);
+                }
+                // Register method names in scope too (for default implementations).
+                for (cd.methods) |m| {
+                    if (!env.scope.boundInCurrentFrame(m.name)) {
+                        const mn = env.freshName(m.name);
+                        try env.scope.bind(m.name, mn);
+                    }
+                }
+            },
+            else => {}, // Data/type decls: skip binder extraction
         }
     }
 
@@ -497,7 +566,102 @@ fn renameDecl(
                 .span = ts.span,
             } };
         },
-        // Non-M1 decls: skip silently.
+        .Class => |cd| blk: {
+            // Class name was already bound in pass 1; look it up.
+            const class_name = env.scope.lookup(cd.class_name) orelse env.freshName(cd.class_name);
+
+            // Single type variable for the class (Haskell 2010 §4.2).
+            if (cd.tyvars.len != 1) {
+                const msg = try std.fmt.allocPrint(
+                    env.alloc,
+                    "class `{s}` must have exactly one type variable",
+                    .{cd.class_name},
+                );
+                try env.diags.emit(env.alloc, .{
+                    .severity = .@"error",
+                    .code = .type_error,
+                    .span = cd.span,
+                    .message = msg,
+                });
+                // Use a synthetic variable to continue.
+            }
+            const tyvar_name = if (cd.tyvars.len >= 1) cd.tyvars[0] else "a";
+            const tyvar = env.freshName(tyvar_name);
+
+            // Rename superclass constraints.
+            var ras = std.ArrayListUnmanaged(RAssertion){};
+            if (cd.context) |ctx_| {
+                for (ctx_.constraints) |assertion| {
+                    const class_n = try env.resolve(assertion.class_name, cd.span);
+                    try ras.append(env.alloc, .{
+                        .class_name = class_n,
+                        .types = assertion.types,
+                    });
+                }
+            }
+
+            // Rename methods.
+            var rms = std.ArrayListUnmanaged(RClassMethod){};
+            for (cd.methods) |m| {
+                const method_name = env.scope.lookup(m.name) orelse env.freshName(m.name);
+                const default_impl: ?RMatch = if (m.default_implementation) |def|
+                    try renameMatch(def, env)
+                else
+                    null;
+                try rms.append(env.alloc, .{
+                    .name = method_name,
+                    .type = m.type,
+                    .default_impl = default_impl,
+                });
+            }
+
+            break :blk RDecl{ .ClassDecl = .{
+                .name = class_name,
+                .tyvar = tyvar,
+                .superclasses = try ras.toOwnedSlice(env.alloc),
+                .methods = try rms.toOwnedSlice(env.alloc),
+                .span = cd.span,
+            } };
+        },
+        .Instance => |inst| blk: {
+            // Resolve class name.
+            const class_name = try env.resolve(inst.constructor_type.Con.name, inst.span);
+
+            // Rename context constraints.
+            var ras = std.ArrayListUnmanaged(RAssertion){};
+            if (inst.context) |ctx_| {
+                for (ctx_.constraints) |assertion| {
+                    const class_n = try env.resolve(assertion.class_name, inst.span);
+                    try ras.append(env.alloc, .{
+                        .class_name = class_n,
+                        .types = assertion.types,
+                    });
+                }
+            }
+
+            // Rename instance bindings.
+            var rbs = std.ArrayListUnmanaged(RInstanceBinding){};
+            for (inst.bindings) |fb| {
+                const binding_name = env.scope.lookup(fb.name) orelse env.freshName(fb.name);
+                var reqs = std.ArrayListUnmanaged(RMatch){};
+                for (fb.equations) |eq| {
+                    try reqs.append(env.alloc, try renameMatch(eq, env));
+                }
+                try rbs.append(env.alloc, .{
+                    .name = binding_name,
+                    .equations = try reqs.toOwnedSlice(env.alloc),
+                    .span = fb.span,
+                });
+            }
+
+            break :blk RDecl{ .InstanceDecl = .{
+                .class_name = class_name,
+                .instance_type = inst.constructor_type,
+                .context = try ras.toOwnedSlice(env.alloc),
+                .bindings = try rbs.toOwnedSlice(env.alloc),
+                .span = inst.span,
+            } };
+        },
         else => null,
     };
 }

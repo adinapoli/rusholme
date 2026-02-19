@@ -75,6 +75,37 @@ pub const TypeError = union(enum) {
         /// Type of the scrutinee
         scrutinee_ty: HType,
     },
+
+    /// No instance found for a class constraint (e.g. `Eq (a -> b)`).
+    missing_instance: struct {
+        class_name: Name,
+        ty: HType,
+    },
+
+    /// Multiple matching instances for a class constraint.
+    overlapping_instances: struct {
+        class_name: Name,
+        ty: HType,
+    },
+
+    /// Ambiguous type: a class constraint could not be resolved because
+    /// the type variable was never determined (e.g. `show (read s)`).
+    ambiguous_type: struct {
+        class_name: Name,
+        ty: HType,
+    },
+
+    /// Reference to a type class that does not exist.
+    no_such_class: struct {
+        name: Name,
+    },
+
+    /// Instance declaration is missing a required method implementation.
+    missing_method: struct {
+        class_name: Name,
+        method_name: Name,
+        instance_ty: HType,
+    },
 };
 
 /// Generate a human-readable message for a TypeError.
@@ -123,6 +154,45 @@ pub fn format(alloc: std.mem.Allocator, te: TypeError) std.mem.Allocator.Error![
                 alloc,
                 "pattern of type `{s}` does not match scrutinee of type `{s}`",
                 .{ pat_str, scrutinee_str },
+            );
+        },
+        .missing_instance => |mi| blk: {
+            const ty_str = try mi.ty.pretty(alloc);
+            break :blk std.fmt.allocPrint(
+                alloc,
+                "no instance for `{s} {s}`",
+                .{ mi.class_name.base, ty_str },
+            );
+        },
+        .overlapping_instances => |oi| blk: {
+            const ty_str = try oi.ty.pretty(alloc);
+            break :blk std.fmt.allocPrint(
+                alloc,
+                "overlapping instances for `{s} {s}`",
+                .{ oi.class_name.base, ty_str },
+            );
+        },
+        .ambiguous_type => |at| blk: {
+            const ty_str = try at.ty.pretty(alloc);
+            break :blk std.fmt.allocPrint(
+                alloc,
+                "ambiguous type variable in constraint `{s} {s}`",
+                .{ at.class_name.base, ty_str },
+            );
+        },
+        .no_such_class => |nc| blk: {
+            break :blk std.fmt.allocPrint(
+                alloc,
+                "not a type class: `{s}`",
+                .{nc.name.base},
+            );
+        },
+        .missing_method => |mm| blk: {
+            const ty_str = try mm.instance_ty.pretty(alloc);
+            break :blk std.fmt.allocPrint(
+                alloc,
+                "instance `{s} {s}` is missing method `{s}`",
+                .{ mm.class_name.base, ty_str, mm.method_name.base },
             );
         },
     };
@@ -188,4 +258,65 @@ test "TypeError.format: arity_mismatch" {
     try testing.expect(std.mem.indexOf(u8, msg, "Maybe") != null);
     try testing.expect(std.mem.indexOf(u8, msg, "expects 1") != null);
     try testing.expect(std.mem.indexOf(u8, msg, "applied to 2") != null);
+}
+
+test "TypeError.format: missing_instance" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const te = TypeError{ .missing_instance = .{
+        .class_name = testName("Show", 302),
+        .ty = con0("Int -> Int", 0),
+    } };
+
+    const msg = try format(alloc, te);
+    try testing.expect(std.mem.indexOf(u8, msg, "no instance") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "Show") != null);
+}
+
+test "TypeError.format: ambiguous_type" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const te = TypeError{ .ambiguous_type = .{
+        .class_name = testName("Num", 304),
+        .ty = HType{ .Meta = .{ .id = 7, .ref = null } },
+    } };
+
+    const msg = try format(alloc, te);
+    try testing.expect(std.mem.indexOf(u8, msg, "ambiguous") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "Num") != null);
+}
+
+test "TypeError.format: no_such_class" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const te = TypeError{ .no_such_class = .{
+        .name = testName("Foo", 9999),
+    } };
+
+    const msg = try format(alloc, te);
+    try testing.expect(std.mem.indexOf(u8, msg, "not a type class") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "Foo") != null);
+}
+
+test "TypeError.format: missing_method" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const te = TypeError{ .missing_method = .{
+        .class_name = testName("Eq", 300),
+        .method_name = testName("==", 50),
+        .instance_ty = con0("Bool", 104),
+    } };
+
+    const msg = try format(alloc, te);
+    try testing.expect(std.mem.indexOf(u8, msg, "missing method") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "Eq") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "==") != null);
 }

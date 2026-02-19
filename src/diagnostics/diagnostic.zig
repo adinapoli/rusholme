@@ -40,6 +40,9 @@ pub const DiagnosticCode = enum {
     unbound_variable,
     duplicate_definition,
     kind_error,
+    missing_instance,
+    overlapping_instances,
+    ambiguous_type,
 
     /// Returns a stable string code like "E001" for programmatic use.
     pub fn code(self: DiagnosticCode) []const u8 {
@@ -49,6 +52,9 @@ pub const DiagnosticCode = enum {
             .unbound_variable => "E003",
             .duplicate_definition => "E004",
             .kind_error => "E005",
+            .missing_instance => "E006",
+            .overlapping_instances => "E007",
+            .ambiguous_type => "E008",
         };
     }
 

@@ -45,6 +45,7 @@ const unify_mod = @import("unify.zig");
 const diag_mod = @import("../diagnostics/diagnostic.zig");
 const span_mod = @import("../diagnostics/span.zig");
 const type_error_mod = @import("type_error.zig");
+const class_env_mod = @import("class_env.zig");
 
 pub const HType = htype_mod.HType;
 pub const MetaVar = htype_mod.MetaVar;
@@ -58,6 +59,8 @@ pub const Severity = diag_mod.Severity;
 pub const SourceSpan = span_mod.SourceSpan;
 pub const SourcePos = span_mod.SourcePos;
 pub const TypeError = type_error_mod.TypeError;
+pub const ClassEnv = class_env_mod.ClassEnv;
+pub const ClassConstraint = class_env_mod.ClassConstraint;
 
 // ── Constraint ─────────────────────────────────────────────────────────
 
@@ -72,6 +75,8 @@ pub const TypeError = type_error_mod.TypeError;
 /// written by the unifier are visible through those pointers.  Callers must
 /// ensure that any `HType` nodes referenced transitively (via `Fun.arg`,
 /// `Con.args`, etc.) are allocated on an arena that outlives the solve call.
+///
+/// TODO(#37): This struct will become a union(Enum) for Eq/Class constraints.
 pub const Constraint = struct {
     lhs: HType,
     rhs: HType,
@@ -91,6 +96,10 @@ pub const Constraint = struct {
 /// metavar binding allocation.  It is also used to format diagnostic
 /// messages.
 ///
+/// `class_env` is the class environment containing all declared classes and
+/// instances.  It is ignored for M1 (equality-only constraints) but will be
+/// used in M2 for issue #37 (class constraint resolution).
+///
 /// Returns `error.OutOfMemory` only if arena allocation fails (a fatal
 /// condition distinct from type errors, which are soft failures recorded in
 /// `diags`).
@@ -98,7 +107,9 @@ pub fn solve(
     constraints: []Constraint,
     alloc: std.mem.Allocator,
     diags: *DiagnosticCollector,
+    class_env: ?*const ClassEnv,
 ) std.mem.Allocator.Error!void {
+    _ = class_env;  // TODO(#37): Use class_env for class constraint resolution
     for (constraints) |*c| {
         unify_mod.unify(alloc, &c.lhs, &c.rhs) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -216,7 +227,7 @@ test "solve: empty constraint set produces no diagnostics" {
     defer diags.deinit(arena.allocator());
 
     const constraints: []Constraint = &.{};
-    try solve(constraints, arena.allocator(), &diags);
+    try solve(constraints, arena.allocator(), &diags, null);
     try testing.expect(!diags.hasErrors());
 }
 
@@ -231,7 +242,7 @@ test "solve: single Int ~ Int constraint succeeds" {
         .rhs = con0("Int", 0),
         .span = testSpan(),
     }};
-    try solve(&constraints, arena.allocator(), &diags);
+    try solve(&constraints, arena.allocator(), &diags, null);
     try testing.expect(!diags.hasErrors());
 }
 
@@ -249,7 +260,7 @@ test "solve: ?0 ~ Int solves metavar" {
         .rhs = con0("Int", 0),
         .span = testSpan(),
     }};
-    try solve(&constraints, alloc, &diags);
+    try solve(&constraints, alloc, &diags, null);
     try testing.expect(!diags.hasErrors());
 
     // The metavar in the constraint should now be solved to Int.
@@ -272,7 +283,7 @@ test "solve: multiple independent constraints all solved" {
         .{ .lhs = HType{ .Meta = mv0 }, .rhs = con0("Int", 0), .span = testSpan() },
         .{ .lhs = HType{ .Meta = mv1 }, .rhs = con0("Bool", 1), .span = testSpan() },
     };
-    try solve(&constraints, alloc, &diags);
+    try solve(&constraints, alloc, &diags, null);
     try testing.expect(!diags.hasErrors());
 
     try testing.expectEqualStrings("Int", constraints[0].lhs.chase().Con.name.base);
@@ -293,7 +304,7 @@ test "solve: Int ~ Bool emits TypeMismatch diagnostic" {
         .rhs = con0("Bool", 1),
         .span = testSpan(),
     }};
-    try solve(&constraints, alloc, &diags);
+    try solve(&constraints, alloc, &diags, null);
     try testing.expect(diags.hasErrors());
     try testing.expectEqual(@as(usize, 1), diags.errorCount());
     try testing.expectEqual(DiagnosticCode.type_error, diags.diagnostics.items[0].code);
@@ -315,7 +326,7 @@ test "solve: ?0 ~ [?0] emits InfiniteType diagnostic" {
         .rhs = HType{ .Con = .{ .name = testName("[]", 99), .args = &args } },
         .span = testSpan(),
     }};
-    try solve(&constraints, alloc, &diags);
+    try solve(&constraints, alloc, &diags, null);
     try testing.expect(diags.hasErrors());
     // Message should mention "occurs check"
     try testing.expect(std.mem.indexOf(u8, diags.diagnostics.items[0].message, "occurs check") != null);
@@ -352,7 +363,7 @@ test "solve: conflicting constraints both reported" {
         .{ .lhs = HType{ .Fun = .{ .arg = shared, .res = &unit_ty } }, .rhs = HType{ .Fun = .{ .arg = try dupCon0(alloc, "Int", 0), .res = &unit_ty } }, .span = testSpan() },
         .{ .lhs = HType{ .Fun = .{ .arg = shared, .res = &unit_ty } }, .rhs = HType{ .Fun = .{ .arg = try dupCon0(alloc, "Bool", 1), .res = &unit_ty } }, .span = testSpan() },
     };
-    try solve(&constraints, alloc, &diags);
+    try solve(&constraints, alloc, &diags, null);
     try testing.expect(diags.hasErrors());
     // The second constraint fails (Int vs Bool after ?0 = Int).
     try testing.expectEqual(@as(usize, 1), diags.errorCount());
@@ -374,7 +385,7 @@ test "solve: diagnostic carries correct source span" {
         .rhs = con0("Bool", 1),
         .span = span,
     }};
-    try solve(&constraints, alloc, &diags);
+    try solve(&constraints, alloc, &diags, null);
     try testing.expect(diags.hasErrors());
     try testing.expectEqual(@as(u32, 42), diags.diagnostics.items[0].span.start.line);
     try testing.expectEqual(@as(u32, 5), diags.diagnostics.items[0].span.start.column);
@@ -443,7 +454,7 @@ test "solver: type mismatch diagnostic carries structured payload" {
         .rhs = con0("Bool", 1),
         .span = testSpan(),
     }};
-    try solve(&constraints, alloc, &diags);
+    try solve(&constraints, alloc, &diags, null);
     try testing.expect(diags.hasErrors());
     try testing.expectEqual(@as(usize, 1), diags.errorCount());
 
@@ -478,7 +489,7 @@ test "solver: infinite type diagnostic carries structured payload" {
         .rhs = HType{ .Con = .{ .name = testName("[]", 99), .args = &args } },
         .span = testSpan(),
     }};
-    try solve(&constraints, alloc, &diags);
+    try solve(&constraints, alloc, &diags, null);
     try testing.expect(diags.hasErrors());
 
     const diag = diags.diagnostics.items[0];
