@@ -3,6 +3,12 @@
 > Auto-generated from GitHub issues. Each issue links to its tracker.
 > **Starting points** (zero dependencies): #1✓, #2✓, #17✓, #22✓, #24✓, #27✓, #53✓, #85✓, #58, #62⚡, #66, #68, #107✓
 
+**Recent Progress (2026-02-20):**
+- ✓ #256: lexer+parser: quasi-quotation syntax ([name| ... |])
+- ✓ #255: lexer: LANGUAGE pragma support ({-# LANGUAGE #-})
+- ✓ #254: lexer: string literal keyword parsing (resolved by quasiquotation fix)
+- ✓ #252: parser: TypeApplications extension (e @Type)
+
 **Recent Progress (2026-02-19):**
 - ✓ #198: parser: operator function definitions and type signatures ((|>) x y = ...)
 - ✓ #202: parser: fix operator sections with consym operators ((p ++) fails)
@@ -142,10 +148,10 @@
 | [#212](https://github.com/adinapoli/rusholme/issues/212) | lexer+ast: replace i64 integer literals with arbitrary-precision representation | [#85](https://github.com/adinapoli/rusholme/issues/85), [#27](https://github.com/adinapoli/rusholme/issues/27) | :white_circle: |
 | [#232](https://github.com/adinapoli/rusholme/issues/232) | pattern guards: AST and parser incomplete for pat <- expr in guards | [#200](https://github.com/adinapoli/rusholme/issues/200) | :green_circle: |
 | [#252](https://github.com/adinapoli/rusholme/issues/252) | parser: Support TypeApplications extension in expressions (e @Type) | [#30](https://github.com/adinapoli/rusholme/issues/30), [#32](https://github.com/adinapoli/rusholme/issues/32) | :green_circle: |
-| [#250](https://github.com/adinapoli/rusholme/issues/250) | parser: support wildcard patterns in do notation bindings (completed via #252; VTT parser blocked by #254) | [#30](https://github.com/adinapoli/rusholme/issues/30), [#31](https://github.com/adinapoli/rusholme/issues/31), [#254](https://github.com/adinapoli/rusholme/issues/254) | :white_circle: |
-| [#254](https://github.com/adinapoli/rusholme/issues/254) | lexer: string literal parsing fails when string contains keyword 'of' | [#86](https://github.com/adinapoli/rusholme/issues/86) | :white_circle: |
-| [#255](https://github.com/adinapoli/rusholme/issues/255) | parser: support LANGUAGE pragmas ({-# LANGUAGE ... #-}) | [#29](https://github.com/adinapoli/rusholme/issues/29) | :white_circle: |
-| [#256](https://github.com/adinapoli/rusholme/issues/256) | parser: support quasi-quotation syntax ([name| ... |]) | [#29](https://github.com/adinapoli/rusholme/issues/29) | :white_circle: |
+| [#250](https://github.com/adinapoli/rusholme/issues/250) | parser: support wildcard patterns in do notation bindings (completed via #252; VTT parser blocked by #254) | [#30](https://github.com/adinapoli/rusholme/issues/30), [#31](https://github.com/adinapoli/rusholme/issues/31), [#254](https://github.com/adinapoli/rusholme/issues/254) | :yellow_circle: |
+| [#254](https://github.com/adinapoli/rusholme/issues/254) | lexer: string literal parsing fails when string contains keyword 'of' (resolved by quasiquotation fix) | [#86](https://github.com/adinapoli/rusholme/issues/86) | :green_circle: |
+| [#255](https://github.com/adinapoli/rusholme/issues/255) | parser: support LANGUAGE pragmas ({-# LANGUAGE ... #-}) | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
+| [#256](https://github.com/adinapoli/rusholme/issues/256) | parser: support quasi-quotation syntax ([name| ... |]) | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
 
 ### CLI
 
