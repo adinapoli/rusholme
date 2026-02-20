@@ -21,3 +21,21 @@ Thumbs.db
 tags
 website/logo.png
 node_modules
+
+# https://github.com/anthropic-experimental/sandbox-runtime/issues/139
+.bash_profile
+.bashrc
+.gitconfig
+.gitmodules
+.idea
+.mcp.json
+.profile
+.ripgreprc
+.vscode
+.zprofile
+.zshrc
+HEAD
+config
+hooks
+objects
+refs

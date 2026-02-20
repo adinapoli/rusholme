@@ -1002,10 +1002,33 @@ pub const Parser = struct {
         if (infix_head) |h| {
             try tyvars.appendSlice(self.allocator, h.tyvars);
         } else {
-            // Standard form: T a b c
-            while (try self.check(.varid)) {
-                const tv = try self.advance();
-                try tyvars.append(self.allocator, tv.token.varid);
+            // Standard form: T a b c  or  T a (n :: Nat)
+            while (true) {
+                if (try self.check(.varid)) {
+                    const tv = try self.advance();
+                    try tyvars.append(self.allocator, tv.token.varid);
+                } else if (try self.check(.open_paren)) {
+                    // Kind-annotated type variable: (n :: Kind)
+                    // Parse the variable name and skip the kind annotation.
+                    _ = try self.advance(); // consume '('
+                    const tv = try self.expect(.varid);
+                    _ = try self.expect(.dcolon);
+                    // Skip the kind type (balanced parens until matching ')')
+                    var depth: u32 = 1;
+                    while (depth > 0) {
+                        const tok = try self.advance();
+                        switch (std.meta.activeTag(tok.token)) {
+                            .open_paren => depth += 1,
+                            .close_paren => depth -= 1,
+                            .eof => {
+                                try self.emitErrorMsg(tok.span, "unexpected end of input in kind annotation");
+                                return error.UnexpectedToken;
+                            },
+                            else => {},
+                        }
+                    }
+                    try tyvars.append(self.allocator, tv.token.varid);
+                } else break;
             }
         }
 
@@ -1067,9 +1090,39 @@ pub const Parser = struct {
         };
     }
 
-    // Parse standard (H98) constructor declaration: Con t1 t2 ... | Con { f1 :: T1, f2 :: T2 }
+    /// Parse standard (H98) constructor declaration, including existentials:
+    ///   Con t1 t2 ...
+    ///   Con { f1 :: T1, f2 :: T2 }
+    ///   forall a. Show a => Con a
     fn parseConDecl(self: *Parser) ParseError!ast_mod.ConDecl {
         const start = try self.currentSpan();
+
+        // Optional existential quantifier: forall a b.
+        var ex_tyvars: std.ArrayListUnmanaged([]const u8) = .empty;
+        var ex_context: ?ast_mod.Context = null;
+
+        if (try self.check(.kw_forall)) {
+            _ = try self.advance(); // consume 'forall'
+            while (try self.check(.varid)) {
+                const tv = try self.advance();
+                try ex_tyvars.append(self.allocator, tv.token.varid);
+            }
+            // Expect dot (lexed as varsym ".")
+            const dot_tok = try self.expect(.varsym);
+            if (!std.mem.eql(u8, dot_tok.token.varsym, ".")) {
+                try self.emitErrorMsg(dot_tok.span, "expected '.' after type variables in existential quantification");
+                return error.UnexpectedToken;
+            }
+            // Optional context after forall: Show a =>
+            if (try self.parseContextOptional()) |ctx| {
+                ex_context = ctx;
+            } else if (try self.check(.conid) and try self.lookaheadForSingleContextConstraint()) {
+                ex_context = .{
+                    .constraints = try self.parseSingleContextConstraints(),
+                };
+            }
+        }
+
         const name_tok = try self.expect(.conid);
 
         var fields: std.ArrayListUnmanaged(ast_mod.FieldDecl) = .empty;
@@ -1111,6 +1164,8 @@ pub const Parser = struct {
         return ast_mod.ConDecl{
             .name = name_tok.token.conid,
             .fields = try fields.toOwnedSlice(self.allocator),
+            .ex_tyvars = try ex_tyvars.toOwnedSlice(self.allocator),
+            .ex_context = ex_context,
             .span = self.spanFrom(start),
         };
     }
@@ -4581,4 +4636,133 @@ test "module: sc033 sections — consym, minus, backtick left sections" {
         \\greet = ("Hello, " ++)
     );
     try std.testing.expectEqual(10, mod.declarations.len);
+}
+
+test "decl: H98 existential data constructor" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\data ShowBox = forall a. Show a => MkShowBox a
+    );
+    try std.testing.expectEqual(1, mod.declarations.len);
+    try std.testing.expect(mod.declarations[0] == .Data);
+
+    const data_decl = mod.declarations[0].Data;
+    try std.testing.expectEqualStrings("ShowBox", data_decl.name);
+    try std.testing.expectEqual(0, data_decl.tyvars.len);
+    try std.testing.expectEqual(1, data_decl.constructors.len);
+
+    const con = data_decl.constructors[0];
+    try std.testing.expectEqualStrings("MkShowBox", con.name);
+    try std.testing.expectEqual(1, con.ex_tyvars.len);
+    try std.testing.expectEqualStrings("a", con.ex_tyvars[0]);
+    try std.testing.expect(con.ex_context != null);
+    try std.testing.expectEqual(1, con.ex_context.?.constraints.len);
+    try std.testing.expectEqualStrings("Show", con.ex_context.?.constraints[0].class_name);
+    try std.testing.expectEqual(1, con.fields.len);
+}
+
+test "decl: GADT constructor with constraint" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\data Expr a where
+        \\  Eq :: Eq a => Expr a -> Expr a -> Expr Bool
+        \\  If :: Expr Bool -> Expr a -> Expr a -> Expr a
+    );
+    try std.testing.expectEqual(1, mod.declarations.len);
+
+    const data_decl = mod.declarations[0].Data;
+    try std.testing.expectEqual(2, data_decl.constructors.len);
+    try std.testing.expectEqualStrings("Eq", data_decl.constructors[0].name);
+    try std.testing.expect(data_decl.constructors[0].gadt_type != null);
+    try std.testing.expect(data_decl.constructors[1].gadt_type != null);
+}
+
+test "decl: GADT with existential via constraint" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\data Showable where
+        \\  MkShowable :: Show a => a -> Showable
+    );
+    try std.testing.expectEqual(1, mod.declarations.len);
+
+    const data_decl = mod.declarations[0].Data;
+    try std.testing.expectEqual(1, data_decl.constructors.len);
+    try std.testing.expectEqualStrings("MkShowable", data_decl.constructors[0].name);
+    try std.testing.expect(data_decl.constructors[0].gadt_type != null);
+}
+
+test "decl: sc015 forall types file constructs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Simple forall type signature
+    const mod1 = try parseTestModule(allocator,
+        \\module M where
+        \\identity :: forall a. a -> a
+        \\identity x = x
+    );
+    try std.testing.expectEqual(2, mod1.declarations.len);
+
+    // Forall with constraint
+    const mod2 = try parseTestModule(allocator,
+        \\module M where
+        \\showAndReturn :: forall a. Show a => a -> String
+        \\showAndReturn x = show x
+    );
+    try std.testing.expectEqual(2, mod2.declarations.len);
+
+    // Multiple constraints in type sig
+    const mod3 = try parseTestModule(allocator,
+        \\module M where
+        \\bothConstraints :: (Show a, Eq a) => a -> a -> String
+        \\bothConstraints x y = show x
+    );
+    try std.testing.expectEqual(2, mod3.declarations.len);
+
+    // All sc015 constructs together (without cons patterns which are a separate issue)
+    const mod4 = try parseTestModule(allocator,
+        \\module M where
+        \\identity :: forall a. a -> a
+        \\identity x = x
+        \\showAndReturn :: forall a. Show a => a -> String
+        \\showAndReturn x = show x
+        \\data ShowBox = forall a. Show a => MkShowBox a
+        \\bothConstraints :: (Show a, Eq a) => a -> a -> String
+        \\bothConstraints x y = show x
+    );
+    try std.testing.expectEqual(7, mod4.declarations.len);
+}
+
+test "decl: data declaration with kind-annotated type variable" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\data SafeList a (n :: Nat) where
+        \\  Nil  :: SafeList a Zero
+        \\  Cons :: a -> SafeList a n -> SafeList a (Succ n)
+    );
+    try std.testing.expectEqual(1, mod.declarations.len);
+
+    const data_decl = mod.declarations[0].Data;
+    try std.testing.expectEqualStrings("SafeList", data_decl.name);
+    try std.testing.expectEqual(2, data_decl.tyvars.len);
+    try std.testing.expectEqualStrings("a", data_decl.tyvars[0]);
+    try std.testing.expectEqualStrings("n", data_decl.tyvars[1]);
+    try std.testing.expectEqual(2, data_decl.constructors.len);
 }

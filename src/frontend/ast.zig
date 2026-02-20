@@ -132,13 +132,21 @@ pub const DataDecl = struct {
 };
 
 /// Constructor declaration
+///
+/// Supports three forms:
+///   H98 plain:       `Con t1 t2`
+///   H98 existential: `forall a. Show a => Con a`
+///   GADT:            `Con :: forall a. Show a => a -> T a`
 pub const ConDecl = struct {
     name: []const u8,
     fields: []const FieldDecl,
     doc_comment: ?[]const u8 = null,
     span: SourceSpan,
-    // GADT-style explicit type annotation: Con :: Type
-    // Simple GADT form only - full existential variables not yet supported
+    /// Existential type variables: `forall a b.` before the constructor name (H98 style)
+    ex_tyvars: []const []const u8 = &.{},
+    /// Existential context: `Show a =>` before the constructor name (H98 style)
+    ex_context: ?Context = null,
+    /// GADT-style explicit type annotation: `Con :: Type`
     gadt_type: ?Type = null,
 };
 
