@@ -379,6 +379,28 @@ pub const Lexer = struct {
             },
             '[' => {
                 _ = self.advance();
+                // Check for quasiquotation: [name| ... |]
+                const after_bracket_pos = self.pos;
+                const next = self.peek() orelse {
+                    return LocatedToken.init(.open_bracket, span_mod.SourceSpan.init(start_pos, self.currentPos()));
+                };
+                // Quasiquotation starts with an identifier followed by |
+                if (unicode.isIdStart(@intCast(next))) {
+                    // Scan the quasiquotation name
+                    _ = self.advance();
+                    while (!self.isAtEnd() and unicode.isIdContinue(@intCast(self.peek().?))) {
+                        _ = self.advance();
+                    }
+                    // Check for | after the name
+                    if (!self.isAtEnd() and self.peek().? == '|') {
+                        _ = self.advance(); // consume |
+                        // Now scan everything up to |] as raw string content
+                        return self.scanQuasiQuote(start_pos);
+                    }
+                    // Not a quasiquotation, backtrack
+                    self.pos = after_bracket_pos;
+                    return LocatedToken.init(.open_bracket, span_mod.SourceSpan.init(start_pos, self.currentPos()));
+                }
                 return LocatedToken.init(.open_bracket, span_mod.SourceSpan.init(start_pos, self.currentPos()));
             },
             ']' => {
@@ -900,6 +922,45 @@ pub const Lexer = struct {
             .{ "SP", 0x20 },  .{ "DEL", 0x7F },
         });
         return map.get(s);
+    }
+
+    /// Scan quasiquotation content: [name| ... |]
+    /// Returns the entire quasiquotation as a string literal token.
+    fn scanQuasiQuote(self: *Lexer, start_pos: SourcePos) LocatedToken {
+        var buf = std.ArrayList(u8).empty;
+        defer buf.deinit(self.allocator);
+
+        while (!self.isAtEnd()) {
+            // Check for |] end marker (but only at a position that makes sense)
+            if (self.peek() == '|') {
+                // Save current position in case we need to backtrack
+                const content_start = self.pos;
+                _ = self.advance(); // consume |
+                if (!self.isAtEnd() and self.peek() == ']') {
+                    // Found |] - end of quasiquotation
+                    _ = self.advance(); // consume ]
+                    const end_pos = self.currentPos();
+                    const str = self.allocator.dupe(u8, buf.items) catch {
+                        return LocatedToken.init(.{ .lex_error = "allocation error" }, span_mod.SourceSpan.init(start_pos, end_pos));
+                    };
+                    return LocatedToken.init(.{ .lit_string = str }, span_mod.SourceSpan.init(start_pos, end_pos));
+                }
+                // Not |], restore position and add | to content
+                self.pos = content_start;
+            }
+
+            // Append the next byte (including newlines and any character)
+            const c = self.peek().?;
+            _ = self.advance();
+            buf.append(self.allocator, c) catch {
+                return LocatedToken.init(.{ .lex_error = "allocation error" }, span_mod.SourceSpan.init(start_pos, self.currentPos()));
+            };
+        }
+
+        const end_pos = self.currentPos();
+        const msg = "unterminated quasiquotation (expected |])";
+        self.emitError(span_mod.SourceSpan.init(start_pos, end_pos), msg);
+        return LocatedToken.init(.{ .lex_error = msg }, span_mod.SourceSpan.init(start_pos, end_pos));
     }
 
     fn scanIntWithRadix(self: *Lexer, start_pos: SourcePos, radix: u8) LocatedToken {
