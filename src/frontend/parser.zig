@@ -1348,6 +1348,11 @@ pub const Parser = struct {
 
         _ = try self.expect(.equals);
         const constructor = try self.parseConDecl();
+        if (constructor.fields.len != 1) {
+            try self.emitErrorMsg(constructor.span, "A newtype constructor must have exactly one field");
+            return error.UnexpectedToken;
+        }
+
         const deriving = try self.parseDerivingClause();
 
         return .{ .Newtype = .{
@@ -4341,6 +4346,17 @@ fn parseTestModule(allocator: std.mem.Allocator, source: []const u8) !ast_mod.Mo
     return try parser.parseModule();
 }
 
+fn parseTestModuleFails(allocator: std.mem.Allocator, source: []const u8) !void {
+    var lexer = Lexer.init(allocator, source, 1);
+    var layout = LayoutProcessor.init(allocator, &lexer);
+    var diags = DiagnosticCollector.init();
+    var parser = try Parser.init(allocator, &layout, &diags);
+
+    _ = parser.parseModule() catch {};
+
+    if (!diags.hasErrors()) return error.ExpectedFailure;
+}
+
 test "decl: class declaration without context" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -4528,6 +4544,22 @@ test "decl: newtype with deriving" {
     try std.testing.expect(newtype_decl.constructor.fields[0].Plain == .Con);
     try std.testing.expectEqualStrings("Int", newtype_decl.constructor.fields[0].Plain.Con.name);
     try std.testing.expectEqual(2, newtype_decl.deriving.len);
+}
+
+test "decl: newtype fails with 0 fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try parseTestModuleFails(allocator, "module M where newtype Age = Age");
+}
+
+test "decl: newtype fails with 2 fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try parseTestModuleFails(allocator, "module M where newtype Age = Age Int String");
 }
 
 test "decl: multiple declarations in module" {
