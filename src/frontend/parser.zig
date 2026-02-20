@@ -2299,6 +2299,10 @@ pub const Parser = struct {
                 const tok = try self.advance();
                 return .{ .Var = .{ .name = tok.token.varid, .span = tok.span } };
             },
+            .underscore => {
+                const tok = try self.advance();
+                return .{ .Var = .{ .name = "_", .span = tok.span } };
+            },
             .conid => {
                 const tok = try self.advance();
                 // Check for record construction: Con { ... }
@@ -2779,9 +2783,12 @@ pub const Parser = struct {
                 if (try self.check(.arrow_left)) {
                     _ = try self.advance();
                     const action = try self.parseExpr();
-                    // Extract pattern from the expression (should be a variable)
+                    // Extract pattern from the expression (should be a variable or wildcard)
                     const binding_pat: ast_mod.Pattern = switch (expr) {
-                        .Var => |q| .{ .Var = .{ .name = q.name, .span = q.span } },
+                        .Var => |q| if (std.mem.eql(u8, q.name, "_"))
+                            .{ .Wild = q.span }
+                        else
+                            .{ .Var = .{ .name = q.name, .span = q.span } },
                         else => {
                             try self.emitErrorMsg(expr.getSpan(), "bind pattern must be a variable");
                             return error.InvalidSyntax;
@@ -2901,7 +2908,10 @@ pub const Parser = struct {
     /// InfixApp. Such cases are left for a future parser improvement.
     fn exprToPattern(self: *Parser, expr: ast_mod.Expr) ParseError!ast_mod.Pattern {
         return switch (expr) {
-            .Var => |q| .{ .Var = .{ .name = q.name, .span = q.span } },
+            .Var => |q| if (std.mem.eql(u8, q.name, "_"))
+                .{ .Wild = q.span }
+            else
+                .{ .Var = .{ .name = q.name, .span = q.span } },
             .Lit => |l| .{ .Lit = l },
             .Tuple => |exprs| blk: {
                 var pats: std.ArrayListUnmanaged(ast_mod.Pattern) = .empty;
@@ -2987,7 +2997,7 @@ pub const Parser = struct {
     fn isExprStart(self: *Parser) ParseError!bool {
         const tag = try self.peekTag();
         return switch (tag) {
-            .varid, .conid, .lit_integer, .lit_float, .lit_string, .lit_char, .open_paren, .open_bracket, .minus, .backslash, .kw_if, .kw_let, .kw_case, .kw_do => true,
+            .varid, .conid, .underscore, .lit_integer, .lit_float, .lit_string, .lit_char, .open_paren, .open_bracket, .minus, .backslash, .kw_if, .kw_let, .kw_case, .kw_do => true,
             else => false,
         };
     }
