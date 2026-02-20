@@ -30,6 +30,7 @@
 const std = @import("std");
 const naming = @import("../naming/unique.zig");
 const core = @import("../core/ir.zig");
+const cycle_detection = @import("cycle_detection.zig");
 
 pub const Name = naming.Name;
 pub const UniqueSupply = naming.UniqueSupply;
@@ -131,19 +132,9 @@ pub const HType = union(enum) {
     /// This is the core operation used by the unifier to avoid repeatedly
     /// traversing long chains.
     pub fn chase(self: HType) HType {
-        var current = self;
-        while (true) {
-            switch (current) {
-                .Meta => |mv| {
-                    if (mv.ref) |next| {
-                        current = next.*;
-                    } else {
-                        return current; // unsolved — stop
-                    }
-                },
-                else => return current,
-            }
-        }
+        return cycle_detection.chaseValue(self) catch {
+            std.debug.panic("HType.chase: infinite type cycle detected", .{});
+        };
     }
 
     // ── Predicates ─────────────────────────────────────────────────────
