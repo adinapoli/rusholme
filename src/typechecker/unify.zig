@@ -42,6 +42,7 @@
 const std = @import("std");
 const htype = @import("htype.zig");
 const span_mod = @import("../diagnostics/span.zig");
+const cycle_detection = @import("cycle_detection.zig");
 
 pub const HType = htype.HType;
 pub const MetaVar = htype.MetaVar;
@@ -218,43 +219,14 @@ pub fn unify(alloc: std.mem.Allocator, a: *HType, b: *HType) UnifyError!void {
 /// Walk a MetaVar chain to the last unsolved `Meta` node and return a pointer
 /// to it.  `node` must be a `.Meta` (possibly with solved links).
 fn tailPtr(node: *HType) *HType {
-    var cur: *HType = node;
-    while (true) {
-        switch (cur.*) {
-            .Meta => |mv| {
-                if (mv.ref) |next| {
-                    cur = next;
-                } else {
-                    return cur;
-                }
-            },
-            else => unreachable,
-        }
-    }
+    return cycle_detection.chasePtr(node) catch {
+        std.debug.panic("unify.tailPtr: infinite type cycle detected", .{});
+    };
 }
 
-/// Follow the MetaVar chain in `node` to the last unsolved `Meta`, then bind
-/// that cell to `ty` (which must be a non-Meta ground type).
-///
-/// `node` must be an `HType` whose `chase()` returned an unsolved `.Meta`.
-/// We walk the `ref` chain manually (mirroring `chase`) so that we can write
-/// through the actual pointer stored in the last solved-chain link.
 fn bindPtr(alloc: std.mem.Allocator, node: *HType, ty: HType) UnifyError!void {
-    // Walk to the last Meta node in the chain.
-    var cur: *HType = node;
-    while (true) {
-        switch (cur.*) {
-            .Meta => |mv| {
-                if (mv.ref) |next| {
-                    cur = next;
-                } else {
-                    // `cur` is the unsolved MetaVar node — bind it.
-                    return bind(cur, mv.id, ty, alloc);
-                }
-            },
-            else => unreachable, // caller guarantees chase() returned Meta
-        }
-    }
+    const end = cycle_detection.chasePtr(node) catch return UnifyError.InfiniteType;
+    return bind(end, end.Meta.id, ty, alloc);
 }
 
 /// Perform the occurs check and write the solution into the MetaVar cell at

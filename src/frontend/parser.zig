@@ -23,6 +23,8 @@ const DiagnosticCollector = diag_mod.DiagnosticCollector;
 /// Tag type for comparing tokens without caring about payloads.
 const TokenTag = std.meta.Tag(Token);
 
+const max_loop_iterations: usize = 10_000;
+
 pub const ParseError = error{
     UnexpectedToken,
     UnexpectedEOF,
@@ -380,7 +382,14 @@ pub const Parser = struct {
         _ = try self.expectOpenBrace();
         var items: std.ArrayListUnmanaged(T) = .empty;
 
+        var fuel: usize = max_loop_iterations;
         while (true) {
+            if (fuel == 0) {
+                try self.emitErrorMsg(try self.currentSpan(), "parser loop limit exceeded in layout block");
+                return error.InvalidSyntax;
+            }
+            fuel -= 1;
+
             if (try self.checkCloseBrace()) break;
             if (try self.atEnd()) break;
 
@@ -388,7 +397,14 @@ pub const Parser = struct {
             try items.append(self.allocator, item);
 
             // Consume trailing semicolons
-            while (try self.matchSemi()) {}
+            var semi_fuel: usize = max_loop_iterations;
+            while (try self.matchSemi()) {
+                if (semi_fuel == 0) {
+                    try self.emitErrorMsg(try self.currentSpan(), "parser loop limit exceeded parsing semicolons");
+                    return error.InvalidSyntax;
+                }
+                semi_fuel -= 1;
+            }
         }
 
         _ = try self.expectCloseBrace();
@@ -401,7 +417,15 @@ pub const Parser = struct {
     /// close brace, or EOF. Used for error recovery to skip past a
     /// malformed declaration and resume parsing the next one.
     pub fn synchronize(self: *Parser) !void {
+        var fuel: usize = max_loop_iterations;
         while (true) {
+            if (fuel == 0) {
+                // If we've skipped 10,000 tokens trying to synchronize, just stop
+                // to avoid hanging.
+                return;
+            }
+            fuel -= 1;
+
             const tag = try self.peekTag();
             switch (tag) {
                 .semi, .v_semi, .close_brace, .v_close_brace, .eof => return,
@@ -1514,8 +1538,7 @@ pub const Parser = struct {
                 };
                 _ = try self.expect(.backtick); // closing backtick
                 break :blk id_name;
-            } else
-                break;
+            } else break;
 
             try self.registerFixity(op_name, fixity, prec);
 
@@ -1805,9 +1828,7 @@ pub const Parser = struct {
             switch (std.meta.activeTag(tok.token)) {
                 .darrow => return true,
                 // Tokens that terminate the bare constraint scan without darrow.
-                .arrow_right, .equals, .kw_where,
-                .open_brace, .v_open_brace, .close_brace, .v_close_brace,
-                .semi, .v_semi, .eof => return false,
+                .arrow_right, .equals, .kw_where, .open_brace, .v_open_brace, .close_brace, .v_close_brace, .semi, .v_semi, .eof => return false,
                 .open_paren => {
                     // Skip balanced parens (e.g. Monad (m a) =>)
                     offset += 1;
@@ -2510,7 +2531,14 @@ pub const Parser = struct {
         if (try self.check(.open_brace) or try self.check(.v_open_brace)) {
             _ = try self.advance(); // consume { or virtual {
             var binds: std.ArrayListUnmanaged(ast_mod.Decl) = .empty;
+            var fuel: usize = max_loop_iterations;
             while (true) {
+                if (fuel == 0) {
+                    try self.emitErrorMsg(try self.currentSpan(), "parser loop limit exceeded in let block bindings");
+                    return error.InvalidSyntax;
+                }
+                fuel -= 1;
+
                 if (try self.check(.close_brace) or try self.check(.v_close_brace)) {
                     _ = try self.advance(); // consume } or virtual }
                     break;
@@ -2518,7 +2546,15 @@ pub const Parser = struct {
                 if (try self.atEnd()) break;
                 const decl = try self.parseTopDecl() orelse break;
                 try binds.append(self.allocator, decl);
-                while (try self.matchSemi()) {}
+
+                var semi_fuel: usize = max_loop_iterations;
+                while (try self.matchSemi()) {
+                    if (semi_fuel == 0) {
+                        try self.emitErrorMsg(try self.currentSpan(), "parser loop limit exceeded parsing semicolons in let block");
+                        return error.InvalidSyntax;
+                    }
+                    semi_fuel -= 1;
+                }
             }
             _ = try self.expect(.kw_in);
             const body = try self.parseExpr();
@@ -2554,7 +2590,13 @@ pub const Parser = struct {
         const first_alt = try self.parseAlt();
         try alts.append(self.allocator, first_alt);
         // matchSemi handles both explicit ';' and virtual ';' emitted by the layout rule.
+        var fuel: usize = max_loop_iterations;
         while (try self.matchSemi()) {
+            if (fuel == 0) {
+                try self.emitErrorMsg(try self.currentSpan(), "parser loop limit exceeded in case alternatives");
+                return error.InvalidSyntax;
+            }
+            fuel -= 1;
             if (try self.tryParseAlt()) |alt| {
                 try alts.append(self.allocator, alt);
             } else {
@@ -2608,9 +2650,24 @@ pub const Parser = struct {
         _ = try self.expectOpenBrace();
         var stmts: std.ArrayListUnmanaged(ast_mod.Stmt) = .empty;
 
+        var fuel: usize = max_loop_iterations;
         while (true) {
+            if (fuel == 0) {
+                try self.emitErrorMsg(try self.currentSpan(), "parser loop limit exceeded in do block");
+                return error.InvalidSyntax;
+            }
+            fuel -= 1;
+
             // Consume any leading semicolons (empty statements from layout).
-            while (try self.matchSemi()) {}
+            var semi_fuel: usize = max_loop_iterations;
+            while (try self.matchSemi()) {
+                if (semi_fuel == 0) {
+                    try self.emitErrorMsg(try self.currentSpan(), "parser loop limit exceeded in do block semicolons");
+                    return error.InvalidSyntax;
+                }
+                semi_fuel -= 1;
+            }
+
             if (try self.checkCloseBrace()) break;
             if (try self.atEnd()) break;
 
