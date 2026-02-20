@@ -683,6 +683,11 @@ pub const PrettyPrinter = struct {
                 try self.write(" :: ");
                 try self.printType(ann.type);
             },
+            .TypeApp => |ta| {
+                try self.printExpr(ta.fn_expr.*);
+                try self.write(" @");
+                try self.printType(ta.type);
+            },
             .Negate => |inner| {
                 try self.write("-");
                 try self.printExprAtom(inner.*);

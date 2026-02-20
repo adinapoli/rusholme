@@ -2280,6 +2280,23 @@ pub const Parser = struct {
             func = .{ .App = .{ .fn_expr = fn_node, .arg_expr = arg_node } };
         }
 
+        // Handle type applications: f @Int, read @Double (GHC TypeApplications extension)
+        // Multiple type applications can be chained: f @Int @Bool
+        while (try self.check(.at)) {
+            const at_tok = try self.advance();
+            if (!try self.isTypeStart()) {
+                try self.emitErrorMsg(at_tok.span, "expected type after @ in type application");
+                return error.UnexpectedToken;
+            }
+            const ty = try self.parseType();
+            const func_node = try self.allocNode(ast_mod.Expr, func);
+            func = .{ .TypeApp = .{
+                .fn_expr = func_node,
+                .type = ty,
+                .span = at_tok.span,
+            } };
+        }
+
         // Check for record update: expr { field = value, ... }
         // This can follow any expression, e.g., `point { x = 10 }` or `f point { x = 10 }`
         if (try self.check(.open_brace)) {
@@ -2303,6 +2320,10 @@ pub const Parser = struct {
             .varid => {
                 const tok = try self.advance();
                 return .{ .Var = .{ .name = tok.token.varid, .span = tok.span } };
+            },
+            .underscore => {
+                const tok = try self.advance();
+                return .{ .Var = .{ .name = "_", .span = tok.span } };
             },
             .conid => {
                 const tok = try self.advance();
@@ -2784,9 +2805,12 @@ pub const Parser = struct {
                 if (try self.check(.arrow_left)) {
                     _ = try self.advance();
                     const action = try self.parseExpr();
-                    // Extract pattern from the expression (should be a variable)
+                    // Extract pattern from the expression (should be a variable or wildcard)
                     const binding_pat: ast_mod.Pattern = switch (expr) {
-                        .Var => |q| .{ .Var = .{ .name = q.name, .span = q.span } },
+                        .Var => |q| if (std.mem.eql(u8, q.name, "_"))
+                            .{ .Wild = q.span }
+                        else
+                            .{ .Var = .{ .name = q.name, .span = q.span } },
                         else => {
                             try self.emitErrorMsg(expr.getSpan(), "bind pattern must be a variable");
                             return error.InvalidSyntax;
@@ -2906,7 +2930,10 @@ pub const Parser = struct {
     /// InfixApp. Such cases are left for a future parser improvement.
     fn exprToPattern(self: *Parser, expr: ast_mod.Expr) ParseError!ast_mod.Pattern {
         return switch (expr) {
-            .Var => |q| .{ .Var = .{ .name = q.name, .span = q.span } },
+            .Var => |q| if (std.mem.eql(u8, q.name, "_"))
+                .{ .Wild = q.span }
+            else
+                .{ .Var = .{ .name = q.name, .span = q.span } },
             .Lit => |l| .{ .Lit = l },
             .Tuple => |exprs| blk: {
                 var pats: std.ArrayListUnmanaged(ast_mod.Pattern) = .empty;
@@ -2992,7 +3019,7 @@ pub const Parser = struct {
     fn isExprStart(self: *Parser) ParseError!bool {
         const tag = try self.peekTag();
         return switch (tag) {
-            .varid, .conid, .lit_integer, .lit_float, .lit_string, .lit_char, .open_paren, .open_bracket, .minus, .backslash, .kw_if, .kw_let, .kw_case, .kw_do => true,
+            .varid, .conid, .underscore, .lit_integer, .lit_float, .lit_string, .lit_char, .open_paren, .open_bracket, .minus, .backslash, .kw_if, .kw_let, .kw_case, .kw_do => true,
             else => false,
         };
     }

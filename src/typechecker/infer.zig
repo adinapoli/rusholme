@@ -927,6 +927,18 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
             break :blk ann_ty;
         },
 
+        // ── TypeApp ───────────────────────────────────────────────────
+        //
+        // f @T is the TypeApplications extension (GHC).
+        // At the typechecker level, we simply ignore the type annotation
+        // on applications and infer the type of the function expression.
+        // The actual type application is handled during type elaboration.
+        .TypeApp => |ta| blk: {
+            _ = try astTypeToHType(ta.type, ctx); // Convert but ignore for now
+            const fn_ty = try infer(ctx, ta.fn_expr.*);
+            break :blk fn_ty;
+        },
+
         // ── Negate ────────────────────────────────────────────────────
         .Negate => |inner| blk: {
             const inner_ty = try infer(ctx, inner.*);
