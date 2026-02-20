@@ -2275,6 +2275,23 @@ pub const Parser = struct {
             func = .{ .App = .{ .fn_expr = fn_node, .arg_expr = arg_node } };
         }
 
+        // Handle type applications: f @Int, read @Double (GHC TypeApplications extension)
+        // Multiple type applications can be chained: f @Int @Bool
+        while (try self.check(.at)) {
+            const at_tok = try self.advance();
+            if (!try self.isTypeStart()) {
+                try self.emitErrorMsg(at_tok.span, "expected type after @ in type application");
+                return error.UnexpectedToken;
+            }
+            const ty = try self.parseType();
+            const func_node = try self.allocNode(ast_mod.Expr, func);
+            func = .{ .TypeApp = .{
+                .fn_expr = func_node,
+                .type = ty,
+                .span = at_tok.span,
+            } };
+        }
+
         // Check for record update: expr { field = value, ... }
         // This can follow any expression, e.g., `point { x = 10 }` or `f point { x = 10 }`
         if (try self.check(.open_brace)) {

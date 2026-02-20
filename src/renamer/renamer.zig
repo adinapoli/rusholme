@@ -298,6 +298,8 @@ pub const RExpr = union(enum) {
     EnumFromTo: struct { from: *const RExpr, to: *const RExpr, span: SourceSpan },
     EnumFromThenTo: struct { from: *const RExpr, then: *const RExpr, to: *const RExpr, span: SourceSpan },
     TypeAnn: struct { expr: *const RExpr, type: ast.Type },
+    /// Type application: f @Int (GHC TypeApplications extension)
+    TypeApp: struct { fn_expr: *const RExpr, type: ast.Type, span: SourceSpan },
     Negate: *const RExpr,
     Paren: *const RExpr,
 };
@@ -868,6 +870,11 @@ fn renameExpr(expr: ast.Expr, env: *RenameEnv) RenameError!RExpr {
             const expr_r = try env.alloc.create(RExpr);
             expr_r.* = try renameExpr(ta.expr.*, env);
             break :blk RExpr{ .TypeAnn = .{ .expr = expr_r, .type = ta.type } };
+        },
+        .TypeApp => |ta| blk: {
+            const fn_r = try env.alloc.create(RExpr);
+            fn_r.* = try renameExpr(ta.fn_expr.*, env);
+            break :blk RExpr{ .TypeApp = .{ .fn_expr = fn_r, .type = ta.type, .span = ta.span } };
         },
         .Negate => |e| blk: {
             const r = try env.alloc.create(RExpr);

@@ -295,6 +295,8 @@ pub const Expr = union(enum) {
     ListComp: struct { expr: *const Expr, qualifiers: []const Qualifier },
     /// Type annotation: 5 :: Int
     TypeAnn: struct { expr: *const Expr, type: Type },
+    /// Type application: f @Int (GHC TypeApplications extension)
+    TypeApp: struct { fn_expr: *const Expr, type: Type, span: SourceSpan },
     /// Negation: -x
     Negate: *const Expr,
     /// Parenthesized expression: (x + y)
@@ -325,6 +327,7 @@ pub const Expr = union(enum) {
             .EnumFromThenTo => |e| e.span,
             .ListComp => |l| l.expr.getSpan(),
             .TypeAnn => |a| a.expr.getSpan(),
+            .TypeApp => |a| a.fn_expr.getSpan().merge(a.span),
             .Negate, .Paren => |e| e.getSpan(),
             .RecordCon => |r| r.con.span,
             .RecordUpdate, .Field => unreachable,
