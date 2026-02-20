@@ -56,6 +56,23 @@ pub const Parser = struct {
     /// Default fixity for operators without a declaration (Haskell 2010 §4.4.2).
     const default_fixity = ast_mod.FixityInfo{ .precedence = 9, .fixity = .InfixL };
 
+    /// Returns true if the token tag represents an operator.
+    pub fn isOpTag(tag: TokenTag) bool {
+        return tag == .varsym or tag == .consym or tag == .bang or tag == .dot or tag == .minus;
+    }
+
+    /// Extracts the operator name string from a token representing an operator.
+    pub fn getOpName(tok: Token) []const u8 {
+        return switch (tok) {
+            .varsym => |s| s,
+            .consym => |s| s,
+            .bang => "!",
+            .dot => ".",
+            .minus => "-",
+            else => unreachable,
+        };
+    }
+
     pub fn init(
         allocator: std.mem.Allocator,
         layout: *LayoutProcessor,
@@ -675,12 +692,11 @@ pub const Parser = struct {
             .varid => try self.parseValueDecl(),
             .open_paren => try self.parseValueDecl(),
             // Bang pattern binding: !y = expr (pattern binding with strictness)
+            .bang => {
+                return try self.parsePatBindDecl();
+            },
             .varsym => {
                 const tok = try self.peek();
-                if (std.mem.eql(u8, tok.token.varsym, "!")) {
-                    // This is a pattern binding with a bang pattern
-                    return try self.parsePatBindDecl();
-                }
                 try self.emitErrorMsg(tok.span, "expected declaration");
                 return error.UnexpectedToken;
             },
@@ -720,8 +736,8 @@ pub const Parser = struct {
         // Haskell 2010 §4.4.2: funlhs → ( op ) apat*
         if (try self.check(.open_paren)) {
             const tok1 = try self.peekAt(1);
-            const is_op = std.meta.activeTag(tok1.token) == .varsym or
-                std.meta.activeTag(tok1.token) == .consym;
+            const tag1 = std.meta.activeTag(tok1.token);
+            const is_op = Parser.isOpTag(tag1);
             if (is_op) {
                 const tok2 = try self.peekAt(2);
                 if (std.meta.activeTag(tok2.token) == .close_paren) {
@@ -729,11 +745,7 @@ pub const Parser = struct {
                     _ = try self.advance(); // (
                     const op_tok = try self.advance(); // operator
                     _ = try self.advance(); // )
-                    const op_name = switch (std.meta.activeTag(op_tok.token)) {
-                        .varsym => op_tok.token.varsym,
-                        .consym => op_tok.token.consym,
-                        else => unreachable,
-                    };
+                    const op_name = Parser.getOpName(op_tok.token);
 
                     // Type signature: ( op ) :: type
                     if (try self.check(.dcolon)) {
@@ -790,9 +802,9 @@ pub const Parser = struct {
         // Detected by: varid already consumed, next token is backtick, varsym, or consym.
         const next_for_infix = try self.peek();
         const next_tag = std.meta.activeTag(next_for_infix.token);
-        if (next_tag == .backtick or next_tag == .varsym or next_tag == .consym) {
+        if (next_tag == .backtick or Parser.isOpTag(next_tag)) {
             // Special case: "!" is a bang pattern, not an infix operator
-            if (next_tag == .varsym and std.mem.eql(u8, next_for_infix.token.varsym, "!")) {
+            if (next_tag == .bang) {
                 // This is a strict argument pattern: foo !x = ..., not infix
                 // Fall through to the regular function binding case below
             } else {
@@ -827,6 +839,18 @@ pub const Parser = struct {
                     .consym => inner: {
                         _ = try self.advance();
                         break :inner next_for_infix.token.consym;
+                    },
+                    .bang => inner: {
+                        _ = try self.advance();
+                        break :inner "!";
+                    },
+                    .dot => inner: {
+                        _ = try self.advance();
+                        break :inner ".";
+                    },
+                    .minus => inner: {
+                        _ = try self.advance();
+                        break :inner "-";
                     },
                     else => unreachable,
                 };
@@ -1035,10 +1059,10 @@ pub const Parser = struct {
     fn isInfixTypeConstructor(self: *Parser) ParseError!bool {
         if (!try self.check(.varid)) return false;
 
-        // Check if followed by (varsym | consym)
+        // Check if followed by an operator token
         const tok1 = try self.peekAt(1);
         const tag1 = std.meta.activeTag(tok1.token);
-        if (tag1 != .varsym and tag1 != .consym) return false;
+        if (!Parser.isOpTag(tag1)) return false;
 
         // Check if followed by another varid
         const tok2 = try self.peekAt(2);
@@ -1052,11 +1076,7 @@ pub const Parser = struct {
 
         // Expect varsym or consym (the constructor name)
         const con_tok = try self.advance();
-        const con_name = switch (con_tok.token) {
-            .varsym => |s| s,
-            .consym => |c| c,
-            else => unreachable, // Checked by isInfixTypeConstructor
-        };
+        const con_name: []const u8 = Parser.getOpName(con_tok.token); // Checked by isInfixTypeConstructor
 
         // Expect the second type variable
         const second_tok = try self.expect(.varid);
@@ -1245,12 +1265,9 @@ pub const Parser = struct {
             // Support strict field annotations: !Type
             while (true) {
                 var strict = false;
-                if (try self.check(.varsym)) {
-                    const tok = try self.peek();
-                    if (std.mem.eql(u8, tok.token.varsym, "!")) {
-                        _ = try self.advance(); // consume "!"
-                        strict = true;
-                    }
+                if (try self.check(.bang)) {
+                    _ = try self.advance(); // consume "!"
+                    strict = true;
                 }
                 const ty = try self.tryParseAtomicType() orelse {
                     if (strict) {
@@ -1426,13 +1443,13 @@ pub const Parser = struct {
                 // Handle parenthesized operator name: (==) :: …
                 const item_name: []const u8 = if (try self.check(.open_paren)) blk: {
                     const tok1 = try self.peekAt(1);
-                    if (std.meta.activeTag(tok1.token) == .varsym) {
+                    if (Parser.isOpTag(std.meta.activeTag(tok1.token))) {
                         const tok2 = try self.peekAt(2);
                         if (std.meta.activeTag(tok2.token) == .close_paren) {
                             _ = try self.advance(); // (
                             const op_tok = try self.advance(); // operator symbol
                             _ = try self.advance(); // )
-                            break :blk op_tok.token.varsym;
+                            break :blk Parser.getOpName(op_tok.token);
                         }
                     }
                     // Not an operator — unexpected open paren in class body.
@@ -1592,10 +1609,8 @@ pub const Parser = struct {
         // identifiers (varid/conid inside backticks).
         while (true) {
             const tag = try self.peekTag();
-            const op_name: []const u8 = if (tag == .varsym)
-                (try self.advance()).token.varsym
-            else if (tag == .consym)
-                (try self.advance()).token.consym
+            const op_name: []const u8 = if (Parser.isOpTag(tag))
+                Parser.getOpName((try self.advance()).token)
             else if (tag == .varid)
                 (try self.advance()).token.varid
             else if (tag == .backtick) blk: {
@@ -1778,12 +1793,13 @@ pub const Parser = struct {
             try tyvars.append(self.allocator, tv.token.varid);
         }
 
-        // Expect dot (lexed as varsym)
-        const dot_tok = try self.expect(.varsym);
-        if (!std.mem.eql(u8, dot_tok.token.varsym, ".")) {
-            try self.emitErrorMsg(dot_tok.span, "expected '.' after type variables in forall quantification");
-            return error.UnexpectedToken;
-        }
+        // Expect dot
+        _ = self.expect(.dot) catch |err| {
+            if (err == error.UnexpectedToken) {
+                try self.emitErrorMsg(self.last_span, "expected '.' after type variables in forall quantification");
+            }
+            return err;
+        };
 
         // Parse optional context (can be parenthesized or single)
         var context: ?ast_mod.Context = null;
@@ -2191,10 +2207,9 @@ pub const Parser = struct {
         while (true) {
             const tag = try self.peekTag();
 
-            const is_sym = (tag == .varsym or tag == .consym);
-            const is_minus = (tag == .minus);
+            const is_op = Parser.isOpTag(tag);
             const is_backtick = (tag == .backtick);
-            if (!is_sym and !is_minus and !is_backtick) break;
+            if (!is_op and !is_backtick) break;
 
             const op_tok: LocatedToken = try self.peek();
             const op_name: []const u8 = if (is_backtick) blk: {
@@ -2207,13 +2222,7 @@ pub const Parser = struct {
                 const close_tok = try self.peekAt(2);
                 if (std.meta.activeTag(close_tok.token) != .backtick) break;
                 break :blk id_name;
-            } else if (is_minus)
-                "-"
-            else switch (op_tok.token) {
-                .varsym => |s| s,
-                .consym => |c| c,
-                else => unreachable,
-            };
+            } else Parser.getOpName(op_tok.token);
 
             const info = self.getFixity(op_name) orelse default_fixity;
             if (info.precedence < min_prec) break;
@@ -3026,11 +3035,7 @@ pub const Parser = struct {
         // Look for operator symbols
         if (self.isAtomPattern(pat) and try self.isInfixOp()) {
             const tok = try self.advance();
-            const op_name = switch (tok.token) {
-                .varsym => |s| s,
-                .consym => |c| c,
-                else => unreachable,
-            };
+            const op_name = Parser.getOpName(tok.token);
             const right_pat = try self.parsePattern();
             return .{ .InfixCon = .{
                 .left = try self.allocNode(ast_mod.Pattern, pat),
@@ -3054,12 +3059,7 @@ pub const Parser = struct {
     fn isPatternStart(self: *Parser) ParseError!bool {
         const tag = try self.peekTag();
         return switch (tag) {
-            .varid, .conid, .underscore, .lit_integer, .lit_char, .lit_string, .minus, .open_paren, .open_bracket => true,
-            .varsym => {
-                // Only "!" (bang pattern) starts a pattern, not other operators
-                const tok = try self.peek();
-                return std.mem.eql(u8, tok.token.varsym, "!");
-            },
+            .varid, .conid, .underscore, .lit_integer, .lit_char, .lit_string, .minus, .open_paren, .open_bracket, .bang => true,
             else => false,
         };
     }
@@ -3067,7 +3067,7 @@ pub const Parser = struct {
     /// Check if current is an infix operator (varsym or consym).
     fn isInfixOp(self: *Parser) ParseError!bool {
         const tag = try self.peekTag();
-        return tag == .varsym or tag == .consym;
+        return Parser.isOpTag(tag);
     }
 
     /// Check if a pattern is an "atom" pattern (can appear on left of infix op).
@@ -3083,16 +3083,13 @@ pub const Parser = struct {
         const start = try self.currentSpan();
 
         // Handle bang pattern: !x, !(Just y) (GHC extension - strictness annotation)
-        if (try self.check(.varsym)) {
-            const tok = try self.peek();
-            if (std.mem.eql(u8, tok.token.varsym, "!")) {
-                _ = try self.advance(); // consume "!"
-                const pat = try self.parseAtomicPattern();
-                return .{ .Bang = .{
-                    .pat = try self.allocNode(ast_mod.Pattern, pat),
-                    .span = start.merge(pat.getSpan()),
-                } };
-            }
+        if (try self.check(.bang)) {
+            _ = try self.advance(); // consume "!"
+            const pat = try self.parseAtomicPattern();
+            return .{ .Bang = .{
+                .pat = try self.allocNode(ast_mod.Pattern, pat),
+                .span = start.merge(pat.getSpan()),
+            } };
         }
 
         const tag = try self.peekTag();
@@ -4922,4 +4919,32 @@ test "decl: data declaration with kind-annotated type variable" {
     try std.testing.expectEqualStrings("a", data_decl.tyvars[0]);
     try std.testing.expectEqualStrings("n", data_decl.tyvars[1]);
     try std.testing.expectEqual(2, data_decl.constructors.len);
+}
+
+test "decl: bang pattern on function argument" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const decls = (try parseTestModule(arena.allocator(),
+        \\module Test where
+        \\f !x = x
+    )).declarations;
+    try std.testing.expect(decls.len == 1);
+    const decl = decls[0];
+    try std.testing.expect(decl == .FunBind);
+    try std.testing.expectEqualStrings("f", decl.FunBind.name);
+    try std.testing.expect(decl.FunBind.equations[0].patterns[0] == .Bang);
+    try std.testing.expect(decl.FunBind.equations[0].patterns[0].Bang.pat.* == .Var);
+}
+
+test "decl: bang pattern in pattern binding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const decls = (try parseTestModule(arena.allocator(),
+        \\module Test where
+        \\!x = 42
+    )).declarations;
+    try std.testing.expect(decls.len == 1);
+    const decl = decls[0];
+    try std.testing.expect(decl == .PatBind);
+    try std.testing.expect(decl.PatBind.pattern == .Bang);
 }
