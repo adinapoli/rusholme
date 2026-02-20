@@ -64,6 +64,7 @@ pub const Token = union(enum) {
     kw_deriving,
     kw_default,
     kw_foreign,
+    kw_LANGUAGE,
     kw_forall,
     kw_infixl,
     kw_infixr,
@@ -90,6 +91,10 @@ pub const Token = union(enum) {
     open_brace,
     /// Explicit close brace: }
     close_brace,
+    /// {-# (pragma open)
+    pragma_open,
+    /// #-} (pragma close)
+    pragma_close,
     /// Explicit semicolon: ;
     semi,
 
@@ -243,6 +248,7 @@ pub const Token = union(enum) {
             .{ "deriving", .kw_deriving },
             .{ "default", .kw_default },
             .{ "foreign", .kw_foreign },
+            .{ "LANGUAGE", .kw_LANGUAGE },
             .{ "forall", .kw_forall },
             .{ "infixl", .kw_infixl },
             .{ "infixr", .kw_infixr },
@@ -276,6 +282,7 @@ pub const Token = union(enum) {
             .kw_deriving => try w.writeAll("deriving"),
             .kw_default => try w.writeAll("default"),
             .kw_foreign => try w.writeAll("foreign"),
+            .kw_LANGUAGE => try w.writeAll("LANGUAGE"),
             .kw_forall => try w.writeAll("forall"),
             .kw_infixl => try w.writeAll("infixl"),
             .kw_infixr => try w.writeAll("infixr"),
@@ -296,6 +303,8 @@ pub const Token = union(enum) {
             // Layout tokens (explicit)
             .open_brace => try w.writeAll("{"),
             .close_brace => try w.writeAll("}"),
+            .pragma_open => try w.writeAll("{-#"),
+            .pragma_close => try w.writeAll("#-}"),
             .semi => try w.writeAll(";"),
 
             // Layout tokens (virtual)
@@ -417,10 +426,38 @@ pub const Lexer = struct {
             },
             '{' => {
                 _ = self.advance();
+                // Check for pragma open: {-#
+                const next1 = self.peek() orelse {
+                    return LocatedToken.init(.open_brace, span_mod.SourceSpan.init(start_pos, self.currentPos()));
+                };
+                if (next1 == '-') {
+                    const next2 = self.peekNext() orelse {
+                        return LocatedToken.init(.open_brace, span_mod.SourceSpan.init(start_pos, self.currentPos()));
+                    };
+                    if (next2 == '#') {
+                        _ = self.advance(); // consume -
+                        _ = self.advance(); // consume #
+                        return LocatedToken.init(.pragma_open, span_mod.SourceSpan.init(start_pos, self.currentPos()));
+                    }
+                }
                 return LocatedToken.init(.open_brace, span_mod.SourceSpan.init(start_pos, self.currentPos()));
             },
             '}' => {
                 _ = self.advance();
+                // Check for pragma close: #-}
+                const next1 = self.peek() orelse {
+                    return LocatedToken.init(.close_brace, span_mod.SourceSpan.init(start_pos, self.currentPos()));
+                };
+                if (next1 == '-') {
+                    const next2 = self.peekNext() orelse {
+                        return LocatedToken.init(.close_brace, span_mod.SourceSpan.init(start_pos, self.currentPos()));
+                    };
+                    if (next2 == '}') {
+                        _ = self.advance(); // consume -
+                        _ = self.advance(); // consume }
+                        return LocatedToken.init(.pragma_close, span_mod.SourceSpan.init(start_pos, self.currentPos()));
+                    }
+                }
                 return LocatedToken.init(.close_brace, span_mod.SourceSpan.init(start_pos, self.currentPos()));
             },
             '`' => {
