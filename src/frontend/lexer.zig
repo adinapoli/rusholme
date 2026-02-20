@@ -138,6 +138,10 @@ pub const Token = union(enum) {
     minus,
     /// ` (backtick, used for infix function application: x `div` y)
     backtick,
+    /// ! (bang, used for strictness annotations / bang patterns)
+    bang,
+    /// . (dot, used for function composition / record field access)
+    dot,
 
     // ── Other ──────────────────────────────────────────────────────────
     /// End of file
@@ -318,6 +322,8 @@ pub const Token = union(enum) {
             .underscore => try w.writeAll("_"),
             .minus => try w.writeAll("-"),
             .backtick => try w.writeAll("`"),
+            .bang => try w.writeAll("!"),
+            .dot => try w.writeAll("."),
 
             // Other
             .eof => try w.writeAll("<eof>"),
@@ -665,6 +671,8 @@ pub const Lexer = struct {
             .{ "~", .tilde },
             .{ "=>", .darrow },
             .{ "-", .minus },
+            .{ "!", .bang },
+            .{ ".", .dot },
         });
         return map.get(s);
     }
@@ -1429,7 +1437,7 @@ test "Lexer: Operators and Comments" {
     var lexer = Lexer.init(std.testing.allocator, source, 1);
 
     try std.testing.expectEqualStrings("f", lexer.nextToken().token.varid);
-    try std.testing.expectEqualStrings(".", lexer.nextToken().token.varsym);
+    try std.testing.expect(std.meta.activeTag(lexer.nextToken().token) == .dot);
     try std.testing.expectEqualStrings("g", lexer.nextToken().token.varid);
     try std.testing.expectEqualStrings("x", lexer.nextToken().token.varid);
     try std.testing.expectEqualStrings(">>=", lexer.nextToken().token.varsym);
