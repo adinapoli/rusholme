@@ -141,6 +141,8 @@
 | [#230](https://github.com/adinapoli/rusholme/issues/230) | parser: fix guarded case alternatives (\| guard -> expr uses wrong arrow) | [#202](https://github.com/adinapoli/rusholme/issues/202) | :green_circle: |
 | [#212](https://github.com/adinapoli/rusholme/issues/212) | lexer+ast: replace i64 integer literals with arbitrary-precision representation | [#85](https://github.com/adinapoli/rusholme/issues/85), [#27](https://github.com/adinapoli/rusholme/issues/27) | :white_circle: |
 | [#232](https://github.com/adinapoli/rusholme/issues/232) | pattern guards: AST and parser incomplete for pat <- expr in guards | [#200](https://github.com/adinapoli/rusholme/issues/200) | :green_circle: |
+| [#252](https://github.com/adinapoli/rusholme/issues/252) | parser: Support TypeApplications extension in expressions (e @Type) | [#30](https://github.com/adinapoli/rusholme/issues/30), [#32](https://github.com/adinapoli/rusholme/issues/32) | :white_circle: |
+| [#250](https://github.com/adinapoli/rusholme/issues/250) | parser: support wildcard patterns in do notation bindings (_ <- expr) | [#30](https://github.com/adinapoli/rusholme/issues/30), [#31](https://github.com/adinapoli/rusholme/issues/31), [#252](https://github.com/adinapoli/rusholme/issues/252) | :white_circle: |
 
 ### CLI
 
