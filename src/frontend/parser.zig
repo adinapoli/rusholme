@@ -1214,12 +1214,13 @@ pub const Parser = struct {
                 const tv = try self.advance();
                 try ex_tyvars.append(self.allocator, tv.token.varid);
             }
-            // Expect dot (lexed as varsym ".")
-            const dot_tok = try self.expect(.varsym);
-            if (!std.mem.eql(u8, dot_tok.token.varsym, ".")) {
-                try self.emitErrorMsg(dot_tok.span, "expected '.' after type variables in existential quantification");
-                return error.UnexpectedToken;
-            }
+            // Expect dot
+            _ = self.expect(.dot) catch |err| {
+                if (err == error.UnexpectedToken) {
+                    try self.emitErrorMsg(self.last_span, "expected '.' after type variables in existential quantification");
+                }
+                return err;
+            };
             // Optional context after forall: Show a =>
             if (try self.parseContextOptional()) |ctx| {
                 ex_context = ctx;
