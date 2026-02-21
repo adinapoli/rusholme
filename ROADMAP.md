@@ -129,7 +129,7 @@
 | [#140](https://github.com/adinapoli/rusholme/issues/140) | Implement parser: overloaded literals | [#29](https://github.com/adinapoli/rusholme/issues/29), [#32](https://github.com/adinapoli/rusholme/issues/32) | :white_circle: |
 | [#192](https://github.com/adinapoli/rusholme/issues/192) | parser: implement arithmetic sequences ([e..], [e,e..], [e..e], [e,e..e]) | [#29](https://github.com/adinapoli/rusholme/issues/29), [#133](https://github.com/adinapoli/rusholme/issues/133) | :green_circle: |
 | [#193](https://github.com/adinapoli/rusholme/issues/193) | lexer+parser: implement backtick infix operator syntax (`f`) | [#25](https://github.com/adinapoli/rusholme/issues/25), [#30](https://github.com/adinapoli/rusholme/issues/30) | :green_circle: |
-| [#218](https://github.com/adinapoli/rusholme/issues/218) | Parser: backtick left sections require atomic LHS | [#193](https://github.com/adinapoli/rusholme/issues/193) | :white_circle: |
+| [#218](https://github.com/adinapoli/rusholme/issues/218) | Parser: backtick left sections require atomic LHS | [#193](https://github.com/adinapoli/rusholme/issues/193) | :yellow_circle: |
 | [#194](https://github.com/adinapoli/rusholme/issues/194) | parser: implement let-without-in as a do-statement binding | [#30](https://github.com/adinapoli/rusholme/issues/30) | :green_circle: |
 | [#195](https://github.com/adinapoli/rusholme/issues/195) | parser: implement superclass context in class declarations (class (Eq a) => ...) | [#33](https://github.com/adinapoli/rusholme/issues/33) | :green_circle: |
 | [#196](https://github.com/adinapoli/rusholme/issues/196) | parser: implement as-patterns (x@pat) in case alternatives and function args | [#31](https://github.com/adinapoli/rusholme/issues/31) | :green_circle: |
