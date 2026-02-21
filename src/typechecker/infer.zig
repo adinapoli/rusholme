@@ -750,16 +750,74 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
             var sigs = try collectLetSigs(ctx, let_blk.binds);
             defer sigs.deinit(ctx.alloc);
 
-            // Infer each binding, passing the signature if available
+            // Snapshot env free metas before any binding metas are added.
+            // All bindings in a let group are mutually recursive peers, so they share
+            // this one snapshot for the active-variables check during generalisation.
+            var env_metas = std.AutoHashMapUnmanaged(u32, void){};
+            defer env_metas.deinit(ctx.alloc);
+            try ctx.env.collectFreeMetas(&env_metas, ctx.alloc);
+
+            // Pass 1: allocate fresh meta nodes for all binders in the let group.
+            // This enables mutual recursion - each binding can reference the others
+            // through their pre-allocated meta nodes.
+            var let_metas = std.AutoHashMapUnmanaged(naming_mod.Unique, *HType){};
+            defer let_metas.deinit(ctx.alloc);
             for (let_blk.binds) |decl| {
-                const sig: ?*const TypeSigEntry = blk2: {
-                    if (decl == .FunBind) {
-                        break :blk2 sigs.getPtr(decl.FunBind.name.unique);
-                    }
-                    break :blk2 null;
-                };
-                try inferLetDecl(ctx, decl, sig);
+                switch (decl) {
+                    .FunBind => |fb| {
+                        const node = try ctx.freshMeta();
+                        try ctx.env.bindMono(fb.name, node.*);
+                        try let_metas.put(ctx.alloc, fb.name.unique, node);
+                    },
+                    .PatBind => |pb| try assignPatMetas(ctx, pb.pattern, &let_metas),
+                    .TypeSig => {},
+                    .ClassDecl => {},
+                    .InstanceDecl => {},
+                }
             }
+
+            // Pass 2: infer each binding body, unify through the meta nodes, generalise.
+            for (let_blk.binds) |decl| {
+                switch (decl) {
+                    .FunBind => |fb| {
+                        const fun_node = let_metas.get(fb.name.unique) orelse continue;
+                        const sig_entry = sigs.get(fb.name.unique);
+
+                        for (fb.equations) |eq| {
+                            const eq_ty = try inferMatch(ctx, eq);
+
+                            if (sig_entry) |s| {
+                                // If there's a signature, unify the inferred type against it.
+                                try ctx.unifyNow(eq_ty, s.ty, fb.span);
+                            } else {
+                                // Otherwise, unify against the fresh meta node.
+                                try ctx.unifyNow(fun_node, eq_ty, fb.span);
+                            }
+                        }
+
+                        if (sig_entry) |_| {
+                            // For bindings with signatures, create a scheme from the signature type.
+                            // The signature is the authority, not the inferred type.
+                            // We need to generalise the signature type (which contains fresh metas).
+                            const scheme = try generalisePtr(ctx, sig_entry.?.ty, &env_metas);
+                            try ctx.env.bind(fb.name, scheme);
+                        } else {
+                            // For bindings without signatures, generalise the inferred type.
+                            const scheme = try generalisePtr(ctx, fun_node, &env_metas);
+                            try ctx.env.bind(fb.name, scheme);
+                        }
+                    },
+                    .PatBind => |pb| {
+                        const rhs_ty = try inferRhs(ctx, pb.rhs);
+                        const pat_ty = try inferPat(ctx, pb.pattern);
+                        try ctx.unifyNow(rhs_ty, pat_ty, pb.span);
+                    },
+                    .TypeSig => {},
+                    .ClassDecl => {},
+                    .InstanceDecl => {},
+                }
+            }
+
             break :blk try infer(ctx, let_blk.body.*);
         },
 
