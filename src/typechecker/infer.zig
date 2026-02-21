@@ -509,6 +509,46 @@ const TypeSigEntry = struct {
     loc: SourceSpan, // For error reporting
 };
 
+// ── Span helpers ─────────────────────────────────────────────────────
+
+/// Helper to extract a source span from an RExpr.
+/// Returns syntheticSpan() if the expression variant doesn't have a simple span.
+fn getExprSpan(expr: RExpr) SourceSpan {
+    return switch (expr) {
+        .Var => |v| v.span,
+        .Lit => |l| l.getSpan(),
+        .EnumFrom => |e| e.span,
+        .EnumFromThen => |e| e.span,
+        .EnumFromTo => |e| e.span,
+        .EnumFromThenTo => |e| e.span,
+        .TypeApp => |tapp| tapp.span,
+        .InfixApp => |ia| ia.op_span,
+        .LeftSection => |ls| ls.op_span,
+        .RightSection => |rs| rs.op_span,
+        else => syntheticSpan(),
+    };
+}
+
+/// Helper to extract a source span from an RPat.
+/// Returns syntheticSpan() if the pattern variant doesn't have a simple span.
+fn getPatSpan(pat: *const RPat) SourceSpan {
+    return switch (pat.*) {
+        .Var => |v| v.span,
+        .Wild => |w| w,
+        .Con => |c| c.con_span,
+        .Lit => |l| l.getSpan(),
+        .AsPat => |ap| ap.span,
+        .RecPat => |rp| rp.con_span,
+        .InfixCon => |ic| ic.con_span,
+        else => syntheticSpan(),
+    };
+}
+
+/// Check if a span is valid (not synthetic).
+fn isValidSpan(span: SourceSpan) bool {
+    return span.start.line > 0 or span.end.line > 0;
+}
+
 fn knownTypeByName(name: []const u8) ?HType {
     if (std.mem.eql(u8, name, "Int")) return HType{ .Con = .{ .name = Known.Type.Int, .args = &.{} } };
     if (std.mem.eql(u8, name, "Integer")) return HType{ .Con = .{ .name = Known.Type.Integer, .args = &.{} } };
@@ -607,7 +647,16 @@ pub fn inferPat(ctx: *InferCtx, pat: RPat) std.mem.Allocator.Error!*HType {
             const elem_ty = try ctx.freshMeta();
             for (pats) |p| {
                 const pt = try inferPat(ctx, p);
-                try ctx.unifyNow(pt, elem_ty, syntheticSpan());
+                // Get span from pattern for better error messages
+                const pat_span = switch (p) {
+                    .Var => |v| v.span,
+                    .Wild => |w| w,
+                    .Con => |c| c.con_span,
+                    .Lit => |lit| lit.getSpan(),
+                    .AsPat => |ap| ap.span,
+                    else => syntheticSpan(), // Fallback for nested patterns
+                };
+                try ctx.unifyNow(pt, elem_ty, pat_span);
             }
             const args = try ctx.alloc.dupe(HType, &.{elem_ty.*});
             break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
@@ -625,7 +674,16 @@ pub fn inferPat(ctx: *InferCtx, pat: RPat) std.mem.Allocator.Error!*HType {
         .Negate => |inner| blk: {
             const inner_ty = try inferPat(ctx, inner.*);
             const int_node = try ctx.alloc_ty(intTy());
-            try ctx.unifyNow(inner_ty, int_node, syntheticSpan());
+            // Get span from inner pattern
+            const inner_span = switch (inner.*) {
+                .Var => |v| v.span,
+                .Wild => |w| w,
+                .Con => |c| c.con_span,
+                .Lit => |lit| lit.getSpan(),
+                .AsPat => |ap| ap.span,
+                else => syntheticSpan(),
+            };
+            try ctx.unifyNow(inner_ty, int_node, inner_span);
             break :blk int_node;
         },
         .Paren => |inner| inferPat(ctx, inner.*),
@@ -701,7 +759,18 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
             const arg_ty = try infer(ctx, a.arg_expr.*);
             const res_ty = try ctx.freshMeta();
             const expected_fn = try ctx.alloc_ty(HType{ .Fun = .{ .arg = arg_ty, .res = res_ty } });
-            try ctx.unifyNow(fn_ty, expected_fn, syntheticSpan());
+            // Use span from function expression for better error messages
+            const app_span = switch (a.fn_expr.*) {
+                .Var => |v| v.span,
+                .Lit => |l| l.getSpan(),
+                .EnumFrom => |e| e.span,
+                .EnumFromThen => |e| e.span,
+                .EnumFromTo => |e| e.span,
+                .EnumFromThenTo => |e| e.span,
+                .TypeApp => |ta| ta.span,
+                else => syntheticSpan(),
+            };
+            try ctx.unifyNow(fn_ty, expected_fn, app_span);
             break :blk res_ty;
         },
 
@@ -831,8 +900,29 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
             const then_ty = try infer(ctx, i.then_expr.*);
             const else_ty = try infer(ctx, i.else_expr.*);
             const bool_node = try ctx.alloc_ty(boolTy());
-            try ctx.unifyNow(cond_ty, bool_node, syntheticSpan());
-            try ctx.unifyNow(then_ty, else_ty, syntheticSpan());
+            // Use condition's span for bool check, then_expr span for branch compatibility
+            const cond_span = switch (i.condition.*) {
+                .Var => |v| v.span,
+                .Lit => |l| l.getSpan(),
+                .EnumFrom => |e| e.span,
+                .EnumFromThen => |e| e.span,
+                .EnumFromTo => |e| e.span,
+                .EnumFromThenTo => |e| e.span,
+                .TypeApp => |ta| ta.span,
+                else => syntheticSpan(), // Fallback for expressions without simple span access
+            };
+            const then_span = switch (i.then_expr.*) {
+                .Var => |v| v.span,
+                .Lit => |l| l.getSpan(),
+                .EnumFrom => |e| e.span,
+                .EnumFromThen => |e| e.span,
+                .EnumFromTo => |e| e.span,
+                .EnumFromThenTo => |e| e.span,
+                .TypeApp => |ta| ta.span,
+                else => syntheticSpan(),
+            };
+            try ctx.unifyNow(cond_ty, bool_node, cond_span);
+            try ctx.unifyNow(then_ty, else_ty, then_span);
             break :blk then_ty;
         },
 
@@ -921,7 +1011,18 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
             const elem_ty = try ctx.freshMeta();
             for (elems) |e| {
                 const et = try infer(ctx, e);
-                try ctx.unifyNow(et, elem_ty, syntheticSpan());
+                // Get span from the element for better error messages
+                const elem_span = switch (e) {
+                    .Var => |v| v.span,
+                    .Lit => |l| l.getSpan(),
+                    .EnumFrom => |ef| ef.span,
+                    .EnumFromThen => |ef| ef.span,
+                    .EnumFromTo => |ef| ef.span,
+                    .EnumFromThenTo => |ef| ef.span,
+                    .TypeApp => |ta| ta.span,
+                    else => syntheticSpan(),
+                };
+                try ctx.unifyNow(et, elem_ty, elem_span);
             }
             const args = try ctx.alloc.dupe(HType, &.{elem_ty.*});
             break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
@@ -993,7 +1094,18 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
         .TypeAnn => |ta| blk: {
             const ann_ty = try astTypeToHType(ta.type, ctx);
             const expr_ty = try infer(ctx, ta.expr.*);
-            try ctx.unifyNow(expr_ty, ann_ty, syntheticSpan());
+            // Use span from expression for better error messages
+            const expr_span = switch (ta.expr.*) {
+                .Var => |v| v.span,
+                .Lit => |l| l.getSpan(),
+                .EnumFrom => |e| e.span,
+                .EnumFromThen => |e| e.span,
+                .EnumFromTo => |e| e.span,
+                .EnumFromThenTo => |e| e.span,
+                .TypeApp => |tapp| tapp.span,
+                else => syntheticSpan(),
+            };
+            try ctx.unifyNow(expr_ty, ann_ty, expr_span);
             break :blk ann_ty;
         },
 
@@ -1013,7 +1125,18 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
         .Negate => |inner| blk: {
             const inner_ty = try infer(ctx, inner.*);
             const int_node = try ctx.alloc_ty(intTy());
-            try ctx.unifyNow(inner_ty, int_node, syntheticSpan());
+            // Use span from inner expression for better error messages
+            const neg_span = switch (inner.*) {
+                .Var => |v| v.span,
+                .Lit => |l| l.getSpan(),
+                .EnumFrom => |e| e.span,
+                .EnumFromThen => |e| e.span,
+                .EnumFromTo => |e| e.span,
+                .EnumFromThenTo => |e| e.span,
+                .TypeApp => |ta| ta.span,
+                else => syntheticSpan(),
+            };
+            try ctx.unifyNow(inner_ty, int_node, neg_span);
             break :blk int_node;
         },
 
@@ -1031,14 +1154,14 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
         .EnumFromThen => |e| blk: {
             const from_ty = try infer(ctx, e.from.*);
             const then_ty = try infer(ctx, e.then.*);
-            try ctx.unifyNow(from_ty, then_ty, syntheticSpan());
+            try ctx.unifyNow(from_ty, then_ty, e.span);
             const args = try ctx.alloc.dupe(HType, &.{from_ty.*});
             break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
         },
         .EnumFromTo => |e| blk: {
             const from_ty = try infer(ctx, e.from.*);
             const to_ty = try infer(ctx, e.to.*);
-            try ctx.unifyNow(from_ty, to_ty, syntheticSpan());
+            try ctx.unifyNow(from_ty, to_ty, e.span);
             const args = try ctx.alloc.dupe(HType, &.{from_ty.*});
             break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
         },
@@ -1046,8 +1169,8 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
             const from_ty = try infer(ctx, e.from.*);
             const then_ty = try infer(ctx, e.then.*);
             const to_ty = try infer(ctx, e.to.*);
-            try ctx.unifyNow(from_ty, then_ty, syntheticSpan());
-            try ctx.unifyNow(from_ty, to_ty, syntheticSpan());
+            try ctx.unifyNow(from_ty, then_ty, e.span);
+            try ctx.unifyNow(from_ty, to_ty, e.span);
             const args = try ctx.alloc.dupe(HType, &.{from_ty.*});
             break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
         },
@@ -1078,22 +1201,31 @@ fn inferRhs(ctx: *InferCtx, rhs: RRhs) std.mem.Allocator.Error!*HType {
         .Guarded => |guards| blk: {
             const result_ty = try ctx.freshMeta();
             for (guards) |g| {
+                var last_guard_span = syntheticSpan();
                 for (g.guards) |guard| {
                     switch (guard) {
                         .ExprGuard => |ge| {
                             const gt = try infer(ctx, ge);
                             const bool_node = try ctx.alloc_ty(boolTy());
-                            try ctx.unifyNow(gt, bool_node, syntheticSpan());
+                            // Get span from guard expression
+                            const guard_span = getExprSpan(ge);
+                            try ctx.unifyNow(gt, bool_node, guard_span);
+                            last_guard_span = guard_span;
                         },
                         .PatGuard => |pg| {
                             const action_ty = try infer(ctx, pg.expr);
                             const pat_ty = try inferPat(ctx, pg.pat);
-                            try ctx.unifyNow(action_ty, pat_ty, syntheticSpan());
+                            // Get span from pattern and expression
+                            const action_span = getExprSpan(pg.expr);
+                            const pat_span = getPatSpan(&pg.pat);
+                            // Prefer the action span as it's more specific
+                            try ctx.unifyNow(action_ty, pat_ty, if (isValidSpan(action_span)) action_span else pat_span);
+                            last_guard_span = action_span;
                         },
                     }
                 }
                 const rhs_ty = try infer(ctx, g.rhs);
-                try ctx.unifyNow(rhs_ty, result_ty, syntheticSpan());
+                try ctx.unifyNow(rhs_ty, result_ty, getExprSpan(g.rhs));
             }
             break :blk result_ty;
         },
@@ -1109,21 +1241,27 @@ fn inferStmt(ctx: *InferCtx, stmt: RStmt) std.mem.Allocator.Error!*HType {
             const action_ty = try infer(ctx, g.expr);
             const pat_ty = try inferPat(ctx, g.pat);
             const monad_pat = try monadTy(ctx, pat_ty);
-            try ctx.unifyNow(action_ty, monad_pat, syntheticSpan());
+            // Use action expression span for better diagnostics
+            const action_span = getExprSpan(g.expr);
+            try ctx.unifyNow(action_ty, monad_pat, action_span);
             break :blk pat_ty;
         },
         .Qualifier => |e| blk: {
             const ty = try infer(ctx, e);
             const inner = try ctx.freshMeta();
             const monad_inner = try monadTy(ctx, inner);
-            try ctx.unifyNow(ty, monad_inner, syntheticSpan());
+            // Use qualifier expression span for better diagnostics
+            const qual_span = getExprSpan(e);
+            try ctx.unifyNow(ty, monad_inner, qual_span);
             break :blk inner;
         },
         .Stmt => |e| blk: {
             const ty = try infer(ctx, e);
             const inner = try ctx.freshMeta();
             const monad_inner = try monadTy(ctx, inner);
-            try ctx.unifyNow(ty, monad_inner, syntheticSpan());
+            // Use statement expression span for better diagnostics
+            const stmt_span = getExprSpan(e);
+            try ctx.unifyNow(ty, monad_inner, stmt_span);
             break :blk inner;
         },
         .LetStmt => |decls| blk: {
