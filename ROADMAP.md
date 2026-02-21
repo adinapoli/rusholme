@@ -4,6 +4,7 @@
 > **Starting points** (zero dependencies): #1✓, #2✓, #17✓, #22✓, #24✓, #27✓, #53✓, #85✓, #58, #62⚡, #66, #68, #107✓
 
 **Recent Progress (2026-02-20):**
+- ✓ #205: parser: record syntax in newtype declarations
 - ✓ #256: lexer+parser: quasi-quotation syntax ([name| ... |])
 - ✓ #255: lexer: LANGUAGE pragma support ({-# LANGUAGE #-})
 - ✓ #254: lexer: string literal keyword parsing (resolved by quasiquotation fix)
@@ -141,7 +142,7 @@
 | [#203](https://github.com/adinapoli/rusholme/issues/203) | parser: fix where-clause after do-block (layout rule closes do context incorrectly) | [#26](https://github.com/adinapoli/rusholme/issues/26), [#30](https://github.com/adinapoli/rusholme/issues/30) | :green_circle: |
 | [#204](https://github.com/adinapoli/rusholme/issues/204) | parser: implement default method implementations in class declarations | [#33](https://github.com/adinapoli/rusholme/issues/33) | :green_circle: |
 | [#220](https://github.com/adinapoli/rusholme/issues/220) | ast/parser: class default methods only store first equation | [#204](https://github.com/adinapoli/rusholme/issues/204) | :white_circle: |
-| [#205](https://github.com/adinapoli/rusholme/issues/205) | parser: implement record syntax in newtype declarations (depends on #135) | [#135](https://github.com/adinapoli/rusholme/issues/135) | :yellow_circle: |
+| [#205](https://github.com/adinapoli/rusholme/issues/205) | parser: implement record syntax in newtype declarations (depends on #135) | [#135](https://github.com/adinapoli/rusholme/issues/135) | :green_circle: |
 | [#206](https://github.com/adinapoli/rusholme/issues/206) | parser: implement infix type constructors in data declaration heads (data a :+: b = ...) | [#29](https://github.com/adinapoli/rusholme/issues/29), [#137](https://github.com/adinapoli/rusholme/issues/137) | :green_circle: |
 | [#207](https://github.com/adinapoli/rusholme/issues/207) | parser: layout rule too permissive — bad indentation accepted instead of rejected | [#26](https://github.com/adinapoli/rusholme/issues/26) | :white_circle: |
 | [#230](https://github.com/adinapoli/rusholme/issues/230) | parser: fix guarded case alternatives (\| guard -> expr uses wrong arrow) | [#202](https://github.com/adinapoli/rusholme/issues/202) | :green_circle: |
