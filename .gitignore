@@ -39,3 +39,7 @@ config
 hooks
 objects
 refs
+
+# worktrees
+
+agent-*
