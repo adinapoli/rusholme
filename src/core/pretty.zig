@@ -200,8 +200,36 @@ pub fn CorePrinter(comptime WriterType: type) type {
             }
         }
 
+        pub fn printDataDecl(self: *Self, dd: ast.CoreDataDecl) anyerror!void {
+            try self.write("data ");
+            try self.printName(dd.name);
+            for (dd.tyvars) |tv| {
+                try self.writeByte(' ');
+                try self.printName(tv);
+            }
+            if (dd.constructors.len > 0) {
+                try self.write(" = ");
+                for (dd.constructors, 0..) |con, i| {
+                    if (i > 0) try self.write(" | ");
+                    try self.printId(con, true);
+                }
+            }
+        }
+
         pub fn printProgram(self: *Self, program: ast.CoreProgram) anyerror!void {
-            for (program, 0..) |bind, i| {
+            for (program.data_decls, 0..) |dd, i| {
+                if (i > 0) {
+                    try self.newline();
+                }
+                try self.printDataDecl(dd);
+                try self.newline();
+            }
+
+            if (program.data_decls.len > 0 and program.binds.len > 0) {
+                try self.newline();
+            }
+
+            for (program.binds, 0..) |bind, i| {
                 if (i > 0) {
                     try self.newline();
                     try self.newline();

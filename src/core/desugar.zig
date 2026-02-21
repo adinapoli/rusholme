@@ -57,6 +57,9 @@ pub fn desugarModule(
     var binds = std.ArrayListUnmanaged(ast_mod.Bind){};
     errdefer binds.deinit(alloc);
 
+    var data_decls = std.ArrayListUnmanaged(ast_mod.CoreDataDecl){};
+    errdefer data_decls.deinit(alloc);
+
     for (module.declarations) |decl| {
         switch (decl) {
             .FunBind => |fb| {
@@ -138,11 +141,40 @@ pub fn desugarModule(
                     else => std.debug.panic("Complex top-level pattern bindings not implemented in desugarer", .{}),
                 }
             },
+            .DataDecl => |dd| {
+                var tyvars = try alloc.alloc(Name, dd.tyvars.len);
+                for (dd.tyvars, 0..) |tv_str, i| {
+                    tyvars[i] = Name{ .base = tv_str, .unique = .{ .value = 0 } };
+                }
+
+                var cons = try alloc.alloc(ast_mod.Id, dd.constructors.len);
+                for (dd.constructors, 0..) |con, i| {
+                    const scheme = module_types.schemes.get(con.name.unique) orelse {
+                        std.debug.panic("Missing type scheme for data constructor {s}", .{con.name.base});
+                    };
+                    const core_ty = try schemeToCore(alloc, scheme);
+                    cons[i] = ast_mod.Id{
+                        .name = con.name,
+                        .ty = core_ty,
+                        .span = con.span,
+                    };
+                }
+
+                try data_decls.append(alloc, .{
+                    .name = dd.name,
+                    .tyvars = tyvars,
+                    .constructors = cons,
+                    .span = dd.span,
+                });
+            },
             else => {},
         }
     }
 
-    return binds.toOwnedSlice(alloc);
+    return ast_mod.CoreProgram{
+        .data_decls = try data_decls.toOwnedSlice(alloc),
+        .binds = try binds.toOwnedSlice(alloc),
+    };
 }
 
 fn desugarRhs(ctx: *DesugarCtx, rhs: renamer_mod.RRhs) !ast_mod.Expr {
