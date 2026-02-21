@@ -5095,3 +5095,166 @@ test "decl: bang pattern in pattern binding" {
     try std.testing.expect(decl == .PatBind);
     try std.testing.expect(decl.PatBind.pattern == .Bang);
 }
+
+// ============================================================================
+// Field Selector Tests (Issue #139)
+// ============================================================================
+//
+// In Haskell 2010, field selectors are just variables that happen to be
+// field names from record types. The parser treats them as regular Var
+// expressions. The distinction between a field selector and a regular
+// variable is determined by the typechecker based on record type info.
+//
+// For example, in:
+//   data Point = Point { x :: Int, y :: Int }
+//   getX = x       -- x is a field selector of type Point -> Int
+//   getX p = x p   -- x applied to p, also a field selector
+//
+// The parser doesn't need to know that 'x' is a field name - it just
+// parses it as a variable. The typechecker resolves the actual type.
+
+test "field selector: variable as field selector" {
+    // Field selector used as a function (e.g., getMaxRetry = maxRetry)
+    // The parser treats 'maxRetry' as a regular variable.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const rhs = try parseTestExpr(&arena, "getMaxRetry = maxRetry");
+
+    // RHS should be a Var expression
+    try std.testing.expect(rhs == .Var);
+    try std.testing.expectEqualStrings("maxRetry", rhs.Var.name);
+}
+
+test "field selector: field selector application" {
+    // Field selector applied to argument (e.g., x p)
+    // Parses as App(Var("x"), Var("p"))
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const rhs = try parseTestExpr(&arena, "getX p = x p");
+
+    // RHS should be App(Var("x"), Var("p"))
+    try std.testing.expect(rhs == .App);
+    try std.testing.expect(rhs.App.fn_expr.* == .Var);
+    try std.testing.expectEqualStrings("x", rhs.App.fn_expr.Var.name);
+    try std.testing.expect(rhs.App.arg_expr.* == .Var);
+    try std.testing.expectEqualStrings("p", rhs.App.arg_expr.Var.name);
+}
+
+test "field selector: chained field selector application" {
+    // Multiple field selectors in an expression (e.g., x p + y p)
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const rhs = try parseTestExpr(&arena, "sum p = x p + y p");
+
+    // Should parse as InfixApp(App(x, p), +, App(y, p))
+    try std.testing.expect(rhs == .InfixApp);
+    try std.testing.expectEqualStrings("+", rhs.InfixApp.op.name);
+
+    // Left side: App(x, p)
+    try std.testing.expect(rhs.InfixApp.left.* == .App);
+    try std.testing.expectEqualStrings("x", rhs.InfixApp.left.App.fn_expr.Var.name);
+
+    // Right side: App(y, p)
+    try std.testing.expect(rhs.InfixApp.right.* == .App);
+    try std.testing.expectEqualStrings("y", rhs.InfixApp.right.App.fn_expr.Var.name);
+}
+
+test "record: construction with field punning" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\data Point = Point { x :: Int, y :: Int }
+        \\origin = Point { x = 0, y = 0 }
+    );
+    try std.testing.expectEqual(2, mod.declarations.len);
+
+    // Second declaration is the origin binding
+    const origin_decl = mod.declarations[1];
+    try std.testing.expect(origin_decl == .FunBind);
+    const rhs = origin_decl.FunBind.equations[0].rhs.UnGuarded;
+
+    // Should be RecordCon
+    try std.testing.expect(rhs == .RecordCon);
+    try std.testing.expectEqualStrings("Point", rhs.RecordCon.con.name);
+    try std.testing.expectEqual(@as(usize, 2), rhs.RecordCon.fields.len);
+}
+
+test "record: update syntax" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\data Config = Config { verbose :: Bool }
+        \\setVerbose cfg = cfg { verbose = True }
+    );
+    try std.testing.expectEqual(2, mod.declarations.len);
+
+    // Second declaration is setVerbose
+    const fn_decl = mod.declarations[1];
+    try std.testing.expect(fn_decl == .FunBind);
+    const rhs = fn_decl.FunBind.equations[0].rhs.UnGuarded;
+
+    // Should be RecordUpdate
+    try std.testing.expect(rhs == .RecordUpdate);
+    try std.testing.expect(rhs.RecordUpdate.expr.* == .Var);
+    try std.testing.expectEqual(@as(usize, 1), rhs.RecordUpdate.fields.len);
+    try std.testing.expectEqualStrings("verbose", rhs.RecordUpdate.fields[0].field_name);
+}
+
+test "record: nested field selector in update" {
+    // Complex case: app { config = (config app) { verbose = True } }
+    // The inner 'config app' is field selector application
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\data App = App { config :: Config }
+        \\setVerbose app = app { config = config app }
+    );
+    try std.testing.expectEqual(2, mod.declarations.len);
+
+    const fn_decl = mod.declarations[1];
+    try std.testing.expect(fn_decl == .FunBind);
+    const rhs = fn_decl.FunBind.equations[0].rhs.UnGuarded;
+
+    // Outer should be RecordUpdate
+    try std.testing.expect(rhs == .RecordUpdate);
+
+    // The field value should be App(Var("config"), Var("app"))
+    const field_val = rhs.RecordUpdate.fields[0].expr;
+    try std.testing.expect(field_val == .App);
+    try std.testing.expectEqualStrings("config", field_val.App.fn_expr.Var.name);
+    try std.testing.expectEqualStrings("app", field_val.App.arg_expr.Var.name);
+}
+
+test "record: pattern with field punning" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\getX Point { x = n } = n
+    );
+    try std.testing.expectEqual(1, mod.declarations.len);
+
+    const fn_decl = mod.declarations[0];
+    try std.testing.expect(fn_decl == .FunBind);
+
+    // First pattern should be RecPat
+    const pat = fn_decl.FunBind.equations[0].patterns[0];
+    try std.testing.expect(pat == .RecPat);
+    try std.testing.expectEqualStrings("Point", pat.RecPat.con.name);
+    try std.testing.expectEqual(@as(usize, 1), pat.RecPat.fields.len);
+    try std.testing.expectEqualStrings("x", pat.RecPat.fields[0].field_name);
+}
