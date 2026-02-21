@@ -1539,22 +1539,25 @@ pub const Parser = struct {
         }
 
         // Merge type signatures and default equations into ClassMethod nodes.
-        // Every type signature becomes a method; a default equation without a
-        // corresponding type signature is silently dropped (ill-formed class).
+        // Every type signature becomes a method; default equations without a
+        // corresponding type signature are silently dropped (ill-formed class).
+        // Multiple default equations for the same method are collected into a slice.
         var methods: std.ArrayListUnmanaged(ast_mod.ClassMethod) = .empty;
         for (type_sigs.items) |sig| {
-            // Look up a matching default equation by name.
-            var default_impl: ?ast_mod.Match = null;
+            // Collect all matching default equations by name.
+            var impls: std.ArrayListUnmanaged(ast_mod.Match) = .empty;
             for (defaults.items) |def| {
                 if (std.mem.eql(u8, def.name, sig.name)) {
-                    default_impl = def.impl;
-                    break;
+                    try impls.append(self.allocator, def.impl);
                 }
             }
             try methods.append(self.allocator, .{
                 .name = sig.name,
                 .type = sig.type,
-                .default_implementation = default_impl,
+                .default_implementation = if (impls.items.len > 0)
+                    try impls.toOwnedSlice(self.allocator)
+                else
+                    null,
             });
         }
 
@@ -4517,7 +4520,9 @@ test "decl: class with default implementation" {
     try std.testing.expect(class_decl.methods[0].default_implementation == null);
     try std.testing.expectEqualStrings("size", class_decl.methods[1].name);
     try std.testing.expect(class_decl.methods[1].default_implementation != null);
-    const impl = class_decl.methods[1].default_implementation.?;
+    const impls = class_decl.methods[1].default_implementation.?;
+    try std.testing.expectEqual(1, impls.len);
+    const impl = impls[0];
     try std.testing.expectEqual(1, impl.patterns.len); // pattern: c
     try std.testing.expect(impl.rhs == .UnGuarded);
 }
