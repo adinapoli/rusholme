@@ -1,36 +1,40 @@
 # Rusholme Run-Time System (RTS) Design
 
-This document outlines the proposed design for the Rusholme compiler's Run-Time System (RTS), drawing inspiration from the GHC RTS but adapted for a Zig-based toolchain.
+This document outlines the design for the Rusholme compiler's Run-Time System (RTS). Unlike GHC, which uses a C/C-- RTS with an STG machine and a bespoke garbage collector, Rusholme's RTS is written entirely in Zig, utilizes the GRIN (Graph Reduction Intermediate Notation) evaluator, and heavily leverages Zig's `std.mem.Allocator` interface for a flexible, phased approach to memory management.
 
 ## High-Level Architecture
 
-In a lazy functional language like Haskell, the RTS governs garbage collection (GC), thunk evaluation, threading, and more. GHC's RTS is written in C/C-- and linked against compiled Haskell binaries.
+The RTS serves as the foundation for executing compiled Rusholme code, providing memory management, thunk evaluation, and runtime startup.
 
-For Rusholme, we intend to write the RTS entirely in Zig.
+### 1. Evaluator / Machine Model
+Rusholme skips STG and Cmm entirely, using **GRIN** as its core intermediate representation before sending code to LLVM. GRIN explicitly represents memory operations (`store`, `fetch`, `update`) and thunks as first-class IR constructs. The RTS will provide the necessary runtime primitives to support these memory operations, ensuring that the lazy evaluation (call-by-need) semantics are strictly preserved across different targets.
 
-### 1. RTS Responsibilities
-- **Garbage Collection (GC):** A copying, generational, or mark-and-sweep GC. Zig's allocators can manage underlying OS memory, but the RTS will trace roots and collect dead thunks/closures.
-- **Evaluator / Machine Model:** An evaluator (e.g., STG machine) that knows how to enter a thunk, interact with the runtime stack, and update thunks with computed values to enforce laziness.
-- **Entry Point Integration:** Instead of standard C `main`, the compiled binary delegates to an RTS `main`, which initializes the heap/state and begins evaluating the compiled `Main.main` entry point.
+### 2. Phased Memory Management Strategy
+Rusholme avoids building a monolithic, complex garbage collector from day one (unlike GHC's generational copying GC). Instead, it adopts a phased strategy leveraging Zig's vtable-based `std.mem.Allocator`:
+- **Phase 1: Arena / Region Allocator:** Utilizing Zig's `std.heap.ArenaAllocator` for bulk memory deallocation. This provides a fast, simple start for early milestones.
+- **Phase 2: Immix (Mark-Region GC):** A custom Zig `Allocator` implementing the Immix algorithm (opportunistic defragmentation, high space efficiency) for robust runtime collection.
+- **Phase 3: ASAP (As Static As Possible):** Utilizing GRIN's whole-program analysis to insert compile-time static deallocations. The goal is to eliminate runtime GC overhead for statically-deallocatable values, falling back to Immix only where necessary.
 
-### 2. ABI and Interface
-A strict Application Binary Interface (ABI) needs to be defined between the Rusholme-compiled code and the Zig RTS.
-- **Allocation:** Compiled code calls memory allocation routines (`rusholme_alloc`) provided by the RTS to create new thunks or closures on the GC heap.
-- **Metadata:** The compiler emits metadata that the GC uses to understand object layouts and trace pointers.
+Because the entire runtime and its internal tools are parameterized over the `std.mem.Allocator` interface, switching between these phases requires swapping out the allocator instance at startup—not rewriting the runtime codebase.
 
-### 3. Compilation & Linking Strategy
-Since Rusholme is written in Zig, the generated code (whether emitted as C code, LLVM IR, or Zig source) will be linked with the compiled Zig RTS structure (`librusholme_rts.a` or via `zig build-exe`).
+### 3. ABI and Interface
+The interface between the compiled GRIN output and the Zig RTS relies on a strict Application Binary Interface (ABI):
+- **Allocation:** Compiled code calls standard RTS allocator functions (backed by the active `std.mem.Allocator`) for `store` operations and closure creation.
+- **Thunk Updates:** The RTS exposes functions to handle the `update` of a thunk with its evaluated form.
 
-### 4. The Execution Flow
-1. The OS starts the process and vectors into the Zig RTS `main` function.
-2. The Zig RTS initializes its internal state (memory allocators, stacks, garbage collector structures).
-3. The Zig RTS makes an external call to the generated `rusholme_Main_main` closure.
-4. The generated code leverages the RTS for allocations (`rusholme_alloc`) and yielding (if threading/concurrency is supported).
-5. At exit, control yields back to the RTS for clean shutdown.
+### 4. Compilation & Linking Strategy
+With LLVM as the primary backend emitting native code or WebAssembly, the compiled object files will be linked against the Zig RTS (e.g., via `zig build-exe` or by linking a static `librusholme_rts.a`).
 
-## Advantages of Zig
-Using Zig for both the Rusholme compiler and its RTS gives us a major advantage: **Pervasive Code Sharing**.
-- Data structures representing a `Closure` or `Thunk` can be defined once in a shared Zig package.
-- The compiler uses these structs to calculate accurate offsets when generating code.
-- The RTS uses the exact same structs to parse closures during GC.
-- This eliminates the class of bugs where the compiler and RTS subtly disagree on object memory layouts.
+### 5. Execution Flow
+1. The OS starts the process, invoking the Zig RTS `main` function.
+2. The RTS initializes the specific memory allocator (Arena or Immix) and its internal state.
+3. The RTS invokes the compiled `rusholme_Main_main` closure.
+4. The generated GRIN code executes, making calls into the RTS for `store`, `fetch`, and `update` memory operations.
+5. On completion, control yields back to the RTS to perform clean shutdown and free allocated regions via the `Allocator` interface.
+
+## The Zig Advantage
+Using Zig for both the compiler and the RTS offers pervasive code sharing:
+- Data structures for closures and heap objects can be defined once in a shared Zig package.
+- The compiler uses these exact structs to calculate memory offsets during code generation.
+- The RTS uses the same structs to traverse memory during garbage collection.
+- This unified memory model eliminates bugs caused by disagreements between the compiler's emitted layouts and the runtime's expectations.
