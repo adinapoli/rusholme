@@ -742,13 +742,25 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
         //   Γ ⊢ rhs : τ    σ = gen(Γ, τ)    Γ, x:σ ⊢ body : τ'
         //   ────────────────────────────────────────────────────
         //               Γ ⊢ let x = rhs in body : τ'
-        .Let => |let| blk: {
+        .Let => |let_blk| blk: {
             try ctx.env.push();
             defer ctx.env.pop();
-            // TODO(#175): Collect TypeSig declarations first and check signatures.
-            // For now, pass null for sig since we don't support checking signatures in this context yet.
-            for (let.binds) |decl| try inferLetDecl(ctx, decl, null);
-            break :blk try infer(ctx, let.body.*);
+
+            // Collect type signatures first (Pass 0)
+            var sigs = try collectLetSigs(ctx, let_blk.binds);
+            defer sigs.deinit(ctx.alloc);
+
+            // Infer each binding, passing the signature if available
+            for (let_blk.binds) |decl| {
+                const sig: ?*const TypeSigEntry = blk2: {
+                    if (decl == .FunBind) {
+                        break :blk2 sigs.getPtr(decl.FunBind.name.unique);
+                    }
+                    break :blk2 null;
+                };
+                try inferLetDecl(ctx, decl, sig);
+            }
+            break :blk try infer(ctx, let_blk.body.*);
         },
 
         // ── If ────────────────────────────────────────────────────────
@@ -1057,12 +1069,60 @@ fn inferStmt(ctx: *InferCtx, stmt: RStmt) std.mem.Allocator.Error!*HType {
             break :blk inner;
         },
         .LetStmt => |decls| blk: {
-            // TODO(#175): Collect TypeSig declarations first and check signatures.
-            // For now, pass null for sig since we don't support checking signatures in this context yet.
-            for (decls) |decl| try inferLetDecl(ctx, decl, null);
+            // Collect type signatures first (Pass 0)
+            var sigs = try collectLetSigs(ctx, decls);
+            defer sigs.deinit(ctx.alloc);
+
+            // Infer each binding, passing the signature if available
+            for (decls) |decl| {
+                const sig: ?*const TypeSigEntry = blk2: {
+                    if (decl == .FunBind) {
+                        break :blk2 sigs.getPtr(decl.FunBind.name.unique);
+                    }
+                    break :blk2 null;
+                };
+                try inferLetDecl(ctx, decl, sig);
+            }
             break :blk ctx.freshMeta();
         },
     };
+}
+
+// ── Let-declaration type signature collection ───────────────────────────────
+
+/// Collect type signatures from a list of let-bindings.
+///
+/// Returns a map from `Unique` to `TypeSigEntry` for all type signatures
+/// found in the declaration list. The HType for each signature is allocated
+/// on the arena with fresh metavariables for type variables.
+fn collectLetSigs(
+    ctx: *InferCtx,
+    decls: []const RDecl,
+) std.mem.Allocator.Error!std.AutoHashMapUnmanaged(naming_mod.Unique, TypeSigEntry) {
+    var sigs = std.AutoHashMapUnmanaged(naming_mod.Unique, TypeSigEntry){};
+    errdefer sigs.deinit(ctx.alloc);
+
+    for (decls) |decl| {
+        if (decl != .TypeSig) continue;
+        const ts = decl.TypeSig;
+
+        // Each let-binding needs its own scope for type variables
+        // to avoid accidental sharing between different signatures.
+        var scope = TypeVarMap{};
+        defer scope.deinit(ctx.alloc);
+
+        const ty = try astTypeToHTypeWithScope(ts.type, ctx, &scope);
+
+        for (ts.names) |name| {
+            try sigs.put(ctx.alloc, name.unique, .{
+                .name = name,
+                .ty = ty,
+                .loc = ts.span,
+            });
+        }
+    }
+
+    return sigs;
 }
 
 // ── Let-declaration inference ───────────────────────────────────────────
@@ -1075,10 +1135,11 @@ fn inferStmt(ctx: *InferCtx, stmt: RStmt) std.mem.Allocator.Error!*HType {
 /// If a type signature (`TypeSig`) is provided, the inferred type is unified
 /// against the signature to ensure they match.
 ///
-/// TODO(#175): Type signatures should be collected in a separate pass before
-/// any inference, so that mutually recursive bindings with signatures can be
-/// handled correctly. The current implementation checks signatures after
-/// inference, which works for single-binding cases but not for mutual recursion.
+/// Known limitation: For mutually recursive let-bindings with signatures,
+/// this implementation processes each binding sequentially rather than
+/// pre-allocating all metas first. This means that recursive calls within
+/// a binding group will work (via the mono pre-binding), but cross-binding
+/// recursion may not properly use signatures.
 fn inferLetDecl(
     ctx: *InferCtx,
     decl: RDecl,
@@ -2734,4 +2795,162 @@ test "inferModule with type application in signature" {
     // The signature gets parsed and converted correctly; the type error
     // (Just has type Int -> Int, not Int -> Maybe Int) is expected.
     // This demonstrates the type application in signatures is working.
+}
+
+// ── Let-binding Type Signature Tests (issue #183) ────────────────────────
+
+test "infer: let-binding with type signature uses signature" {
+    // foo = let
+    //   f :: Int -> Int
+    //   f x = x
+    //   in f 42
+    // Should infer foo :: Int and use the signature for f
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = try TyEnv.init(alloc);
+    defer env.deinit();
+    var mv = MetaVarSupply{};
+    var us = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+    try env_mod.initBuiltins(&env, alloc, &us);
+
+    var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
+
+    const AstType = @import("../frontend/ast.zig").Type;
+
+    const f_name = testName("f", 9400);
+    const x_name = testName("x", 9401);
+
+    // Construct AST type: Int -> Int
+    const int_ptr = try alloc.create(AstType);
+    int_ptr.* = AstType{ .Con = .{ .name = "Int", .span = testSpan() } };
+
+    const fun_args = try alloc.alloc(*const AstType, 2);
+    fun_args[0] = int_ptr;
+    fun_args[1] = int_ptr;
+
+    const fun_type = AstType{ .Fun = fun_args };
+
+    // Create the TypeSig declaration
+    const sig = RDecl{ .TypeSig = .{
+        .names = &.{f_name},
+        .type = fun_type,
+        .span = testSpan(),
+    } };
+
+    // Create the FunBind: f x = x (represented as f = \x -> x for simplicity)
+    const body = RExpr{ .Var = .{ .name = x_name, .span = testSpan() } };
+    const lam = RExpr{ .Lambda = .{
+        .params = &.{x_name},
+        .param_spans = &.{testSpan()},
+        .body = &body,
+    } };
+    const funbind = RDecl{ .FunBind = .{
+        .name = f_name,
+        .equations = &.{.{ .patterns = &.{}, .rhs = .{ .UnGuarded = lam }, .span = testSpan() }},
+        .span = testSpan(),
+    } };
+
+    // Create the let body: f 42
+    const forty_two = RExpr{ .Lit = .{ .Int = .{ .value = 42, .span = testSpan() } } };
+    const f_var = RExpr{ .Var = .{ .name = f_name, .span = testSpan() } };
+    const app = RExpr{ .App = .{ .fn_expr = &f_var, .arg_expr = &forty_two } };
+
+    // Create the Let expression
+    const let_binds = try alloc.alloc(RDecl, 2);
+    let_binds[0] = sig;
+    let_binds[1] = funbind;
+
+    const let_expr = RExpr{ .Let = .{ .binds = let_binds, .body = &app } };
+
+    const result = try infer(&ctx, let_expr);
+    const chased = result.chase();
+
+    // Should have no errors
+    try testing.expect(!diags.hasErrors());
+
+    // Result should be Int
+    try testing.expect(chased == .Con);
+    try testing.expectEqualStrings("Int", chased.Con.name.base);
+}
+
+test "infer: let-binding with polymorphic signature works" {
+    // bar = let
+    //   id :: a -> a
+    //   id x = x
+    //   in id 42
+    // Should work with polymorphic type signature
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = try TyEnv.init(alloc);
+    defer env.deinit();
+    var mv = MetaVarSupply{};
+    var us = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+    try env_mod.initBuiltins(&env, alloc, &us);
+
+    var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
+
+    const AstType = @import("../frontend/ast.zig").Type;
+
+    const id_name = testName("id", 9500);
+    const x_name = testName("x", 9501);
+
+    // Construct AST type: a -> a
+    const a_ptr = try alloc.create(AstType);
+    a_ptr.* = AstType{ .Var = "a" };
+
+    const fun_args = try alloc.alloc(*const AstType, 2);
+    fun_args[0] = a_ptr;
+    fun_args[1] = a_ptr;
+
+    const fun_type = AstType{ .Fun = fun_args };
+
+    // Create the TypeSig declaration
+    const sig = RDecl{ .TypeSig = .{
+        .names = &.{id_name},
+        .type = fun_type,
+        .span = testSpan(),
+    } };
+
+    // Create the FunBind: id x = x (represented as id = \x -> x for simplicity)
+    const body = RExpr{ .Var = .{ .name = x_name, .span = testSpan() } };
+    const lam = RExpr{ .Lambda = .{
+        .params = &.{x_name},
+        .param_spans = &.{testSpan()},
+        .body = &body,
+    } };
+    const funbind = RDecl{ .FunBind = .{
+        .name = id_name,
+        .equations = &.{.{ .patterns = &.{}, .rhs = .{ .UnGuarded = lam }, .span = testSpan() }},
+        .span = testSpan(),
+    } };
+
+    // Create the let body: id 42
+    const forty_two = RExpr{ .Lit = .{ .Int = .{ .value = 42, .span = testSpan() } } };
+    const id_var = RExpr{ .Var = .{ .name = id_name, .span = testSpan() } };
+    const app = RExpr{ .App = .{ .fn_expr = &id_var, .arg_expr = &forty_two } };
+
+    // Create the Let expression
+    const let_binds = try alloc.alloc(RDecl, 2);
+    let_binds[0] = sig;
+    let_binds[1] = funbind;
+
+    const let_expr = RExpr{ .Let = .{ .binds = let_binds, .body = &app } };
+
+    const result = try infer(&ctx, let_expr);
+    const chased = result.chase();
+
+    // Should have no errors
+    try testing.expect(!diags.hasErrors());
+
+    // Result should be Int
+    try testing.expect(chased == .Con);
+    try testing.expectEqualStrings("Int", chased.Con.name.base);
 }
