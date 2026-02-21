@@ -46,6 +46,7 @@ pub const tc = struct {
 pub const core = struct {
     pub const ast = @import("core/ast.zig");
     pub const pretty = @import("core/pretty.zig");
+    pub const desugar = @import("core/desugar.zig");
 };
 
 pub const grin = struct {

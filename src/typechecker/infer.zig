@@ -124,6 +124,7 @@ pub const InferCtx = struct {
     /// this is reset to null.
     /// See #176.
     monad_type: ?*HType = null,
+    local_binders: std.AutoHashMapUnmanaged(naming_mod.Unique, *HType) = .{},
 
     pub fn init(
         alloc: std.mem.Allocator,
@@ -139,6 +140,7 @@ pub const InferCtx = struct {
             .u_supply = u_supply,
             .diags = diags,
             .monad_type = null,
+            .local_binders = .{},
         };
     }
 
@@ -589,6 +591,7 @@ pub fn inferPat(ctx: *InferCtx, pat: RPat) std.mem.Allocator.Error!*HType {
         .Var => |v| blk: {
             const ty = try ctx.freshMeta();
             try ctx.env.bindMono(v.name, ty.*);
+            try ctx.local_binders.put(ctx.alloc, v.name.unique, ty);
             break :blk ty;
         },
         .Lit => |l| inferLit(l, ctx),
@@ -596,6 +599,7 @@ pub fn inferPat(ctx: *InferCtx, pat: RPat) std.mem.Allocator.Error!*HType {
         .AsPat => |ap| blk: {
             const inner_ty = try inferPat(ctx, ap.pat.*);
             try ctx.env.bindMono(ap.name, inner_ty.*);
+            try ctx.local_binders.put(ctx.alloc, ap.name.unique, inner_ty);
             break :blk inner_ty;
         },
         .Con => |c| blk: {
@@ -787,6 +791,7 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
             for (lam.params) |param| {
                 const ty = try ctx.freshMeta();
                 try ctx.env.bindMono(param, ty.*);
+                try ctx.local_binders.put(ctx.alloc, param.unique, ty);
                 try param_tys.append(ctx.alloc, ty);
             }
 
@@ -836,6 +841,7 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                     .FunBind => |fb| {
                         const node = try ctx.freshMeta();
                         try ctx.env.bindMono(fb.name, node.*);
+                        try ctx.local_binders.put(ctx.alloc, fb.name.unique, node);
                         try let_metas.put(ctx.alloc, fb.name.unique, node);
                     },
                     .PatBind => |pb| try assignPatMetas(ctx, pb.pattern, &let_metas),
@@ -1460,6 +1466,7 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
             .FunBind => |fb| {
                 const node = try ctx.freshMeta();
                 try ctx.env.bindMono(fb.name, node.*);
+                try ctx.local_binders.put(ctx.alloc, fb.name.unique, node);
                 try top_metas.put(ctx.alloc, fb.name.unique, node);
             },
             .PatBind => |pb| try assignPatMetas(ctx, pb.pattern, &top_metas),
@@ -1512,7 +1519,12 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
     }
 
     // Build result.
-    var result = ModuleTypes{ .schemes = .{} };
+    var result = ModuleTypes{
+        .schemes = .{},
+        .local_binders = ctx.local_binders,
+    };
+    ctx.local_binders = .{}; // Ownership passed to ModuleTypes
+
     var it = top_metas.iterator();
     while (it.next()) |entry| {
         const scheme = ctx.env.lookupScheme(entry.key_ptr.*) orelse
@@ -1531,11 +1543,13 @@ fn assignPatMetas(
         .Var => |v| {
             const node = try ctx.freshMeta();
             try ctx.env.bindMono(v.name, node.*);
+            try ctx.local_binders.put(ctx.alloc, v.name.unique, node);
             try out.put(ctx.alloc, v.name.unique, node);
         },
         .AsPat => |ap| {
             const node = try ctx.freshMeta();
             try ctx.env.bindMono(ap.name, node.*);
+            try ctx.local_binders.put(ctx.alloc, ap.name.unique, node);
             try out.put(ctx.alloc, ap.name.unique, node);
             try assignPatMetas(ctx, ap.pat.*, out);
         },
@@ -1565,9 +1579,11 @@ fn assignPatMetas(
 /// The result of type-checking a module.
 pub const ModuleTypes = struct {
     schemes: std.AutoHashMapUnmanaged(naming_mod.Unique, TyScheme),
+    local_binders: std.AutoHashMapUnmanaged(naming_mod.Unique, *HType),
 
     pub fn deinit(self: *ModuleTypes, alloc: std.mem.Allocator) void {
         self.schemes.deinit(alloc);
+        self.local_binders.deinit(alloc);
     }
 
     pub fn get(self: *const ModuleTypes, unique: naming_mod.Unique) ?TyScheme {
@@ -2054,7 +2070,7 @@ test "generalisePtr: meta free in env is not generalised" {
     const body = scheme.body.chase();
     try testing.expect(body == .Fun);
     try testing.expect(body.Fun.arg.*.chase() == .Rigid); // ?inner → rigid
-    try testing.expect(body.Fun.res.*.chase() == .Meta);  // ?outer stays meta
+    try testing.expect(body.Fun.res.*.chase() == .Meta); // ?outer stays meta
 }
 
 test "infer: genuine let-polymorphism still works in nested scopes" {

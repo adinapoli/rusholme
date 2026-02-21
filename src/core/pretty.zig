@@ -200,6 +200,33 @@ pub fn CorePrinter(comptime WriterType: type) type {
             }
         }
 
+        pub fn printProgram(self: *Self, program: ast.CoreProgram) anyerror!void {
+            for (program, 0..) |bind, i| {
+                if (i > 0) {
+                    try self.newline();
+                    try self.newline();
+                }
+                switch (bind) {
+                    .NonRec => |nr| try self.printBindPair(nr),
+                    .Rec => |r| {
+                        try self.write("rec {");
+                        try self.newline();
+                        self.indent();
+                        for (r, 0..) |bp, j| {
+                            if (j > 0) try self.newline();
+                            try self.writeIndent();
+                            try self.printBindPair(bp);
+                            try self.write(";");
+                        }
+                        self.dedent();
+                        try self.newline();
+                        try self.writeIndent();
+                        try self.write("}");
+                    },
+                }
+            }
+        }
+
         fn printBindPair(self: *Self, bp: ast.BindPair) anyerror!void {
             try self.printId(bp.binder, true);
             try self.write(" = ");
