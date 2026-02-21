@@ -115,6 +115,7 @@ fn cmdParse(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     var layout = LayoutProcessor.init(arena_alloc, &lexer);
     var diags = DiagnosticCollector.init();
     defer diags.deinit(arena_alloc);
+    layout.setDiagnostics(&diags);
 
     var parser = Parser.init(arena_alloc, &layout, &diags) catch {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
@@ -178,6 +179,7 @@ fn cmdCheck(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     var layout = LayoutProcessor.init(arena_alloc, &lexer);
     var diags = DiagnosticCollector.init();
     defer diags.deinit(arena_alloc);
+    layout.setDiagnostics(&diags);
 
     var parser = Parser.init(arena_alloc, &layout, &diags) catch {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
