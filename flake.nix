@@ -29,6 +29,7 @@
 
             # Development tools
             git
+            pre-commit
           ] ++ pkgs.lib.optionals (!isDarwin) [
             # Linux-only tools
             valgrind
