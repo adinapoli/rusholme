@@ -7,6 +7,9 @@
 - ✓ #183: typechecker: let-binding type signatures are ignored
 - ✓ #216: ast: add LetQualifier variant to Qualifier for list comprehension let-bindings
 - ✓ #218: Parser: backtick left sections with compound LHS
+- ✓ #207: parser: layout rule too permissive — bad indentation accepted instead of rejected
+- ✓ #250: Make `vtt-parser` program parse (VTT file added as test case)
+- ✓ #263: typechecker: mutually recursive let-bindings with type signatures
 
 **Recent Progress (2026-02-20):**
 - ✓ #205: parser: record syntax in newtype declarations
@@ -149,12 +152,12 @@
 | [#220](https://github.com/adinapoli/rusholme/issues/220) | ast/parser: class default methods only store first equation | [#204](https://github.com/adinapoli/rusholme/issues/204) | :green_circle: |
 | [#205](https://github.com/adinapoli/rusholme/issues/205) | parser: implement record syntax in newtype declarations (depends on #135) | [#135](https://github.com/adinapoli/rusholme/issues/135) | :green_circle: |
 | [#206](https://github.com/adinapoli/rusholme/issues/206) | parser: implement infix type constructors in data declaration heads (data a :+: b = ...) | [#29](https://github.com/adinapoli/rusholme/issues/29), [#137](https://github.com/adinapoli/rusholme/issues/137) | :green_circle: |
-| [#207](https://github.com/adinapoli/rusholme/issues/207) | parser: layout rule too permissive — bad indentation accepted instead of rejected | [#26](https://github.com/adinapoli/rusholme/issues/26) | :white_circle: |
+| [#207](https://github.com/adinapoli/rusholme/issues/207) | parser: layout rule too permissive — bad indentation accepted instead of rejected | [#26](https://github.com/adinapoli/rusholme/issues/26) | :green_circle: |
 | [#230](https://github.com/adinapoli/rusholme/issues/230) | parser: fix guarded case alternatives (\| guard -> expr uses wrong arrow) | [#202](https://github.com/adinapoli/rusholme/issues/202) | :green_circle: |
 | [#212](https://github.com/adinapoli/rusholme/issues/212) | lexer+ast: replace i64 integer literals with arbitrary-precision representation | [#85](https://github.com/adinapoli/rusholme/issues/85), [#27](https://github.com/adinapoli/rusholme/issues/27) | :white_circle: |
 | [#232](https://github.com/adinapoli/rusholme/issues/232) | pattern guards: AST and parser incomplete for pat <- expr in guards | [#200](https://github.com/adinapoli/rusholme/issues/200) | :green_circle: |
 | [#252](https://github.com/adinapoli/rusholme/issues/252) | parser: Support TypeApplications extension in expressions (e @Type) | [#30](https://github.com/adinapoli/rusholme/issues/30), [#32](https://github.com/adinapoli/rusholme/issues/32) | :green_circle: |
-| [#250](https://github.com/adinapoli/rusholme/issues/250) | parser: support wildcard patterns in do notation bindings (completed via #252; VTT parser blocked by #254) | [#30](https://github.com/adinapoli/rusholme/issues/30), [#31](https://github.com/adinapoli/rusholme/issues/31), [#254](https://github.com/adinapoli/rusholme/issues/254) | :yellow_circle: |
+| [#250](https://github.com/adinapoli/rusholme/issues/250) | parser: support wildcard patterns in do notation bindings (completed via #252; VTT parser blocked by #254) | [#30](https://github.com/adinapoli/rusholme/issues/30), [#31](https://github.com/adinapoli/rusholme/issues/31), [#254](https://github.com/adinapoli/rusholme/issues/254) | :green_circle: |
 | [#254](https://github.com/adinapoli/rusholme/issues/254) | lexer: string literal parsing fails when string contains keyword 'of' (resolved by quasiquotation fix) | [#86](https://github.com/adinapoli/rusholme/issues/86) | :green_circle: |
 | [#255](https://github.com/adinapoli/rusholme/issues/255) | parser: support LANGUAGE pragmas ({-# LANGUAGE ... #-}) | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
 | [#256](https://github.com/adinapoli/rusholme/issues/256) | parser: support quasi-quotation syntax ([name| ... |]) | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
@@ -200,7 +203,7 @@
 | [#175](https://github.com/adinapoli/rusholme/issues/175) | typechecker: type signatures are ignored during inference | [#36](https://github.com/adinapoli/rusholme/issues/36) | :green_circle: |
 | [#176](https://github.com/adinapoli/rusholme/issues/176) | typechecker: do-notation inference is hard-coded to IO, not generic Monad | [#36](https://github.com/adinapoli/rusholme/issues/36), [#37](https://github.com/adinapoli/rusholme/issues/37) | :green_circle: |
 | [#183](https://github.com/adinapoli/rusholme/issues/183) | typechecker: let-binding type signatures are ignored | [#175](https://github.com/adinapoli/rusholme/issues/175) | :green_circle: |
-| [#263](https://github.com/adinapoli/rusholme/issues/263) | typechecker: mutually recursive let-bindings with type signatures not fully supported | [#183](https://github.com/adinapoli/rusholme/issues/183) | :white_circle: |
+| [#263](https://github.com/adinapoli/rusholme/issues/263) | typechecker: mutually recursive let-bindings with type signatures not fully supported | [#183](https://github.com/adinapoli/rusholme/issues/183) | :green_circle: |
 | [#184](https://github.com/adinapoli/rusholme/issues/184) | typechecker: bidirectional signature checking for rank-N polymorphism | [#175](https://github.com/adinapoli/rusholme/issues/175) | :white_circle: |
 | [#177](https://github.com/adinapoli/rusholme/issues/177) | typechecker: astTypeToHType incomplete — App, Paren, Forall, n-tuples not handled | [#36](https://github.com/adinapoli/rusholme/issues/36) | :green_circle: |
 | [#37](https://github.com/adinapoli/rusholme/issues/37) | Implement type class resolution and dictionary passing | [#36](https://github.com/adinapoli/rusholme/issues/36), [#153](https://github.com/adinapoli/rusholme/issues/153) | :green_circle: |
