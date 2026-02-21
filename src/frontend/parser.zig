@@ -3531,6 +3531,7 @@ fn initTestParser(
     lexer.* = Lexer.init(allocator, source, 1);
     layout.* = LayoutProcessor.init(allocator, lexer);
     diags.* = DiagnosticCollector.init();
+    layout.setDiagnostics(diags);
     return Parser.init(allocator, layout, diags) catch |err| switch (err) {
         error.OutOfMemory => @panic("OOM in initTestParser"),
         error.UnexpectedToken, error.UnexpectedEOF, error.InvalidSyntax => @panic("parse error in initTestParser"),
@@ -3769,6 +3770,7 @@ fn parseTestExpr(
     var lexer = Lexer.init(allocator, full, 1);
     var layout = LayoutProcessor.init(allocator, &lexer);
     var diags = DiagnosticCollector.init();
+    layout.setDiagnostics(&diags);
     var parser = Parser.init(allocator, &layout, &diags) catch |err| switch (err) {
         error.OutOfMemory => @panic("OOM in parseTestExpr"),
         error.UnexpectedToken, error.UnexpectedEOF, error.InvalidSyntax => @panic("parse error in parseTestExpr"),
@@ -4389,6 +4391,7 @@ fn parseTestModule(allocator: std.mem.Allocator, source: []const u8) !ast_mod.Mo
     var lexer = Lexer.init(allocator, source, 1);
     var layout = LayoutProcessor.init(allocator, &lexer);
     var diags = DiagnosticCollector.init();
+    layout.setDiagnostics(&diags);
     var parser = Parser.init(allocator, &layout, &diags) catch |err| switch (err) {
         error.OutOfMemory => @panic("OOM in parseTestModule"),
         error.UnexpectedToken, error.UnexpectedEOF, error.InvalidSyntax => @panic("parse error in parseTestModule"),
@@ -4400,6 +4403,7 @@ fn parseTestModuleFails(allocator: std.mem.Allocator, source: []const u8) !void 
     var lexer = Lexer.init(allocator, source, 1);
     var layout = LayoutProcessor.init(allocator, &lexer);
     var diags = DiagnosticCollector.init();
+    layout.setDiagnostics(&diags);
     var parser = try Parser.init(allocator, &layout, &diags);
 
     _ = parser.parseModule() catch {};

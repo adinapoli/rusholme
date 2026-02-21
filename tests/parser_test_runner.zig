@@ -93,6 +93,7 @@ fn tryParse(allocator: std.mem.Allocator, comptime path: []const u8) !bool {
     var layout = LayoutProcessor.init(aa, &lexer);
     var diags = DiagnosticCollector.init();
     defer diags.deinit(aa);
+    layout.setDiagnostics(&diags);
 
     var parser = Parser.init(aa, &layout, &diags) catch return false;
 

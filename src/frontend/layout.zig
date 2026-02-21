@@ -1,6 +1,7 @@
 const std = @import("std");
 const lexer_mod = @import("lexer.zig");
 const span_mod = @import("../diagnostics/span.zig");
+const diag_mod = @import("../diagnostics/diagnostic.zig");
 const Lexer = lexer_mod.Lexer;
 const Token = lexer_mod.Token;
 const LocatedToken = lexer_mod.LocatedToken;
@@ -50,6 +51,14 @@ pub const LayoutProcessor = struct {
     first_token: bool,
     // Set to true when a new context is pushed, to avoid a semicolon before the first token.
     context_just_opened: bool,
+    // Track the last token's line for layout validation.
+    // Helps detect dangling operators like "+ 1" that should be rejected.
+    last_token_line: usize,
+    // Track when the last token emitted was a virtual delimiter (semicolon or close brace)
+    // This indicates we're expecting a fresh declaration to start.
+    last_token_was_virtual_delimiter: bool,
+    // Diagnostic collector for reporting layout errors.
+    diagnostics: ?*diag_mod.DiagnosticCollector,
 
     pub fn init(allocator: std.mem.Allocator, lexer: *Lexer) LayoutProcessor {
         return .{
@@ -62,6 +71,9 @@ pub const LayoutProcessor = struct {
             .pending_kind = .block,
             .first_token = true,
             .context_just_opened = false,
+            .last_token_line = 0,
+            .last_token_was_virtual_delimiter = false,
+            .diagnostics = null,
         };
     }
 
@@ -74,6 +86,12 @@ pub const LayoutProcessor = struct {
         }
         self.stack.deinit(self.allocator);
         self.pending.deinit(self.allocator);
+    }
+
+    /// Set the diagnostic collector for this layout processor.
+    /// Must be called after init but before any tokens are consumed.
+    pub fn setDiagnostics(self: *LayoutProcessor, diagnostics: *diag_mod.DiagnosticCollector) void {
+        self.diagnostics = diagnostics;
     }
 
     pub fn nextToken(self: *LayoutProcessor) !LocatedToken {
@@ -174,11 +192,13 @@ pub const LayoutProcessor = struct {
                         break;
                     }
                     try self.pending.append(self.allocator, tok);
+                    self.last_token_was_virtual_delimiter = true;
                     return LocatedToken.init(.v_semi, tok.span);
                 } else if (n < ctx.column) {
                     // Less indentation: close this context (case 6).
                     _ = self.popContext();
                     self.peeked_token = tok;
+                    self.last_token_was_virtual_delimiter = true;
                     return LocatedToken.init(.v_close_brace, tok.span);
                 } else {
                     break; // n > ctx.column — token is further right; nothing to close
@@ -241,6 +261,25 @@ pub const LayoutProcessor = struct {
             return tok;
         }
 
+        // 10. Layout validation: Reject operators at wrong indentation that can't start a declaration.
+        //     A common malformed layout is:
+        //       f x = x
+        //       + 1
+        //     where the operator appears on a new line at a column that doesn't match the context,
+        //     but also doesn't represent a valid continuation. The layout processor doesn't know
+        //     about expression completeness, so we use a heuristic: operators on new lines (different
+        //     line from previous token) that are not part of a freshly-opened context and are NOT
+        // preceded by an open paren (which would indicate an operator declaration like (+++) :: ...) are rejected.
+        if (LayoutProcessor.isDisallowedStarter(tok.token) and !self.context_just_opened) {
+            if (tok.span.start.line != self.last_token_line and !self.last_token_was_virtual_delimiter) {
+                // Operator on a new line, not after open paren - this is likely malformed layout
+                try self.emitLayoutError(tok.span, "operator cannot start a declaration");
+            }
+        }
+
+        // Track token line for layout validation on next token
+        self.last_token_line = tok.span.start.line;
+
         return tok;
     }
 
@@ -285,6 +324,32 @@ pub const LayoutProcessor = struct {
             return self.pending.orderedRemove(0);
         }
         return eof_tok;
+    }
+
+    /// Check if a token is an operator that cannot start a new declaration.
+    /// This is used to detect malformed layout like:
+    ///   f x = x
+    ///   + 1   -- operator at module level, invalid
+    fn isDisallowedStarter(token: Token) bool {
+        return switch (token) {
+            .varsym, .consym => true,
+            .minus, .bang, .dot => true,
+            .equals, .kw_where, .kw_let, .kw_do, .kw_in, .kw_of, .kw_class, .kw_instance, .kw_data => false,
+            else => false,
+        };
+    }
+
+    /// Emit a layout error for a token that violates layout rules.
+    fn emitLayoutError(self: *LayoutProcessor, span_val: span_mod.SourceSpan, message: []const u8) !void {
+        if (self.diagnostics) |diags| {
+            const owned_msg = try self.allocator.dupe(u8, message);
+            try diags.emit(self.allocator, diag_mod.Diagnostic{
+                .severity = .@"error",
+                .code = .parse_error,
+                .span = span_val,
+                .message = owned_msg,
+            });
+        }
     }
 };
 
