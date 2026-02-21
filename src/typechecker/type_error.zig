@@ -47,6 +47,14 @@ pub const TypeError = union(enum) {
         ty: HType,
     },
 
+    /// Infinite type cycle: a cycle was detected in the metavariable chain
+    /// (e.g., ?0 → ?1 → ?0). This is a compiler invariant violation that
+    /// indicates unsound type unification occurred.
+    infinite_type_cycle: struct {
+        /// The first metavariable in the cycle (for error reporting)
+        meta_id: u32,
+    },
+
     /// Constructor applied to wrong number of arguments.
     ///
     /// Emitted when a type constructor is applied to a number of arguments
@@ -129,6 +137,13 @@ pub fn format(alloc: std.mem.Allocator, te: TypeError) std.mem.Allocator.Error![
                 alloc,
                 "infinite type: ?{d} ~ `{s}` (occurs check failed)",
                 .{ it.meta.id, ty_str },
+            );
+        },
+        .infinite_type_cycle => |itc| blk: {
+            break :blk std.fmt.allocPrint(
+                alloc,
+                "infinite type cycle detected in metavariable chain starting at ?{d}",
+                .{itc.meta_id},
             );
         },
         .arity_mismatch => |am| blk: {
@@ -241,6 +256,21 @@ test "TypeError.format: infinite_type" {
     try testing.expect(std.mem.indexOf(u8, msg, "?42") != null);
     try testing.expect(std.mem.indexOf(u8, msg, "Int") != null);
     try testing.expect(std.mem.indexOf(u8, msg, "occurs check") != null);
+}
+
+test "TypeError.format: infinite_type_cycle" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const te = TypeError{ .infinite_type_cycle = .{
+        .meta_id = 7,
+    } };
+
+    const msg = try format(alloc, te);
+    try testing.expect(std.mem.indexOf(u8, msg, "?7") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "infinite type cycle") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "metavariable chain") != null);
 }
 
 test "TypeError.format: arity_mismatch" {

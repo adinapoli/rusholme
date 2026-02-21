@@ -131,10 +131,21 @@ pub const HType = union(enum) {
     ///
     /// This is the core operation used by the unifier to avoid repeatedly
     /// traversing long chains.
+    ///
+    /// **Note:** This function panics on cycle detection. For error-handling
+    /// code paths, use `tryChase()` instead.
     pub fn chase(self: HType) HType {
         return cycle_detection.chaseValue(self) catch {
             std.debug.panic("HType.chase: infinite type cycle detected", .{});
         };
+    }
+
+    /// Like `chase()` but returns an error instead of panicking on cycle.
+    ///
+    /// Use this in entry points where the error can be propagated up to
+    /// diagnostic emission (e.g., in `unify()` and the constraint solver).
+    pub fn tryChase(self: HType) cycle_detection.CycleError!HType {
+        return cycle_detection.chaseValue(self);
     }
 
     // ── Predicates ─────────────────────────────────────────────────────
