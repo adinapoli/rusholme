@@ -226,6 +226,13 @@ pub const TerminalRenderer = struct {
                 const ty_str = try mm.instance_ty.pretty(self.file_contents.allocator);
                 try writer.print("{s}`{s}`{s}\n", .{ yellow_color, ty_str, reset_color });
             },
+            .infinite_type_cycle => |itc| {
+                try writer.print("{s}---{s} infinite type cycle detected{c}", .{ err_color, reset_color, '\n' });
+                try writer.writeAll(indent);
+                try writer.print("   metavariable: {s}?{d}{s}\n", .{ yellow_color, itc.meta_id, reset_color });
+                try writer.writeAll(indent);
+                try writer.print("   {s}note:{s} a cycle was detected in the type variable chain.\n", .{ cyan_color, reset_color });
+            },
         }
     }
 

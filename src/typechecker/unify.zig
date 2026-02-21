@@ -63,6 +63,10 @@ pub const UnifyError = error{
     /// The occurs check failed: a metavariable appears in its own solution,
     /// which would produce an infinite type, e.g. `?0 ~ [?0]`.
     InfiniteType,
+    /// A cycle was detected in the metavariable chain (e.g., ?0 → ?1 → ?0).
+    /// This indicates unsound type unification occurred, but we report it
+    /// gracefully as a diagnostic rather than panicking.
+    InfiniteTypeCycle,
     /// Two distinct rigid type variables were unified, e.g. `a ~ b` where
     /// both are bound by `forall`.
     RigidMismatch,
@@ -92,8 +96,9 @@ pub const UnifyError = error{
 /// constraint solver is responsible for checkpointing if needed).
 pub fn unify(alloc: std.mem.Allocator, a: *HType, b: *HType) UnifyError!void {
     // Chase to the root of each side (follows solved MetaVar chains).
-    const lhs = a.chase();
-    const rhs = b.chase();
+    // Use tryChase to propagate cycle detection as an error.
+    const lhs = a.tryChase() catch return UnifyError.InfiniteTypeCycle;
+    const rhs = b.tryChase() catch return UnifyError.InfiniteTypeCycle;
 
     // Both are the same unsolved metavar — reflexivity.
     if (lhs == .Meta and rhs == .Meta and lhs.Meta.eql(rhs.Meta))
@@ -104,8 +109,8 @@ pub fn unify(alloc: std.mem.Allocator, a: *HType, b: *HType) UnifyError!void {
     // mutation chain.  We walk to the tail of `a`'s chain and point it at
     // the tail of `b`'s chain directly.
     if (lhs == .Meta and rhs == .Meta) {
-        const a_tail = tailPtr(a);
-        const b_tail = tailPtr(b);
+        const a_tail = try tailPtr(a);
+        const b_tail = try tailPtr(b);
         a_tail.Meta.ref = b_tail;
         return;
     }
@@ -218,14 +223,13 @@ pub fn unify(alloc: std.mem.Allocator, a: *HType, b: *HType) UnifyError!void {
 
 /// Walk a MetaVar chain to the last unsolved `Meta` node and return a pointer
 /// to it.  `node` must be a `.Meta` (possibly with solved links).
-fn tailPtr(node: *HType) *HType {
-    return cycle_detection.chasePtr(node) catch {
-        std.debug.panic("unify.tailPtr: infinite type cycle detected", .{});
-    };
+/// Returns `InfiniteTypeCycle` if a cycle is detected in the chain.
+fn tailPtr(node: *HType) UnifyError!*HType {
+    return cycle_detection.chasePtr(node) catch UnifyError.InfiniteTypeCycle;
 }
 
 fn bindPtr(alloc: std.mem.Allocator, node: *HType, ty: HType) UnifyError!void {
-    const end = cycle_detection.chasePtr(node) catch return UnifyError.InfiniteType;
+    const end = cycle_detection.chasePtr(node) catch return UnifyError.InfiniteTypeCycle;
     return bind(end, end.Meta.id, ty, alloc);
 }
 

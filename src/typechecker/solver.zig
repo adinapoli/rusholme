@@ -153,6 +153,28 @@ pub fn solve(
                     .payload = DiagnosticPayload{ .type_error = te },
                 });
             },
+            error.InfiniteTypeCycle => {
+                // A cycle was detected in the metavariable chain.
+                // Extract the metavar ID for better error reporting.
+                const meta_id = if (c.lhs.chase() == .Meta)
+                    c.lhs.Meta.id
+                else
+                    blk: {
+                        if (c.rhs.chase() == .Meta) break :blk c.rhs.Meta.id;
+                        break :blk 0;
+                    };
+                const te = TypeError{ .infinite_type_cycle = .{
+                    .meta_id = meta_id,
+                } };
+                const msg = try type_error_mod.format(alloc, te);
+                try diags.emit(alloc, .{
+                    .severity = .@"error",
+                    .code = .type_error,
+                    .span = c.span,
+                    .message = msg,
+                    .payload = DiagnosticPayload{ .type_error = te },
+                });
+            },
             error.ArityMismatch => {
                 // For M1, we don't have detailed arity info from the unifier,
                 // so we use a generic payload. The message still provides
