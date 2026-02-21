@@ -122,7 +122,7 @@
 | [#134](https://github.com/adinapoli/rusholme/issues/134) | Implement parser: tuple types and expressions | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
 | [#135](https://github.com/adinapoli/rusholme/issues/135) | Implement parser: record syntax | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
 | [#136](https://github.com/adinapoli/rusholme/issues/136) | Implement parser: list comprehensions | [#29](https://github.com/adinapoli/rusholme/issues/29), [#133](https://github.com/adinapoli/rusholme/issues/133) | :green_circle: |
-| [#216](https://github.com/adinapoli/rusholme/issues/216) | ast: add LetQualifier variant to Qualifier for list comprehension let-bindings | [#136](https://github.com/adinapoli/rusholme/issues/136) | :white_circle: |
+| [#216](https://github.com/adinapoli/rusholme/issues/216) | ast: add LetQualifier variant to Qualifier for list comprehension let-bindings | [#136](https://github.com/adinapoli/rusholme/issues/136) | :yellow_circle: |
 | [#137](https://github.com/adinapoli/rusholme/issues/137) | Implement parser: type operators | [#29](https://github.com/adinapoli/rusholme/issues/29), [#32](https://github.com/adinapoli/rusholme/issues/32) | :green_circle: |
 | [#138](https://github.com/adinapoli/rusholme/issues/138) | Implement parser: bang patterns | [#29](https://github.com/adinapoli/rusholme/issues/29), [#31](https://github.com/adinapoli/rusholme/issues/31) | :white_circle: |
 | [#139](https://github.com/adinapoli/rusholme/issues/139) | Implement parser: field selectors | [#29](https://github.com/adinapoli/rusholme/issues/29), [#135](https://github.com/adinapoli/rusholme/issues/135) | :white_circle: |
