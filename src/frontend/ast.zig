@@ -370,8 +370,12 @@ pub const Stmt = union(enum) {
 
 /// List comprehension qualifier
 pub const Qualifier = union(enum) {
+    /// Generator: pat <- expr
     Generator: struct { pat: Pattern, expr: Expr },
+    /// Boolean guard: predicate expression
     Qualifier: Expr,
+    /// Let qualifier: let { decls }
+    LetQualifier: []const Decl,
 };
 
 /// Patterns

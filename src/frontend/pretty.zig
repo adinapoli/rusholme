@@ -782,6 +782,18 @@ pub const PrettyPrinter = struct {
                 try self.printExpr(gen.expr);
             },
             .Qualifier => |expr| try self.printExpr(expr),
+            .LetQualifier => |decls| {
+                try self.write("let ");
+                self.indent();
+                for (decls, 0..) |decl, i| {
+                    if (i > 0) {
+                        try self.newline();
+                        try self.writeIndent();
+                    }
+                    try self.printDecl(decl);
+                }
+                self.dedent();
+            },
         }
     }
 
