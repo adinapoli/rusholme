@@ -3,6 +3,11 @@
 > Auto-generated from GitHub issues. Each issue links to its tracker.
 > **Starting points** (zero dependencies): #1✓, #2✓, #17✓, #22✓, #24✓, #27✓, #53✓, #85✓, #58, #62⚡, #66, #68, #107✓
 
+**Recent Progress (2026-02-21):**
+- ✓ #183: typechecker: let-binding type signatures are ignored
+- ✓ #216: ast: add LetQualifier variant to Qualifier for list comprehension let-bindings
+- ✓ #218: Parser: backtick left sections with compound LHS
+
 **Recent Progress (2026-02-20):**
 - ✓ #205: parser: record syntax in newtype declarations
 - ✓ #256: lexer+parser: quasi-quotation syntax ([name| ... |])
@@ -122,18 +127,18 @@
 | [#134](https://github.com/adinapoli/rusholme/issues/134) | Implement parser: tuple types and expressions | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
 | [#135](https://github.com/adinapoli/rusholme/issues/135) | Implement parser: record syntax | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
 | [#136](https://github.com/adinapoli/rusholme/issues/136) | Implement parser: list comprehensions | [#29](https://github.com/adinapoli/rusholme/issues/29), [#133](https://github.com/adinapoli/rusholme/issues/133) | :green_circle: |
-| [#216](https://github.com/adinapoli/rusholme/issues/216) | ast: add LetQualifier variant to Qualifier for list comprehension let-bindings | [#136](https://github.com/adinapoli/rusholme/issues/136) | :yellow_circle: |
+| [#216](https://github.com/adinapoli/rusholme/issues/216) | ast: add LetQualifier variant to Qualifier for list comprehension let-bindings | [#136](https://github.com/adinapoli/rusholme/issues/136) | :green_circle: |
 | [#137](https://github.com/adinapoli/rusholme/issues/137) | Implement parser: type operators | [#29](https://github.com/adinapoli/rusholme/issues/29), [#32](https://github.com/adinapoli/rusholme/issues/32) | :green_circle: |
-| [#138](https://github.com/adinapoli/rusholme/issues/138) | Implement parser: bang patterns | [#29](https://github.com/adinapoli/rusholme/issues/29), [#31](https://github.com/adinapoli/rusholme/issues/31) | :white_circle: |
+| [#138](https://github.com/adinapoli/rusholme/issues/138) | Implement parser: bang patterns | [#29](https://github.com/adinapoli/rusholme/issues/29), [#31](https://github.com/adinapoli/rusholme/issues/31) | :green_circle: |
 | [#139](https://github.com/adinapoli/rusholme/issues/139) | Implement parser: field selectors | [#29](https://github.com/adinapoli/rusholme/issues/29), [#135](https://github.com/adinapoli/rusholme/issues/135) | :white_circle: |
 | [#140](https://github.com/adinapoli/rusholme/issues/140) | Implement parser: overloaded literals | [#29](https://github.com/adinapoli/rusholme/issues/29), [#32](https://github.com/adinapoli/rusholme/issues/32) | :white_circle: |
 | [#192](https://github.com/adinapoli/rusholme/issues/192) | parser: implement arithmetic sequences ([e..], [e,e..], [e..e], [e,e..e]) | [#29](https://github.com/adinapoli/rusholme/issues/29), [#133](https://github.com/adinapoli/rusholme/issues/133) | :green_circle: |
 | [#193](https://github.com/adinapoli/rusholme/issues/193) | lexer+parser: implement backtick infix operator syntax (`f`) | [#25](https://github.com/adinapoli/rusholme/issues/25), [#30](https://github.com/adinapoli/rusholme/issues/30) | :green_circle: |
-| [#218](https://github.com/adinapoli/rusholme/issues/218) | Parser: backtick left sections require atomic LHS | [#193](https://github.com/adinapoli/rusholme/issues/193) | :yellow_circle: |
+| [#218](https://github.com/adinapoli/rusholme/issues/218) | Parser: backtick left sections require atomic LHS | [#193](https://github.com/adinapoli/rusholme/issues/193) | :green_circle: |
 | [#194](https://github.com/adinapoli/rusholme/issues/194) | parser: implement let-without-in as a do-statement binding | [#30](https://github.com/adinapoli/rusholme/issues/30) | :green_circle: |
 | [#195](https://github.com/adinapoli/rusholme/issues/195) | parser: implement superclass context in class declarations (class (Eq a) => ...) | [#33](https://github.com/adinapoli/rusholme/issues/33) | :green_circle: |
 | [#196](https://github.com/adinapoli/rusholme/issues/196) | parser: implement as-patterns (x@pat) in case alternatives and function args | [#31](https://github.com/adinapoli/rusholme/issues/31) | :green_circle: |
-| [#197](https://github.com/adinapoli/rusholme/issues/197) | parser: implement functional dependencies in class declarations (\| a -> b) | [#33](https://github.com/adinapoli/rusholme/issues/33) | :white_circle: |
+| [#197](https://github.com/adinapoli/rusholme/issues/197) | parser: implement functional dependencies in class declarations (\| a -> b) | [#33](https://github.com/adinapoli/rusholme/issues/33) | :green_circle: |
 | [#198](https://github.com/adinapoli/rusholme/issues/198) | parser: implement operator function definitions and type signatures ((|>) x y = ...) | [#29](https://github.com/adinapoli/rusholme/issues/29), [#30](https://github.com/adinapoli/rusholme/issues/30) | :green_circle: |
 | [#199](https://github.com/adinapoli/rusholme/issues/199) | parser: implement constrained and existential GADT constructors (forall / Class a =>) | [#29](https://github.com/adinapoli/rusholme/issues/29), [#32](https://github.com/adinapoli/rusholme/issues/32) | :green_circle: |
 | [#200](https://github.com/adinapoli/rusholme/issues/200) | parser: implement multi-condition guards (\| g1, g2 = e) and pattern guards | [#30](https://github.com/adinapoli/rusholme/issues/30) | :green_circle: |
@@ -141,7 +146,7 @@
 | [#202](https://github.com/adinapoli/rusholme/issues/202) | parser: fix operator sections with consym operators ((p ++) fails) | [#30](https://github.com/adinapoli/rusholme/issues/30) | :green_circle: |
 | [#203](https://github.com/adinapoli/rusholme/issues/203) | parser: fix where-clause after do-block (layout rule closes do context incorrectly) | [#26](https://github.com/adinapoli/rusholme/issues/26), [#30](https://github.com/adinapoli/rusholme/issues/30) | :green_circle: |
 | [#204](https://github.com/adinapoli/rusholme/issues/204) | parser: implement default method implementations in class declarations | [#33](https://github.com/adinapoli/rusholme/issues/33) | :green_circle: |
-| [#220](https://github.com/adinapoli/rusholme/issues/220) | ast/parser: class default methods only store first equation | [#204](https://github.com/adinapoli/rusholme/issues/204) | :white_circle: |
+| [#220](https://github.com/adinapoli/rusholme/issues/220) | ast/parser: class default methods only store first equation | [#204](https://github.com/adinapoli/rusholme/issues/204) | :green_circle: |
 | [#205](https://github.com/adinapoli/rusholme/issues/205) | parser: implement record syntax in newtype declarations (depends on #135) | [#135](https://github.com/adinapoli/rusholme/issues/135) | :green_circle: |
 | [#206](https://github.com/adinapoli/rusholme/issues/206) | parser: implement infix type constructors in data declaration heads (data a :+: b = ...) | [#29](https://github.com/adinapoli/rusholme/issues/29), [#137](https://github.com/adinapoli/rusholme/issues/137) | :green_circle: |
 | [#207](https://github.com/adinapoli/rusholme/issues/207) | parser: layout rule too permissive — bad indentation accepted instead of rejected | [#26](https://github.com/adinapoli/rusholme/issues/26) | :white_circle: |
@@ -194,7 +199,7 @@
 | [#174](https://github.com/adinapoli/rusholme/issues/174) | typechecker: generalisePtr passes empty env_types, risking over-generalisation | [#36](https://github.com/adinapoli/rusholme/issues/36) | :green_circle: |
 | [#175](https://github.com/adinapoli/rusholme/issues/175) | typechecker: type signatures are ignored during inference | [#36](https://github.com/adinapoli/rusholme/issues/36) | :green_circle: |
 | [#176](https://github.com/adinapoli/rusholme/issues/176) | typechecker: do-notation inference is hard-coded to IO, not generic Monad | [#36](https://github.com/adinapoli/rusholme/issues/36), [#37](https://github.com/adinapoli/rusholme/issues/37) | :green_circle: |
-| [#183](https://github.com/adinapoli/rusholme/issues/183) | typechecker: let-binding type signatures are ignored | [#175](https://github.com/adinapoli/rusholme/issues/175) | :yellow_circle: |
+| [#183](https://github.com/adinapoli/rusholme/issues/183) | typechecker: let-binding type signatures are ignored | [#175](https://github.com/adinapoli/rusholme/issues/175) | :green_circle: |
 | [#263](https://github.com/adinapoli/rusholme/issues/263) | typechecker: mutually recursive let-bindings with type signatures not fully supported | [#183](https://github.com/adinapoli/rusholme/issues/183) | :white_circle: |
 | [#184](https://github.com/adinapoli/rusholme/issues/184) | typechecker: bidirectional signature checking for rank-N polymorphism | [#175](https://github.com/adinapoli/rusholme/issues/175) | :white_circle: |
 | [#177](https://github.com/adinapoli/rusholme/issues/177) | typechecker: astTypeToHType incomplete — App, Paren, Forall, n-tuples not handled | [#36](https://github.com/adinapoli/rusholme/issues/36) | :green_circle: |
