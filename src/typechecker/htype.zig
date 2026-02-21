@@ -2,7 +2,7 @@
 //!
 //! During bidirectional type inference the typechecker works with
 //! *partially-known* types.  A fresh metavariable `?0` stands for an unknown
-//! type that will be filled in by the constraint solver.  `core.ir.CoreType`
+//! type that will be filled in by the constraint solver.  `core.ast.CoreType`
 //! has no such concept — it is a fully-resolved, immutable type produced only
 //! after elaboration.  `HType` bridges the gap.
 //!
@@ -29,7 +29,7 @@
 
 const std = @import("std");
 const naming = @import("../naming/unique.zig");
-const core = @import("../core/ir.zig");
+const core = @import("../core/ast.zig");
 const cycle_detection = @import("cycle_detection.zig");
 
 pub const Name = naming.Name;
@@ -88,7 +88,7 @@ pub const MetaVarSupply = struct {
 
 /// The typechecker's internal type representation.
 ///
-/// Structurally mirrors `core.ir.CoreType` but adds `Meta` (unification
+/// Structurally mirrors `core.ast.CoreType` but adds `Meta` (unification
 /// metavariables) and uses `Rigid` instead of `TyVar` to emphasise that
 /// rigid variables are *given*, not inferred.
 ///

@@ -44,7 +44,8 @@ pub const tc = struct {
 
 // IR representations
 pub const core = struct {
-    pub const ir = @import("core/ir.zig");
+    pub const ast = @import("core/ast.zig");
+    pub const pretty = @import("core/pretty.zig");
 };
 
 pub const grin = struct {
