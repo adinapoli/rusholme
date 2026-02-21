@@ -169,8 +169,18 @@ pub const ClassDecl = struct {
     context: ?Context,
     class_name: []const u8,
     tyvars: []const []const u8,
+    /// Functional dependencies (GHC extension): e.g., `| c -> e` becomes `.{ .determiners = &.{"c"}, .determined = &.{"e"} }`
+    fundeps: []const FunDep,
     methods: []const ClassMethod,
     span: SourceSpan,
+};
+
+/// Functional dependency: `a b -> c` means variables `a` and `b` determine `c`
+pub const FunDep = struct {
+    /// Left-hand side: determining type variables
+    determiners: []const []const u8,
+    /// Right-hand side: determined type variables
+    determined: []const []const u8,
 };
 
 pub const ClassMethod = struct {

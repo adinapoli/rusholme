@@ -1416,6 +1416,47 @@ pub const Parser = struct {
             try tyvars.append(self.allocator, tv.token.varid);
         }
 
+        // Parse functional dependencies (GHC extension): | var+ -> var+ (, var+ -> var+)*
+        var fundeps: std.ArrayListUnmanaged(ast_mod.FunDep) = .empty;
+        if (try self.match(.pipe) != null) {
+            while (true) {
+                // Parse determiners (LHS): var+
+                var determiners: std.ArrayListUnmanaged([]const u8) = .empty;
+                while (try self.check(.varid)) {
+                    const tv = try self.advance();
+                    try determiners.append(self.allocator, tv.token.varid);
+                }
+                if (determiners.items.len == 0) {
+                    const got = try self.peek();
+                    try self.emitErrorMsg(got.span, "expected type variable in functional dependency");
+                    return error.UnexpectedToken;
+                }
+
+                // Parse arrow
+                _ = try self.expect(.arrow_right);
+
+                // Parse determined (RHS): var+
+                var determined: std.ArrayListUnmanaged([]const u8) = .empty;
+                while (try self.check(.varid)) {
+                    const tv = try self.advance();
+                    try determined.append(self.allocator, tv.token.varid);
+                }
+                if (determined.items.len == 0) {
+                    const got = try self.peek();
+                    try self.emitErrorMsg(got.span, "expected type variable in functional dependency");
+                    return error.UnexpectedToken;
+                }
+
+                try fundeps.append(self.allocator, .{
+                    .determiners = try determiners.toOwnedSlice(self.allocator),
+                    .determined = try determined.toOwnedSlice(self.allocator),
+                });
+
+                // Check for more fundeps separated by comma
+                if (try self.match(.comma) == null) break;
+            }
+        }
+
         // Parse class body: type signatures and optional default implementations.
         //
         // A class body may contain two kinds of items (Haskell 2010 §4.3.1):
@@ -1521,6 +1562,7 @@ pub const Parser = struct {
             .context = context,
             .class_name = name_tok.token.conid,
             .tyvars = try tyvars.toOwnedSlice(self.allocator),
+            .fundeps = try fundeps.toOwnedSlice(self.allocator),
             .methods = try methods.toOwnedSlice(self.allocator),
             .span = self.spanFrom(start),
         } };

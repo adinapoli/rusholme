@@ -366,6 +366,22 @@ pub const PrettyPrinter = struct {
             try self.writeByte(' ');
             try self.write(tv);
         }
+        // Print functional dependencies
+        if (cd.fundeps.len > 0) {
+            try self.write(" | ");
+            for (cd.fundeps, 0..) |fd, i| {
+                if (i > 0) try self.write(", ");
+                for (fd.determiners, 0..) |det, j| {
+                    if (j > 0) try self.writeByte(' ');
+                    try self.write(det);
+                }
+                try self.write(" -> ");
+                for (fd.determined, 0..) |det, j| {
+                    if (j > 0) try self.writeByte(' ');
+                    try self.write(det);
+                }
+            }
+        }
         if (cd.methods.len > 0) {
             try self.write(" where");
             try self.newline();
