@@ -382,6 +382,23 @@ pub const RDecl = union(enum) {
     ClassDecl: RClassDecl,
     /// Type class instance declaration.
     InstanceDecl: RInstanceDecl,
+    /// Data declaration (algebraic data type).
+    DataDecl: RDataDecl,
+};
+
+/// A renamed data constructor declaration.
+pub const RConDecl = struct {
+    name: Name,
+    fields: []const ast.FieldDecl,
+    span: SourceSpan,
+};
+
+/// A renamed data declaration.
+pub const RDataDecl = struct {
+    name: Name,
+    tyvars: []const []const u8,
+    constructors: []const RConDecl,
+    span: SourceSpan,
 };
 
 /// A renamed type class assertion: `ClassName type1 type2 ...`.
@@ -519,7 +536,24 @@ pub fn rename(module: ast.Module, env: *RenameEnv) !RenamedModule {
                     }
                 }
             },
-            else => {}, // Data/type decls: skip binder extraction
+            .Data => |dd| {
+                for (dd.constructors) |con| {
+                    if (env.scope.boundInCurrentFrame(con.name)) {
+                        const msg = try std.fmt.allocPrint(env.alloc, "duplicate definition: `{s}`", .{con.name});
+                        try env.diags.emit(env.alloc, .{
+                            .severity = .@"error",
+                            .code = .duplicate_definition,
+                            .span = con.span,
+                            .message = msg,
+                        });
+                    } else {
+                        const cn = env.freshName(con.name);
+                        try env.scope.bind(con.name, cn);
+                        try top_names.put(env.alloc, con.name, cn);
+                    }
+                }
+            },
+            else => {}, // type decls: skip binder extraction
         }
     }
 
@@ -621,16 +655,13 @@ fn renameDecl(
             var rms = std.ArrayListUnmanaged(RClassMethod){};
             for (cd.methods) |m| {
                 const method_name = env.scope.lookup(m.name) orelse env.freshName(m.name);
-                const default_impl: ?[]const RMatch = if (m.default_implementation) |defs|
-                    impl_blk: {
-                        var renames = std.ArrayListUnmanaged(RMatch){};
-                        for (defs) |def| {
-                            try renames.append(env.alloc, try renameMatch(def, env));
-                        }
-                        break :impl_blk try renames.toOwnedSlice(env.alloc);
+                const default_impl: ?[]const RMatch = if (m.default_implementation) |defs| impl_blk: {
+                    var renames = std.ArrayListUnmanaged(RMatch){};
+                    for (defs) |def| {
+                        try renames.append(env.alloc, try renameMatch(def, env));
                     }
-                else
-                    null;
+                    break :impl_blk try renames.toOwnedSlice(env.alloc);
+                } else null;
                 try rms.append(env.alloc, .{
                     .name = method_name,
                     .type = m.type,
@@ -683,6 +714,26 @@ fn renameDecl(
                 .context = try ras.toOwnedSlice(env.alloc),
                 .bindings = try rbs.toOwnedSlice(env.alloc),
                 .span = inst.span,
+            } };
+        },
+        .Data => |dd| blk: {
+            const data_name = env.scope.lookup(dd.name) orelse env.freshName(dd.name);
+            var rcons = std.ArrayListUnmanaged(RConDecl){};
+            for (dd.constructors) |con| {
+                const con_name = env.scope.lookup(con.name) orelse env.freshName(con.name);
+                // We keep field definitions as-is because ast.FieldDecl handles the un-renamable type ASTs
+                // just fine (types are mostly checked dynamically during infer or resolved later).
+                try rcons.append(env.alloc, .{
+                    .name = con_name,
+                    .fields = con.fields,
+                    .span = con.span,
+                });
+            }
+            break :blk RDecl{ .DataDecl = .{
+                .name = data_name,
+                .tyvars = dd.tyvars,
+                .constructors = try rcons.toOwnedSlice(env.alloc),
+                .span = dd.span,
             } };
         },
         else => null,

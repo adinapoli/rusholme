@@ -404,7 +404,10 @@ fn astTypeToHTypeWithScope(
         },
         .Con => |qname| blk: {
             if (knownTypeByName(qname.name)) |ty| break :blk ctx.alloc_ty(ty);
-            break :blk ctx.freshMeta();
+            break :blk ctx.alloc_ty(HType{ .Con = .{
+                .name = Name{ .base = qname.name, .unique = .{ .value = 0 } },
+                .args = &.{},
+            } });
         },
         .Fun => |parts| blk: {
             if (parts.len < 2) break :blk ctx.freshMeta();
@@ -848,6 +851,7 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                     .TypeSig => {},
                     .ClassDecl => {},
                     .InstanceDecl => {},
+                    .DataDecl => {},
                 }
             }
 
@@ -890,6 +894,7 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                     .TypeSig => {},
                     .ClassDecl => {},
                     .InstanceDecl => {},
+                    .DataDecl => {},
                 }
             }
 
@@ -1389,6 +1394,9 @@ fn inferLetDecl(
         .InstanceDecl => {
             // Instance declarations are handled separately during pass 1.
         },
+        .DataDecl => {
+            // Data declarations are handled separately during module inference.
+        },
     }
 }
 
@@ -1459,6 +1467,9 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
     defer env_metas.deinit(ctx.alloc);
     try ctx.env.collectFreeMetas(&env_metas, ctx.alloc);
 
+    var data_schemes = std.AutoHashMapUnmanaged(naming_mod.Unique, TyScheme){};
+    defer data_schemes.deinit(ctx.alloc);
+
     // Pass 1: allocate fresh meta nodes for all top-level binders.
     var top_metas = std.AutoHashMapUnmanaged(naming_mod.Unique, *HType){};
     for (module.declarations) |decl| {
@@ -1473,6 +1484,51 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
             .TypeSig => {},
             .ClassDecl => {}, // Classes are handled separately
             .InstanceDecl => {}, // Instances are handled separately
+            .DataDecl => |dd| {
+                var scope_dd = TypeVarMap{};
+                defer scope_dd.deinit(ctx.alloc);
+
+                var tyvar_ids = std.ArrayListUnmanaged(u64){};
+                defer tyvar_ids.deinit(ctx.alloc);
+
+                var ty_args = std.ArrayListUnmanaged(HType){};
+                defer ty_args.deinit(ctx.alloc);
+
+                for (dd.tyvars) |tv| {
+                    const tv_name = ctx.freshRigid(tv);
+                    const tv_node = try ctx.alloc_ty(.{ .Rigid = tv_name });
+                    try scope_dd.put(ctx.alloc, tv, tv_node);
+                    try tyvar_ids.append(ctx.alloc, tv_name.unique.value);
+                    try ty_args.append(ctx.alloc, tv_node.*);
+                }
+
+                const res_ty = try ctx.alloc_ty(.{ .Con = .{
+                    .name = dd.name,
+                    .args = try ty_args.toOwnedSlice(ctx.alloc),
+                } });
+
+                for (dd.constructors) |con| {
+                    var con_ty = res_ty;
+                    var i = con.fields.len;
+                    while (i > 0) {
+                        i -= 1;
+                        const ast_ty = switch (con.fields[i]) {
+                            .Plain => |t| t,
+                            .Record => |r| r.type,
+                        };
+                        const arg_ty = try astTypeToHTypeWithScope(ast_ty, ctx, &scope_dd);
+                        con_ty = try ctx.alloc_ty(.{ .Fun = .{ .arg = arg_ty, .res = con_ty } });
+                    }
+
+                    const scheme = TyScheme{
+                        .binders = try ctx.alloc.dupe(u64, tyvar_ids.items),
+                        .constraints = &.{},
+                        .body = con_ty.*,
+                    };
+                    try ctx.env.bind(con.name, scheme);
+                    try data_schemes.put(ctx.alloc, con.name.unique, scheme);
+                }
+            },
         }
     }
 
@@ -1515,6 +1571,7 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
             .TypeSig => {},
             .ClassDecl => {}, // Classes are handled separately (class registration)
             .InstanceDecl => {}, // Instances are handled separately (instance resolution)
+            .DataDecl => {},
         }
     }
 
@@ -1530,6 +1587,11 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
         const scheme = ctx.env.lookupScheme(entry.key_ptr.*) orelse
             TyScheme.mono(entry.value_ptr.*.*);
         try result.schemes.put(ctx.alloc, entry.key_ptr.*, scheme);
+    }
+
+    var ds_it = data_schemes.iterator();
+    while (ds_it.next()) |entry| {
+        try result.schemes.put(ctx.alloc, entry.key_ptr.*, entry.value_ptr.*);
     }
     return result;
 }

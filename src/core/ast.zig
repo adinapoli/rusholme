@@ -150,8 +150,20 @@ pub const Expr = union(enum) {
     Coercion: Coercion,
 };
 
-/// A Core program is a list of top-level bindings.
-pub const CoreProgram = []const Bind;
+/// A Core-level data declaration.
+pub const CoreDataDecl = struct {
+    name: Name,
+    tyvars: []const Name,
+    /// Data constructors, represented as typed Ids.
+    constructors: []const Id,
+    span: SourceSpan,
+};
+
+/// A Core program consists of data declarations and top-level bindings.
+pub const CoreProgram = struct {
+    data_decls: []const CoreDataDecl,
+    binds: []const Bind,
+};
 
 // ── Tests ──────────────────────────────────────────────────────────────
 

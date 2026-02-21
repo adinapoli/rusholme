@@ -330,7 +330,7 @@ fn cmdCore(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     var stdout = &stdout_fw.interface;
 
     var pp = rusholme.core.pretty.CorePrinter(*Io.Writer).init(stdout);
-    try stdout.print("=== Core Program ({} bindings) ===\n", .{core_prog.len});
+    try stdout.print("=== Core Program ({} data, {} bindings) ===\n", .{ core_prog.data_decls.len, core_prog.binds.len });
     try pp.printProgram(core_prog);
     try stdout.print("\n", .{});
 
