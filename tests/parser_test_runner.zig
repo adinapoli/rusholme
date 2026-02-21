@@ -225,6 +225,7 @@ test "should_compile: sc040_type_annotations_exprs" { try testShouldCompile(std.
 test "should_compile: sc041_ghc_real_world_001" { try testShouldCompile(std.testing.allocator, "sc041_ghc_real_world_001"); }
 test "should_compile: sc042_ghc_real_world_002" { try testShouldCompile(std.testing.allocator, "sc042_ghc_real_world_002"); }
 test "should_compile: sc043_infix_constructors_in_types" { try testShouldCompile(std.testing.allocator, "sc043_infix_constructors_in_types"); }
+test "should_compile: sc044_vtt_parser" { try testShouldCompile(std.testing.allocator, "sc044_vtt_parser"); }
 
 // ── should_fail test declarations ─────────────────────────────────────────
 
