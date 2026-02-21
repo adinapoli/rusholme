@@ -194,7 +194,8 @@
 | [#174](https://github.com/adinapoli/rusholme/issues/174) | typechecker: generalisePtr passes empty env_types, risking over-generalisation | [#36](https://github.com/adinapoli/rusholme/issues/36) | :green_circle: |
 | [#175](https://github.com/adinapoli/rusholme/issues/175) | typechecker: type signatures are ignored during inference | [#36](https://github.com/adinapoli/rusholme/issues/36) | :green_circle: |
 | [#176](https://github.com/adinapoli/rusholme/issues/176) | typechecker: do-notation inference is hard-coded to IO, not generic Monad | [#36](https://github.com/adinapoli/rusholme/issues/36), [#37](https://github.com/adinapoli/rusholme/issues/37) | :green_circle: |
-| [#183](https://github.com/adinapoli/rusholme/issues/183) | typechecker: let-binding type signatures are ignored | [#175](https://github.com/adinapoli/rusholme/issues/175) | :white_circle: |
+| [#183](https://github.com/adinapoli/rusholme/issues/183) | typechecker: let-binding type signatures are ignored | [#175](https://github.com/adinapoli/rusholme/issues/175) | :yellow_circle: |
+| [#263](https://github.com/adinapoli/rusholme/issues/263) | typechecker: mutually recursive let-bindings with type signatures not fully supported | [#183](https://github.com/adinapoli/rusholme/issues/183) | :white_circle: |
 | [#184](https://github.com/adinapoli/rusholme/issues/184) | typechecker: bidirectional signature checking for rank-N polymorphism | [#175](https://github.com/adinapoli/rusholme/issues/175) | :white_circle: |
 | [#177](https://github.com/adinapoli/rusholme/issues/177) | typechecker: astTypeToHType incomplete — App, Paren, Forall, n-tuples not handled | [#36](https://github.com/adinapoli/rusholme/issues/36) | :green_circle: |
 | [#37](https://github.com/adinapoli/rusholme/issues/37) | Implement type class resolution and dictionary passing | [#36](https://github.com/adinapoli/rusholme/issues/36), [#153](https://github.com/adinapoli/rusholme/issues/153) | :green_circle: |
