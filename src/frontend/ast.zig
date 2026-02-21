@@ -176,10 +176,10 @@ pub const ClassDecl = struct {
 pub const ClassMethod = struct {
     name: []const u8,
     type: Type,
-    /// Optional default implementation. Stored as a `Match` so that it can
-    /// carry argument patterns (e.g. `size c = length (toList c)`).
+    /// Optional default implementation. Stored as a slice of `Match` equations so that
+    /// multi-equation defaults (e.g., `foo True = 1; foo False = 0`) are preserved.
     /// For a no-argument default the patterns slice is empty.
-    default_implementation: ?Match,
+    default_implementation: ?[]const Match,
 };
 
 /// Type class instance: `instance Eq Bool where`

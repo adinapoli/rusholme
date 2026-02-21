@@ -394,7 +394,9 @@ pub const RAssertion = struct {
 pub const RClassMethod = struct {
     name: Name,
     type: ast.Type,
-    default_impl: ?RMatch,
+    /// Optional default implementation. Stored as a slice of renamed `RMatch` equations
+    /// so that multi-equation defaults are preserved.
+    default_impl: ?[]const RMatch,
 };
 
 /// A renamed type class declaration.
@@ -619,8 +621,14 @@ fn renameDecl(
             var rms = std.ArrayListUnmanaged(RClassMethod){};
             for (cd.methods) |m| {
                 const method_name = env.scope.lookup(m.name) orelse env.freshName(m.name);
-                const default_impl: ?RMatch = if (m.default_implementation) |def|
-                    try renameMatch(def, env)
+                const default_impl: ?[]const RMatch = if (m.default_implementation) |defs|
+                    impl_blk: {
+                        var renames = std.ArrayListUnmanaged(RMatch){};
+                        for (defs) |def| {
+                            try renames.append(env.alloc, try renameMatch(def, env));
+                        }
+                        break :impl_blk try renames.toOwnedSlice(env.alloc);
+                    }
                 else
                     null;
                 try rms.append(env.alloc, .{

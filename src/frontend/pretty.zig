@@ -376,15 +376,17 @@ pub const PrettyPrinter = struct {
                 try self.write(" :: ");
                 try self.printType(method.type);
                 try self.newline();
-                if (method.default_implementation) |impl| {
-                    try self.writeIndent();
-                    try self.write(method.name);
-                    for (impl.patterns) |*pat| {
-                        try self.writeByte(' ');
-                        try self.printPattern(pat);
+                if (method.default_implementation) |impls| {
+                    for (impls) |impl| {
+                        try self.writeIndent();
+                        try self.write(method.name);
+                        for (impl.patterns) |*pat| {
+                            try self.writeByte(' ');
+                            try self.printPattern(pat);
+                        }
+                        try self.printRhs(impl.rhs);
+                        try self.newline();
                     }
-                    try self.printRhs(impl.rhs);
-                    try self.newline();
                 }
             }
             self.dedent();

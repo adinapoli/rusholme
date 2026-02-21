@@ -37,3 +37,14 @@ instance Shape Circle where
     area (Circle r) = 3.14159 * r * r
     perimeter (Circle r) = 2 * 3.14159 * r
     -- isLarge uses default
+
+-- Multi-equation default methods
+class Decision a where
+    decide :: a -> Bool -> Bool
+    decide True  _    = True
+    decide False x    = x
+
+    choose :: a -> Int -> Int
+    choose x 0        = 0
+    choose x 1        = x
+    choose _ n        = n * 2
