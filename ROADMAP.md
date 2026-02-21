@@ -142,7 +142,7 @@
 | [#195](https://github.com/adinapoli/rusholme/issues/195) | parser: implement superclass context in class declarations (class (Eq a) => ...) | [#33](https://github.com/adinapoli/rusholme/issues/33) | :green_circle: |
 | [#196](https://github.com/adinapoli/rusholme/issues/196) | parser: implement as-patterns (x@pat) in case alternatives and function args | [#31](https://github.com/adinapoli/rusholme/issues/31) | :green_circle: |
 | [#197](https://github.com/adinapoli/rusholme/issues/197) | parser: implement functional dependencies in class declarations (\| a -> b) | [#33](https://github.com/adinapoli/rusholme/issues/33) | :green_circle: |
-| [#198](https://github.com/adinapoli/rusholme/issues/198) | parser: implement operator function definitions and type signatures ((|>) x y = ...) | [#29](https://github.com/adinapoli/rusholme/issues/29), [#30](https://github.com/adinapoli/rusholme/issues/30) | :green_circle: |
+| [#198](https://github.com/adinapoli/rusholme/issues/198) | parser: implement operator function definitions and type signatures ((\|>) x y = ...) | [#29](https://github.com/adinapoli/rusholme/issues/29), [#30](https://github.com/adinapoli/rusholme/issues/30) | :green_circle: |
 | [#199](https://github.com/adinapoli/rusholme/issues/199) | parser: implement constrained and existential GADT constructors (forall / Class a =>) | [#29](https://github.com/adinapoli/rusholme/issues/29), [#32](https://github.com/adinapoli/rusholme/issues/32) | :green_circle: |
 | [#200](https://github.com/adinapoli/rusholme/issues/200) | parser: implement multi-condition guards (\| g1, g2 = e) and pattern guards | [#30](https://github.com/adinapoli/rusholme/issues/30) | :green_circle: |
 | [#201](https://github.com/adinapoli/rusholme/issues/201) | parser: fix negative float literal parsing (-3.14 fails with 'expected expression') | [#30](https://github.com/adinapoli/rusholme/issues/30) | :green_circle: |
@@ -160,7 +160,7 @@
 | [#250](https://github.com/adinapoli/rusholme/issues/250) | parser: support wildcard patterns in do notation bindings (completed via #252; VTT parser blocked by #254) | [#30](https://github.com/adinapoli/rusholme/issues/30), [#31](https://github.com/adinapoli/rusholme/issues/31), [#254](https://github.com/adinapoli/rusholme/issues/254) | :green_circle: |
 | [#254](https://github.com/adinapoli/rusholme/issues/254) | lexer: string literal parsing fails when string contains keyword 'of' (resolved by quasiquotation fix) | [#86](https://github.com/adinapoli/rusholme/issues/86) | :green_circle: |
 | [#255](https://github.com/adinapoli/rusholme/issues/255) | parser: support LANGUAGE pragmas ({-# LANGUAGE ... #-}) | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
-| [#256](https://github.com/adinapoli/rusholme/issues/256) | parser: support quasi-quotation syntax ([name| ... |]) | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
+| [#256](https://github.com/adinapoli/rusholme/issues/256) | parser: support quasi-quotation syntax ([name\| ... \|]) | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
 
 ### CLI
 
@@ -178,6 +178,7 @@
 | [#69](https://github.com/adinapoli/rusholme/issues/69) | Implement chosen name uniqueness mechanism | [#68](https://github.com/adinapoli/rusholme/issues/68) | :green_circle: |
 | [#66](https://github.com/adinapoli/rusholme/issues/66) | Research: Calling convention (eval/apply vs push/enter vs CPS) | — | :green_circle: |
 | [#67](https://github.com/adinapoli/rusholme/issues/67) | Implement chosen calling convention in runtime and codegen | [#66](https://github.com/adinapoli/rusholme/issues/66), [#54](https://github.com/adinapoli/rusholme/issues/54) | :white_circle: |
+| [#277](https://github.com/adinapoli/rusholme/issues/277) | Research: Thunk representation for Rusholme's runtime | [#66](https://github.com/adinapoli/rusholme/issues/66) | :green_circle: |
 
 ### Epic [#154](https://github.com/adinapoli/rusholme/issues/154): Typechecker, Renamer & Desugarer (AST → Core)
 
