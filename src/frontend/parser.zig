@@ -2869,25 +2869,9 @@ pub const Parser = struct {
                 while (try self.matchSemi()) {}
             }
             _ = try self.expectCloseBrace();
-            // A let qualifier desugars to a let expression with the
-            // bound names in scope for subsequent qualifiers. We
-            // represent it as a Guard wrapping a Let with a unit body,
-            // which is sufficient for parsing purposes. The renamer/
-            // desugarer will handle it properly.
-            //
             // Per Haskell 2010 §3.11, let qualifiers are a first-class
-            // construct; we store them as a special Guard expression.
-            // Since the AST Qualifier union only has Generator and
-            // Qualifier (guard), we represent a let-qualifier as a
-            // guard whose expression is a Let with a unit body. A
-            // follow-up issue will add LetQualifier to ast.Qualifier.
-            // See: https://github.com/adinapoli/rusholme/issues/216
-            const unit = ast_mod.Expr{ .Tuple = &.{} };
-            const let_expr = ast_mod.Expr{ .Let = .{
-                .binds = try binds.toOwnedSlice(self.allocator),
-                .body = try self.allocNode(ast_mod.Expr, unit),
-            } };
-            return .{ .Qualifier = let_expr };
+            // construct. We store the declarations directly in LetQualifier.
+            return .{ .LetQualifier = try binds.toOwnedSlice(self.allocator) };
         }
 
         // Generator or guard: parse an expression first, then check for `<-`.
