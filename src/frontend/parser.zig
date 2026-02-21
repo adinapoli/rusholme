@@ -2230,6 +2230,16 @@ pub const Parser = struct {
                 break :blk id_name;
             } else Parser.getOpName(op_tok.token);
 
+            // For backtick operators, check if this is a left section: (expr `op`)
+            // If the token after the closing backtick is `)`, don't consume it here.
+            // Let the paren handler construct the LeftSection.
+            if (is_backtick) {
+                const after_close_bt = try self.peekAt(3);
+                if (std.meta.activeTag(after_close_bt.token) == .close_paren) {
+                    break;
+                }
+            }
+
             const info = self.getFixity(op_name) orelse default_fixity;
             if (info.precedence < min_prec) break;
             if (info.fixity == .InfixN and info.precedence == min_prec and min_prec > 0) break;
@@ -2502,6 +2512,35 @@ pub const Parser = struct {
                 // from parseInfixExpr (including backtick support) but accepts an
                 // already-parsed LHS, avoiding re-parsing `first` as an app-chain.
                 const paren_result = try self.continueInfixExpr(first, 0);
+
+                // Check for backtick left section after full infix expression: (expr `f`)
+                // This handles compound LHS like (x + y `div`) which wasn't caught above.
+                if (try self.peekTag() == .backtick) {
+                    const id_tok = try self.peekAt(1);
+                    const after_id = try self.peekAt(2);
+                    const is_id = std.meta.activeTag(id_tok.token) == .varid or
+                        std.meta.activeTag(id_tok.token) == .conid;
+                    const is_bt2 = std.meta.activeTag(after_id.token) == .backtick;
+                    if (is_id and is_bt2) {
+                        const after_bt2 = try self.peekAt(3);
+                        if (std.meta.activeTag(after_bt2.token) == .close_paren) {
+                            // Left section: (expr `f`)
+                            const bt1 = try self.advance(); // opening backtick
+                            const fn_id = try self.advance(); // identifier
+                            const bt2 = try self.advance(); // closing backtick
+                            _ = try self.expect(.close_paren);
+                            const bt_name: []const u8 = switch (std.meta.activeTag(fn_id.token)) {
+                                .varid => fn_id.token.varid,
+                                .conid => fn_id.token.conid,
+                                else => unreachable,
+                            };
+                            return .{ .LeftSection = .{
+                                .expr = try self.allocNode(ast_mod.Expr, paren_result),
+                                .op = .{ .name = bt_name, .span = bt1.span.merge(bt2.span) },
+                            } };
+                        }
+                    }
+                }
 
                 _ = try self.expect(.close_paren);
                 return .{ .Paren = try self.allocNode(ast_mod.Expr, paren_result) };
@@ -4799,6 +4838,19 @@ test "expr: left section with string consym (\"Hello, \" ++)" {
     try std.testing.expect(expr == .LeftSection);
     try std.testing.expect(expr.LeftSection.expr.* == .Lit);
     try std.testing.expectEqualStrings("++", expr.LeftSection.op.name);
+}
+
+// Issue #218: backtick left sections with compound LHS
+test "expr: backtick left section with compound LHS (x + y `div`)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const expr = try parseTestExpr(&arena,
+        \\f = (x + y `div`)
+    );
+    try std.testing.expect(expr == .LeftSection);
+    // The LHS should be an InfixApp (x + y)
+    try std.testing.expect(expr.LeftSection.expr.* == .InfixApp);
+    try std.testing.expectEqualStrings("div", expr.LeftSection.op.name);
 }
 
 test "expr: right section with consym (++ \"!\")" {
