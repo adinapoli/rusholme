@@ -4,6 +4,7 @@
 //!   rhc parse <file.hs>    Parse a Haskell file and print the AST
 //!   rhc check <file.hs>    Parse, rename, and typecheck; print inferred types
 //!   rhc core <file.hs>     Parse, typecheck, and desugar; print Core IR
+//!   rhc grin <file.hs>     Parse, typecheck, desugar; translate to GRin IR
 //!   rhc --help             Show this help message
 //!   rhc --version          Show version information
 
@@ -87,6 +88,18 @@ pub fn main(init: std.process.Init) !void {
         }
         const file_path = cmd_args[0];
         try cmdCore(allocator, io, file_path);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "grin")) {
+        const cmd_args = user_args[1..];
+        if (cmd_args.len == 0) {
+            try writeStderr(io, "rhc grin: missing file argument\n");
+            try writeStderr(io, "Usage: rhc grin <file.hs>\n");
+            std.process.exit(1);
+        }
+        const file_path = cmd_args[0];
+        try cmdGrin(allocator, io, file_path);
         return;
     }
 
@@ -337,6 +350,105 @@ fn cmdCore(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     try stdout.flush();
 }
 
+/// Parse, check, desugar, and translate a Haskell source file to GRIN IR.
+/// Prints the resulting GRIN IR to stdout.
+fn cmdGrin(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
+    const source = readSourceFile(allocator, io, file_path) catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        switch (err) {
+            error.FileNotFound => try stderr.print("rhc: file not found: {s}\n", .{file_path}),
+            error.AccessDenied => try stderr.print("rhc: permission denied: {s}\n", .{file_path}),
+            else => try stderr.print("rhc: cannot read file '{s}': {}\n", .{ file_path, err }),
+        }
+        try stderr.flush();
+        std.process.exit(1);
+    };
+    defer allocator.free(source);
+
+    const file_id: FileId = 1;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    var lexer = Lexer.init(arena_alloc, source, file_id);
+    var layout = LayoutProcessor.init(arena_alloc, &lexer);
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(arena_alloc);
+    layout.setDiagnostics(&diags);
+
+    var parser = Parser.init(arena_alloc, &layout, &diags) catch {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    };
+    const module = parser.parseModule() catch {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    };
+    if (diags.hasErrors()) {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    }
+
+    var u_supply = rusholme.naming.unique.UniqueSupply{};
+    var rename_env = try renamer_mod.RenameEnv.init(arena_alloc, &u_supply, &diags);
+    defer rename_env.deinit();
+    const renamed = try renamer_mod.rename(module, &rename_env);
+    if (diags.hasErrors()) {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    }
+
+    var mv_supply = htype_mod.MetaVarSupply{};
+    var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
+    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
+    var infer_ctx = infer_mod.InferCtx.init(arena_alloc, &ty_env, &mv_supply, &u_supply, &diags);
+    var module_types = try infer_mod.inferModule(&infer_ctx, renamed);
+    defer module_types.deinit(arena_alloc);
+    if (diags.hasErrors()) {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    }
+
+    // ── Desugar ────────────────────────────────────────────────────────
+    const core_prog = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags);
+    if (diags.hasErrors()) {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    }
+
+    // ── Lambda lift ────────────────────────────────────────────────────
+    // NOTE: Temporarily skipped due to compilation errors in lift.zig (issue #338)
+    // const core_lifted = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog);
+    const core_lifted = core_prog;
+
+    if (diags.hasErrors()) {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    }
+
+    // ── Translate to GRIN ───────────────────────────────────────────────
+    const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted);
+    if (diags.hasErrors()) {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    }
+
+    // ── Pretty-print ───────────────────────────────────────────────────
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_fw: File.Writer = .init(.stdout(), io, &stdout_buf);
+    var stdout = &stdout_fw.interface;
+
+    var pp = rusholme.grin.pretty.GrinPrinter(*Io.Writer).init(stdout);
+    try stdout.print("=== GRIN Program ({} defs) ===\n", .{grin_prog.defs.len});
+    try pp.printProgram(grin_prog);
+    try stdout.print("\n", .{});
+
+    try stdout.flush();
+}
+
 /// Render all collected diagnostics to stderr using the terminal renderer.
 fn renderDiagnostics(
     allocator: std.mem.Allocator,
@@ -401,6 +513,7 @@ fn printUsage(io: Io) !void {
         \\  rhc parse <file.hs>    Parse a Haskell file and pretty-print the AST
         \\  rhc check <file.hs>    Parse, rename, and typecheck; print inferred types
         \\  rhc core <file.hs>     Parse, typecheck, and desugar; print Core IR
+        \\  rhc grin <file.hs>     Parse, typecheck, desugar; translate to GRIN IR
         \\  rhc --help             Show this help message
         \\  rhc --version          Show version information
         \\
