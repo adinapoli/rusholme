@@ -292,6 +292,31 @@ Some issues are `type:research` — their deliverable is a written document, not
 
 ## 9. Common Pitfalls
 
+- **Don't take "kitchen sink" shortcuts for deferred features.** When a AST node or
+  expression type cannot be fully implemented yet, do **not** group it into a catch-all
+  `ListComp, RecordCon, RecordUpdate =>` block that returns a generic `<unsupported>` placeholder.
+  This hides the deferred work with no traceability.
+
+  Instead, each unimplemented case must:
+  1. Be handled explicitly in the switch
+  2. Include a comment referencing the GitHub issue tracking it (e.g. `// tracked in: https://github.com/.../issues/307`)
+  3. If no tracking issue exists, file one before submitting the PR
+  4. File a follow-up issue during PR preparation (see section 5)
+
+  The pattern should be:
+  ```zig
+  // ── Not yet implemented ─────────────────────────────────────────
+  //
+  // IMPORTANT: Each unsupported case MUST have a tracking issue...
+  .ListComp => {
+      // tracked in: https://github.com/adinapoli/rusholme/issues/XXX
+      return ...
+  },
+  ```
+
+  This ensures deferred work is discoverable via grep, visible in code review, and
+  never forgotten. See issue #307 for the consequence of violating this rule.
+
 - **Don't start an issue with unmet dependencies.** The dependency graph exists for a reason.
   Check `depends_on_github` in the JSON file.
 - **Don't modify `DESIGN.md` without discussion.** It's the project's source of truth.
