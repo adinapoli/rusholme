@@ -132,7 +132,7 @@ pub fn lintCoreProgram(
 
     var has_errors = false;
 
-    for (program, 0..) |bind, i| {
+    for (program.binds, 0..) |bind, i| {
         const ok = try lintBind(alloc, &env, bind, diags, alloc, "top-level");
         if (!ok) {
             has_errors = true;
@@ -680,7 +680,7 @@ test "lintCoreProgram: empty program passes" {
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
 
-    const program: core.CoreProgram = &.{};
+    const program: core.CoreProgram = .{ .data_decls = &.{}, .binds = &.{} };
     const ok = try lintCoreProgram(alloc, program, &diags);
     try testing.expect(ok);
     try testing.expectEqual(@as(usize, 0), diags.errorCount());
@@ -703,7 +703,7 @@ test "lintCoreProgram: simple non-recursive binding passes" {
         .rhs = rhs,
     } };
 
-    const program: core.CoreProgram = &.{bind};
+    const program: core.CoreProgram = .{ .data_decls = &.{}, .binds = &.{bind} };
     const ok = try lintCoreProgram(alloc, program, &diags);
     try testing.expect(ok);
     try testing.expectEqual(@as(usize, 0), diags.errorCount());
@@ -726,7 +726,7 @@ test "lintCoreProgram: unbound variable fails" {
         .rhs = rhs,
     } };
 
-    const program: core.CoreProgram = &.{bind};
+    const program: core.CoreProgram = .{ .data_decls = &.{}, .binds = &.{bind} };
     const ok = try lintCoreProgram(alloc, program, &diags);
     try testing.expect(!ok);
     try testing.expectEqual(@as(usize, 1), diags.errorCount());
@@ -749,7 +749,7 @@ test "lintCoreProgram: type mismatch in binding fails" {
         .rhs = rhs, // but RHS is Int
     } };
 
-    const program: core.CoreProgram = &.{bind};
+    const program: core.CoreProgram = .{ .data_decls = &.{}, .binds = &.{bind} };
     const ok = try lintCoreProgram(alloc, program, &diags);
     try testing.expect(!ok);
     try testing.expectEqual(@as(usize, 1), diags.errorCount());
@@ -793,7 +793,7 @@ test "lintCoreProgram: application of non-function fails" {
         .rhs = app,
     } };
 
-    const program: core.CoreProgram = &.{ bind_f, bind_x };
+    const program: core.CoreProgram = .{ .data_decls = &.{}, .binds = &.{ bind_f, bind_x } };
     const ok = try lintCoreProgram(alloc, program, &diags);
     try testing.expect(!ok);
     try testing.expect(diags.errorCount() >= 1);
@@ -818,7 +818,7 @@ test "lintCoreProgram: recursive binding passes" {
 
     const bind = Bind{ .Rec = pairs };
 
-    const program: core.CoreProgram = &.{bind};
+    const program: core.CoreProgram = .{ .data_decls = &.{}, .binds = &.{bind} };
     const ok = try lintCoreProgram(alloc, program, &diags);
     try testing.expect(ok);
     try testing.expectEqual(@as(usize, 0), diags.errorCount());
