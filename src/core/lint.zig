@@ -2,7 +2,7 @@
 //!
 //! Core is the "type-safety firewall" — if Core typechecks, later stages
 //! (GRIN translation, codegen) can trust the program is well-formed.
-//! Lint errors are **internal compiler errors (ICE)**, not user-facing.
+//! Lint errors are **internal compiler errors**, not user-facing.
 //!
 //! Reference: GHC's `compiler/GHC/Core/Lint.hs`
 //!
@@ -22,7 +22,7 @@
 //! defer diags.deinit(alloc);
 //! lintCoreProgram(alloc, program, &diags);
 //! if (diags.hasErrors()) {
-//!     // ICE: compiler bug
+//!     // internal compiler error
 //! }
 //! ```
 

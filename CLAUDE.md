@@ -162,6 +162,8 @@ nix develop --command zig build test --summary all
   add a brief comment explaining why.
 - **Respect the pipeline boundaries.** Each stage (lexer, parser, Core, GRIN, backend) is a
   separate module with a clean interface. Don't reach across boundaries.
+- **Never use the acronym "ICE".** This acronym has negative connotations. Use 
+  "internal compiler error" or "compiler bug" instead.
 
 ### Project Mantras (from DESIGN.md)
 
