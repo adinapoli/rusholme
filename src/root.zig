@@ -53,6 +53,7 @@ pub const core = struct {
 pub const grin = struct {
     pub const ast = @import("grin/ast.zig");
     pub const pretty = @import("grin/pretty.zig");
+    pub const primop = @import("grin/primop.zig");
 };
 
 // Backend
