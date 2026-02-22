@@ -18,7 +18,7 @@
 //! Reference: Hruska et al. 2020, Section 3; Boquist 1999, Chapter 4.
 
 const std = @import("std");
-const ir = @import("ir.zig");
+const ir = @import("ast.zig");
 
 /// A pretty-printer for GRIN IR that writes directly to any `std.io.Writer`.
 pub fn GrinPrinter(comptime WriterType: type) type {
