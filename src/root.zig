@@ -65,7 +65,7 @@ pub const backend = struct {
 };
 
 // Runtime
-pub const runtime = @import("runtime.zig");
+pub const runtime = @import("runtime/mod.zig");
 
 // Re-export commonly used types
 pub const SourceSpan = diagnostics.span.SourceSpan;
@@ -95,4 +95,5 @@ test {
     testing.refAllDecls(grin);
     testing.refAllDecls(backend);
     testing.refAllDecls(tc);
+    testing.refAllDecls(runtime);
 }

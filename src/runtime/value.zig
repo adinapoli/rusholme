@@ -236,10 +236,10 @@ pub const Heap = struct {
     nodes: std.ArrayList(Value),
 
     /// Initialize a new heap.
-    pub fn init(allocator: Allocator) Heap {
+    pub fn init(allocator: Allocator) !Heap {
         return .{
             .allocator = allocator,
-            .nodes = std.ArrayList(Value).init(allocator),
+            .nodes = try std.ArrayList(Value).initCapacity(allocator, 64),
         };
     }
 
@@ -309,7 +309,7 @@ test "Value: unit" {
 }
 
 test "Heap: allocate and read" {
-    var heap = Heap.init(testing.allocator);
+    var heap = try Heap.init(testing.allocator);
     defer heap.deinit();
 
     const ptr = try heap.alloc(.{ .Int = 42 });
@@ -321,7 +321,7 @@ test "Heap: allocate and read" {
 }
 
 test "Heap: update" {
-    var heap = Heap.init(testing.allocator);
+    var heap = try Heap.init(testing.allocator);
     defer heap.deinit();
 
     const ptr = try heap.alloc(.{ .Int = 42 });
