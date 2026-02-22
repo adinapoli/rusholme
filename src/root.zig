@@ -57,6 +57,7 @@ pub const grin = struct {
     pub const pretty = @import("grin/pretty.zig");
     pub const translate = @import("grin/translate.zig");
     pub const primop = @import("grin/primop.zig");
+    pub const translate = @import("grin/translate.zig");
 };
 
 // Backend
