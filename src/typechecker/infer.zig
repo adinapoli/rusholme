@@ -1726,6 +1726,28 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
                     try ctx.env.bind(con.name, scheme);
                     try data_schemes.put(ctx.alloc, con.name.unique, scheme);
                 }
+
+                // Generate type schemes for record field selectors
+                // For data Point = Point { x :: Int, y :: Int }, generate:
+                // x :: Point -> Int
+                // y :: Point -> Int
+                // See Haskell 2010 §4.2.1 and issue #310
+                var selector_iter = dd.selectors.iterator();
+                while (selector_iter.next()) |entry| {
+                    const selector_info = entry.value_ptr.*;
+                    const field_type = try astTypeToHTypeWithScope(selector_info.field_type, ctx, &scope_dd);
+                    const selector_ty = try ctx.alloc_ty(.{ .Fun = .{
+                        .arg = res_ty,
+                        .res = field_type,
+                    } });
+                    const selector_scheme = TyScheme{
+                        .binders = try ctx.alloc.dupe(u64, tyvar_ids.items),
+                        .constraints = &.{},
+                        .body = selector_ty.*,
+                    };
+                    try ctx.env.bind(selector_info.name, selector_scheme);
+                    try data_schemes.put(ctx.alloc, selector_info.name.unique, selector_scheme);
+                }
             },
         }
     }

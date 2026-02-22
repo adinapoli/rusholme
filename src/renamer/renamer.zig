@@ -405,12 +405,22 @@ pub const RConDecl = struct {
     span: SourceSpan,
 };
 
+/// Information about a record field selector function.
+pub const RSelectorInfo = struct {
+    name: Name,
+    field_type: ast.Type,
+};
+
 /// A renamed data declaration.
 pub const RDataDecl = struct {
     name: Name,
     tyvars: []const []const u8,
     constructors: []const RConDecl,
     span: SourceSpan,
+    /// Record field selectors generated for this data type.
+    /// Maps field name -> selector information.
+    /// The typechecker uses this to generate proper type schemes.
+    selectors: std.StringHashMapUnmanaged(RSelectorInfo),
 };
 
 /// A renamed type class assertion: `ClassName type1 type2 ...`.
@@ -562,6 +572,19 @@ pub fn rename(module: ast.Module, env: *RenameEnv) !RenamedModule {
                         const cn = env.freshName(con.name);
                         try env.scope.bind(con.name, cn);
                         try top_names.put(env.alloc, con.name, cn);
+                    }
+                    // Register record field selectors for this constructor
+                    // For data Point = Point { x :: Int }, register 'x' in scope
+                    // See Haskell 2010 §4.2.1 and issue #310
+                    for (con.fields) |field| {
+                        if (field == .Record) {
+                            const field_name = field.Record.name;
+                            if (!env.scope.boundInCurrentFrame(field_name)) {
+                                const selector_name = env.freshName(field_name);
+                                try env.scope.bind(field_name, selector_name);
+                                try top_names.put(env.alloc, field_name, selector_name);
+                            }
+                        }
                     }
                 }
             },
@@ -731,6 +754,8 @@ fn renameDecl(
         .Data => |dd| blk: {
             const data_name = env.scope.lookup(dd.name) orelse env.freshName(dd.name);
             var rcons = std.ArrayListUnmanaged(RConDecl){};
+            var selectors = std.StringHashMapUnmanaged(RSelectorInfo){};
+
             for (dd.constructors) |con| {
                 const con_name = env.scope.lookup(con.name) orelse env.freshName(con.name);
                 // We keep field definitions as-is because ast.FieldDecl handles the un-renamable type ASTs
@@ -740,12 +765,29 @@ fn renameDecl(
                     .fields = con.fields,
                     .span = con.span,
                 });
+
+                // Record record field selectors for the typechecker
+                // For data Point = Point { x :: Int }, record 'x' -> (selector_name, Int)
+                // See Haskell 2010 §4.2.1 and issue #310
+                for (con.fields) |field| {
+                    if (field == .Record) {
+                        const field_name = field.Record.name;
+                        const selector_name = env.scope.lookup(field_name) orelse continue;
+                        // Don't overwrite if already present (multiple constructors with same field is invalid)
+                        try selectors.put(env.alloc, field_name, .{
+                            .name = selector_name,
+                            .field_type = field.Record.type,
+                        });
+                    }
+                }
             }
+
             break :blk RDecl{ .DataDecl = .{
                 .name = data_name,
                 .tyvars = dd.tyvars,
                 .constructors = try rcons.toOwnedSlice(env.alloc),
                 .span = dd.span,
+                .selectors = selectors,
             } };
         },
         else => null,
