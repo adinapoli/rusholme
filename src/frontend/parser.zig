@@ -3462,11 +3462,22 @@ pub const Parser = struct {
     /// Parse record update: expr { field = value, ... }
     /// The opening brace has already been consumed.
     fn parseRecordUpdate(self: *Parser, rec_expr: ast_mod.Expr) ParseError!ast_mod.Expr {
-        _ = try self.expect(.open_brace);
+        const open_brace = try self.expect(.open_brace);
+        const start_span = open_brace.span;
 
         var fields: std.ArrayListUnmanaged(ast_mod.FieldUpdate) = .empty;
         while (true) {
-            if (try self.match(.close_brace)) |_| break;
+            const close_tok = try self.match(.close_brace);
+            if (close_tok) |tok| {
+                // Construct span from start of expression to closing brace
+                const span = rec_expr.getSpan().merge(tok.span);
+                const rec_node = try self.allocNode(ast_mod.Expr, rec_expr);
+                return .{ .RecordUpdate = .{
+                    .expr = rec_node,
+                    .fields = try fields.toOwnedSlice(self.allocator),
+                    .span = span,
+                } };
+            }
 
             // Parse field name (varid)
             const field_tok = try self.expect(.varid);
@@ -3494,6 +3505,7 @@ pub const Parser = struct {
         return .{ .RecordUpdate = .{
             .expr = rec_node,
             .fields = try fields.toOwnedSlice(self.allocator),
+            .span = start_span, // Fallback - shouldn't reach here
         } };
     }
 

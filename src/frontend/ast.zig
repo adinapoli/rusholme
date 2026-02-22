@@ -314,9 +314,9 @@ pub const Expr = union(enum) {
     /// Record construction: Point {x = 1, y = 2}
     RecordCon: struct { con: QName, fields: []const FieldUpdate },
     /// Record update: p {x = 5} (GHC extension, not in Haskell 2010)
-    RecordUpdate: struct { expr: *const Expr, fields: []const FieldUpdate },
+    RecordUpdate: struct { expr: *const Expr, fields: []const FieldUpdate, span: SourceSpan },
     /// Field selector: x .point (GHC extension, not in Haskell 2010)
-    Field: struct { expr: *const Expr, field_name: []const u8 },
+    Field: struct { expr: *const Expr, field_name: []const u8, span: SourceSpan },
 
     pub fn getSpan(self: Expr) SourceSpan {
         return switch (self) {
@@ -340,7 +340,8 @@ pub const Expr = union(enum) {
             .TypeApp => |a| a.fn_expr.getSpan().merge(a.span),
             .Negate, .Paren => |e| e.getSpan(),
             .RecordCon => |r| r.con.span,
-            .RecordUpdate, .Field => unreachable,
+            .RecordUpdate => |r| r.span,
+            .Field => |f| f.span,
         };
     }
 };
