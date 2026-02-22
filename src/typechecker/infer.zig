@@ -477,19 +477,33 @@ fn astTypeToHTypeWithScope(
         },
         .Paren => |inner| astTypeToHTypeWithScope(inner.*, ctx, scope),
         .Forall => |fa| blk: {
-            // Convert each type variable to a rigid binder and nest ForAll nodes
-            // (since HType.ForAll supports only a single binder)
+            // Create rigid binders and insert into scope BEFORE recursing into
+            // the body, so type variables in the body resolve to the correct
+            // rigid names.  Then wrap the body in nested ForAll nodes.
+            //
+            // Step 1: Create rigid names and populate scope.
+            var binder_names = std.ArrayListUnmanaged(Name){};
+            for (fa.tyvars) |tv| {
+                const rigid_name = ctx.u_supply.freshName(tv);
+                const rigid_node = try ctx.alloc_ty(HType{ .Rigid = rigid_name });
+                try scope.put(ctx.alloc, tv, rigid_node);
+                try binder_names.append(ctx.alloc, rigid_name);
+            }
+
+            // Step 2: Recurse into body — type vars now resolve to the rigids.
             var body: *HType = try astTypeToHTypeWithScope(fa.type.*, ctx, scope);
-            // Process binders in reverse order so they nest correctly:
-            // forall a b. t  becomes  ForAll b. (ForAll a. t)
-            var i = fa.tyvars.len;
+
+            // Step 3: Wrap in ForAll nodes (reverse order so they nest correctly:
+            // forall a b. t  becomes  ForAll a. (ForAll b. t))
+            var i = binder_names.items.len;
             while (i > 0) {
                 i -= 1;
-                const rigid_name = ctx.u_supply.freshName(fa.tyvars[i]);
                 const body_p = try ctx.alloc.create(HType);
                 body_p.* = body.*;
-                const forall_ty = HType{ .ForAll = .{ .binder = rigid_name, .body = body_p } };
-                body = try ctx.alloc_ty(forall_ty);
+                body = try ctx.alloc_ty(HType{ .ForAll = .{
+                    .binder = binder_names.items[i],
+                    .body = body_p,
+                } });
             }
             break :blk body;
         },
@@ -512,7 +526,149 @@ const TypeSigEntry = struct {
     name: Name,
     ty: *HType,
     loc: SourceSpan, // For error reporting
+    /// Unique IDs of the top-level skolem (rigid) binders introduced by
+    /// `skolemiseSignature`.  These become the `TyScheme.binders` directly,
+    /// bypassing `generalisePtr`.
+    skolem_ids: []const u64,
 };
+
+// ── Skolemisation ──────────────────────────────────────────────────────
+
+/// Result of skolemising a type signature.
+const SkolemiseResult = struct {
+    /// The skolemised type — forall binders replaced with fresh rigids,
+    /// nested foralls preserved as `HType.ForAll` nodes.
+    ty: *HType,
+    /// Unique IDs of the fresh rigid (skolem) variables, in binder order.
+    /// These become `TyScheme.binders` directly.
+    skolem_ids: []const u64,
+};
+
+/// Skolemise a type signature for bidirectional signature checking.
+///
+/// Given an AST type (possibly with `forall` binders), produces an `HType`
+/// where top-level `forall`-bound variables are replaced with fresh rigid
+/// (skolem) variables.  These rigids enforce that the function body must
+/// work for *all* instantiations — the body is checked *against* the
+/// signature rather than unified after inference.
+///
+/// For signatures without explicit `forall` (e.g. `a -> a`), Haskell 2010
+/// §4.1.2 specifies an implicit `forall` over all free type variables.
+/// These are skolemised identically to explicit binders.
+///
+/// Nested `forall`s (rank-2+) are preserved as `HType.ForAll` nodes.  They
+/// represent universally quantified arguments the *caller* must provide
+/// polymorphically, and are not peeled off as top-level skolems.
+///
+/// Reference: Dunfield & Krishnaswami, "Complete and Easy Bidirectional
+/// Typechecking for Higher-Rank Polymorphism", ICFP 2013, §3.
+fn skolemiseSignature(
+    ast_ty: @import("../frontend/ast.zig").Type,
+    ctx: *InferCtx,
+) std.mem.Allocator.Error!SkolemiseResult {
+    var skolem_ids = std.ArrayListUnmanaged(u64){};
+    var scope = TypeVarMap{};
+    defer scope.deinit(ctx.alloc);
+
+    switch (ast_ty) {
+        .Forall => |fa| {
+            // Explicit forall: create fresh rigids for each binder.
+            for (fa.tyvars) |tv| {
+                const rigid_name = ctx.u_supply.freshName(tv);
+                const rigid_node = try ctx.alloc_ty(HType{ .Rigid = rigid_name });
+                try scope.put(ctx.alloc, tv, rigid_node);
+                try skolem_ids.append(ctx.alloc, rigid_name.unique.value);
+            }
+            // Convert body with skolems in scope.  Nested foralls are handled
+            // by the Forall case in astTypeToHTypeWithScope (producing ForAll nodes).
+            const body = try astTypeToHTypeWithScope(fa.type.*, ctx, &scope);
+            return .{
+                .ty = body,
+                .skolem_ids = try skolem_ids.toOwnedSlice(ctx.alloc),
+            };
+        },
+        else => {
+            // No explicit forall: collect free type variables as implicit forall
+            // (Haskell 2010 §4.1.2: `f :: a -> a` means `f :: forall a. a -> a`).
+            var free_vars = std.ArrayListUnmanaged([]const u8){};
+            defer free_vars.deinit(ctx.alloc);
+            try collectFreeTypeVars(ast_ty, &free_vars, ctx.alloc);
+
+            for (free_vars.items) |tv| {
+                const rigid_name = ctx.u_supply.freshName(tv);
+                const rigid_node = try ctx.alloc_ty(HType{ .Rigid = rigid_name });
+                try scope.put(ctx.alloc, tv, rigid_node);
+                try skolem_ids.append(ctx.alloc, rigid_name.unique.value);
+            }
+
+            const ty = try astTypeToHTypeWithScope(ast_ty, ctx, &scope);
+            return .{
+                .ty = ty,
+                .skolem_ids = try skolem_ids.toOwnedSlice(ctx.alloc),
+            };
+        },
+    }
+}
+
+/// Collect free type variable names from an AST `Type`.
+///
+/// Walks the type recursively and appends each `Var` name to `out`,
+/// skipping duplicates and variables bound by nested `Forall` nodes.
+/// Used to determine the implicit `forall` binders for signatures
+/// without an explicit `forall`.
+fn collectFreeTypeVars(
+    ast_ty: @import("../frontend/ast.zig").Type,
+    out: *std.ArrayListUnmanaged([]const u8),
+    alloc: std.mem.Allocator,
+) std.mem.Allocator.Error!void {
+    switch (ast_ty) {
+        .Var => |name| {
+            for (out.items) |existing| {
+                if (std.mem.eql(u8, existing, name)) return;
+            }
+            try out.append(alloc, name);
+        },
+        .Con => {},
+        .Fun => |parts| {
+            for (parts) |p| try collectFreeTypeVars(p.*, out, alloc);
+        },
+        .App => |parts| {
+            for (parts) |p| try collectFreeTypeVars(p.*, out, alloc);
+        },
+        .List => |inner| try collectFreeTypeVars(inner.*, out, alloc),
+        .Tuple => |parts| {
+            for (parts) |p| try collectFreeTypeVars(p.*, out, alloc);
+        },
+        .Paren => |inner| try collectFreeTypeVars(inner.*, out, alloc),
+        .Forall => |fa| {
+            // Collect from the body, then remove any that are bound by this forall.
+            var inner = std.ArrayListUnmanaged([]const u8){};
+            defer inner.deinit(alloc);
+            try collectFreeTypeVars(fa.type.*, &inner, alloc);
+            for (inner.items) |v| {
+                var bound = false;
+                for (fa.tyvars) |tv| {
+                    if (std.mem.eql(u8, v, tv)) {
+                        bound = true;
+                        break;
+                    }
+                }
+                if (!bound) {
+                    // Add to outer if not already there
+                    var dup = false;
+                    for (out.items) |existing| {
+                        if (std.mem.eql(u8, existing, v)) {
+                            dup = true;
+                            break;
+                        }
+                    }
+                    if (!dup) try out.append(alloc, v);
+                }
+            }
+        },
+        .IParam => {},
+    }
+}
 
 // ── Span helpers ─────────────────────────────────────────────────────
 
@@ -874,11 +1030,17 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                             }
                         }
 
-                        if (sig_entry) |_| {
-                            // For bindings with signatures, create a scheme from the signature type.
-                            // The signature is the authority, not the inferred type.
-                            // We need to generalise the signature type (which contains fresh metas).
-                            const scheme = try generalisePtr(ctx, sig_entry.?.ty, &env_metas);
+                        if (sig_entry) |s| {
+                            // For bindings with signatures, build the TyScheme directly from
+                            // the skolemised signature. The signature has already been skolemised
+                            // in Pass 0, so we use its rigid (skolem) binders directly instead of
+                            // generalising metavariables. This enforces that the function body must
+                            // work for all instantiations of the skolemised variables.
+                            const scheme = TyScheme{
+                                .binders = s.skolem_ids,
+                                .constraints = &.{},
+                                .body = s.ty.*,
+                            };
                             try ctx.env.bind(fb.name, scheme);
                         } else {
                             // For bindings without signatures, generalise the inferred type.
@@ -1300,8 +1462,9 @@ fn inferStmt(ctx: *InferCtx, stmt: RStmt) std.mem.Allocator.Error!*HType {
 /// Collect type signatures from a list of let-bindings.
 ///
 /// Returns a map from `Unique` to `TypeSigEntry` for all type signatures
-/// found in the declaration list. The HType for each signature is allocated
-/// on the arena with fresh metavariables for type variables.
+/// found in the declaration list. Each signature is skolemised: top-level
+/// type variables become rigid (skolem) variables, and the binder unique
+/// IDs are stored alongside the type for direct `TyScheme` construction.
 fn collectLetSigs(
     ctx: *InferCtx,
     decls: []const RDecl,
@@ -1313,18 +1476,14 @@ fn collectLetSigs(
         if (decl != .TypeSig) continue;
         const ts = decl.TypeSig;
 
-        // Each let-binding needs its own scope for type variables
-        // to avoid accidental sharing between different signatures.
-        var scope = TypeVarMap{};
-        defer scope.deinit(ctx.alloc);
-
-        const ty = try astTypeToHTypeWithScope(ts.type, ctx, &scope);
+        const skolem_result = try skolemiseSignature(ts.type, ctx);
 
         for (ts.names) |name| {
             try sigs.put(ctx.alloc, name.unique, .{
                 .name = name,
-                .ty = ty,
+                .ty = skolem_result.ty,
                 .loc = ts.span,
+                .skolem_ids = skolem_result.skolem_ids,
             });
         }
     }
@@ -1376,9 +1535,22 @@ fn inferLetDecl(
                 try ctx.unifyNow(fun_node, s.ty, fb.span);
             }
 
-            // Generalise using the pre-snapshot env metas and rebind.
-            const scheme = try generalisePtr(ctx, fun_node, &env_metas);
-            try ctx.env.bind(fb.name, scheme);
+            // If there's a signature, build the TyScheme directly from
+            // the skolemised signature. Otherwise, generalise the inferred type.
+            if (sig) |s| {
+                // The signature has already been skolemised (during collection),
+                // so we use its rigid (skolem) binders directly instead of
+                // generalising metavariables.
+                const scheme = TyScheme{
+                    .binders = s.skolem_ids,
+                    .constraints = &.{},
+                    .body = s.ty.*,
+                };
+                try ctx.env.bind(fb.name, scheme);
+            } else {
+                const scheme = try generalisePtr(ctx, fun_node, &env_metas);
+                try ctx.env.bind(fb.name, scheme);
+            }
         },
         .PatBind => |pb| {
             const rhs_ty = try inferRhs(ctx, pb.rhs);
@@ -1444,18 +1616,18 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
         if (decl != .TypeSig) continue;
         const ts = decl.TypeSig;
 
-        var scope = TypeVarMap{};
-        defer scope.deinit(ctx.alloc);
-
-        // Convert AST type to HType with shared type variables
-        const ty = try astTypeToHTypeWithScope(ts.type, ctx, &scope);
+        // Skolemise the signature: top-level forall binders become rigids.
+        // This enables bidirectional checking where the signature enforces
+        // rigidity of type variables (not just metavariables).
+        const skolem_result = try skolemiseSignature(ts.type, ctx);
 
         // Bind for all names in the signature (Haskell allows multiple names per signature)
         for (ts.names) |name| {
             try sigs.put(ctx.alloc, name.unique, .{
                 .name = name,
-                .ty = ty,
+                .ty = skolem_result.ty,
                 .loc = ts.span,
+                .skolem_ids = skolem_result.skolem_ids,
             });
         }
     }
@@ -1551,11 +1723,17 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
                     }
                 }
 
-                if (sig_entry) |_| {
-                    // For bindings with signatures, create a scheme from the signature type.
-                    // The signature is the authority, not the inferred type.
-                    // We need to generalise the signature type (which contains fresh metas).
-                    const scheme = try generalisePtr(ctx, sig_entry.?.ty, &env_metas);
+                if (sig_entry) |s| {
+                    // For bindings with signatures, build the TyScheme directly from
+                    // the skolemised signature. The signature has already been skolemised
+                    // in Pass 0, so we use its rigid (skolem) binders directly instead of
+                    // generalising metavariables. This enforces that the function body must
+                    // work for all instantiations of the skolemised variables.
+                    const scheme = TyScheme{
+                        .binders = s.skolem_ids,
+                        .constraints = &.{},
+                        .body = s.ty.*,
+                    };
                     try ctx.env.bind(fb.name, scheme);
                 } else {
                     // For bindings without signatures, generalise the inferred type.
@@ -2287,6 +2465,417 @@ test "infer: if True then 1 else 2 has type Int" {
 
     try testing.expect(!diags.hasErrors());
     const chased = ty.chase();
+    try testing.expect(chased == .Con);
+    try testing.expectEqualStrings("Int", chased.Con.name.base);
+}
+
+// ── Skolemisation tests ─────────────────────────────────────────────────
+
+test "skolemiseSignature: explicit forall a. a -> a creates 1 skolem" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = try TyEnv.init(alloc);
+    defer env.deinit();
+    var mv = MetaVarSupply{};
+    var us = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
+
+    const AstType = @import("../frontend/ast.zig").Type;
+
+    // Construct: forall a. a -> a
+    const a_ptr = try alloc.create(AstType);
+    a_ptr.* = AstType{ .Var = "a" };
+
+    const fun_args = try alloc.alloc(*const AstType, 2);
+    fun_args[0] = a_ptr;
+    fun_args[1] = a_ptr;
+
+    const body_type = AstType{ .Fun = fun_args };
+    const forall_type = AstType{ .Forall = .{
+        .tyvars = &.{ "a" },
+        .context = null,
+        .type = &body_type,
+    } };
+
+    const result = try skolemiseSignature(forall_type, &ctx);
+
+    // Should have exactly 1 skolem binder
+    try testing.expectEqual(@as(usize, 1), result.skolem_ids.len);
+
+    // The body should be: Rigid -> Rigid (same rigid for both positions)
+    try testing.expect(result.ty.* == .Fun);
+    const arg_chased = result.ty.Fun.arg.chase();
+    const res_chased = result.ty.Fun.res.chase();
+    try testing.expect(arg_chased == .Rigid);
+    try testing.expect(res_chased == .Rigid);
+    // Both should be the same rigid (same binder ID)
+    try testing.expectEqual(arg_chased.Rigid.unique.value, res_chased.Rigid.unique.value);
+}
+
+test "skolemiseSignature: implicit forall (a -> a) creates 1 skolem" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = try TyEnv.init(alloc);
+    defer env.deinit();
+    var mv = MetaVarSupply{};
+    var us = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
+
+    const AstType = @import("../frontend/ast.zig").Type;
+
+    // Construct: a -> a (implicit forall)
+    const a_ptr = try alloc.create(AstType);
+    a_ptr.* = AstType{ .Var = "a" };
+
+    const fun_args = try alloc.alloc(*const AstType, 2);
+    fun_args[0] = a_ptr;
+    fun_args[1] = a_ptr;
+
+    const ty = AstType{ .Fun = fun_args };
+
+    const result = try skolemiseSignature(ty, &ctx);
+
+    // Should have exactly 1 skolem binder
+    try testing.expectEqual(@as(usize, 1), result.skolem_ids.len);
+
+    // The body should be: Rigid -> Rigid (same rigid)
+    try testing.expect(result.ty.* == .Fun);
+    const arg_chased = result.ty.Fun.arg.chase();
+    const res_chased = result.ty.Fun.res.chase();
+    try testing.expect(arg_chased == .Rigid);
+    try testing.expect(res_chased == .Rigid);
+    try testing.expectEqual(arg_chased.Rigid.unique.value, res_chased.Rigid.unique.value);
+}
+
+test "skolemiseSignature: monomorphic type (Int -> Int) has 0 skolems" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = try TyEnv.init(alloc);
+    defer env.deinit();
+    var mv = MetaVarSupply{};
+    var us = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
+
+    const AstType = @import("../frontend/ast.zig").Type;
+
+    // Construct: Int -> Int
+    const int_ptr1 = try alloc.create(AstType);
+    int_ptr1.* = AstType{ .Con = .{ .name = "Int", .module_name = null, .span = testSpan() } };
+    const int_ptr2 = try alloc.create(AstType);
+    int_ptr2.* = AstType{ .Con = .{ .name = "Int", .module_name = null, .span = testSpan() } };
+
+    const fun_args = try alloc.alloc(*const AstType, 2);
+    fun_args[0] = int_ptr1;
+    fun_args[1] = int_ptr2;
+
+    const ty = AstType{ .Fun = fun_args };
+
+    const result = try skolemiseSignature(ty, &ctx);
+
+    // Should have 0 skolem binders (no type variables)
+    try testing.expectEqual(@as(usize, 0), result.skolem_ids.len);
+
+    // The body should be: Con -> Con
+    try testing.expect(result.ty.* == .Fun);
+    try testing.expect(result.ty.Fun.arg.chase() == .Con);
+    try testing.expectEqualStrings("Int", result.ty.Fun.arg.chase().Con.name.base);
+}
+
+test "skolemiseSignature: multiple type vars (a -> b -> a) has 2 skolems" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = try TyEnv.init(alloc);
+    defer env.deinit();
+    var mv = MetaVarSupply{};
+    var us = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
+
+    const AstType = @import("../frontend/ast.zig").Type;
+
+    // Construct: a -> b -> a
+    const a_ptr1 = try alloc.create(AstType);
+    a_ptr1.* = AstType{ .Var = "a" };
+    const b_ptr = try alloc.create(AstType);
+    b_ptr.* = AstType{ .Var = "b" };
+    const a_ptr2 = try alloc.create(AstType);
+    a_ptr2.* = AstType{ .Var = "a" };
+
+    const inner_args = try alloc.alloc(*const AstType, 2);
+    inner_args[0] = b_ptr;
+    inner_args[1] = a_ptr2;
+
+    const inner_type = try alloc.create(AstType);
+    inner_type.* = AstType{ .Fun = inner_args };
+
+    const outer_args = try alloc.alloc(*const AstType, 2);
+    outer_args[0] = a_ptr1;
+    outer_args[1] = inner_type;
+
+    const ty = AstType{ .Fun = outer_args };
+
+    const result = try skolemiseSignature(ty, &ctx);
+
+    // Should have 2 skolem binders (a and b)
+    try testing.expectEqual(@as(usize, 2), result.skolem_ids.len);
+
+    // The body should be: Rigid_a -> (Rigid_b -> Rigid_a)
+    try testing.expect(result.ty.* == .Fun);
+    const arg1_chased = result.ty.Fun.arg.chase();
+    try testing.expect(arg1_chased == .Rigid);
+
+    try testing.expect(result.ty.Fun.res.*.chase() == .Fun);
+    const arg2_chased = result.ty.Fun.res.Fun.arg.chase();
+    try testing.expect(arg2_chased == .Rigid);
+
+    const res_chased = result.ty.Fun.res.Fun.res.chase();
+    try testing.expect(res_chased == .Rigid);
+
+    // The two 'a's should be the same rigid, 'b' should be different
+    try testing.expectEqual(arg1_chased.Rigid.unique.value, res_chased.Rigid.unique.value);
+    try testing.expect(arg1_chased.Rigid.unique.value != arg2_chased.Rigid.unique.value);
+}
+
+// ── Bidirectional signature checking tests ───────────────────────────────
+
+test "signature checking: distinct skolems a and b cannot unify" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = try TyEnv.init(alloc);
+    defer env.deinit();
+    var mv = MetaVarSupply{};
+    var us = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
+
+    const AstType = @import("../frontend/ast.zig").Type;
+
+    const f_name = testName("f", 9800);
+    const x_name = testName("x", 9801);
+
+    // Construct signature type: a -> b
+    const a_ptr = try alloc.create(AstType);
+    a_ptr.* = AstType{ .Var = "a" };
+    const b_ptr = try alloc.create(AstType);
+    b_ptr.* = AstType{ .Var = "b" };
+
+    const fun_args = try alloc.alloc(*const AstType, 2);
+    fun_args[0] = a_ptr;
+    fun_args[1] = b_ptr;
+
+    const fun_type = AstType{ .Fun = fun_args };
+
+    // Create the TypeSig declaration
+    const sig = RDecl{ .TypeSig = .{
+        .names = &.{f_name},
+        .type = fun_type,
+        .span = testSpan(),
+    } };
+
+    // Create the FunBind: f x = x (this doesn't satisfy a -> b since both sides are same type)
+    const body = RExpr{ .Var = .{ .name = x_name, .span = testSpan() } };
+    const lam = RExpr{ .Lambda = .{
+        .params = &.{x_name},
+        .param_spans = &.{testSpan()},
+        .body = &body,
+    } };
+    const funbind = RDecl{ .FunBind = .{
+        .name = f_name,
+        .equations = &.{.{ .patterns = &.{}, .rhs = .{ .UnGuarded = lam }, .span = testSpan() }},
+        .span = testSpan(),
+    } };
+
+    // Create the Let expression
+    const let_binds = try alloc.alloc(RDecl, 2);
+    let_binds[0] = sig;
+    let_binds[1] = funbind;
+
+    const let_expr = RExpr{ .Let = .{ .binds = let_binds, .body = &body } };
+
+    // This should fail because \x -> x has type c -> c, which cannot unify with a -> b
+    // (distinct skolems a and b cannot be unified with each other)
+    const result = try infer(&ctx, let_expr);
+
+    // Should have errors
+    try testing.expect(diags.hasErrors());
+
+    // Result type is what we get from the let body (unimportant for this test)
+    _ = result;
+}
+
+test "signature checking: rank-1 signature a -> a with matching body" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = try TyEnv.init(alloc);
+    defer env.deinit();
+    var mv = MetaVarSupply{};
+    var us = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
+
+    const AstType = @import("../frontend/ast.zig").Type;
+
+    const id_name = testName("id", 9900);
+    const x_name = testName("x", 9901);
+
+    // Construct signature type: forall a. a -> a
+    const a_ptr1 = try alloc.create(AstType);
+    a_ptr1.* = AstType{ .Var = "a" };
+    const a_ptr2 = try alloc.create(AstType);
+    a_ptr2.* = AstType{ .Var = "a" };
+
+    const fun_args = try alloc.alloc(*const AstType, 2);
+    fun_args[0] = a_ptr1;
+    fun_args[1] = a_ptr2;
+
+    const body_type = AstType{ .Fun = fun_args };
+    const forall_type = AstType{ .Forall = .{
+        .tyvars = &.{ "a" },
+        .context = null,
+        .type = &body_type,
+    } };
+
+    // Create the TypeSig declaration
+    const sig = RDecl{ .TypeSig = .{
+        .names = &.{id_name},
+        .type = forall_type,
+        .span = testSpan(),
+    } };
+
+    // Create the FunBind: id x = x
+    const body = RExpr{ .Var = .{ .name = x_name, .span = testSpan() } };
+    const lam = RExpr{ .Lambda = .{
+        .params = &.{x_name},
+        .param_spans = &.{testSpan()},
+        .body = &body,
+    } };
+    const funbind = RDecl{ .FunBind = .{
+        .name = id_name,
+        .equations = &.{.{ .patterns = &.{}, .rhs = .{ .UnGuarded = lam }, .span = testSpan() }},
+        .span = testSpan(),
+    } };
+
+    // Create the Let body: id 42
+    const forty_two = RExpr{ .Lit = .{ .Int = .{ .value = 42, .span = testSpan() } } };
+    const id_var = RExpr{ .Var = .{ .name = id_name, .span = testSpan() } };
+    const app = RExpr{ .App = .{ .fn_expr = &id_var, .arg_expr = &forty_two } };
+
+    // Create the Let expression
+    const let_binds = try alloc.alloc(RDecl, 2);
+    let_binds[0] = sig;
+    let_binds[1] = funbind;
+
+    const let_expr = RExpr{ .Let = .{ .binds = let_binds, .body = &app } };
+
+    const result = try infer(&ctx, let_expr);
+    const chased = result.chase();
+
+    // Should have no errors
+    try testing.expect(!diags.hasErrors());
+
+    // Result should be Int
+    try testing.expect(chased == .Con);
+    try testing.expectEqualStrings("Int", chased.Con.name.base);
+}
+
+test "signature checking: monomorphic signature Int -> Int with matching body" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = try TyEnv.init(alloc);
+    defer env.deinit();
+    var mv = MetaVarSupply{};
+    var us = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
+
+    const AstType = @import("../frontend/ast.zig").Type;
+
+    const double_name = testName("double", 9950);
+    const x_name = testName("x", 9951);
+
+    // Construct signature type: Int -> Int
+    const int_ptr1 = try alloc.create(AstType);
+    int_ptr1.* = AstType{ .Con = .{ .name = "Int", .module_name = null, .span = testSpan() } };
+    const int_ptr2 = try alloc.create(AstType);
+    int_ptr2.* = AstType{ .Con = .{ .name = "Int", .module_name = null, .span = testSpan() } };
+
+    const fun_args = try alloc.alloc(*const AstType, 2);
+    fun_args[0] = int_ptr1;
+    fun_args[1] = int_ptr2;
+
+    const fun_type = AstType{ .Fun = fun_args };
+
+    // Create the TypeSig declaration
+    const sig = RDecl{ .TypeSig = .{
+        .names = &.{double_name},
+        .type = fun_type,
+        .span = testSpan(),
+    } };
+
+    // Create the FunBind: double x = x + x
+    // For this test, we'll use double x = x to simplify
+    const body = RExpr{ .Var = .{ .name = x_name, .span = testSpan() } };
+    const lam = RExpr{ .Lambda = .{
+        .params = &.{x_name},
+        .param_spans = &.{testSpan()},
+        .body = &body,
+    } };
+    const funbind = RDecl{ .FunBind = .{
+        .name = double_name,
+        .equations = &.{.{ .patterns = &.{}, .rhs = .{ .UnGuarded = lam }, .span = testSpan() }},
+        .span = testSpan(),
+    } };
+
+    // Create the Let body: double 42
+    const forty_two = RExpr{ .Lit = .{ .Int = .{ .value = 42, .span = testSpan() } } };
+    const double_var = RExpr{ .Var = .{ .name = double_name, .span = testSpan() } };
+    const app = RExpr{ .App = .{ .fn_expr = &double_var, .arg_expr = &forty_two } };
+
+    // Create the Let expression
+    const let_binds = try alloc.alloc(RDecl, 2);
+    let_binds[0] = sig;
+    let_binds[1] = funbind;
+
+    const let_expr = RExpr{ .Let = .{ .binds = let_binds, .body = &app } };
+
+    const result = try infer(&ctx, let_expr);
+    const chased = result.chase();
+
+    // Should have no errors
+    try testing.expect(!diags.hasErrors());
+
+    // Result should be Int
     try testing.expect(chased == .Con);
     try testing.expectEqualStrings("Int", chased.Con.name.base);
 }
