@@ -1017,7 +1017,7 @@ fn renameExpr(expr: ast.Expr, env: *RenameEnv) RenameError!RExpr {
         // 2. File a GitHub issue if none exists
         // 3. See CONTRIBUTING.md for the "deferred features" policy
         .ListComp => {
-            // tracked in: https://github.com/adinapoli/rusholme/issues/XXX (TODO: file issue)
+            // tracked in: https://github.com/adinapoli/rusholme/issues/309
             return RExpr{ .Var = .{ .name = env.freshName("< ListComp not yet implemented >"), .span = expr.getSpan() } };
         },
     };
