@@ -20,11 +20,18 @@
 
 const std = @import("std");
 
-pub const value = @import("rts/value.zig");
-pub const io = @import("rts/io.zig");
-pub const arith = @import("rts/arith.zig");
+pub const value = @import("value.zig");
+pub const io = @import("io.zig");
+pub const arith = @import("arith.zig");
 
 // Re-export commonly used types
 pub const Value = value.Value;
 pub const EvalError = value.EvalError;
 pub const Heap = value.Heap;
+
+// ── Tests ────────────────────────────────────────────────────────────────
+
+test {
+    const testing = std.testing;
+    testing.refAllDecls(@This());
+}

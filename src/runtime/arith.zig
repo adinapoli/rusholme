@@ -73,11 +73,14 @@ pub fn absInt(args: []const Value) EvalError!Value {
 
     const a = args[0].asInt() orelse return EvalError.TypeError;
 
-    // Handle i64::min specially since @abs returns u64
-    if (a == std.math.minInt(i64)) {
-        return Value.fromInt(std.math.minInt(i64));
-    }
-    return Value.fromInt(@abs(a));
+    // @abs returns u64 for i64 input. For all values except minInt(i64),
+    // the result fits in i64. For minInt(i64), we saturate to maxInt(i64).
+    const abs_val = @abs(a);
+    const result: i64 = if (abs_val > std.math.maxInt(i64))
+        std.math.maxInt(i64)
+    else
+        @intCast(abs_val);
+    return Value.fromInt(result);
 }
 
 /// Integer quotient (truncates toward zero).
