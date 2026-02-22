@@ -3,6 +3,9 @@
 > Auto-generated from GitHub issues. Each issue links to its tracker.
 > **Starting points** (zero dependencies): #1✓, #2✓, #17✓, #22✓, #24✓, #27✓, #53✓, #85✓, #58, #62⚡, #66, #68, #107✓
 
+**Architecture Decisions:**
+- **#0001**: PrimOps and RTS Architecture — defines the contract between compiler and runtime via ~15-30 primitive operations. See `docs/decisions/0001-primops-and-rts-architecture.md`.
+
 **Recent Progress (2026-02-21):**
 - ✓ #183: typechecker: let-binding type signatures are ignored
 - ✓ #216: ast: add LetQualifier variant to Qualifier for list comprehension let-bindings
@@ -230,6 +233,21 @@
 | [#315](https://github.com/adinapoli/rusholme/issues/315) | Generate whole-program eval and apply functions for GRIN | [#314](https://github.com/adinapoli/rusholme/issues/314) | :white_circle: |
 | [#317](https://github.com/adinapoli/rusholme/issues/317) | Handle partial application and over-application in Core→GRIN | [#314](https://github.com/adinapoli/rusholme/issues/314), [#315](https://github.com/adinapoli/rusholme/issues/315) | :white_circle: |
 
+### Epic: PrimOps and Runtime System (Decision #0001)
+
+> Architecture: ~15-30 PrimOps form the contract between compiler and RTS.
+> Prelude functions are implemented in Haskell, calling down to PrimOps.
+> See `docs/decisions/0001-primops-and-rts-architecture.md`.
+
+| # | Issue | Deps | Status |
+|---|-------|------|--------|
+| [#330](https://github.com/adinapoli/rusholme/issues/330) | Define PrimOps and implement GRIN evaluator dispatch | [#40](https://github.com/adinapoli/rusholme/issues/40) | :white_circle: |
+| [#325](https://github.com/adinapoli/rusholme/issues/325) | Implement token-passing IO for lazy semantics | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
+| [#326](https://github.com/adinapoli/rusholme/issues/326) | Implement exception handling in the RTS | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
+| [#327](https://github.com/adinapoli/rusholme/issues/327) | Integrate GC with PrimOp allocations | [#330](https://github.com/adinapoli/rusholme/issues/330), [#70](https://github.com/adinapoli/rusholme/issues/70) | :white_circle: |
+| [#328](https://github.com/adinapoli/rusholme/issues/328) | Add runtime stack traces for PrimOp failures | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
+| [#329](https://github.com/adinapoli/rusholme/issues/329) | Support concurrent/parallel IO in the RTS | [#326](https://github.com/adinapoli/rusholme/issues/326) | :white_circle: |
+
 ### Epic [#8](https://github.com/adinapoli/rusholme/issues/8): Tree-Walking Interpreter
 
 | # | Issue | Deps | Status |
@@ -237,8 +255,8 @@
 | [#318](https://github.com/adinapoli/rusholme/issues/318) | Implement GRIN evaluator state: heap, environment, and function table | [#40](https://github.com/adinapoli/rusholme/issues/40) | :white_circle: |
 | [#319](https://github.com/adinapoli/rusholme/issues/319) | Implement GRIN evaluator for simple expressions (Return, Store, Fetch, Update, Bind) | [#318](https://github.com/adinapoli/rusholme/issues/318) | :white_circle: |
 | [#320](https://github.com/adinapoli/rusholme/issues/320) | Implement GRIN evaluator for App and Case expressions | [#319](https://github.com/adinapoli/rusholme/issues/319) | :white_circle: |
-| [#51](https://github.com/adinapoli/rusholme/issues/51) | Implement basic IO primitives for the interpreter (putStrLn, getLine) | [#320](https://github.com/adinapoli/rusholme/issues/320) | :white_circle: |
-| [#52](https://github.com/adinapoli/rusholme/issues/52) | Implement arithmetic and comparison primitives for the interpreter | [#320](https://github.com/adinapoli/rusholme/issues/320) | :white_circle: |
+| [#51](https://github.com/adinapoli/rusholme/issues/51) | Implement basic IO primitives for the interpreter (putStrLn, getLine) | [#320](https://github.com/adinapoli/rusholme/issues/320), [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
+| [#52](https://github.com/adinapoli/rusholme/issues/52) | Implement arithmetic and comparison primitives for the interpreter | [#320](https://github.com/adinapoli/rusholme/issues/320), [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
 | [#321](https://github.com/adinapoli/rusholme/issues/321) | End-to-end integration test: main = putStrLn "Hello" through GRIN evaluator | [#320](https://github.com/adinapoli/rusholme/issues/320), [#315](https://github.com/adinapoli/rusholme/issues/315), [#314](https://github.com/adinapoli/rusholme/issues/314), [#51](https://github.com/adinapoli/rusholme/issues/51) | :white_circle: |
 
 ### Epic [#9](https://github.com/adinapoli/rusholme/issues/9): LLVM Backend and Zig Runtime
@@ -329,9 +347,13 @@ The longest dependency chain to M1 (`main = putStrLn "Hello"`):
                                ├─► #42 Core→GRIN research ──► #313 lambda lifting ──► #314 Core→GRIN simple
                                │                                                       ├─► #315 eval/apply gen ──► #317 partial app
                                │                                                       │
+                               ├─► #330 PrimOps definition (Decision #0001)
+                               │         │
+                               │         └─► Provides primitive operations for RTS
+                               │
                                ├─► #318 evaluator state ──► #319 simple eval ──► #320 App/Case eval
-                               │                                                  ├─► #51 IO prims
-                               │                                                  └─► #52 arith prims
+                               │                                                  ├─► #51 IO prims (via #330)
+                               │                                                  └─► #52 arith prims (via #330)
                                │
                                │   #314 + #315 + #320 + #51 ──► #321 end-to-end integration  ✓ interpreter path
                                │
