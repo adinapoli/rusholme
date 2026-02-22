@@ -225,15 +225,21 @@
 | [#40](https://github.com/adinapoli/rusholme/issues/40) | Define GRIN IR types (Modern GRIN dialect) | [#69](https://github.com/adinapoli/rusholme/issues/69) | :green_circle: |
 | [#41](https://github.com/adinapoli/rusholme/issues/41) | Implement GRIN IR pretty-printer | [#40](https://github.com/adinapoli/rusholme/issues/40) | :white_circle: |
 | [#42](https://github.com/adinapoli/rusholme/issues/42) | Research: Core to GRIN translation strategy | [#34](https://github.com/adinapoli/rusholme/issues/34), [#40](https://github.com/adinapoli/rusholme/issues/40) | :white_circle: |
-| [#43](https://github.com/adinapoli/rusholme/issues/43) | Implement Core to GRIN translation | [#42](https://github.com/adinapoli/rusholme/issues/42) | :white_circle: |
+| [#313](https://github.com/adinapoli/rusholme/issues/313) | Implement lambda lifting pass on Core IR | [#42](https://github.com/adinapoli/rusholme/issues/42) | :white_circle: |
+| [#314](https://github.com/adinapoli/rusholme/issues/314) | Implement Core to GRIN translation for simple expressions | [#313](https://github.com/adinapoli/rusholme/issues/313), [#41](https://github.com/adinapoli/rusholme/issues/41), [#42](https://github.com/adinapoli/rusholme/issues/42) | :white_circle: |
+| [#315](https://github.com/adinapoli/rusholme/issues/315) | Generate whole-program eval and apply functions for GRIN | [#314](https://github.com/adinapoli/rusholme/issues/314) | :white_circle: |
+| [#317](https://github.com/adinapoli/rusholme/issues/317) | Handle partial application and over-application in Core→GRIN | [#314](https://github.com/adinapoli/rusholme/issues/314), [#315](https://github.com/adinapoli/rusholme/issues/315) | :white_circle: |
 
 ### Epic [#8](https://github.com/adinapoli/rusholme/issues/8): Tree-Walking Interpreter
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#50](https://github.com/adinapoli/rusholme/issues/50) | Implement GRIN tree-walking evaluator (core eval loop) | [#40](https://github.com/adinapoli/rusholme/issues/40) | :white_circle: |
-| [#51](https://github.com/adinapoli/rusholme/issues/51) | Implement basic IO primitives for the interpreter (putStrLn, getLine) | [#50](https://github.com/adinapoli/rusholme/issues/50) | :white_circle: |
-| [#52](https://github.com/adinapoli/rusholme/issues/52) | Implement arithmetic and comparison primitives for the interpreter | [#50](https://github.com/adinapoli/rusholme/issues/50) | :white_circle: |
+| [#318](https://github.com/adinapoli/rusholme/issues/318) | Implement GRIN evaluator state: heap, environment, and function table | [#40](https://github.com/adinapoli/rusholme/issues/40) | :white_circle: |
+| [#319](https://github.com/adinapoli/rusholme/issues/319) | Implement GRIN evaluator for simple expressions (Return, Store, Fetch, Update, Bind) | [#318](https://github.com/adinapoli/rusholme/issues/318) | :white_circle: |
+| [#320](https://github.com/adinapoli/rusholme/issues/320) | Implement GRIN evaluator for App and Case expressions | [#319](https://github.com/adinapoli/rusholme/issues/319) | :white_circle: |
+| [#51](https://github.com/adinapoli/rusholme/issues/51) | Implement basic IO primitives for the interpreter (putStrLn, getLine) | [#320](https://github.com/adinapoli/rusholme/issues/320) | :white_circle: |
+| [#52](https://github.com/adinapoli/rusholme/issues/52) | Implement arithmetic and comparison primitives for the interpreter | [#320](https://github.com/adinapoli/rusholme/issues/320) | :white_circle: |
+| [#321](https://github.com/adinapoli/rusholme/issues/321) | End-to-end integration test: main = putStrLn "Hello" through GRIN evaluator | [#320](https://github.com/adinapoli/rusholme/issues/320), [#315](https://github.com/adinapoli/rusholme/issues/315), [#314](https://github.com/adinapoli/rusholme/issues/314), [#51](https://github.com/adinapoli/rusholme/issues/51) | :white_circle: |
 
 ### Epic [#9](https://github.com/adinapoli/rusholme/issues/9): LLVM Backend and Zig Runtime
 
@@ -318,8 +324,17 @@ The longest dependency chain to M1 (`main = putStrLn "Hello"`):
 #68 naming research
  └─► #69 unique supply
       ├─► #34 Core IR types ──► #36 HM inference ──► #38 desugarer
-      └─► #40 GRIN IR types ──► #42 Core→GRIN research ──► #43 Core→GRIN impl
-                               ├─► #50 GRIN evaluator ──► #51 IO primitives  ✓ interpreter path
+      └─► #40 GRIN IR types ──► #41 pretty-printer ─┐
+                               │                     │
+                               ├─► #42 Core→GRIN research ──► #313 lambda lifting ──► #314 Core→GRIN simple
+                               │                                                       ├─► #315 eval/apply gen ──► #317 partial app
+                               │                                                       │
+                               ├─► #318 evaluator state ──► #319 simple eval ──► #320 App/Case eval
+                               │                                                  ├─► #51 IO prims
+                               │                                                  └─► #52 arith prims
+                               │
+                               │   #314 + #315 + #320 + #51 ──► #321 end-to-end integration  ✓ interpreter path
+                               │
                                └─► #54 LLVM codegen ──► #55 GRIN exprs ─┐
                                                                          ├─► #57 link & run  ✓ compiler path
                                                         #53✓ LLVM bindings ──► #56 Zig runtime ─┘
