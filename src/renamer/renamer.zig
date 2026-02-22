@@ -302,6 +302,12 @@ pub const RExpr = union(enum) {
     TypeApp: struct { fn_expr: *const RExpr, type: ast.Type, span: SourceSpan },
     Negate: *const RExpr,
     Paren: *const RExpr,
+    /// Record construction: Point { x = 1, y = 2 }
+    RecordCon: struct { con: Name, fields: []const RFieldUpdate },
+    /// Record update: p { x = 5 }
+    RecordUpdate: struct { expr: *const RExpr, fields: []const RFieldUpdate, span: SourceSpan },
+    /// Field selector: x .point (GHC extension, not in Haskell 2010)
+    Field: struct { expr: *const RExpr, field_name: []const u8, span: SourceSpan },
 };
 
 /// A renamed pattern.
@@ -328,6 +334,12 @@ pub const RFieldPat = struct {
     field_name: []const u8,
     /// None for field punning (x -> x = x), Some for explicit pattern (x = p)
     pat: ?*RPat,
+};
+
+/// Field update in renamed record constructions and updates.
+pub const RFieldUpdate = struct {
+    field_name: []const u8,
+    expr: RExpr,
 };
 
 /// A renamed right-hand side.
@@ -973,13 +985,40 @@ fn renameExpr(expr: ast.Expr, env: *RenameEnv) RenameError!RExpr {
             to_r.* = try renameExpr(e.to.*, env);
             break :blk RExpr{ .EnumFromThenTo = .{ .from = from_r, .then = then_r, .to = to_r, .span = e.span } };
         },
-        // M1: ListComp, RecordCon, RecordUpdate, Field — not yet handled.
-        // Emit an unbound-variable diagnostic for the sub-expressions we skip.
-        .ListComp, .RecordCon, .RecordUpdate, .Field => {
-            // Return a synthetic variable so downstream passes have a node.
-            const dummy_span = expr.getSpan();
-            const synthetic = env.freshName("<unsupported>");
-            return RExpr{ .Var = .{ .name = synthetic, .span = dummy_span } };
+        .RecordCon => |rc| blk: {
+            const con_name = try env.resolve(rc.con.name, rc.con.span);
+            var rfields = std.ArrayListUnmanaged(RFieldUpdate){};
+            for (rc.fields) |f| {
+                const rexpr = try renameExpr(f.expr, env);
+                try rfields.append(env.alloc, .{ .field_name = f.field_name, .expr = rexpr });
+            }
+            break :blk RExpr{ .RecordCon = .{ .con = con_name, .fields = try rfields.toOwnedSlice(env.alloc) } };
+        },
+        .RecordUpdate => |ru| blk: {
+            const rec_r = try env.alloc.create(RExpr);
+            rec_r.* = try renameExpr(ru.expr.*, env);
+            var rfields = std.ArrayListUnmanaged(RFieldUpdate){};
+            for (ru.fields) |f| {
+                const rexpr = try renameExpr(f.expr, env);
+                try rfields.append(env.alloc, .{ .field_name = f.field_name, .expr = rexpr });
+            }
+            break :blk RExpr{ .RecordUpdate = .{ .expr = rec_r, .fields = try rfields.toOwnedSlice(env.alloc), .span = ru.span } };
+        },
+        .Field => |f| blk: {
+            const expr_r = try env.alloc.create(RExpr);
+            expr_r.* = try renameExpr(f.expr.*, env);
+            break :blk RExpr{ .Field = .{ .expr = expr_r, .field_name = f.field_name, .span = f.span } };
+        },
+        // ── Not yet implemented ─────────────────────────────────────────
+        //
+        // IMPORTANT: Each unsupported case MUST have a tracking issue. When
+        // adding a new AST case, if full support is deferred:
+        // 1. Add the case here with an issue reference
+        // 2. File a GitHub issue if none exists
+        // 3. See CONTRIBUTING.md for the "deferred features" policy
+        .ListComp => {
+            // tracked in: https://github.com/adinapoli/rusholme/issues/XXX (TODO: file issue)
+            return RExpr{ .Var = .{ .name = env.freshName("< ListComp not yet implemented >"), .span = expr.getSpan() } };
         },
     };
 }
