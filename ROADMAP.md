@@ -6,7 +6,24 @@
 **Architecture Decisions:**
 - **#0001**: PrimOps and RTS Architecture — defines the contract between compiler and runtime via ~15-30 primitive operations. See `docs/decisions/0001-primops-and-rts-architecture.md`.
 
+**Recent Progress (2026-02-22):**
+- ✓ #184: typechecker: bidirectional signature checking for rank-N polymorphism
+- ✓ #41: Implement GRIN IR pretty-printer
+- ✓ #35: Implement Core IR pretty-printer
+- ✓ #38: Implement desugarer / elaborator (typed AST → Core IR)
+- ✓ #42: Research: Core to GRIN translation strategy
+- ✓ #39: Implement Core lint (type-check Core IR for internal consistency)
+- ✓ #277: Research: Thunk representation for Rusholme's runtime
+
 **Recent Progress (2026-02-21):**
+- ✓ #310: Core-checking sc004_record_syntax.hs doesn't recognise record functions
+- ✓ #307: Core-checking sc004_record_syntax trigger renamer bug
+- ✓ #302: core check doesn't work for sc004 (record syntax)
+- ✓ #298: calling `core` on sc003_data_types.hs emits 0 bindings
+- ✓ #288: Research: Evaluate zig-graph for dependency and analysis graphs
+- ✓ #248: Improve diagnostics for typechecker cycle detection panics
+- ✓ #246: Audit usages of `while(true)`
+- ✓ #236: typechecker errors lack source file name and spans - shows '<unknown>:0:0-0'
 - ✓ #183: typechecker: let-binding type signatures are ignored
 - ✓ #216: ast: add LetQualifier variant to Qualifier for list comprehension let-bindings
 - ✓ #218: Parser: backtick left sections with compound LHS
@@ -68,6 +85,8 @@
 | [#1](https://github.com/adinapoli/rusholme/issues/1) | Set up GitHub Actions CI via Nix flake | — | :green_circle: |
 | [#2](https://github.com/adinapoli/rusholme/issues/2) | Establish modular project layout (src/ split by pipeline stage) | — | :green_circle: |
 | [#225](https://github.com/adinapoli/rusholme/issues/225) | infra: track libxev for future parallel compilation and LSP async I/O | — | :white_circle: |
+| [#290](https://github.com/adinapoli/rusholme/issues/290) | Research: Evaluate toposort library for dependency ordering | — | :white_circle: |
+| [#288](https://github.com/adinapoli/rusholme/issues/288) | Research: Evaluate zig-graph for dependency and analysis graphs | — | :green_circle: |
 
 ### Epic [#3](https://github.com/adinapoli/rusholme/issues/3): Structured Error Diagnostics
 
@@ -100,6 +119,7 @@
 | [#108](https://github.com/adinapoli/rusholme/issues/108) | Enforce std.testing.allocator in all tests and add GPA to main.zig | [#107](https://github.com/adinapoli/rusholme/issues/107) | :green_circle: |
 | [#109](https://github.com/adinapoli/rusholme/issues/109) | Add Valgrind CI step for C interop leak detection | [#107](https://github.com/adinapoli/rusholme/issues/107) | :white_circle: |
 | [#110](https://github.com/adinapoli/rusholme/issues/110) | Document zero-leak policy in CONTRIBUTING.md and DESIGN.md | [#107](https://github.com/adinapoli/rusholme/issues/107) | :green_circle: |
+| [#246](https://github.com/adinapoli/rusholme/issues/246) | infra: Audit usages of `while(true)` for potential improvements | — | :green_circle: |
 
 ---
 
@@ -208,26 +228,32 @@
 | [#176](https://github.com/adinapoli/rusholme/issues/176) | typechecker: do-notation inference is hard-coded to IO, not generic Monad | [#36](https://github.com/adinapoli/rusholme/issues/36), [#37](https://github.com/adinapoli/rusholme/issues/37) | :green_circle: |
 | [#183](https://github.com/adinapoli/rusholme/issues/183) | typechecker: let-binding type signatures are ignored | [#175](https://github.com/adinapoli/rusholme/issues/175) | :green_circle: |
 | [#263](https://github.com/adinapoli/rusholme/issues/263) | typechecker: mutually recursive let-bindings with type signatures not fully supported | [#183](https://github.com/adinapoli/rusholme/issues/183) | :green_circle: |
-| [#184](https://github.com/adinapoli/rusholme/issues/184) | typechecker: bidirectional signature checking for rank-N polymorphism | [#175](https://github.com/adinapoli/rusholme/issues/175) | :white_circle: |
+| [#184](https://github.com/adinapoli/rusholme/issues/184) | typechecker: bidirectional signature checking for rank-N polymorphism | [#175](https://github.com/adinapoli/rusholme/issues/175) | :green_circle: |
+| [#236](https://github.com/adinapoli/rusholme/issues/236) | typechecker: errors lack source file name and spans - shows '<unknown>:0:0-0' | [#184](https://github.com/adinapoli/rusholme/issues/184) | :green_circle: |
+| [#248](https://github.com/adinapoli/rusholme/issues/248) | typechecker: Improve diagnostics for cycle detection panics | [#184](https://github.com/adinapoli/rusholme/issues/184) | :green_circle: |
 | [#177](https://github.com/adinapoli/rusholme/issues/177) | typechecker: astTypeToHType incomplete — App, Paren, Forall, n-tuples not handled | [#36](https://github.com/adinapoli/rusholme/issues/36) | :green_circle: |
 | [#37](https://github.com/adinapoli/rusholme/issues/37) | Implement type class resolution and dictionary passing | [#36](https://github.com/adinapoli/rusholme/issues/36), [#153](https://github.com/adinapoli/rusholme/issues/153) | :green_circle: |
-| [#38](https://github.com/adinapoli/rusholme/issues/38) | Implement desugarer / elaborator (typed AST → Core IR) | [#36](https://github.com/adinapoli/rusholme/issues/36), [#153](https://github.com/adinapoli/rusholme/issues/153) | :white_circle: |
+| [#38](https://github.com/adinapoli/rusholme/issues/38) | Implement desugarer / elaborator (typed AST → Core IR) | [#36](https://github.com/adinapoli/rusholme/issues/36), [#153](https://github.com/adinapoli/rusholme/issues/153) | :green_circle: |
 
 ### Epic [#5](https://github.com/adinapoli/rusholme/issues/5): Core IR (System F_C)
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#34](https://github.com/adinapoli/rusholme/issues/34) | Define Core IR types (System F_C expressions, binders, types) | [#69](https://github.com/adinapoli/rusholme/issues/69) | :green_circle: |
-| [#35](https://github.com/adinapoli/rusholme/issues/35) | Implement Core IR pretty-printer | [#34](https://github.com/adinapoli/rusholme/issues/34) | :white_circle: |
-| [#39](https://github.com/adinapoli/rusholme/issues/39) | Implement Core lint (type-check Core IR for internal consistency) | [#34](https://github.com/adinapoli/rusholme/issues/34) | :white_circle: |
+| [#35](https://github.com/adinapoli/rusholme/issues/35) | Implement Core IR pretty-printer | [#34](https://github.com/adinapoli/rusholme/issues/34) | :green_circle: |
+| [#39](https://github.com/adinapoli/rusholme/issues/39) | Implement Core lint (type-check Core IR for internal consistency) | [#34](https://github.com/adinapoli/rusholme/issues/34) | :green_circle: |
+| [#298](https://github.com/adinapoli/rusholme/issues/298) | core: fix binding emission for sc003_data_types.hs (0 bindings emitted) | [#38](https://github.com/adinapoli/rusholme/issues/38) | :green_circle: |
+| [#302](https://github.com/adinapoli/rusholme/issues/302) | core: fix lint for sc004 (record syntax validation) | [#39](https://github.com/adinapoli/rusholme/issues/39) | :green_circle: |
+| [#307](https://github.com/adinapoli/rusholme/issues/307) | core: fix sc004_record_syntax renamer bug (triggered by record functions) | [#302](https://github.com/adinapoli/rusholme/issues/302) | :green_circle: |
+| [#310](https://github.com/adinapoli/rusholme/issues/310) | core: fix record function recognition in sc004_record_syntax.hs | [#307](https://github.com/adinapoli/rusholme/issues/307) | :green_circle: |
 
 ### Epic [#6](https://github.com/adinapoli/rusholme/issues/6): GRIN IR and Core→GRIN Translation
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#40](https://github.com/adinapoli/rusholme/issues/40) | Define GRIN IR types (Modern GRIN dialect) | [#69](https://github.com/adinapoli/rusholme/issues/69) | :green_circle: |
-| [#41](https://github.com/adinapoli/rusholme/issues/41) | Implement GRIN IR pretty-printer | [#40](https://github.com/adinapoli/rusholme/issues/40) | :yellow_circle: |
-| [#42](https://github.com/adinapoli/rusholme/issues/42) | Research: Core to GRIN translation strategy | [#34](https://github.com/adinapoli/rusholme/issues/34), [#40](https://github.com/adinapoli/rusholme/issues/40) | :yellow_circle: |
+| [#41](https://github.com/adinapoli/rusholme/issues/41) | Implement GRIN IR pretty-printer | [#40](https://github.com/adinapoli/rusholme/issues/40) | :green_circle: |
+| [#42](https://github.com/adinapoli/rusholme/issues/42) | Research: Core to GRIN translation strategy | [#34](https://github.com/adinapoli/rusholme/issues/34), [#40](https://github.com/adinapoli/rusholme/issues/40) | :green_circle: |
 | [#313](https://github.com/adinapoli/rusholme/issues/313) | Implement lambda lifting pass on Core IR | [#42](https://github.com/adinapoli/rusholme/issues/42) | :white_circle: |
 | [#314](https://github.com/adinapoli/rusholme/issues/314) | Implement Core to GRIN translation for simple expressions | [#313](https://github.com/adinapoli/rusholme/issues/313), [#41](https://github.com/adinapoli/rusholme/issues/41), [#42](https://github.com/adinapoli/rusholme/issues/42) | :white_circle: |
 | [#315](https://github.com/adinapoli/rusholme/issues/315) | Generate whole-program eval and apply functions for GRIN | [#314](https://github.com/adinapoli/rusholme/issues/314) | :white_circle: |
