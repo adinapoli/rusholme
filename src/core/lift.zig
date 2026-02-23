@@ -446,15 +446,50 @@ for (free_vars_slice) |_| {
                 // Check if this lambda was lifted.
                 const expr_ptr = @intFromPtr(expr);
                 if (self.expr_to_lambda.get(expr_ptr)) |lambda_id| {
-                    if (self.lambdas.get(lambda_id)) |info| {
-                        // This lambda was lifted. Replace with a reference to the lifted function.
-                        // Create a Var node referencing the lifted function.
-                        const lifted_id = Id{
-                            .name = info.lifted_name,
-                            .ty = info.ty,
-                            .span = l.span,
-                        };
-                        new_expr.* = .{ .Var = lifted_id };
+                    if (self.lambdas.getPtr(lambda_id)) |info| {
+                        // Only rewrite if this was actually lifted (nested lambda).
+                        // Top-level lambdas (parent_id == 0) should be kept as-is.
+                        if (info.parent_id != 0) {
+                            // This lambda was lifted. Replace with a call to the lifted function,
+                            // passing free variables as extra arguments.
+                            const lifted_id = Id{
+                                .name = info.lifted_name,
+                                .ty = info.ty,
+                                .span = l.span,
+                            };
+                            
+                            // Start with the lifted function name
+                            var current: *Expr = try self.alloc.create(Expr);
+                            current.* = .{ .Var = lifted_id };
+                            
+                            // Wrap in App nodes for each free variable
+                            for (info.free_vars) |fv_id| {
+                                const fv_var = try self.alloc.create(Expr);
+                                fv_var.* = .{ .Var = .{
+                                    .name = .{ .base = "fv", .unique = .{ .value = fv_id } },
+                                    .ty = undefined, // Type not needed for rewriting
+                                    .span = l.span,
+                                }};
+                                
+                                const app = try self.alloc.create(Expr);
+                                app.* = .{ .App = .{
+                                    .fn_expr = current,
+                                    .arg = fv_var,
+                                    .span = l.span,
+                                }};
+                                current = app;
+                            }
+                            
+                            new_expr.* = current.*;
+                        } else {
+                            // Top-level lambda - keep as-is, just rewrite body
+                            const new_body = try self.rewriteExpr(l.body, current_binders);
+                            new_expr.* = .{ .Lam = .{
+                                .binder = l.binder,
+                                .body = new_body,
+                                .span = l.span,
+                            }};
+                        }
                     } else {
                         // Lambda info not found, keep as is
                         const new_body = try self.rewriteExpr(l.body, current_binders);

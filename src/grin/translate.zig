@@ -225,61 +225,55 @@ fn translateExpr(ctx: *TranslateCtx, expr: *const CoreExpr) !*GrinExpr {
 
 /// Translate a function application.
 fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExpr {
-    // Extract the App data from the expression
-    const app = switch (app_expr.*) {
-        .App => |a| &a,
-        else => {
-            // Should not happen - this function should only be called with App expressions
-            std.debug.panic("translateApp called with non-App expression", .{});
-        }
-    };
+    // Verify this is an App expression
+    switch (app_expr.*) {
+        .App => {},
+        else => std.debug.panic("translateApp called with non-App expression", .{}),
+    }
 
     // Collect the function and all arguments from the application chain.
-    var fn_expr: *const CoreExpr = app.fn_expr;
+    // Core App is left-associative: f x y = ((f x) y)
+    // We walk left collecting arguments, then reverse them.
     var args = std.ArrayListUnmanaged(*const CoreExpr){};
     defer args.deinit(ctx.alloc);
 
-    // Collect the function head.
-    var current: *const CoreExpr = app.fn_expr;
+    var current: *const CoreExpr = app_expr;
     while (true) {
         switch (current.*) {
             .App => |a| {
                 try args.append(ctx.alloc, a.arg);
                 current = a.fn_expr;
             },
-            .Var => {
-                fn_expr = @ptrCast(current);
-                break;
-            },
             else => {
-                // Could be a more complex expression producing a function.
-                // For now, translate the function expression directly.
-                fn_expr = current;
+                // Reached the function head
                 break;
             },
         }
     }
 
+    // `current` is now the function expression (should be a Var)
+    const fn_expr = current;
+
     // Translate the function name.
     const translated_fn = try translateExpr(ctx, fn_expr);
+
+    // Reverse the arguments (we collected them right-to-left)
+    std.mem.reverse(*const CoreExpr, args.items);
 
     // Translate all arguments.
     var grin_args = try ctx.alloc.alloc(GrinVal, args.items.len);
     for (args.items, 0..) |arg, i| {
         const arg_result = try translateExpr(ctx, arg);
         // The expression should return a value.
-        // For now, we'll just extract the return value directly.
-        // This is a simplification - in a full implementation, we'd
-        // need to handle monadic binds to get the value.
         switch (arg_result.*) {
             .Return => |v| {
-                grin_args[args.items.len - 1 - i] = v;
+                grin_args[i] = v;
             },
             else => {
                 // Complex argument expression - need to bind and use.
                 // For MVP, we'll just create a variable.
                 const fresh_var = try ctx.freshName("arg");
-                grin_args[args.items.len - 1 - i] = .{ .Var = fresh_var };
+                grin_args[i] = .{ .Var = fresh_var };
             },
         }
     }
