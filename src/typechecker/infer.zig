@@ -126,6 +126,12 @@ pub const InferCtx = struct {
     monad_type: ?*HType = null,
     local_binders: std.AutoHashMapUnmanaged(naming_mod.Unique, *HType) = .{},
 
+    /// Lookup map for type constructor names from the renamed module.
+    /// Maps type name base string -> renamed Name with proper unique ID.
+    /// Used in `astTypeToHTypeWithScope` to resolve custom ADT type constructors.
+    /// Nullable because it's only set during module inference, not in unit tests.
+    type_con_names: ?*const std.StringHashMapUnmanaged(Name) = null,
+
     pub fn init(
         alloc: std.mem.Allocator,
         env: *TyEnv,
@@ -404,10 +410,10 @@ fn astTypeToHTypeWithScope(
         },
         .Con => |qname| blk: {
             if (knownTypeByName(qname.name)) |ty| break :blk ctx.alloc_ty(ty);
-            break :blk ctx.alloc_ty(HType{ .Con = .{
-                .name = Name{ .base = qname.name, .unique = .{ .value = 0 } },
-                .args = &.{},
-            } });
+            // For custom ADT type constructors, look up the renamed Name from the module.
+            // This ensures they have proper unique IDs instead of always using 0.
+            const ty_name = if (ctx.type_con_names) |names| names.get(qname.name) orelse Name{ .base = qname.name, .unique = .{ .value = 0 } } else Name{ .base = qname.name, .unique = .{ .value = 0 } };
+            break :blk ctx.alloc_ty(HType{ .Con = .{ .name = ty_name, .args = &.{} } });
         },
         .Fun => |parts| blk: {
             if (parts.len < 2) break :blk ctx.freshMeta();
@@ -1638,7 +1644,22 @@ fn inferMatch(ctx: *InferCtx, match: RMatch) std.mem.Allocator.Error!*HType {
 /// Returns a `ModuleTypes` mapping each top-level name's unique to its
 /// `TyScheme`.  Errors are collected in `ctx.diags`.
 pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Error!ModuleTypes {
-    // Pass 0: Collect type signatures and convert them to HType.
+    // Pass 0: Build type constructor lookup map from data declarations.
+    // This map is used during type signature conversion to resolve custom ADT
+    // type constructors to their proper unique IDs.
+    var type_con_names = std.StringHashMapUnmanaged(Name){};
+    defer type_con_names.deinit(ctx.alloc);
+    for (module.declarations) |decl| {
+        switch (decl) {
+            .DataDecl => |dd| {
+                try type_con_names.put(ctx.alloc, dd.name.base, dd.name);
+            },
+            else => {},
+        }
+    }
+    ctx.type_con_names = &type_con_names;
+
+    // Pass 0a: Collect type signatures and convert them to HType.
     var sigs = std.AutoHashMapUnmanaged(naming_mod.Unique, TypeSigEntry){};
     defer sigs.deinit(ctx.alloc);
 
