@@ -267,12 +267,16 @@
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#330](https://github.com/adinapoli/rusholme/issues/330) | Define PrimOps and implement GRIN evaluator dispatch | [#40](https://github.com/adinapoli/rusholme/issues/40) | :white_circle: |
+| [#330](https://github.com/adinapoli/rusholme/issues/330) | Define PrimOps and implement GRIN evaluator dispatch | [#40](https://github.com/adinapoli/rusholme/issues/40) | :yellow_circle: |
 | [#325](https://github.com/adinapoli/rusholme/issues/325) | Implement token-passing IO for lazy semantics | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
 | [#326](https://github.com/adinapoli/rusholme/issues/326) | Implement exception handling in the RTS | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
 | [#327](https://github.com/adinapoli/rusholme/issues/327) | Integrate GC with PrimOp allocations | [#330](https://github.com/adinapoli/rusholme/issues/330), [#70](https://github.com/adinapoli/rusholme/issues/70) | :white_circle: |
 | [#328](https://github.com/adinapoli/rusholme/issues/328) | Add runtime stack traces for PrimOp failures | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
 | [#329](https://github.com/adinapoli/rusholme/issues/329) | Support concurrent/parallel IO in the RTS | [#326](https://github.com/adinapoli/rusholme/issues/326) | :white_circle: |
+| [#341](https://github.com/adinapoli/rusholme/issues/341) | Add PrimOp type signatures to typechecker | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
+| [#342](https://github.com/adinapoli/rusholme/issues/342) | Shrink known.zig to PrimOp names only | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
+| [#343](https://github.com/adinapoli/rusholme/issues/343) | Implement heap operation PrimOps (MutVar) | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
+| [#344](https://github.com/adinapoli/rusholme/issues/344) | Implement FFI bridge (ccall PrimOp) | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
 
 ### Epic [#8](https://github.com/adinapoli/rusholme/issues/8): Tree-Walking Interpreter
 
