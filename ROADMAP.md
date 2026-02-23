@@ -6,6 +6,11 @@
 **Architecture Decisions:**
 - **#0001**: PrimOps and RTS Architecture — defines the contract between compiler and runtime via ~15-30 primitive operations. See `docs/decisions/0001-primops-and-rts-architecture.md`.
 
+**Recent Progress (2026-02-23):**
+- ✓ #314: Implement Core to GRIN translation for simple expressions
+- ✓ #313: Implement lambda lifting pass on Core IR
+- ✓ #330: Define PrimOps and implement GRIN evaluator dispatch
+
 **Recent Progress (2026-02-22):**
 - ✓ #184: typechecker: bidirectional signature checking for rank-N polymorphism
 - ✓ #41: Implement GRIN IR pretty-printer
@@ -255,9 +260,10 @@
 | [#41](https://github.com/adinapoli/rusholme/issues/41) | Implement GRIN IR pretty-printer | [#40](https://github.com/adinapoli/rusholme/issues/40) | :green_circle: |
 | [#42](https://github.com/adinapoli/rusholme/issues/42) | Research: Core to GRIN translation strategy | [#34](https://github.com/adinapoli/rusholme/issues/34), [#40](https://github.com/adinapoli/rusholme/issues/40) | :green_circle: |
 | [#313](https://github.com/adinapoli/rusholme/issues/313) | Implement lambda lifting pass on Core IR | [#42](https://github.com/adinapoli/rusholme/issues/42) | :green_circle: |
-| [#314](https://github.com/adinapoli/rusholme/issues/314) | Implement Core to GRIN translation for simple expressions | [#313](https://github.com/adinapoli/rusholme/issues/313), [#41](https://github.com/adinapoli/rusholme/issues/41), [#42](https://github.com/adinapoli/rusholme/issues/42) | :yellow_circle: |
+| [#314](https://github.com/adinapoli/rusholme/issues/314) | Implement Core to GRIN translation for simple expressions | [#313](https://github.com/adinapoli/rusholme/issues/313), [#41](https://github.com/adinapoli/rusholme/issues/41), [#42](https://github.com/adinapoli/rusholme/issues/42) | :green_circle: |
 | [#315](https://github.com/adinapoli/rusholme/issues/315) | Generate whole-program eval and apply functions for GRIN | [#314](https://github.com/adinapoli/rusholme/issues/314) | :white_circle: |
 | [#317](https://github.com/adinapoli/rusholme/issues/317) | Handle partial application and over-application in Core→GRIN | [#314](https://github.com/adinapoli/rusholme/issues/314), [#315](https://github.com/adinapoli/rusholme/issues/315) | :white_circle: |
+| [#347](https://github.com/adinapoli/rusholme/issues/347) | Implement proper backpatching for recursive let bindings in GRIN translator | [#314](https://github.com/adinapoli/rusholme/issues/314) | :white_circle: |
 
 ### Epic: PrimOps and Runtime System (Decision #0001)
 
@@ -267,7 +273,7 @@
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#330](https://github.com/adinapoli/rusholme/issues/330) | Define PrimOps and implement GRIN evaluator dispatch | [#40](https://github.com/adinapoli/rusholme/issues/40) | :yellow_circle: |
+| [#330](https://github.com/adinapoli/rusholme/issues/330) | Define PrimOps and implement GRIN evaluator dispatch | [#40](https://github.com/adinapoli/rusholme/issues/40) | :green_circle: |
 | [#325](https://github.com/adinapoli/rusholme/issues/325) | Implement token-passing IO for lazy semantics | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
 | [#326](https://github.com/adinapoli/rusholme/issues/326) | Implement exception handling in the RTS | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
 | [#327](https://github.com/adinapoli/rusholme/issues/327) | Integrate GC with PrimOp allocations | [#330](https://github.com/adinapoli/rusholme/issues/330), [#70](https://github.com/adinapoli/rusholme/issues/70) | :white_circle: |
