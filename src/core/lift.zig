@@ -78,7 +78,7 @@ const VarSet = struct {
         return self.set.contains(id);
     }
 
-    fn union(self: *VarSet, alloc: Allocator, other: *const VarSet) !void {
+    fn merge(self: *VarSet, alloc: Allocator, other: *const VarSet) !void {
         var it = other.set.iterator();
         while (it.next()) |entry| {
             try self.set.put(alloc, entry.key_ptr.*, {});
@@ -98,7 +98,7 @@ const VarSet = struct {
 
     fn clone(self: *const VarSet, alloc: Allocator) !VarSet {
         var result = VarSet.init(alloc);
-        try result.union(alloc, self);
+        try result.merge(alloc, self);
         return result;
     }
 };
@@ -235,8 +235,8 @@ pub const LambdaLifter = struct {
                 defer fn_free.deinit(self.alloc);
                 var arg_free = try self.collectLambdas(a.arg, parent_lambda_id, current_frame, free_vars, ty, a.span);
                 defer arg_free.deinit(self.alloc);
-                try free_vars.union(self.alloc, &fn_free);
-                try free_vars.union(self.alloc, &arg_free);
+                try free_vars.merge(self.alloc, &fn_free);
+                try free_vars.merge(self.alloc, &arg_free);
             },
             .Lam => |l| {
                 // This is a lambda that needs to be lifted.
@@ -308,8 +308,8 @@ pub const LambdaLifter = struct {
                         var body_free = try self.collectLambdas(l.body, parent_lambda_id, &new_frame, free_vars, ty, l.span);
                         defer body_free.deinit(self.alloc);
 
-                        try free_vars.union(self.alloc, &rhs_free);
-                        try free_vars.union(self.alloc, &body_free);
+                        try free_vars.merge(self.alloc, &rhs_free);
+                        try free_vars.merge(self.alloc, &body_free);
 
                         // Pop frame.
                         _ = self.frames.pop();
@@ -337,15 +337,15 @@ pub const LambdaLifter = struct {
                         for (pairs) |pair| {
                             var rhs_free = try self.collectLambdas(pair.rhs, parent_lambda_id, &new_frame, free_vars, ty, l.span);
                             defer rhs_free.deinit(self.alloc);
-                            try all_rhs_free.union(self.alloc, &rhs_free);
+                            try all_rhs_free.merge(self.alloc, &rhs_free);
                         }
 
                         // Collect free vars in body.
                         var body_free = try self.collectLambdas(l.body, parent_lambda_id, &new_frame, free_vars, ty, l.span);
                         defer body_free.deinit(self.alloc);
 
-                        try free_vars.union(self.alloc, &all_rhs_free);
-                        try free_vars.union(self.alloc, &body_free);
+                        try free_vars.merge(self.alloc, &all_rhs_free);
+                        try free_vars.merge(self.alloc, &body_free);
 
                         // Pop frame.
                         _ = self.frames.pop();
@@ -357,7 +357,7 @@ pub const LambdaLifter = struct {
                 // Collect free vars in scrutinee.
                 var scrut_free = try self.collectLambdas(c.scrutinee, parent_lambda_id, current_frame, free_vars, ty, c.span);
                 defer scrut_free.deinit(self.alloc);
-                try free_vars.union(self.alloc, &scrut_free);
+                try free_vars.merge(self.alloc, &scrut_free);
 
                 // Create new frame with case binder.
                 var new_frame_vars = try self.alloc.alloc(u64, current_frame.vars.len + 1);
@@ -389,14 +389,14 @@ pub const LambdaLifter = struct {
 
                     var alt_free = try self.collectLambdas(alt.body, parent_lambda_id, &alt_frame, free_vars, ty, c.span);
                     defer alt_free.deinit(self.alloc);
-                    try all_alt_free.union(self.alloc, &alt_free);
+                    try all_alt_free.merge(self.alloc, &alt_free);
 
                     // Pop alt frame.
                     _ = self.frames.pop();
                     _ = self.alloc.free(alt_frame_vars);
                 }
 
-                try free_vars.union(self.alloc, &all_alt_free);
+                try free_vars.merge(self.alloc, &all_alt_free);
 
                 // Pop case frame.
                 _ = self.frames.pop();
