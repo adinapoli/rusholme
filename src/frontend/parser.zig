@@ -480,6 +480,53 @@ pub const Parser = struct {
 
     // ── Module parsing ─────────────────────────────────────────────────
 
+    /// Merge multi-equation function bindings that were parsed as separate declarations.
+    ///
+    /// In Haskell, a function with multiple equations like:
+    ///   not True = False
+    ///   not False = True
+    /// is a single declaration. Our parser initially creates separate
+    /// `FunBind` declarations for each equation; this function merges them.
+    fn mergeFunBinds(self: *Parser, decls: []ast_mod.Decl) error{OutOfMemory}![]ast_mod.Decl {
+        var result: std.ArrayListUnmanaged(ast_mod.Decl) = .empty;
+        errdefer result.deinit(self.allocator);
+
+        // Map from function name to its index in result
+        var seen: std.StringHashMapUnmanaged(usize) = .empty;
+        defer seen.deinit(self.allocator);
+
+        for (decls) |decl| {
+            switch (decl) {
+                .FunBind => |fb| {
+                    if (seen.get(fb.name)) |idx| {
+                        // Merge equations into existing FunBind
+                        const existing = &result.items[idx].FunBind;
+                        const old_equations = existing.equations;
+                        var new_equations = try self.allocator.alloc(ast_mod.Match, old_equations.len + fb.equations.len);
+                        @memcpy(new_equations[0..old_equations.len], old_equations);
+                        @memcpy(new_equations[old_equations.len..], fb.equations);
+                        existing.equations = new_equations;
+                        self.allocator.free(old_equations);
+                        // Free the incoming equations slice (but not the equations themselves)
+                        self.allocator.free(fb.equations);
+                        // Extend span to cover all equations
+                        existing.span = existing.span.merge(fb.span);
+                    } else {
+                        // New function binding
+                        const idx_in_result = result.items.len;
+                        try result.append(self.allocator, decl);
+                        try seen.put(self.allocator, fb.name, idx_in_result);
+                    }
+                },
+                else => {
+                    try result.append(self.allocator, decl);
+                },
+            }
+        }
+
+        return try result.toOwnedSlice(self.allocator);
+    }
+
     /// Parse a complete Haskell module.
     ///
     /// ```
@@ -537,11 +584,14 @@ pub const Parser = struct {
 
         _ = try self.expectCloseBrace();
 
+        // Merge multi-equation function bindings
+        const merged_decls = try self.mergeFunBinds(try decls.toOwnedSlice(self.allocator));
+
         return ast_mod.Module{
             .module_name = module_name,
             .exports = exports,
             .imports = try imports.toOwnedSlice(self.allocator),
-            .declarations = try decls.toOwnedSlice(self.allocator),
+            .declarations = merged_decls,
             .span = self.spanFrom(start),
         };
     }
