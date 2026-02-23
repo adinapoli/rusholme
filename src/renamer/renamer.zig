@@ -756,6 +756,34 @@ fn renameDecl(
             var rcons = std.ArrayListUnmanaged(RConDecl){};
             var selectors = std.StringHashMapUnmanaged(RSelectorInfo){};
 
+            // Validate that field names are unique across all constructors.
+            // Haskell 2010 §4.2.1: fields with the same name across constructors
+            // of a single type are not allowed.
+            var field_names = std.StringHashMapUnmanaged([]const u8){};
+            defer field_names.deinit(env.alloc);
+            for (dd.constructors) |con| {
+                for (con.fields) |field| {
+                    if (field == .Record) {
+                        const field_name = field.Record.name;
+                        if (field_names.get(field_name)) |_| {
+                            const msg = try std.fmt.allocPrint(
+                                env.alloc,
+                                "duplicate field name `{s}` in data type `{s}`",
+                                .{ field_name, dd.name },
+                            );
+                            try env.diags.emit(env.alloc, .{
+                                .severity = .@"error",
+                                .code = .duplicate_definition,
+                                .span = con.span,
+                                .message = msg,
+                            });
+                        } else {
+                            try field_names.put(env.alloc, field_name, field_name);
+                        }
+                    }
+                }
+            }
+
             for (dd.constructors) |con| {
                 const con_name = env.scope.lookup(con.name) orelse env.freshName(con.name);
                 // We keep field definitions as-is because ast.FieldDecl handles the un-renamable type ASTs
