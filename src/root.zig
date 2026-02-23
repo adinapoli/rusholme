@@ -53,6 +53,7 @@ pub const core = struct {
 pub const grin = struct {
     pub const ast = @import("grin/ast.zig");
     pub const pretty = @import("grin/pretty.zig");
+    pub const primop = @import("grin/primop.zig");
 };
 
 // Backend
@@ -61,7 +62,7 @@ pub const backend = struct {
 };
 
 // Runtime
-pub const runtime = @import("runtime.zig");
+pub const runtime = @import("runtime/mod.zig");
 
 // Re-export commonly used types
 pub const SourceSpan = diagnostics.span.SourceSpan;
@@ -91,4 +92,5 @@ test {
     testing.refAllDecls(grin);
     testing.refAllDecls(backend);
     testing.refAllDecls(tc);
+    testing.refAllDecls(runtime);
 }
