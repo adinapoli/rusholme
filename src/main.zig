@@ -420,9 +420,9 @@ fn cmdGrin(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     }
 
     // ── Lambda lift ────────────────────────────────────────────────────
-    // NOTE: Temporarily skipped due to compilation errors in lift.zig (issue #338)
-    // const core_lifted = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog);
-    const core_lifted = core_prog;
+    
+    const core_lifted = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog);
+    
 
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);

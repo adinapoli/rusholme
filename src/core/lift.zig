@@ -279,8 +279,8 @@ pub const LambdaLifter = struct {
                 }
 
                 // Update the lambda's type.
-                if (self.lambdas.get(lambda_id)) |info_ptr| {
-                    info_ptr.ty = lifted_ty;
+                if (self.lambdas.getEntry(lambda_id)) |entry| {
+                    entry.value_ptr.ty = lifted_ty;
                 }
 
                 // Note: we don't propagate free_vars from the lambda, since lifted

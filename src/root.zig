@@ -48,8 +48,7 @@ pub const core = struct {
     pub const pretty = @import("core/pretty.zig");
     pub const desugar = @import("core/desugar.zig");
     pub const lint = @import("core/lint.zig");
-    // FIXME: lift module has compilation errors (issue #338)
-    // pub const lift = @import("core/lift.zig");
+    pub const lift = @import("core/lift.zig");
 };
 
 pub const grin = struct {
