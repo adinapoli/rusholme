@@ -1024,6 +1024,10 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                             if (sig_entry) |s| {
                                 // If there's a signature, unify the inferred type against it.
                                 try ctx.unifyNow(eq_ty, s.ty, fb.span);
+                                // Also unify fun_node with the signature so that local_binders
+                                // has the solved type. Without this, fun_node remains an unsolved
+                                // meta and causes a panic in HType.toCore during desugaring.
+                                try ctx.unifyNow(fun_node, s.ty, fb.span);
                             } else {
                                 // Otherwise, unify against the fresh meta node.
                                 try ctx.unifyNow(fun_node, eq_ty, fb.span);
@@ -1765,6 +1769,10 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
                     if (sig_entry) |s| {
                         // If there's a signature, unify the inferred type against it.
                         try ctx.unifyNow(eq_ty, s.ty, fb.span);
+                        // Also unify fun_node with the signature so that local_binders
+                        // has the solved type. Without this, fun_node remains an unsolved
+                        // meta and causes a panic in HType.toCore during desugaring.
+                        try ctx.unifyNow(fun_node, s.ty, fb.span);
                     } else {
                         // Otherwise, unify against the fresh meta node.
                         try ctx.unifyNow(fun_node, eq_ty, fb.span);
@@ -1819,6 +1827,22 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
     while (ds_it.next()) |entry| {
         try result.schemes.put(ctx.alloc, entry.key_ptr.*, entry.value_ptr.*);
     }
+
+    // Add built-in constructor schemes so the desugarer can find them.
+    // These are mono-bound in TyEnv via initBuiltins() but the desugarer
+    // only looks in ModuleTypes.schemes.
+    // Unique IDs from src/naming/known.zig: True=200, False=201, Unit=206
+    const built_in_uniques = [_]naming_mod.Unique{
+        .{ .value = 200 }, // True
+        .{ .value = 201 }, // False
+        .{ .value = 206 }, // Unit
+    };
+    for (built_in_uniques) |unique| {
+        if (ctx.env.lookupScheme(unique)) |scheme| {
+            try result.schemes.put(ctx.alloc, unique, scheme);
+        }
+    }
+
     return result;
 }
 
