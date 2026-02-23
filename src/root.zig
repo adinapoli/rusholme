@@ -48,12 +48,14 @@ pub const core = struct {
     pub const pretty = @import("core/pretty.zig");
     pub const desugar = @import("core/desugar.zig");
     pub const lint = @import("core/lint.zig");
+    pub const lift = @import("core/lift.zig");
 };
 
 pub const grin = struct {
     pub const ast = @import("grin/ast.zig");
     pub const pretty = @import("grin/pretty.zig");
     pub const primop = @import("grin/primop.zig");
+    pub const translate = @import("grin/translate.zig");
 };
 
 // Backend

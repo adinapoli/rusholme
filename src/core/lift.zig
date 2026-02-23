@@ -45,6 +45,8 @@ const LambdaInfo = struct {
     id: u64,
     /// Pointer to the original lambda expression (for identification).
     expr: *const Expr,
+    /// Body of the lambda (needed for reconstruction during lifting).
+    body: *const Expr,
     /// Free variables of this lambda (by unique ID).
     free_vars: []const u64,
     /// Parameters of the lambda (before lifting).
@@ -57,12 +59,16 @@ const LambdaInfo = struct {
     lifted_name: Name,
 };
 
+// Explicit error set for mutually recursive functions
+const LifterError = std.mem.Allocator.Error;
+
 /// A set of variable unique IDs, using a hash set.
 const VarSet = struct {
     set: std.AutoHashMapUnmanaged(u64, void),
     const Allocator = std.mem.Allocator;
 
     fn init(alloc: Allocator) VarSet {
+        _ = alloc;
         return .{ .set = .{} };
     }
 
@@ -141,16 +147,16 @@ pub const LambdaLifter = struct {
     }
 
     pub fn deinit(self: *LambdaLifter) void {
-        self.lambdas.deinit(self.alloc);
-        self.expr_to_lambda.deinit(self.alloc);
-        self.frames.deinit(self.alloc);
-        
-        // Free allocated arrays in LambdaInfo
+        // Free allocated arrays in LambdaInfo first, before deinit the hashmap
         var it = self.lambdas.iterator();
         while (it.next()) |entry| {
             const info = &entry.value_ptr.*;
             self.alloc.free(info.free_vars);
         }
+        
+        self.lambdas.deinit(self.alloc);
+        self.expr_to_lambda.deinit(self.alloc);
+        self.frames.deinit(self.alloc);
     }
 
     /// Push a new scope frame.
@@ -182,6 +188,11 @@ pub const LambdaLifter = struct {
 
     /// Register a lambda expression and return its unique ID.
     fn registerLambda(self: *LambdaLifter, expr: *const Expr, params: []const Id, body: *const Expr, parent_id: u64, ty: CoreType, span: SourceSpan) !u64 {
+        _ = params;
+        _ = body;
+        _ = parent_id;
+        _ = ty;
+        _ = span;
         const lambda_id = self.lambda_counter + 1;
         self.lambda_counter = lambda_id;
 
@@ -194,6 +205,7 @@ pub const LambdaLifter = struct {
 
     /// Complete lambda registration after free variable computation.
     fn completeLambda(self: *LambdaLifter, lambda_id: u64, free_vars: []const u64, params: []const Id, body: *const Expr, ty: CoreType, span: SourceSpan) !void {
+        _ = span;
         const lifted_name = Name{
             .base = "lifted",
             .unique = Unique{ .value = self.lifted_id_counter },
@@ -203,6 +215,7 @@ pub const LambdaLifter = struct {
         const info = LambdaInfo{
             .id = lambda_id,
             .expr = body, // Point to body, will handle this in rewrite
+            .body = body,
             .free_vars = free_vars,
             .params = params,
             .ty = ty,
@@ -229,7 +242,7 @@ pub const LambdaLifter = struct {
                     try free_vars.add(self.alloc, v.name.unique.value);
                 }
             },
-            .Lit => |_lit| {},
+.Lit => {},
             .App => |a| {
                 var fn_free = try self.collectLambdas(a.fn_expr, parent_lambda_id, current_frame, free_vars, ty, a.span);
                 defer fn_free.deinit(self.alloc);
@@ -270,7 +283,7 @@ pub const LambdaLifter = struct {
                 // Compute function type with free vars added as parameters.
                 // For each free variable, we add a parameter to the type.
                 var lifted_ty = l.binder.ty;
-                for (free_vars_slice) |fv| {
+for (free_vars_slice) |_| {
                     const p_ty = try self.alloc.create(CoreType);
                     p_ty.* = intType(); // Use dummy type for now; would need actual type lookup
                     const param_ty = try self.alloc.create(CoreType);
@@ -279,7 +292,7 @@ pub const LambdaLifter = struct {
                 }
 
                 // Update the lambda's type.
-                if (self.lambdas.get(lambda_id)) |info_ptr| {
+                if (self.lambdas.getPtr(lambda_id)) |info_ptr| {
                     info_ptr.ty = lifted_ty;
                 }
 
@@ -402,7 +415,7 @@ pub const LambdaLifter = struct {
                 _ = self.frames.pop();
                 _ = self.alloc.free(new_frame_vars);
             },
-            .Type => |_ty| {},
+.Type => {},
             .Coercion => {},
         }
 
@@ -410,7 +423,7 @@ pub const LambdaLifter = struct {
     }
 
     /// Rewrite an expression, replacing lambdas with function calls.
-    fn rewriteExpr(self: *LambdaLifter, expr: *const Expr, current_binders: []const u64) !*Expr {
+    fn rewriteExpr(self: *LambdaLifter, expr: *const Expr, current_binders: []const u64) LifterError!*Expr {
         const new_expr = try self.alloc.create(Expr);
 
         switch (expr.*) {
@@ -444,7 +457,7 @@ pub const LambdaLifter = struct {
                         new_expr.* = .{ .Var = lifted_id };
                     } else {
                         // Lambda info not found, keep as is
-                        var new_body = try self.rewriteExpr(l.body, current_binders);
+                        const new_body = try self.rewriteExpr(l.body, current_binders);
                         new_expr.* = .{ .Lam = .{
                             .binder = l.binder,
                             .body = new_body,
@@ -453,7 +466,7 @@ pub const LambdaLifter = struct {
                     }
                 } else {
                     // Lambda not registered (top-level lambda chain), rewrite body
-                    var new_body = try self.rewriteExpr(l.body, current_binders);
+                    const new_body = try self.rewriteExpr(l.body, current_binders);
                     new_expr.* = .{ .Lam = .{
                         .binder = l.binder,
                         .body = new_body,
@@ -464,7 +477,7 @@ pub const LambdaLifter = struct {
             .Let => |l| {
                 const new_bind = try self.rewriteBind(l.bind, current_binders);
                 // For the body, we need to add the let-binders to the available binders
-                var new_binders = try self.expandBinders(current_binders, l.bind);
+                const new_binders = try self.expandBinders(current_binders, l.bind);
                 defer self.alloc.free(new_binders);
                 const new_body = try self.rewriteExpr(l.body, new_binders);
                 new_expr.* = .{ .Let = .{
@@ -531,7 +544,7 @@ pub const LambdaLifter = struct {
     }
 
     /// Rewrite a binding.
-    fn rewriteBind(self: *LambdaLifter, bind: Bind, current_binders: []const u64) !Bind {
+    fn rewriteBind(self: *LambdaLifter, bind: Bind, current_binders: []const u64) LifterError!Bind {
         switch (bind) {
             .NonRec => |pair| {
                 const new_rhs = try self.rewriteExpr(pair.rhs, current_binders);
@@ -614,6 +627,13 @@ pub fn lambdaLift(alloc: std.mem.Allocator, program: core.CoreProgram) !core.Cor
     var it = lifter.lambdas.iterator();
     while (it.next()) |entry| {
         const info = &entry.value_ptr.*;
+        
+        // Only lift nested lambdas (parent_id != 0).
+        // Top-level lambdas (parent_id == 0) are already bindings and don't need lifting.
+        if (info.parent_id == 0) {
+            continue;
+        }
+        
         // Create a binding for the lifted function.
         // The function parameters are the original params plus the free vars.
         
@@ -654,16 +674,20 @@ pub fn lambdaLift(alloc: std.mem.Allocator, program: core.CoreProgram) !core.Cor
 
         // Now create lam wrappers for the free var parameters
         for (info.free_vars, 0..) |fv, i| {
-            const p_body = try alloc.create(Expr);
-            p_body.* = current_body;
-
+            _ = i;
             const fv_binder = Id{
                 .name = .{ .base = "fv", .unique = .{ .value = fv } },
                 .ty = intType(),
                 .span = info.params[0].span,
             };
 
-            current_body = p_body;
+            const lam_expr = try alloc.create(Expr);
+            lam_expr.* = .{ .Lam = .{
+                .binder = fv_binder,
+                .body = current_body,
+                .span = info.params[0].span,
+            } };
+            current_body = lam_expr;
         }
 
         // Create the new binding
@@ -680,7 +704,7 @@ pub fn lambdaLift(alloc: std.mem.Allocator, program: core.CoreProgram) !core.Cor
 
     // Phase 4: Rewrite the original bindings.
     var new_binds = std.ArrayListUnmanaged(Bind){};
-    var top_binders_list = try top_level_vars.toOwnedSlice(alloc);
+    const top_binders_list = try top_level_vars.toOwnedSlice(alloc);
     defer alloc.free(top_binders_list);
     
     for (program.binds) |bind| {
