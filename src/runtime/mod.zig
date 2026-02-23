@@ -12,9 +12,10 @@
 //!
 //! The RTS is organized into modules:
 //!
-//! - `value`: Runtime value representation (heap objects, literals, etc.)
-//! - `io`: IO primitives (writeStdout, readStdin, etc.)
-//! - `arith`: Arithmetic primitives (add, sub, mul, etc.)
+//! - : Runtime value representation (heap objects, literals, etc.)
+//! - : IO primitives (writeStdout, readStdin, etc.)
+//! - : Arithmetic primitives (add, sub, mul, etc.)
+//! - : GRIN evaluator with PrimOp dispatch
 //!
 //! Reference: docs/decisions/0001-primops-and-rts-architecture.md
 
@@ -23,11 +24,14 @@ const std = @import("std");
 pub const value = @import("value.zig");
 pub const io = @import("io.zig");
 pub const arith = @import("arith.zig");
+pub const eval = @import("eval.zig");
 
 // Re-export commonly used types
 pub const Value = value.Value;
 pub const EvalError = value.EvalError;
 pub const Heap = value.Heap;
+pub const EvalContext = eval.EvalContext;
+pub const evalPrimOp = eval.evalPrimOp;
 
 // ── Tests ────────────────────────────────────────────────────────────────
 
