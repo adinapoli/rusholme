@@ -136,6 +136,11 @@ pub fn unify(alloc: std.mem.Allocator, a: *HType, b: *HType) UnifyError!void {
                     if (ln.unique.value != rn.unique.value)
                         return UnifyError.RigidMismatch;
                 },
+                .Meta => {
+                    // Rigid can be unified with a metavariable by solving the meta.
+                    // This is the key for bidirectional checking: infer(?a, rigid) solves ?a = rigid.
+                    try bindPtr(alloc, b, lhs);
+                },
                 else => return UnifyError.TypeMismatch,
             }
         },
