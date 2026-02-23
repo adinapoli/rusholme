@@ -93,12 +93,13 @@ pub fn readStdin(io: std.Io, allocator: Allocator, args: []const Value) EvalErro
     errdefer line.deinit(allocator);
 
     while (true) {
-        const byte = r.readByte() catch |err| switch (err) {
+        const bytes = r.take(1) catch |err| switch (err) {
             error.EndOfStream => break,
             else => return EvalError.IOError,
         };
-        if (byte == '\n') break;
-        try line.append(allocator, byte);
+        if (bytes.len == 0) break;
+        if (bytes[0] == '\n') break;
+        try line.append(allocator, bytes[0]);
     }
 
     // Copy to a new slice that we own
