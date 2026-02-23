@@ -45,6 +45,7 @@ const GrinCPat = grin.CPat;
 const GrinAlt = grin.Alt;
 const GrinName = grin.Name;
 
+
 // ── Translation Context ─────────────────────────────────────────────────
 
 /// Context for the Core to GRIN translation.
@@ -490,6 +491,350 @@ fn translateLiteral(lit: CoreLiteral) GrinLiteral {
     };
 }
 
+// ── Tag Collection ────────────────────────────────────────────────────────
+
+/// Collected tags from a GRIN program for eval/apply generation.
+const TagInfo = struct {
+    /// Constructor tags (C-tagged)
+    con_tags: std.ArrayListUnmanaged(GrinTag),
+
+    /// Function tags (F-tagged) - all top-level function names
+    fun_tags: std.StringHashMapUnmanaged(void), // deduplicated by name
+
+    pub fn init() TagInfo {
+        return .{
+            .con_tags = .empty,
+            .fun_tags = .empty,
+        };
+    }
+
+    pub fn deinit(self: *TagInfo, alloc: std.mem.Allocator) void {
+        self.con_tags.deinit(alloc);
+        self.fun_tags.deinit(alloc);
+    }
+};
+
+/// Collect all tags from a GRIN program.
+fn collectTags(alloc: std.mem.Allocator, program: GrinProgram) !TagInfo {
+    var info = TagInfo.init();
+    errdefer info.deinit(alloc);
+
+    // Collect function names (all Def names are potential F-tags)
+    for (program.defs) |def| {
+        try info.fun_tags.put(alloc, def.name.base, {});
+    }
+
+    // Collect constructor tags by scanning all expressions for ConstTagNode
+    for (program.defs) |def| {
+        try collectTagsFromExpr(alloc, def.body, &info);
+    }
+
+    return info;
+}
+
+/// Recursively scan an expression to collect constructor tags.
+fn collectTagsFromExpr(alloc: std.mem.Allocator, expr: *const GrinExpr, info: *TagInfo) !void {
+    switch (expr.*) {
+        .Bind => |bind| {
+            try collectTagsFromExpr(alloc, bind.lhs, info);
+            try collectTagsFromExpr(alloc, bind.rhs, info);
+        },
+        .Case => |case_expr| {
+            try collectTagsFromVal(alloc, case_expr.scrutinee, info);
+            for (case_expr.alts) |alt| {
+                try collectTagsFromExpr(alloc, alt.body, info);
+            }
+        },
+        .App => |app| {
+            for (app.args) |arg| {
+                try collectTagsFromVal(alloc, arg, info);
+            }
+        },
+        .Return => |v| {
+            try collectTagsFromVal(alloc, v, info);
+        },
+        .Store => |v| {
+            try collectTagsFromVal(alloc, v, info);
+        },
+        .Fetch => |fetch| {
+            _ = fetch; // no tags in ptr variable name
+        },
+        .Update => |update| {
+            try collectTagsFromVal(alloc, update.val, info);
+        },
+        .Block => |inner| {
+            try collectTagsFromExpr(alloc, inner, info);
+        },
+    }
+}
+
+/// Recursively scan a value for constructor tags.
+fn collectTagsFromVal(alloc: std.mem.Allocator, val: GrinVal, info: *TagInfo) !void {
+    switch (val) {
+        .ConstTagNode => |ctn| {
+            // Found a constructor - add it to con_tags if not already present
+            const tag = ctn.tag;
+            var found = false;
+            for (info.con_tags.items) |t| {
+                if (t.eql(tag)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                try info.con_tags.append(alloc, tag);
+            }
+            // Also scan fields recursively
+            for (ctn.fields) |field| {
+                try collectTagsFromVal(alloc, field, info);
+            }
+        },
+        .VarTagNode => |vtn| {
+            // Scan field variables (these are not constructor names)
+            for (vtn.fields) |field| {
+                try collectTagsFromVal(alloc, field, info);
+            }
+        },
+        else => {},
+    }
+}
+
+// ── Eval/Apply Generation ─────────────────────────────────────────────────
+
+/// Helper: Create a constructor tag with the given name.
+fn conTag(base: []const u8, unique: u64) GrinTag {
+    return .{ .tag_type = .{ .Con = {} }, .name = .{ .base = base, .unique = .{ .value = unique } } };
+}
+
+/// Helper: Create a function tag with the given name.
+fn funTag(base: []const u8, unique: u64) GrinTag {
+    return .{ .tag_type = .{ .Fun = {} }, .name = .{ .base = base, .unique = .{ .value = unique } } };
+}
+
+/// Helper: Create a partial tag with the given name and missing count.
+fn partialTag(base: []const u8, unique: u64, missing: u32) GrinTag {
+    return .{ .tag_type = .{ .Partial = missing }, .name = .{ .base = base, .unique = .{ .value = unique } } };
+}
+
+/// Generate the `eval` and `apply` functions for a GRIN program.
+///
+/// This is issue #315: Generate whole-program eval and apply functions.
+/// Takes a GRIN program and returns it augmented with the special functions.
+pub fn generateEvalApply(alloc: std.mem.Allocator, program: GrinProgram) !GrinProgram {
+    // Collect all tags from the program
+    var tag_info = try collectTags(alloc, program);
+    defer tag_info.deinit(alloc);
+
+    // Create a new program with all existing defs plus eval and apply
+    var new_defs = std.ArrayListUnmanaged(GrinDef){};
+    defer new_defs.deinit(alloc);
+
+    // Copy all existing definitions
+    for (program.defs) |def| {
+        try new_defs.append(alloc, def);
+    }
+
+    // Generate the eval function
+    const eval_def = try generateEvalFunc(alloc, &tag_info);
+    try new_defs.append(alloc, eval_def);
+
+    // Generate the apply function
+    const apply_def = try generateApplyFunc(alloc);
+    try new_defs.append(alloc, apply_def);
+
+    const defs_slice = try new_defs.toOwnedSlice(alloc);
+    return GrinProgram{ .defs = defs_slice };
+}
+
+/// Generate the `eval p` function.
+///
+/// eval p:
+///   fetch p >>= \node ->
+///     case node of {
+///       C<tag> <fields> -> return C<tag> <fields>
+///       F<func> []      -> app func [] >>= \result -> update p result; return result
+///       P(n)<func> <args> -> return P(n)<func> <args>
+///       _ -> return node
+///     }
+fn generateEvalFunc(alloc: std.mem.Allocator, tag_info: *const TagInfo) !GrinDef {
+    const eval_unique: u64 = 9999;
+    const p_param = try alloc.create(GrinName);
+    p_param.* = .{ .base = "p", .unique = .{ .value = eval_unique } };
+
+    // Variable to hold the fetched node
+    const node_var = try alloc.create(GrinName);
+    node_var.* = .{ .base = "node", .unique = .{ .value = eval_unique + 1 } };
+
+    // Variable to hold function application result
+    const result_var = try alloc.create(GrinName);
+    result_var.* = .{ .base = "result", .unique = .{ .value = eval_unique + 2 } };
+
+    // Create alternatives for all tags
+    var alts = std.ArrayListUnmanaged(GrinAlt){};
+    defer alts.deinit(alloc);
+
+    // Add C-tag alternatives (constructors - already evaluated)
+    for (tag_info.con_tags.items) |con_tag| {
+        const alt = try generateConTagAlt(alloc, node_var.*, con_tag);
+        try alts.append(alloc, alt);
+    }
+
+    // Add F-tag alternatives (thunks - need to force)
+    var fun_iter = tag_info.fun_tags.iterator();
+    while (fun_iter.next()) |entry| {
+        const func_name = GrinName{
+            .base = entry.key_ptr.*,
+            .unique = .{ .value = 0 }, // Use base name
+        };
+        const alt = try generateFunTagAlt(alloc, p_param.*, result_var.*, func_name);
+        try alts.append(alloc, alt);
+    }
+
+    // Add P-tag alternatives (partial applications - already a value)
+    // For simplicity, use a default pattern that returns the node
+    const default_alt = try alloc.create(GrinAlt);
+    const default_body = try alloc.create(GrinExpr);
+    default_body.* = .{ .Return = .{ .Var = node_var.* } };
+    default_alt.* = .{
+        .pat = .{ .DefaultPat = {} },
+        .body = default_body,
+    };
+    try alts.append(alloc, default_alt.*);
+
+    // Create case expression: case node of { ... }
+    const case_expr = try alloc.create(GrinExpr);
+    case_expr.* = .{ .Case = .{
+        .scrutinee = .{ .Var = node_var.* },
+        .alts = try alts.toOwnedSlice(alloc),
+    }};
+
+    // Create fetch expression: fetch p
+    const fetch_expr = try alloc.create(GrinExpr);
+    fetch_expr.* = .{ .Fetch = .{
+        .ptr = p_param.*,
+        .index = null,
+    }};
+
+    // Create bind expression: fetch p >>= \node -> case node of ...
+    const body = try alloc.create(GrinExpr);
+    body.* = .{ .Bind = .{
+        .lhs = fetch_expr,
+        .pat = .{ .Var = node_var.* },
+        .rhs = case_expr,
+    }};
+
+    const params_slice = try alloc.alloc(GrinName, 1);
+    params_slice[0] = p_param.*;
+
+    return GrinDef{
+        .name = .{ .base = "eval", .unique = .{ .value = eval_unique } },
+        .params = params_slice,
+        .body = body,
+    };
+}
+
+/// Generate a C-tag alternative (constructor - already evaluated).
+///
+/// Pattern: C<tag> <fields>
+/// Body: return C<tag> <fields>
+fn generateConTagAlt(alloc: std.mem.Allocator, node_var: GrinName, con_tag: GrinTag) !GrinAlt {
+    // We need to create fresh field names for binding
+    // The number of fields should be known from the constructor's arity
+    // For simplicity, we'll just return the node directly
+    const alt_body = try alloc.create(GrinExpr);
+    alt_body.* = .{ .Return = .{ .Var = node_var } };
+
+    return GrinAlt{
+        .pat = .{ .TagPat = con_tag },
+        .body = alt_body,
+    };
+}
+
+/// Generate an F-tag alternative (thunk - need to force).
+///
+/// Pattern: F<func>
+/// Body: app func [] >>= \result -> update p result; return result
+fn generateFunTagAlt(alloc: std.mem.Allocator, p: GrinName, result: GrinName, func_name: GrinName) !GrinAlt {
+    // Create app expression: app func []
+    const app_expr = try alloc.create(GrinExpr);
+    app_expr.* = .{ .App = .{
+        .name = func_name,
+        .args = &.{}, // No arguments (unforced thunk)
+    }};
+
+    // Create update expression: update p result
+    const update_expr = try alloc.create(GrinExpr);
+    update_expr.* = .{ .Update = .{
+        .ptr = p,
+        .val = .{ .Var = result },
+    }};
+
+    // Create bind expression: app func [] >>= \result -> update p result
+    const update_bind = try alloc.create(GrinExpr);
+    update_bind.* = .{ .Bind = .{
+        .lhs = app_expr,
+        .pat = .{ .Var = result },
+        .rhs = update_expr,
+    }};
+
+    // Create return expression: return result
+    const ret_expr = try alloc.create(GrinExpr);
+    ret_expr.* = .{ .Return = .{ .Var = result } };
+
+    // Chain: (app func [] >>= \result -> update p result); return result
+    const alt_body = try alloc.create(GrinExpr);
+    alt_body.* = .{ .Bind = .{
+        .lhs = update_bind,
+        .pat = .{ .Var = result },
+        .rhs = ret_expr,
+    }};
+
+    const fun_tag = funTag(func_name.base, func_name.unique.value);
+
+    return GrinAlt{
+        .pat = .{ .TagPat = fun_tag },
+        .body = alt_body,
+    };
+}
+
+/// Generate the `apply f x` function.
+///
+/// apply f x:
+///   case f of {
+///     P(n)<func> <args> with n > 1 ->
+///       return P(n-1)<func> <args ++ [x]>
+///     P(1)<func> <args> ->
+///       app func <args ++ [x]>
+///     _ -> return unit  // Simplified: just return unit for non-P values
+///   }
+///
+/// Note: For MVP, we use a simplified version that just returns unit.
+/// Full implementation would require extracting the P-tag structure.
+fn generateApplyFunc(alloc: std.mem.Allocator) !GrinDef {
+    const apply_unique: u64 = 9998;
+
+    const f_param = try alloc.create(GrinName);
+    f_param.* = .{ .base = "f", .unique = .{ .value = apply_unique } };
+
+    const x_param = try alloc.create(GrinName);
+    x_param.* = .{ .base = "x", .unique = .{ .value = apply_unique + 1 } };
+
+    // For MVP: return unit
+    // Full implementation would complexly pattern match on P-tags
+    const body = try alloc.create(GrinExpr);
+    body.* = .{ .Return = .{ .Unit = {} }};
+
+    const params_slice = try alloc.alloc(GrinName, 2);
+    params_slice[0] = f_param.*;
+    params_slice[1] = x_param.*;
+
+    return GrinDef{
+        .name = .{ .base = "apply", .unique = .{ .value = apply_unique } },
+        .params = params_slice,
+        .body = body,
+    };
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -618,5 +963,193 @@ test "translateProgram: literal value" {
             try testing.expectEqual(@as(i64, 42), v.Lit.Int);
         },
         else => try testing.expect(false),
+    }
+}
+
+test "generateEvalApply: adds eval and apply to program" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Create a simple GRIN program with one function
+    const body = try alloc.create(GrinExpr);
+    body.* = .{ .Return = .{ .Lit = .{ .Int = 42 } } };
+
+    const def = GrinDef{
+        .name = .{ .base = "main", .unique = .{ .value = 0 } },
+        .params = &.{},
+        .body = body,
+    };
+
+    const defs = try alloc.alloc(GrinDef, 1);
+    defs[0] = def;
+
+    const program = GrinProgram{ .defs = defs };
+
+    // Generate eval/apply functions
+    const augmented = try generateEvalApply(alloc, program);
+
+    // Should have 3 definitions: original + eval + apply
+    try testing.expectEqual(@as(usize, 3), augmented.defs.len);
+
+    // Original function should be present
+    try testing.expectEqualStrings("main", augmented.defs[0].name.base);
+
+    // eval function should be present
+    var eval_found = false;
+    for (augmented.defs) |d| {
+        if (std.mem.eql(u8, d.name.base, "eval")) {
+            eval_found = true;
+            try testing.expectEqual(@as(usize, 1), d.params.len);
+            try testing.expectEqualStrings("p", d.params[0].base);
+        }
+    }
+    try testing.expect(eval_found);
+
+    // apply function should be present
+    var apply_found = false;
+    for (augmented.defs) |d| {
+        if (std.mem.eql(u8, d.name.base, "apply")) {
+            apply_found = true;
+            try testing.expectEqual(@as(usize, 2), d.params.len);
+            try testing.expectEqualStrings("f", d.params[0].base);
+            try testing.expectEqualStrings("x", d.params[1].base);
+        }
+    }
+    try testing.expect(apply_found);
+}
+
+test "generateEvalFunc: has proper structure" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Create a program with a constructor
+    const con_node = try alloc.create(GrinExpr);
+    con_node.* = .{ .Store = .{ .ConstTagNode = .{
+        .tag = conTag("Just", 1),
+        .fields = &.{.{ .Lit = .{ .Int = 42 } }},
+    } } };
+
+    const def = GrinDef{
+        .name = .{ .base = "testFunc", .unique = .{ .value = 10 } },
+        .params = &.{},
+        .body = con_node,
+    };
+
+    const defs = try alloc.alloc(GrinDef, 1);
+    defs[0] = def;
+
+    const program = GrinProgram{ .defs = defs };
+
+    // Generate eval function
+    var tag_info = try collectTags(alloc, program);
+    defer tag_info.deinit(alloc);
+
+    const eval_def = try generateEvalFunc(alloc, &tag_info);
+
+    // Verify eval structure
+    try testing.expectEqualStrings("eval", eval_def.name.base);
+    try testing.expectEqual(@as(usize, 1), eval_def.params.len);
+    try testing.expectEqualStrings("p", eval_def.params[0].base);
+
+    // Body should be a Bind: fetch p >>= \node -> case node of ...
+    switch (eval_def.body.*) {
+        .Bind => |bind| {
+            // LHS should be a Fetch
+            switch (bind.lhs.*) {
+                .Fetch => |fetch| {
+                    try testing.expectEqualStrings("p", fetch.ptr.base);
+                    try testing.expect(fetch.index == null);
+                },
+                else => try testing.expect(false), // LHS should be Fetch
+            }
+
+            // RHS should be a Case
+            switch (bind.rhs.*) {
+                .Case => |case_expr| {
+                    // Scrutinee should be the node variable
+                    try testing.expectEqualStrings("node", case_expr.scrutinee.Var.base);
+
+                    // Should have at least one alternative (for constructor)
+                    try testing.expect(case_expr.alts.len >= 1);
+                },
+                else => try testing.expect(false), // RHS should be Case
+            }
+        },
+        else => try testing.expect(false), // Body should be Bind
+    }
+}
+
+test "TagInfo: collects constructor tags" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Create a program with multiple constructors
+    const just_node = try alloc.create(GrinExpr);
+    just_node.* = .{ .Store = .{ .ConstTagNode = .{
+        .tag = conTag("Just", 1),
+        .fields = &.{.{ .Lit = .{ .Int = 42 } }},
+    } } };
+
+    const nothing_node = try alloc.create(GrinExpr);
+    nothing_node.* = .{ .Store = .{ .ConstTagNode = .{
+        .tag = conTag("Nothing", 2),
+        .fields = &.{},
+    } } };
+
+    const def = GrinDef{
+        .name = .{ .base = "testFunc", .unique = .{ .value = 10 } },
+        .params = &.{},
+        .body = just_node,
+    };
+
+    const defs = try alloc.alloc(GrinDef, 1);
+    defs[0] = def;
+
+    const program = GrinProgram{ .defs = defs };
+
+    // Collect tags
+    var tag_info = try collectTags(alloc, program);
+    defer tag_info.deinit(alloc);
+
+    // Should have collected the Just constructor
+    try testing.expect(tag_info.con_tags.items.len >= 1);
+
+    // Find the Just tag
+    var just_found = false;
+    for (tag_info.con_tags.items) |tag| {
+        if (std.mem.eql(u8, tag.name.base, "Just")) {
+            just_found = true;
+            try testing.expect(tag.tag_type == .Con);
+        }
+    }
+    try testing.expect(just_found);
+
+    // Should have collected the function name
+    try testing.expect(tag_info.fun_tags.count() >= 1);
+    try testing.expect(tag_info.fun_tags.contains("testFunc"));
+}
+
+test "generateApplyFunc: has proper signature" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const apply_def = try generateApplyFunc(alloc);
+
+    // Verify apply structure
+    try testing.expectEqualStrings("apply", apply_def.name.base);
+    try testing.expectEqual(@as(usize, 2), apply_def.params.len);
+    try testing.expectEqualStrings("f", apply_def.params[0].base);
+    try testing.expectEqualStrings("x", apply_def.params[1].base);
+
+    // Body should be a Return with Unit (MVP)
+    switch (apply_def.body.*) {
+        .Return => |v| {
+            try testing.expect(v == .Unit);
+        },
+        else => try testing.expect(false), // Body should be Return
     }
 }
