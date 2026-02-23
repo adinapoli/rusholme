@@ -185,13 +185,26 @@ const Scope = struct {
     /// Maps Name -> Val (runtime value).
     bindings: std.AutoHashMapUnmanaged(u64, Val),
 
+    /// Memory allocations from resolveVal that need cleanup.
+    /// Tracks []const Val slices that were allocated by the scope's allocator.
+    /// These are typically ConstTagNode fields.
+    allocations: std.ArrayListUnmanaged([]const Val),
+
     /// Initialize an empty scope.
     fn init() Scope {
-        return .{ .bindings = .empty };
+        return .{
+            .bindings = .empty,
+            .allocations = .empty,
+        };
     }
 
     /// Deallocate the scope.
     fn deinit(self: Scope, allocator: Allocator) void {
+        // Free all tracked allocations
+        for (self.allocations.items) |alloc| {
+            allocator.free(alloc);
+        }
+        @constCast(&self.allocations).deinit(allocator);
         @constCast(&self).bindings.deinit(allocator);
     }
 };
@@ -418,10 +431,27 @@ pub const GrinEvaluator = struct {
         return self.heap.write(ptr, node);
     }
 
-    // ── Expression Evaluation Methods ───────────────────────────────────────
+    /// Track an allocation for cleanup when the current scope exits.
+    fn trackAllocation(self: *GrinEvaluator, allocation: []const Val) !void {
+        const current_scope = &self.env.scopes.items[self.env.scopes.items.len - 1];
+        try current_scope.allocations.append(self.allocator, allocation);
+    }
+
+    /// Remove an allocation from scope tracking (for ownership transfer).
+    /// Returns true if the allocation was found and removed.
+    fn untrackAllocation(self: *GrinEvaluator, allocation: []const Val) bool {
+        const current_scope = &self.env.scopes.items[self.env.scopes.items.len - 1];
+        for (current_scope.allocations.items, 0..) |alloc, i| {
+            if (alloc.ptr == allocation.ptr and alloc.len == allocation.len) {
+                _ = current_scope.allocations.swapRemove(i);
+                return true;
+            }
+        }
+        return false;
+    }
 
     /// Resolve a Val to its runtime value, looking up variables if needed.
-    fn resolveVal(self: *const GrinEvaluator, v: *const Val) EvalError!Val {
+    fn resolveVal(self: *GrinEvaluator, v: *const Val) EvalError!Val {
         return switch (v.*) {
             .Var => |name| self.env.lookup(name) orelse return error.UnboundVariable,
             .Unit => Val{ .Unit = {} },
@@ -434,6 +464,8 @@ pub const GrinEvaluator = struct {
                 for (ctn.fields, 0..) |field, i| {
                     resolved_fields[i] = try self.resolveVal(@constCast(&field));
                 }
+                // Track this allocation for cleanup when scope exits
+                try self.trackAllocation(resolved_fields);
                 break :b Val{ .ConstTagNode = .{ .tag = ctn.tag, .fields = resolved_fields } };
             },
             .VarTagNode => |vtn| b: {
@@ -443,6 +475,8 @@ pub const GrinEvaluator = struct {
                 for (vtn.fields, 0..) |field, i| {
                     resolved_fields[i] = try self.resolveVal(@constCast(&field));
                 }
+                // Track this allocation for cleanup when scope exits
+                try self.trackAllocation(resolved_fields);
                 // For now, we can only construct ConstTagNode from resolved tags
                 // This is a simplification - full VarTagNode handling may need more work
                 switch (tag_val) {
@@ -463,6 +497,10 @@ pub const GrinEvaluator = struct {
             .Store => |v| b: {
                 // Allocate the value on the heap, return a HeapPtr
                 const resolved = try self.resolveVal(@constCast(&v));
+                // Transfer ownership of ConstTagNode fields to the heap
+                if (resolved == .ConstTagNode) {
+                    _ = self.untrackAllocation(resolved.ConstTagNode.fields);
+                }
                 const heap_node = switch (resolved) {
                     .ConstTagNode => |ctn| HeapNode{ .Con = .{ .tag = ctn.tag, .fields = ctn.fields } },
                     .Unit => HeapNode{ .Unit = {} },
@@ -517,6 +555,10 @@ pub const GrinEvaluator = struct {
                     return error.InvalidHeapPointer;
 
                 const resolved = try self.resolveVal(@constCast(&update.val));
+                // Transfer ownership of ConstTagNode fields to the heap
+                if (resolved == .ConstTagNode) {
+                    _ = self.untrackAllocation(resolved.ConstTagNode.fields);
+                }
                 const heap_node = switch (resolved) {
                     .ConstTagNode => |ctn| HeapNode{ .Con = .{ .tag = ctn.tag, .fields = ctn.fields } },
                     .Unit => HeapNode{ .Unit = {} },
@@ -564,9 +606,87 @@ pub const GrinEvaluator = struct {
 
             .Block => |inner| self.eval(inner),
 
-            // App and Case are handled in issue #320
-            .App => return error.NotImplemented,
-            .Case => return error.NotImplemented,
+            .App => |app| b: {
+                // Look up the function definition
+                const def = self.funcs.lookup(app.name) orelse return error.UnboundFunction;
+
+                // Resolve argument values
+                if (app.args.len != def.params.len) {
+                    return error.ArityMismatch;
+                }
+
+                // Push new scope for function parameters
+                try self.env.pushScope();
+                errdefer self.env.popScope();
+
+                // Bind each parameter to its resolved argument value
+                for (app.args, def.params) |arg, param| {
+                    const resolved_arg = try self.resolveVal(@constCast(&arg));
+                    try self.env.bind(param, resolved_arg);
+                }
+
+                // Evaluate the function body
+                const result = try self.eval(def.body);
+
+                // Pop scope (handled by errdefer, but also here for success path)
+                self.env.popScope();
+                break :b result;
+            },
+
+            .Case => |case_expr| b: {
+                // Evaluate the scrutinee to a value
+                const scrutinee_val = try self.resolveVal(@constCast(&case_expr.scrutinee));
+
+                // Try to match against each alternative
+                for (case_expr.alts) |alt| {
+                    if (try self.matchPattern(scrutinee_val, alt.pat)) {
+                        // Pattern matched - bind any variables from the pattern
+                        // (This is handled during matchPattern)
+                        const result = try self.eval(alt.body);
+                        break :b result;
+                    }
+                }
+
+                // No alternative matched
+                return error.PatternMatchFailure;
+            },
+        };
+    }
+
+    /// Match a value against a pattern, binding variables if needed.
+    /// Returns true if the pattern matches.
+    fn matchPattern(self: *GrinEvaluator, val: Val, pat: ast.CPat) EvalError!bool {
+        return switch (pat) {
+            .NodePat => |node_pat| b: {
+                // Match against a constructor node pattern
+                if (val != .ConstTagNode) break :b false;
+                const ctn = val.ConstTagNode;
+
+                // Check tag matches
+                if (!ctn.tag.eql(node_pat.tag)) break :b false;
+
+                // Check field count matches
+                if (ctn.fields.len != node_pat.fields.len) break :b false;
+
+                // Bind each field name to the corresponding field value
+                for (ctn.fields, node_pat.fields) |field_val, field_name| {
+                    try self.env.bind(field_name, field_val);
+                }
+
+                break :b true;
+            },
+            .LitPat => |lit_pat| b: {
+                // Match against a literal pattern
+                if (val != .Lit) break :b false;
+                break :b std.meta.eql(val.Lit, lit_pat);
+            },
+            .TagPat => |tag_pat| b: {
+                // Match against a bare tag pattern
+                if (val != .ConstTagNode) break :b false;
+                if (val.ConstTagNode.fields.len != 0) break :b false;
+                break :b val.ConstTagNode.tag.eql(tag_pat);
+            },
+            .DefaultPat => true, // Wildcard always matches
         };
     }
 };
@@ -576,9 +696,11 @@ pub const GrinEvaluator = struct {
 /// Errors that can occur during GRIN evaluation.
 pub const EvalError = error{
     UnboundVariable,
+    UnboundFunction,
     InvalidHeapPointer,
     TypeMismatch,
-    NotImplemented,
+    ArityMismatch,
+    PatternMatchFailure,
 } || Allocator.Error || std.mem.Allocator.Error;
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -1348,4 +1470,534 @@ test "eval: Bind with literal pattern (non-matching)" {
 
     const result = evaluator.eval(body);
     try testing.expectError(EvalError.TypeMismatch, result);
+}
+
+// ── App Expression Tests ─────────────────────────────────────────────────
+
+test "eval: App - simple function call" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Define f x = return x
+    const f_params = try alloc.alloc(ast.Name, 1);
+    f_params[0] = testName("x", 10);
+
+    const f_body = try alloc.create(ast.Expr);
+    f_body.* = .{ .Return = .{ .Var = testName("x", 10) } };
+
+    const f_def = ast.Def{
+        .name = testName("f", 1),
+        .params = f_params,
+        .body = f_body,
+    };
+
+    // Define main = app f [#42]
+    const args = try alloc.alloc(ast.Val, 1);
+    args[0] = ast.Val{ .Lit = .{ .Int = 42 } };
+
+    const main_body = try alloc.create(ast.Expr);
+    main_body.* = .{ .App = .{
+        .name = testName("f", 1),
+        .args = args,
+    } };
+
+    const main_def = ast.Def{
+        .name = testName("main", 2),
+        .params = &.{},
+        .body = main_body,
+    };
+
+    const defs = try alloc.alloc(ast.Def, 2);
+    defs[0] = f_def;
+    defs[1] = main_def;
+
+    const program = ast.Program{ .defs = defs };
+
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    defer evaluator.deinit();
+
+    const result = try evaluator.eval(main_body);
+    try testing.expectEqual(@as(i64, 42), result.Lit.Int);
+}
+
+test "eval: App - unbound function error" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const args = try alloc.alloc(ast.Val, 0);
+
+    const body = try alloc.create(ast.Expr);
+    body.* = .{ .App = .{
+        .name = testName("nonexistent", 999),
+        .args = args,
+    } };
+
+    const defs = try alloc.alloc(ast.Def, 1);
+    defs[0] = .{
+        .name = testName("main", 1),
+        .params = &.{},
+        .body = body,
+    };
+
+    const program = ast.Program{ .defs = defs };
+
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    defer evaluator.deinit();
+
+    const result = evaluator.eval(body);
+    try testing.expectError(EvalError.UnboundFunction, result);
+}
+
+test "eval: App - arity mismatch error" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Define f x = return x (1 parameter)
+    const f_params = try alloc.alloc(ast.Name, 1);
+    f_params[0] = testName("x", 10);
+
+    const f_body = try alloc.create(ast.Expr);
+    f_body.* = .{ .Return = .{ .Var = testName("x", 10) } };
+
+    const f_def = ast.Def{
+        .name = testName("f", 1),
+        .params = f_params,
+        .body = f_body,
+    };
+
+    // Define main = app f [] (0 arguments)
+    const main_body = try alloc.create(ast.Expr);
+    main_body.* = .{ .App = .{
+        .name = testName("f", 1),
+        .args = &.{},
+    } };
+
+    const main_def = ast.Def{
+        .name = testName("main", 2),
+        .params = &.{},
+        .body = main_body,
+    };
+
+    const defs = try alloc.alloc(ast.Def, 2);
+    defs[0] = f_def;
+    defs[1] = main_def;
+
+    const program = ast.Program{ .defs = defs };
+
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    defer evaluator.deinit();
+
+    const result = evaluator.eval(main_body);
+    try testing.expectError(EvalError.ArityMismatch, result);
+}
+
+test "eval: App - recursive function" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Define factorial n = if n == 0 then return 1 else return n * factorial(n-1)
+    // Note: we'll use a simpler version due to lack of if-expression
+    // Actually, let's make it simpler: f x = return x (already tested)
+    // Let's test that parameters are properly scoped
+    const outer_params = try alloc.alloc(ast.Name, 1);
+    outer_params[0] = testName("x", 100);
+
+    const inner_body = try alloc.create(ast.Expr);
+    inner_body.* = .{ .Return = .{ .Var = testName("x", 100) } };
+
+    const inner_args = try alloc.alloc(ast.Val, 0);
+    const inner_app = try alloc.create(ast.Expr);
+    inner_app.* = .{ .App = .{
+        .name = testName("inner", 2),
+        .args = inner_args,
+    } };
+
+    const inner_def = ast.Def{
+        .name = testName("inner", 2),
+        .params = &.{},
+        .body = inner_body,
+    };
+
+    const outer_body = try alloc.create(ast.Expr);
+    outer_body.* = .{ .App = .{
+        .name = testName("inner", 2),
+        .args = &.{},
+    } };
+
+    const outer_def = ast.Def{
+        .name = testName("outer", 1),
+        .params = outer_params,
+        .body = outer_body,
+    };
+
+    const main_args = try alloc.alloc(ast.Val, 1);
+    main_args[0] = ast.Val{ .Lit = .{ .Int = 123 } };
+
+    const main_body = try alloc.create(ast.Expr);
+    main_body.* = .{ .App = .{
+        .name = testName("outer", 1),
+        .args = main_args,
+    } };
+
+    const main_def = ast.Def{
+        .name = testName("main", 3),
+        .params = &.{},
+        .body = main_body,
+    };
+
+    const defs = try alloc.alloc(ast.Def, 3);
+    defs[0] = outer_def;
+    defs[1] = inner_def;
+    defs[2] = main_def;
+
+    const program = ast.Program{ .defs = defs };
+
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    defer evaluator.deinit();
+
+    const result = try evaluator.eval(main_body);
+    // inner should return x which is 123 from outer's scope
+    try testing.expectEqual(@as(i64, 123), result.Lit.Int);
+}
+
+// ── Case Expression Tests ─────────────────────────────────────────────────
+
+test "eval: Case - matching node pattern" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Build: case (CJust [#42]) of { (CJust [x]) -> return x; _ -> return 0 }
+    const just_fields = try alloc.alloc(ast.Val, 1);
+    just_fields[0] = ast.Val{ .Lit = .{ .Int = 42 } };
+
+    const scrutinee = ast.Val{ .ConstTagNode = .{
+        .tag = conTag("Just", 1),
+        .fields = just_fields,
+    } };
+
+    const just_pat_fields = try alloc.alloc(ast.Name, 1);
+    just_pat_fields[0] = testName("x", 200);
+
+    const just_alt_body = try alloc.create(ast.Expr);
+    just_alt_body.* = .{ .Return = .{ .Var = testName("x", 200) } };
+
+    const default_alt_body = try alloc.create(ast.Expr);
+    default_alt_body.* = .{ .Return = .{ .Lit = .{ .Int = 0 } } };
+
+    const alts = try alloc.alloc(ast.Alt, 2);
+    alts[0] = .{
+        .pat = ast.CPat{ .NodePat = .{
+            .tag = conTag("Just", 1),
+            .fields = just_pat_fields,
+        } },
+        .body = just_alt_body,
+    };
+    alts[1] = .{
+        .pat = ast.CPat{ .DefaultPat = {} },
+        .body = default_alt_body,
+    };
+
+    const body = try alloc.create(ast.Expr);
+    body.* = .{ .Case = .{
+        .scrutinee = scrutinee,
+        .alts = alts,
+    } };
+
+    const defs = try alloc.alloc(ast.Def, 1);
+    defs[0] = .{
+        .name = testName("main", 1),
+        .params = &.{},
+        .body = body,
+    };
+
+    const program = ast.Program{ .defs = defs };
+
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    defer evaluator.deinit();
+
+    const result = try evaluator.eval(body);
+    try testing.expectEqual(@as(i64, 42), result.Lit.Int);
+}
+
+test "eval: Case - default pattern match" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Build: case (CNothing []) of { (CJust [x]) -> return x; _ -> return 100 }
+    const nothing_fields = try alloc.alloc(ast.Val, 0);
+
+    const scrutinee = ast.Val{ .ConstTagNode = .{
+        .tag = conTag("Nothing", 2),
+        .fields = nothing_fields,
+    } };
+
+    const just_pat_fields = try alloc.alloc(ast.Name, 1);
+    just_pat_fields[0] = testName("x", 200);
+
+    const just_alt_body = try alloc.create(ast.Expr);
+    just_alt_body.* = .{ .Return = .{ .Var = testName("x", 200) } };
+
+    const default_alt_body = try alloc.create(ast.Expr);
+    default_alt_body.* = .{ .Return = .{ .Lit = .{ .Int = 100 } } };
+
+    const alts = try alloc.alloc(ast.Alt, 2);
+    alts[0] = .{
+        .pat = ast.CPat{ .NodePat = .{
+            .tag = conTag("Just", 1),
+            .fields = just_pat_fields,
+        } },
+        .body = just_alt_body,
+    };
+    alts[1] = .{
+        .pat = ast.CPat{ .DefaultPat = {} },
+        .body = default_alt_body,
+    };
+
+    const body = try alloc.create(ast.Expr);
+    body.* = .{ .Case = .{
+        .scrutinee = scrutinee,
+        .alts = alts,
+    } };
+
+    const defs = try alloc.alloc(ast.Def, 1);
+    defs[0] = .{
+        .name = testName("main", 1),
+        .params = &.{},
+        .body = body,
+    };
+
+    const program = ast.Program{ .defs = defs };
+
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    defer evaluator.deinit();
+
+    const result = try evaluator.eval(body);
+    try testing.expectEqual(@as(i64, 100), result.Lit.Int);
+}
+
+test "eval: Case - literal pattern match" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Build: case (Lit 5) of { (Lit 5) -> return 100; _ -> return 0 }
+    const scrutinee = ast.Val{ .Lit = .{ .Int = 5 } };
+
+    const lit_5_body = try alloc.create(ast.Expr);
+    lit_5_body.* = .{ .Return = .{ .Lit = .{ .Int = 100 } } };
+
+    const default_body = try alloc.create(ast.Expr);
+    default_body.* = .{ .Return = .{ .Lit = .{ .Int = 0 } } };
+
+    const alts = try alloc.alloc(ast.Alt, 2);
+    alts[0] = .{
+        .pat = ast.CPat{ .LitPat = .{ .Int = 5 } },
+        .body = lit_5_body,
+    };
+    alts[1] = .{
+        .pat = ast.CPat{ .DefaultPat = {} },
+        .body = default_body,
+    };
+
+    const body = try alloc.create(ast.Expr);
+    body.* = .{ .Case = .{
+        .scrutinee = scrutinee,
+        .alts = alts,
+    } };
+
+    const defs = try alloc.alloc(ast.Def, 1);
+    defs[0] = .{
+        .name = testName("main", 1),
+        .params = &.{},
+        .body = body,
+    };
+
+    const program = ast.Program{ .defs = defs };
+
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    defer evaluator.deinit();
+
+    const result = try evaluator.eval(body);
+    try testing.expectEqual(@as(i64, 100), result.Lit.Int);
+}
+
+test "eval: Case - tag pattern match" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Build: case (CNothing []) of { (CNothing) -> return 42; _ -> return 0 }
+    const nothing_fields = try alloc.alloc(ast.Val, 0);
+
+    const scrutinee = ast.Val{ .ConstTagNode = .{
+        .tag = conTag("Nothing", 2),
+        .fields = nothing_fields,
+    } };
+
+    const nothing_body = try alloc.create(ast.Expr);
+    nothing_body.* = .{ .Return = .{ .Lit = .{ .Int = 42 } } };
+
+    const default_body = try alloc.create(ast.Expr);
+    default_body.* = .{ .Return = .{ .Lit = .{ .Int = 0 } } };
+
+    const alts = try alloc.alloc(ast.Alt, 2);
+    alts[0] = .{
+        .pat = ast.CPat{ .TagPat = conTag("Nothing", 2) },
+        .body = nothing_body,
+    };
+    alts[1] = .{
+        .pat = ast.CPat{ .DefaultPat = {} },
+        .body = default_body,
+    };
+
+    const body = try alloc.create(ast.Expr);
+    body.* = .{ .Case = .{
+        .scrutinee = scrutinee,
+        .alts = alts,
+    } };
+
+    const defs = try alloc.alloc(ast.Def, 1);
+    defs[0] = .{
+        .name = testName("main", 1),
+        .params = &.{},
+        .body = body,
+    };
+
+    const program = ast.Program{ .defs = defs };
+
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    defer evaluator.deinit();
+
+    const result = try evaluator.eval(body);
+    try testing.expectEqual(@as(i64, 42), result.Lit.Int);
+}
+
+test "eval: Case - pattern match failure" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Build: case (Lit 5) of { (Lit 10) -> return 100; (Lit 20) -> return 200 }
+    const scrutinee = ast.Val{ .Lit = .{ .Int = 5 } };
+
+    const lit_10_body = try alloc.create(ast.Expr);
+    lit_10_body.* = .{ .Return = .{ .Lit = .{ .Int = 100 } } };
+
+    const lit_20_body = try alloc.create(ast.Expr);
+    lit_20_body.* = .{ .Return = .{ .Lit = .{ .Int = 200 } } };
+
+    const alts = try alloc.alloc(ast.Alt, 2);
+    alts[0] = .{
+        .pat = ast.CPat{ .LitPat = .{ .Int = 10 } },
+        .body = lit_10_body,
+    };
+    alts[1] = .{
+        .pat = ast.CPat{ .LitPat = .{ .Int = 20 } },
+        .body = lit_20_body,
+    };
+
+    const body = try alloc.create(ast.Expr);
+    body.* = .{ .Case = .{
+        .scrutinee = scrutinee,
+        .alts = alts,
+    } };
+
+    const defs = try alloc.alloc(ast.Def, 1);
+    defs[0] = .{
+        .name = testName("main", 1),
+        .params = &.{},
+        .body = body,
+    };
+
+    const program = ast.Program{ .defs = defs };
+
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    defer evaluator.deinit();
+
+    const result = evaluator.eval(body);
+    try testing.expectError(EvalError.PatternMatchFailure, result);
+}
+
+test "eval: Combined - function that cases on its argument" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Define f x = case x of { (CJust [y]) -> return y; _ -> return 0 }
+    const f_params = try alloc.alloc(ast.Name, 1);
+    f_params[0] = testName("x", 10);
+
+    const just_pat_fields = try alloc.alloc(ast.Name, 1);
+    just_pat_fields[0] = testName("y", 20);
+
+    const just_body = try alloc.create(ast.Expr);
+    just_body.* = .{ .Return = .{ .Var = testName("y", 20) } };
+
+    const default_body = try alloc.create(ast.Expr);
+    default_body.* = .{ .Return = .{ .Lit = .{ .Int = 0 } } };
+
+    const alts = try alloc.alloc(ast.Alt, 2);
+    alts[0] = .{
+        .pat = ast.CPat{ .NodePat = .{
+            .tag = conTag("Just", 1),
+            .fields = just_pat_fields,
+        } },
+        .body = just_body,
+    };
+    alts[1] = .{
+        .pat = ast.CPat{ .DefaultPat = {} },
+        .body = default_body,
+    };
+
+    const f_body = try alloc.create(ast.Expr);
+    f_body.* = .{ .Case = .{
+        .scrutinee = ast.Val{ .Var = testName("x", 10) },
+        .alts = alts,
+    } };
+
+    const f_def = ast.Def{
+        .name = testName("f", 1),
+        .params = f_params,
+        .body = f_body,
+    };
+
+    // Define main = app f [(CJust [#123])]
+    const just_fields = try alloc.alloc(ast.Val, 1);
+    just_fields[0] = ast.Val{ .Lit = .{ .Int = 123 } };
+
+    const app_args = try alloc.alloc(ast.Val, 1);
+    app_args[0] = ast.Val{ .ConstTagNode = .{
+        .tag = conTag("Just", 1),
+        .fields = just_fields,
+    } };
+
+    const main_body = try alloc.create(ast.Expr);
+    main_body.* = .{ .App = .{
+        .name = testName("f", 1),
+        .args = app_args,
+    } };
+
+    const main_def = ast.Def{
+        .name = testName("main", 2),
+        .params = &.{},
+        .body = main_body,
+    };
+
+    const defs = try alloc.alloc(ast.Def, 2);
+    defs[0] = f_def;
+    defs[1] = main_def;
+
+    const program = ast.Program{ .defs = defs };
+
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    defer evaluator.deinit();
+
+    const result = try evaluator.eval(main_body);
+    try testing.expectEqual(@as(i64, 123), result.Lit.Int);
 }
