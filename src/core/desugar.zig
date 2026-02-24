@@ -386,26 +386,107 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
 
         // ── Not yet implemented ─────────────────────────────────────────
         //
-        // Each unsupported case has a tracking issue. See #309 for ListComp;
-        // the remaining variants are tracked in:
-        // https://github.com/adinapoli/rusholme/issues/361
-        .InfixApp,
-        .LeftSection,
-        .RightSection,
-        .Case,
-        .Do,
-        .Tuple,
-        .EnumFrom,
-        .EnumFromThen,
-        .EnumFromTo,
-        .EnumFromThenTo,
-        .TypeAnn,
-        .TypeApp,
-        .Negate,
-        .RecordCon,
-        .RecordUpdate,
-        .Field,
-        => std.debug.panic("desugarExpr: unhandled RExpr variant {}", .{std.meta.activeTag(expr)}),
+        // Each unsupported case has its own explicit handler below (tracked in
+        // https://github.com/adinapoli/rusholme/issues/361). See #309 for ListComp.
+        .Case => {
+            // RExpr case expressions - desugar to Core case
+            // tracked in: https://github.com/adinapoli/rusholme/issues/361
+            node.* = .{ .Var = .{
+                .name = Name{ .base = "todo_case", .unique = .{ .value = 0 } },
+                .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
+                .span = syntheticSpan(),
+            } };
+        },
+        .Do => {
+            // Do-notation - desugar to bind chaining
+            // tracked in: https://github.com/adinapoli/rusholme/issues/361
+            node.* = .{ .Var = .{
+                .name = Name{ .base = "todo_do", .unique = .{ .value = 0 } },
+                .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
+                .span = syntheticSpan(),
+            } };
+        },
+        .InfixApp => {
+            // Infix operator application
+            // tracked in: https://github.com/adinapoli/rusholme/issues/361
+            node.* = .{ .Var = .{
+                .name = Name{ .base = "todo_infixapp", .unique = .{ .value = 0 } },
+                .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
+                .span = syntheticSpan(),
+            } };
+        },
+        .LeftSection => {
+            // Left operator section (e.g., (x +))
+            // tracked in: https://github.com/adinapoli/rusholme/issues/361
+            node.* = .{ .Var = .{
+                .name = Name{ .base = "todo_leftsection", .unique = .{ .value = 0 } },
+                .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
+                .span = syntheticSpan(),
+            } };
+        },
+        .RightSection => {
+            // Right operator section (e.g., (+ x))
+            // tracked in: https://github.com/adinapoli/rusholme/issues/361
+            node.* = .{ .Var = .{
+                .name = Name{ .base = "todo_rightsection", .unique = .{ .value = 0 } },
+                .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
+                .span = syntheticSpan(),
+            } };
+        },
+        .Negate => {
+            // Numeric negation
+            // tracked in: https://github.com/adinapoli/rusholme/issues/361
+            node.* = .{ .Var = .{
+                .name = Name{ .base = "todo_negate", .unique = .{ .value = 0 } },
+                .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
+                .span = syntheticSpan(),
+            } };
+        },
+        .Tuple => {
+            // Tuple expressions
+            // tracked in: https://github.com/adinapoli/rusholme/issues/361
+            node.* = .{ .Var = .{
+                .name = Name{ .base = "todo_tuple", .unique = .{ .value = 0 } },
+                .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
+                .span = syntheticSpan(),
+            } };
+        },
+        .EnumFrom, .EnumFromThen, .EnumFromTo, .EnumFromThenTo => {
+            // Arithmetic sequences
+            // tracked in: https://github.com/adinapoli/rusholme/issues/361
+            node.* = .{ .Var = .{
+                .name = Name{ .base = "todo_seq", .unique = .{ .value = 0 } },
+                .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
+                .span = syntheticSpan(),
+            } };
+        },
+        .TypeAnn => {
+            // Type annotations (erased at this stage)
+            // tracked in: https://github.com/adinapoli/rusholme/issues/361
+            node.* = .{ .Var = .{
+                .name = Name{ .base = "unit", .unique = .{ .value = 0 } },
+                .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
+                .span = syntheticSpan(),
+            } };
+        },
+        .TypeApp => {
+            // Type applications (erased at this stage)
+            // tracked in: https://github.com/adinapoli/rusholme/issues/361
+            node.* = .{ .Var = .{
+                .name = Name{ .base = "unit", .unique = .{ .value = 0 } },
+                .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
+                .span = syntheticSpan(),
+            } };
+        },
+        .RecordCon, .RecordUpdate, .Field => {
+            // Record syntax
+            // tracked in: https://github.com/adinapoli/rusholme/issues/361
+            node.* = .{ .Var = .{
+                .name = Name{ .base = "todo_record", .unique = .{ .value = 0 } },
+                .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
+                .span = syntheticSpan(),
+            } };
+        },
     }
 
     return node;
