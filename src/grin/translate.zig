@@ -288,6 +288,15 @@ fn translateExpr(ctx: *TranslateCtx, expr: *const CoreExpr) !*GrinExpr {
     return new_expr;
 }
 
+/// Extract a GrinVal from a GrinExpr assuming it returns a simple value.
+/// Used for Update expressions which need a Val rather than an Expr.
+fn exprToVal(expr: *const GrinExpr) !GrinVal {
+    return switch (expr.*) {
+        .Return => |v| v,
+        else => error.CannotExtractValue, // Complex expressions need binding
+    };
+}
+
 /// Translate a function application.
 fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExpr {
     // Verify this is an App expression
@@ -531,37 +540,95 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
             return bind_expr;
         },
         .Rec => |pairs| {
-            // Recursive let: Allocate placeholders, update with real values.
+            // Recursive let: Allocate placeholders, then backpatch with real values.
             // let rec { a = f b; b = g a } in body
-            // becomes: store placeholders with dummy values, update with real thunks.
+            // becomes:
+            //   store Unit >>= p_a ->
+            //   store Unit >>= p_b ->
+            //   [[f b with b:=p_b]] >>= thunk_a -> update p_a thunk_a -> _
+            //   [[g a with a:=p_a]] >>= thunk_b -> update p_b thunk_b -> _
+            //   [[body[a:=p_a, b:=p_b]]]
 
+            // First, create placeholder variables for all binders
             const placeholders = try ctx.alloc.alloc(GrinName, pairs.len);
             defer ctx.alloc.free(placeholders);
 
-            // Create placeholder stores for each binder.
-            for (placeholders) |*p| {
-                p.* = try ctx.freshName("p");
+            for (placeholders, 0..) |_, i| {
+                placeholders[i] = try ctx.mapBinder(&pairs[i].binder);
+            }
 
-                // Create a unit value as placeholder.
+            // Create placeholder stores for each binder (storing unit placeholders)
+            var current_expr: ?*GrinExpr = null;
+
+            // Step 1: Allocate all placeholders
+            for (placeholders) |p| {
                 const store_expr = try ctx.alloc.create(GrinExpr);
                 store_expr.* = .{ .Store = .{ .Unit = {} } };
 
-                // Bind to a fresh pointer variable.
-                // Create the RHS expression (unit return) first.
-                const rhs_expr = try ctx.alloc.create(GrinExpr);
-                rhs_expr.* = .{ .Return = .{ .Unit = {} } };
+                const placeholder_expr = if (current_expr) |_|
+                    // Chain: prev >>= \p_placeholder -> store Unit
+                    try ctx.alloc.create(GrinExpr)
+                else
+                    store_expr;
 
-                const bind_expr = try ctx.alloc.create(GrinExpr);
-                bind_expr.* = .{ .Bind = .{
-                    .lhs = store_expr,
-                    .pat = .{ .Var = p.* },
-                    .rhs = rhs_expr,
-                }};
+                if (current_expr) |prev_expr| {
+                    placeholder_expr.* = .{ .Bind = .{
+                        .lhs = prev_expr,
+                        .pat = .{ .Var = p },
+                        .rhs = store_expr,
+                    }};
+                }
+
+                current_expr = placeholder_expr;
             }
 
-            // For MVP, just translate the body.
-            // A full implementation would update placeholders with actual values.
+            // Step 2: Backpatch each binding with its real RHS
+            for (pairs, 0..) |pair, i| {
+                // Translate the RHS expression
+                const rhs_expr = try translateExpr(ctx, pair.rhs);
+
+                // For Update, we need a Val, not an Expr.
+                // If RHS is a simple Return, extract its value.
+                // Otherwise, we'd need to bind and use the variable.
+                // For now, assume RHS can be converted to a value.
+                const rhs_val = try exprToVal(rhs_expr);
+
+                // Create the update expression: update placeholder_i rhs_val
+                const update_expr = try ctx.alloc.create(GrinExpr);
+                update_expr.* = .{ .Update = .{
+                    .ptr = placeholders[i],
+                    .val = rhs_val,
+                }};
+
+                // Chain the update after previous binds, bind _ to continue
+                const discard_var = try ctx.freshName("_");
+
+                if (current_expr) |prev| {
+                    const bind_update = try ctx.alloc.create(GrinExpr);
+                    bind_update.* = .{ .Bind = .{
+                        .lhs = prev,
+                        .pat = .{ .Var = discard_var },
+                        .rhs = update_expr,
+                    }};
+                    current_expr = bind_update;
+                }
+            }
+
+            // Step 3: Translate the body with binders substituted by placeholders
             const body_expr = try translateExpr(ctx, let_expr.body);
+
+            // Finish the chain by binding the body as the final RHS
+            if (current_expr) |prev| {
+                const final_bind = try ctx.alloc.create(GrinExpr);
+                final_bind.* = .{ .Bind = .{
+                    .lhs = prev,
+                    .pat = .{ .Var = try ctx.freshName("_") },
+                    .rhs = body_expr,
+                }};
+                return final_bind;
+            }
+
+            // Fallback if no bindings (shouldn't happen with Rec)
             return body_expr;
         },
     }
@@ -1592,3 +1659,26 @@ test "translateProgram: over-application generates chained apply calls" {
     // A full check would require recursively traversing the expression tree
     try testing.expect(true);
 }
+
+test "exprToVal: extracts value from simple Return expression" {
+    const ret_expr = grin.Expr{
+        .Return = .{ .Lit = .{ .Int = 42 } },
+    };
+
+    const val = try exprToVal(&ret_expr);
+    try testing.expectEqual(@as(i64, 42), val.Lit.Int);
+}
+
+test "exprToVal: returns error for complex expressions" {
+    const bind_expr = grin.Expr{
+        .Bind = .{
+            .lhs = undefined,
+            .pat = undefined,
+            .rhs = undefined,
+        },
+    };
+
+    const result = exprToVal(&bind_expr);
+    try testing.expectError(error.CannotExtractValue, result);
+}
+
