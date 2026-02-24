@@ -13,7 +13,7 @@ const node = @import("node.zig");
 
 /// Evaluate a thunk and return its WHNF.
 /// Called `rts_eval` from LLVM.
-export fn rts_eval(ptr: *node.Node) *node.Node {
+pub export fn rts_eval(ptr: *node.Node) *node.Node {
     // Check if it's a thunk
     if (ptr.tag == .Thunk) {
         // For M1, thunks are not fully implemented
