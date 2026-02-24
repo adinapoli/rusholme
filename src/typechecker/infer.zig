@@ -1852,11 +1852,13 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
     // Add built-in constructor schemes so the desugarer can find them.
     // These are mono-bound in TyEnv via initBuiltins() but the desugarer
     // only looks in ModuleTypes.schemes.
-    // Unique IDs from src/naming/known.zig: True=200, False=201, Unit=206
+    // Unique IDs from src/naming/known.zig
     const built_in_uniques = [_]naming_mod.Unique{
         .{ .value = 200 }, // True
         .{ .value = 201 }, // False
         .{ .value = 206 }, // Unit
+        .{ .value = 207 }, // Nil  ([] data constructor)
+        .{ .value = 208 }, // Cons ((:) data constructor)
     };
     for (built_in_uniques) |unique| {
         if (ctx.env.lookupScheme(unique)) |scheme| {
