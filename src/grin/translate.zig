@@ -45,7 +45,6 @@ const GrinCPat = grin.CPat;
 const GrinAlt = grin.Alt;
 const GrinName = grin.Name;
 
-
 // ── Translation Context ─────────────────────────────────────────────────
 
 /// Context for the Core to GRIN translation.
@@ -110,6 +109,13 @@ const TranslateCtx = struct {
     fn getFunctionArity(self: TranslateCtx, name: GrinName) ?u32 {
         return self.arity_map.get(name.unique.value);
     }
+};
+
+/// A pending bind for a complex argument sub-expression.
+/// Used by translateApp to sequence complex args before the outer App.
+const PendingBind = struct {
+    fresh_var: GrinName,
+    complex_expr: *GrinExpr,
 };
 
 // ── Translation Functions ───────────────────────────────────────────────
@@ -372,6 +378,17 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
     };
 
     // Translate all arguments.
+    // GRIN requires all App arguments to be simple values (variables or literals).
+    // Complex sub-expressions (e.g., another App like `g x`) must be sequenced
+    // with Bind before the outer App call (A-normal form).
+    //
+    // Example: `f (g x)` becomes:
+    //   arg <- g x
+    //   f arg
+
+    var pending_binds = std.ArrayListUnmanaged(PendingBind){};
+    defer pending_binds.deinit(ctx.alloc);
+
     var grin_args = try ctx.alloc.alloc(GrinVal, args.items.len);
     for (args.items, 0..) |arg, i| {
         const arg_result = try translateExpr(ctx, arg);
@@ -381,9 +398,13 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
                 grin_args[i] = v;
             },
             else => {
-                // Complex argument expression - need to bind and use.
+                // Complex argument expression - bind it to a fresh variable.
                 const fresh_var = try ctx.freshName("arg");
                 grin_args[i] = .{ .Var = fresh_var };
+                try pending_binds.append(ctx.alloc, .{
+                    .fresh_var = fresh_var,
+                    .complex_expr = arg_result,
+                });
             },
         }
     }
@@ -416,7 +437,7 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
                     .rhs = return_expr,
                 } };
 
-                return bind_expr;
+                return try wrapWithPendingBinds(ctx, bind_expr, pending_binds.items);
             } else if (arg_count > arity) {
                 // Over-application: use App for saturated part, chain apply calls
                 // Example: (f x) y z (arity=1, args=3) ->
@@ -438,13 +459,15 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
 
                     // Create apply expr: apply current_result [excess_arg]
                     const apply_expr = try ctx.alloc.create(GrinExpr);
-                    apply_expr.* = .{ .App = .{
-                        .name = .{ .base = "apply", .unique = .{ .value = 9998 } },
-                        .args = &[_]GrinVal{
-                            .{ .Var = result_var }, // This will be bound from previous step
-                            excess_arg,
+                    apply_expr.* = .{
+                        .App = .{
+                            .name = .{ .base = "apply", .unique = .{ .value = 9998 } },
+                            .args = &[_]GrinVal{
+                                .{ .Var = result_var }, // This will be bound from previous step
+                                excess_arg,
+                            },
                         },
-                    } };
+                    };
 
                     // Create bind: result = apply current_result [excess_arg]
                     const bind_expr = try ctx.alloc.create(GrinExpr);
@@ -469,7 +492,7 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
                     .rhs = return_expr,
                 } };
 
-                return final_bind;
+                return try wrapWithPendingBinds(ctx, final_bind, pending_binds.items);
             }
         }
     }
@@ -489,9 +512,42 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
     grin_app.* = .{ .App = .{
         .name = app_fn_name,
         .args = grin_args,
-    }};
+    } };
 
-    return grin_app;
+    return try wrapWithPendingBinds(ctx, grin_app, pending_binds.items);
+}
+
+/// Wrap an expression in Bind chains for pending complex argument sub-expressions.
+///
+/// Given `pending_binds = [{arg_1, (g x)}, {arg_2, (h y)}]` and `inner = f arg_1 arg_2`,
+/// produces:
+///   arg_1 <- g x
+///   arg_2 <- h y
+///   f arg_1 arg_2
+///
+/// The binds are built inside-out: the last pending bind wraps innermost.
+fn wrapWithPendingBinds(
+    ctx: *TranslateCtx,
+    inner: *GrinExpr,
+    pending_binds: []const PendingBind,
+) anyerror!*GrinExpr {
+    if (pending_binds.len == 0) return inner;
+
+    // Build from inside out: the last pending bind is closest to inner.
+    var result = inner;
+    var i: usize = pending_binds.len;
+    while (i > 0) {
+        i -= 1;
+        const pb = pending_binds[i];
+        const bind_expr = try ctx.alloc.create(GrinExpr);
+        bind_expr.* = .{ .Bind = .{
+            .lhs = pb.complex_expr,
+            .pat = .{ .Var = pb.fresh_var },
+            .rhs = result,
+        } };
+        result = bind_expr;
+    }
+    return result;
 }
 
 /// Translate a let binding.
@@ -535,7 +591,7 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
                 .lhs = store_expr,
                 .pat = .{ .Var = fresh_ptr },
                 .rhs = body_expr,
-            }};
+            } };
 
             return bind_expr;
         },
@@ -576,7 +632,7 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
                         .lhs = prev_expr,
                         .pat = .{ .Var = p },
                         .rhs = store_expr,
-                    }};
+                    } };
                 }
 
                 current_expr = placeholder_expr;
@@ -598,7 +654,7 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
                 update_expr.* = .{ .Update = .{
                     .ptr = placeholders[i],
                     .val = rhs_val,
-                }};
+                } };
 
                 // Chain the update after previous binds, bind _ to continue
                 const discard_var = try ctx.freshName("_");
@@ -609,7 +665,7 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
                         .lhs = prev,
                         .pat = .{ .Var = discard_var },
                         .rhs = update_expr,
-                    }};
+                    } };
                     current_expr = bind_update;
                 }
             }
@@ -624,7 +680,7 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
                     .lhs = prev,
                     .pat = .{ .Var = try ctx.freshName("_") },
                     .rhs = body_expr,
-                }};
+                } };
                 return final_bind;
             }
 
@@ -655,7 +711,7 @@ fn translateCase(ctx: *TranslateCtx, case_expr: *const CoreCase) anyerror!*GrinE
     case_grin.* = .{ .Case = .{
         .scrutinee = scrutinee_val,
         .alts = alts,
-    }};
+    } };
 
     return case_grin;
 }
@@ -713,7 +769,7 @@ fn translatePattern(ctx: *TranslateCtx, con: CoreAltCon, binders: []const CoreId
             return .{ .NodePat = .{
                 .tag = tag,
                 .fields = field_names,
-            }};
+            } };
         },
         .LitAlt => |lit| {
             // Literal pattern.
@@ -952,14 +1008,14 @@ fn generateEvalFunc(alloc: std.mem.Allocator, tag_info: *const TagInfo) !GrinDef
     case_expr.* = .{ .Case = .{
         .scrutinee = .{ .Var = node_var.* },
         .alts = try alts.toOwnedSlice(alloc),
-    }};
+    } };
 
     // Create fetch expression: fetch p
     const fetch_expr = try alloc.create(GrinExpr);
     fetch_expr.* = .{ .Fetch = .{
         .ptr = p_param.*,
         .index = null,
-    }};
+    } };
 
     // Create bind expression: fetch p >>= \node -> case node of ...
     const body = try alloc.create(GrinExpr);
@@ -967,7 +1023,7 @@ fn generateEvalFunc(alloc: std.mem.Allocator, tag_info: *const TagInfo) !GrinDef
         .lhs = fetch_expr,
         .pat = .{ .Var = node_var.* },
         .rhs = case_expr,
-    }};
+    } };
 
     const params_slice = try alloc.alloc(GrinName, 1);
     params_slice[0] = p_param.*;
@@ -1003,17 +1059,19 @@ fn generateConTagAlt(alloc: std.mem.Allocator, node_var: GrinName, con_tag: Grin
 fn generateFunTagAlt(alloc: std.mem.Allocator, p: GrinName, result: GrinName, func_name: GrinName) !GrinAlt {
     // Create app expression: app func []
     const app_expr = try alloc.create(GrinExpr);
-    app_expr.* = .{ .App = .{
-        .name = func_name,
-        .args = &.{}, // No arguments (unforced thunk)
-    }};
+    app_expr.* = .{
+        .App = .{
+            .name = func_name,
+            .args = &.{}, // No arguments (unforced thunk)
+        },
+    };
 
     // Create update expression: update p result
     const update_expr = try alloc.create(GrinExpr);
     update_expr.* = .{ .Update = .{
         .ptr = p,
         .val = .{ .Var = result },
-    }};
+    } };
 
     // Create bind expression: app func [] >>= \result -> update p result
     const update_bind = try alloc.create(GrinExpr);
@@ -1021,7 +1079,7 @@ fn generateFunTagAlt(alloc: std.mem.Allocator, p: GrinName, result: GrinName, fu
         .lhs = app_expr,
         .pat = .{ .Var = result },
         .rhs = update_expr,
-    }};
+    } };
 
     // Create return expression: return result
     const ret_expr = try alloc.create(GrinExpr);
@@ -1033,7 +1091,7 @@ fn generateFunTagAlt(alloc: std.mem.Allocator, p: GrinName, result: GrinName, fu
         .lhs = update_bind,
         .pat = .{ .Var = result },
         .rhs = ret_expr,
-    }};
+    } };
 
     const fun_tag = funTag(func_name.base, func_name.unique.value);
 
@@ -1068,7 +1126,7 @@ fn generateApplyFunc(alloc: std.mem.Allocator) !GrinDef {
     // For MVP: return unit
     // Full implementation would complexly pattern match on P-tags
     const body = try alloc.create(GrinExpr);
-    body.* = .{ .Return = .{ .Unit = {} }};
+    body.* = .{ .Return = .{ .Unit = {} } };
 
     const params_slice = try alloc.alloc(GrinName, 2);
     params_slice[0] = f_param.*;
@@ -1105,7 +1163,7 @@ test "translateProgram: simple identity function" {
         .binder = x_id,
         .body = x_var,
         .span = undefined,
-    }};
+    } };
 
     const id_binder = core.Id{
         .name = grin.Name{ .base = "id", .unique = .{ .value = 10 } },
@@ -1420,7 +1478,7 @@ test "buildArityMap: correctly counts lambda parameters" {
         .binder = x_id,
         .body = x_var,
         .span = undefined,
-    }};
+    } };
 
     const id_binder = core.Id{
         .name = grin.Name{ .base = "id", .unique = .{ .value = 10 } },
@@ -1474,14 +1532,14 @@ test "buildArityMap: correctly counts multi-parameter functions" {
         .binder = y_id,
         .body = x_var,
         .span = undefined,
-    }};
+    } };
 
     const outer_lambda = try alloc.create(CoreExpr);
     outer_lambda.* = .{ .Lam = .{
         .binder = x_id,
         .body = inner_lambda,
         .span = undefined,
-    }};
+    } };
 
     // Count arity directly
     const arity = try countLambdaArity(outer_lambda);
@@ -1518,14 +1576,14 @@ test "translateProgram: partial application generates P-tag" {
         .binder = xs_id,
         .body = f_var,
         .span = undefined,
-    }};
+    } };
 
     const map_outer = try alloc.create(CoreExpr);
     map_outer.* = .{ .Lam = .{
         .binder = f_id,
         .body = map_inner,
         .span = undefined,
-    }};
+    } };
 
     const map_binder = core.Id{
         .name = grin.Name{ .base = "map", .unique = .{ .value = 100 } },
@@ -1562,7 +1620,7 @@ test "translateProgram: partial application generates P-tag" {
 
     const core_prog = CoreProgram{
         .data_decls = &.{},
-        .binds = &[_]CoreBind{.{ .NonRec = map_pair }, .{ .NonRec = main_pair }},
+        .binds = &[_]CoreBind{ .{ .NonRec = map_pair }, .{ .NonRec = main_pair } },
     };
 
     const grin_prog = try translateProgram(alloc, core_prog);
@@ -1597,7 +1655,7 @@ test "translateProgram: over-application generates chained apply calls" {
         .binder = x_id,
         .body = x_var,
         .span = undefined,
-    }};
+    } };
 
     const id_binder = core.Id{
         .name = grin.Name{ .base = "id", .unique = .{ .value = 100 } },
@@ -1645,7 +1703,7 @@ test "translateProgram: over-application generates chained apply calls" {
 
     const core_prog = CoreProgram{
         .data_decls = &.{},
-        .binds = &[_]CoreBind{.{ .NonRec = id_pair }, .{ .NonRec = main_pair }},
+        .binds = &[_]CoreBind{ .{ .NonRec = id_pair }, .{ .NonRec = main_pair } },
     };
 
     const grin_prog = try translateProgram(alloc, core_prog);
@@ -1682,3 +1740,131 @@ test "exprToVal: returns error for complex expressions" {
     try testing.expectError(error.CannotExtractValue, result);
 }
 
+test "translateApp: nested application f (g x) emits Bind for complex arg (#374)" {
+    // Regression test for #374: complex sub-expression arguments in App
+    // must be sequenced with Bind, not dropped.
+    //
+    // Core: compose = \f -> \g -> \x -> f (g x)
+    // Expected GRIN:
+    //   compose f g x =
+    //     arg <- g x
+    //     f arg
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Create Core IDs
+    const f_id = core.Id{
+        .name = grin.Name{ .base = "f", .unique = .{ .value = 100 } },
+        .ty = undefined,
+        .span = undefined,
+    };
+    const g_id = core.Id{
+        .name = grin.Name{ .base = "g", .unique = .{ .value = 101 } },
+        .ty = undefined,
+        .span = undefined,
+    };
+    const x_id = core.Id{
+        .name = grin.Name{ .base = "x", .unique = .{ .value = 102 } },
+        .ty = undefined,
+        .span = undefined,
+    };
+    const compose_id = core.Id{
+        .name = grin.Name{ .base = "compose", .unique = .{ .value = 200 } },
+        .ty = undefined,
+        .span = undefined,
+    };
+
+    // Build: x (Var)
+    const x_var = try alloc.create(CoreExpr);
+    x_var.* = .{ .Var = x_id };
+
+    // Build: g (Var)
+    const g_var = try alloc.create(CoreExpr);
+    g_var.* = .{ .Var = g_id };
+
+    // Build: g x (App)
+    const g_x = try alloc.create(CoreExpr);
+    g_x.* = .{ .App = .{ .fn_expr = g_var, .arg = x_var, .span = undefined } };
+
+    // Build: f (Var)
+    const f_var = try alloc.create(CoreExpr);
+    f_var.* = .{ .Var = f_id };
+
+    // Build: f (g x) (App)
+    const f_g_x = try alloc.create(CoreExpr);
+    f_g_x.* = .{ .App = .{ .fn_expr = f_var, .arg = g_x, .span = undefined } };
+
+    // Build: \x -> f (g x) (Lam)
+    const lam_x = try alloc.create(CoreExpr);
+    lam_x.* = .{ .Lam = .{ .binder = x_id, .body = f_g_x, .span = undefined } };
+
+    // Build: \g -> \x -> f (g x) (Lam)
+    const lam_g = try alloc.create(CoreExpr);
+    lam_g.* = .{ .Lam = .{ .binder = g_id, .body = lam_x, .span = undefined } };
+
+    // Build: \f -> \g -> \x -> f (g x) (Lam)
+    const lam_f = try alloc.create(CoreExpr);
+    lam_f.* = .{ .Lam = .{ .binder = f_id, .body = lam_g, .span = undefined } };
+
+    const bind_pair = CoreBindPair{
+        .binder = compose_id,
+        .rhs = lam_f,
+    };
+
+    const core_prog = CoreProgram{
+        .data_decls = &.{},
+        .binds = &.{.{ .NonRec = bind_pair }},
+    };
+
+    const grin_prog = try translateProgram(alloc, core_prog);
+
+    // Should have one definition with 3 parameters (f, g, x).
+    try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
+    const def = grin_prog.defs[0];
+    try testing.expectEqual(@as(usize, 3), def.params.len);
+
+    // The body must be a Bind (not a bare App), since the inner
+    // application (g x) is complex and must be sequenced.
+    //
+    // Expected: Bind { lhs = App(g, [x]), pat = Var(arg), rhs = App(f, [arg]) }
+    switch (def.body.*) {
+        .Bind => |bind| {
+            // LHS should be an App (g x)
+            switch (bind.lhs.*) {
+                .App => |inner_app| {
+                    try testing.expectEqualStrings("g", inner_app.name.base);
+                    try testing.expectEqual(@as(usize, 1), inner_app.args.len);
+                    switch (inner_app.args[0]) {
+                        .Var => |v| try testing.expectEqualStrings("x", v.base),
+                        else => return error.TestUnexpectedResult,
+                    }
+                },
+                else => return error.TestUnexpectedResult,
+            }
+
+            // Pat should be a Var (the fresh arg binding)
+            switch (bind.pat) {
+                .Var => |v| try testing.expectEqualStrings("arg", v.base),
+                else => return error.TestUnexpectedResult,
+            }
+
+            // RHS should be an App (f arg)
+            switch (bind.rhs.*) {
+                .App => |outer_app| {
+                    try testing.expectEqualStrings("f", outer_app.name.base);
+                    try testing.expectEqual(@as(usize, 1), outer_app.args.len);
+                    switch (outer_app.args[0]) {
+                        .Var => |v| try testing.expectEqualStrings("arg", v.base),
+                        else => return error.TestUnexpectedResult,
+                    }
+                },
+                else => return error.TestUnexpectedResult,
+            }
+        },
+        else => {
+            // If the body is a bare App, the bug is still present!
+            return error.TestUnexpectedResult;
+        },
+    }
+}

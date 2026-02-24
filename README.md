@@ -53,8 +53,55 @@ See [DESIGN.md](DESIGN.md) for the full rationale and decisions log.
 
 ## Project Status
 
-🚧 **Early stages** — project skeleton and design documents only. No compiler
-code yet.
+🚧 **Active development** — the compiler can parse, rename, typecheck, desugar,
+lambda-lift, and translate Haskell to GRIN IR. A tree-walking GRIN evaluator
+with PrimOp support is wired up. See the showcase below!
+
+## See It In Action
+
+Given a Haskell source file:
+
+```haskell
+module Demo where
+
+compose :: (b -> c) -> (a -> b) -> a -> c
+compose f g x = f (g x)
+
+apply :: (a -> b) -> a -> b
+apply f x = f x
+
+identity :: a -> a
+identity x = x
+```
+
+**Type inference** — `rhc check demo.hs`:
+
+```
+compose  :: forall a b c. (a -> b) -> (c -> a) -> c -> b
+apply    :: forall a b. (a -> b) -> a -> b
+identity :: forall a. a -> a
+```
+
+**GRIN IR** — `rhc grin demo.hs`:
+
+```
+=== GRIN Program (3 defs) ===
+compose f g x =
+  g x ;
+  \arg ->
+    f arg
+
+apply f x =
+  f x
+
+identity x =
+  pure x
+```
+
+Notice how `compose` correctly sequences the nested application `f (g x)` —
+the inner call `g x` is evaluated first and bound to `arg`, then `f arg` is
+called with the result. This is monadic bind (`>>=`) in GRIN's
+imperative notation.
 
 ## Development
 
