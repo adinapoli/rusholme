@@ -73,11 +73,24 @@ pub fn desugarModule(
                     .span = fb.span,
                 };
 
-                // For M1, we assume single equation, single match, or desugar to lambdas/cases.
-                // Re-using the logic from infer: typically we have equations.
-                // A complete desugarer would build a match compiler here.
-                // For now, we simply translate the RHS of the first equation.
-                if (fb.equations.len > 0) {
+                // Check if this FunBind needs pattern match compilation
+                var needs_match_compiler = fb.equations.len > 1;
+                if (!needs_match_compiler and fb.equations.len > 0) {
+                    for (fb.equations[0].patterns) |pat| {
+                        if (pat != .Var) {
+                            needs_match_compiler = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (needs_match_compiler) {
+                    const p_body = try desugarMatch(&ctx, fb.equations, core_ty);
+                    try binds.append(alloc, .{ .NonRec = .{
+                        .binder = binder_id,
+                        .rhs = p_body,
+                    } });
+                } else if (fb.equations.len > 0) {
                     const eq = fb.equations[0];
                     var body = try desugarRhs(&ctx, eq.rhs);
 
@@ -104,10 +117,7 @@ pub fn desugarModule(
                                     },
                                 };
                             },
-                            else => {
-                                // Match compiler needed for complex patterns in args.
-                                std.debug.panic("Pattern matching in function args not fully implemented for Core translation yet", .{});
-                            },
+                            else => unreachable, // Blocked by needs_match_compiler check
                         }
                     }
 
@@ -502,9 +512,300 @@ fn desugarLiteral(lit: @import("../frontend/ast.zig").Literal) ast_mod.Literal {
     };
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────
+// ── Pattern Match Compiler (Tier 1) ────────────────────────────────────
+
+/// Extract the argument types from a function's CoreType by peeling off
+/// ForAllTy and FunTy layers.
+fn getArgTypes(alloc: std.mem.Allocator, ty: ast_mod.CoreType, num_args: usize) ![]const ast_mod.CoreType {
+    var types = try alloc.alloc(ast_mod.CoreType, num_args);
+    var current = ty;
+    // skip foralls
+    while (current == .ForAllTy) {
+        current = current.ForAllTy.body.*;
+    }
+    for (0..num_args) |i| {
+        if (current != .FunTy) {
+            std.debug.panic("Expected FunTy for argument {d}, got {any}", .{ i, current });
+        }
+        types[i] = current.FunTy.arg.*;
+        current = current.FunTy.res.*;
+    }
+    return types;
+}
+
+/// Tier 1 Pattern Match Compiler.
+/// Translates multi-equation `FunBind`s or single equations with non-Var patterns
+/// into a series of `Lam` abstractions over a nested sequential `Case` tree.
+/// This implementation explicitly supports only simple disjoint patterns (Constructors,
+/// Literals, Wildcards, Vars) and processes them sequentially.
+/// See tracking issues #377 (Tier 2: Nested patterns) and #378 (Tier 3: Decision trees).
+fn desugarMatch(
+    ctx: *DesugarCtx,
+    equations: []const renamer_mod.RMatch,
+    core_ty: ast_mod.CoreType,
+) !*ast_mod.Expr {
+    const num_args = equations[0].patterns.len;
+    if (num_args == 0) {
+        // Nullary function -- just desugar the first equation's RHS.
+        const rhs_expr = try ctx.alloc.create(ast_mod.Expr);
+        rhs_expr.* = try desugarRhs(ctx, equations[0].rhs);
+        return rhs_expr;
+    }
+
+    const arg_tys = try getArgTypes(ctx.alloc, core_ty, num_args);
+
+    // Create fresh lambda binders: `arg_0, arg_1, ...`
+    var binders = try ctx.alloc.alloc(ast_mod.Id, num_args);
+    for (0..num_args) |i| {
+        const span = syntheticSpan();
+        const arg_name = try std.fmt.allocPrint(ctx.alloc, "arg_{d}", .{i});
+        binders[i] = .{
+            .name = .{ .base = arg_name, .unique = .{ .value = 0 } },
+            .ty = arg_tys[i],
+            .span = span,
+        };
+    }
+
+    // Process equations from top to bottom.
+    // We build the body inside-out: start with the last fallback (a panic),
+    // then layer on the equations from bottom to top.
+    var current_body = try ctx.alloc.create(ast_mod.Expr);
+    current_body.* = ast_mod.Expr{
+        // TODO: Emitting a proper error call instead of just panicking during eval.
+        // But since we don't have a Core error primitive yet, we'll just emit a dummy var reference
+        // that will crash evaluation if reached, or just a literal.
+        .Lit = .{
+            .val = .{ .String = "Non-exhaustive patterns in function" },
+            .span = syntheticSpan(),
+        },
+    };
+
+    var eq_idx: usize = equations.len;
+    while (eq_idx > 0) {
+        eq_idx -= 1;
+        const eq = equations[eq_idx];
+
+        // The base RHS for this equation
+        var eq_body = try ctx.alloc.create(ast_mod.Expr);
+        eq_body.* = try desugarRhs(ctx, eq.rhs);
+
+        // Build sequential matches for each argument, from right to left.
+        var arg_idx: usize = num_args;
+        while (arg_idx > 0) {
+            arg_idx -= 1;
+            const pat = eq.patterns[arg_idx];
+
+            const scrut_expr = try ctx.alloc.create(ast_mod.Expr);
+            scrut_expr.* = .{ .Var = binders[arg_idx] };
+
+            // For Tier 1, we expect simple patterns where each argument match can either
+            // succeed (go to eq_body) or fail (go to current_body fallback).
+            switch (pat) {
+                .Var => |v| {
+                    // Variable pattern always succeeds, but we must bind the scrutinee to the variable!
+                    const inner_expr = eq_body;
+                    eq_body = try ctx.alloc.create(ast_mod.Expr);
+                    const var_id = ast_mod.Id{ .name = v.name, .ty = arg_tys[arg_idx], .span = v.span };
+                    eq_body.* = .{ .Let = .{
+                        .bind = .{ .NonRec = .{ .binder = var_id, .rhs = scrut_expr } },
+                        .body = inner_expr,
+                        .span = syntheticSpan(),
+                    } };
+                },
+                .Wild => {
+                    // Wildcard always succeeds, no binding needed.
+                },
+                .Lit => |l| {
+                    // Match literal.
+                    const alt = ast_mod.Alt{
+                        .con = .{ .LitAlt = desugarLiteral(l) },
+                        .binders = &.{},
+                        .body = eq_body,
+                    };
+                    const default_alt = ast_mod.Alt{
+                        .con = .Default,
+                        .binders = &.{},
+                        .body = current_body, // fall through to next equation
+                    };
+                    const new_body = try ctx.alloc.create(ast_mod.Expr);
+                    new_body.* = .{ .Case = .{
+                        .scrutinee = scrut_expr,
+                        .binder = binders[arg_idx],
+                        .ty = arg_tys[arg_idx],
+                        .alts = try ctx.alloc.dupe(ast_mod.Alt, &.{ alt, default_alt }),
+                        .span = syntheticSpan(),
+                    } };
+                    eq_body = new_body;
+                },
+                .Con => |c| {
+                    // Match constructor. No binders yet for Tier 1 unless it's nullary?
+                    // Ah, `Con` has `args`.
+                    // But wait, the standard Core IR requires all constructor parameters
+                    // to be bound in the `Alt.binders` array!
+                    // If the constructor has args, they must be simple variables for a single `Case`!
+                    if (c.args.len > 0) {
+                        for (c.args) |a| {
+                            if (a != .Var and a != .Wild) {
+                                std.debug.panic("Tier 2 (#377): Nested patterns underneath constructors not yet implemented", .{});
+                            }
+                        }
+                    }
+
+                    var con_binders = try ctx.alloc.alloc(ast_mod.Id, c.args.len);
+                    for (c.args, 0..) |a, i| {
+                        if (a == .Var) {
+                            // Since we don't have the Con's field types handy easily, we'll have to rely on
+                            // infer placing the type in local_binders!
+                            const var_name = a.Var.name;
+                            const p_ty_ptr = ctx.types.local_binders.get(var_name.unique) orelse {
+                                std.debug.panic("Missing type for pattern variable {s}", .{var_name.base});
+                            };
+                            con_binders[i] = .{
+                                .name = var_name,
+                                .ty = try htypeToCore(ctx.alloc, p_ty_ptr),
+                                .span = a.Var.span,
+                            };
+                        } else {
+                            // Wildcard. Mint a dummy binder.
+                            const dummy_name = try std.fmt.allocPrint(ctx.alloc, "wild_{d}", .{i});
+                            con_binders[i] = .{
+                                .name = .{ .base = dummy_name, .unique = .{ .value = 0 } },
+                                // For wildcard types we don't know the exact field type easily here,
+                                // but we might be able to get away with a dummy type or we have a problem.
+                                // Actually, Core IR type checking isn't strict about `Wild` binder types
+                                // if they aren't used, but we need *some* type.
+                                // Let's use `Int` as a dummy if we can't find it.
+                                .ty = ast_mod.CoreType{ .TyCon = .{ .name = renamer_mod.Name{ .base = "Int", .unique = .{ .value = 0 } }, .args = &.{} } },
+                                .span = syntheticSpan(),
+                            };
+                        }
+                    }
+
+                    const alt = ast_mod.Alt{
+                        .con = .{ .DataAlt = c.name },
+                        .binders = con_binders,
+                        .body = eq_body,
+                    };
+                    const default_alt = ast_mod.Alt{
+                        .con = .Default,
+                        .binders = &.{},
+                        .body = current_body, // fall through to next equation
+                    };
+                    const new_body = try ctx.alloc.create(ast_mod.Expr);
+                    new_body.* = .{ .Case = .{
+                        .scrutinee = scrut_expr,
+                        .binder = binders[arg_idx],
+                        .ty = arg_tys[arg_idx],
+                        .alts = try ctx.alloc.dupe(ast_mod.Alt, &.{ alt, default_alt }),
+                        .span = syntheticSpan(),
+                    } };
+                    eq_body = new_body;
+                },
+                else => {
+                    std.debug.panic("Tier 2/3 (#377/#378): Pattern {} not yet supported in match compiler", .{pat});
+                },
+            }
+        }
+        current_body = eq_body;
+    }
+
+    // Wrap the assembled body in lambdas for each parameter!
+    const final_expr = current_body;
+    var lam_idx: usize = num_args;
+    while (lam_idx > 0) {
+        lam_idx -= 1;
+        const p_body = try ctx.alloc.create(ast_mod.Expr);
+        p_body.* = final_expr.*;
+        final_expr.* = .{ .Lam = .{
+            .binder = binders[lam_idx],
+            .body = p_body,
+            .span = syntheticSpan(),
+        } };
+    }
+
+    return final_expr;
+}
+
+// ── Literal conversions ─────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+
+test "desugarMatch: Tier 1 literal and wildcard" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var types = infer_mod.ModuleTypes{
+        .schemes = .{},
+        .local_binders = .{},
+    };
+    defer types.deinit(alloc);
+
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var ctx = DesugarCtx{
+        .alloc = alloc,
+        .types = &types,
+        .diags = &diags,
+    };
+
+    // f 0 = "zero"
+    // f _ = "many"
+    // Type: Int -> String
+    const int_ty_name = renamer_mod.Name{ .base = "Int", .unique = .{ .value = 1 } };
+    const str_ty_name = renamer_mod.Name{ .base = "String", .unique = .{ .value = 2 } };
+    const int_ty = ast_mod.CoreType{ .TyCon = .{ .name = int_ty_name, .args = &.{} } };
+    const str_ty = ast_mod.CoreType{ .TyCon = .{ .name = str_ty_name, .args = &.{} } };
+
+    const arg_ty_ptr = try alloc.create(ast_mod.CoreType);
+    arg_ty_ptr.* = int_ty;
+    const res_ty_ptr = try alloc.create(ast_mod.CoreType);
+    res_ty_ptr.* = str_ty;
+
+    const fun_ty = ast_mod.CoreType{ .FunTy = .{ .arg = arg_ty_ptr, .res = res_ty_ptr } };
+
+    // Fake LHS patterns:
+    const pat1 = renamer_mod.RPat{ .Lit = .{ .Int = .{ .value = 0, .span = syntheticSpan() } } };
+    const pat2 = renamer_mod.RPat{ .Wild = syntheticSpan() };
+
+    // Fake RHS expressions:
+    const rhs1 = renamer_mod.RRhs{ .UnGuarded = .{ .Lit = .{ .String = .{ .value = "zero", .span = syntheticSpan() } } } };
+    const rhs2 = renamer_mod.RRhs{ .UnGuarded = .{ .Lit = .{ .String = .{ .value = "many", .span = syntheticSpan() } } } };
+
+    // Equations
+    const eq1 = renamer_mod.RMatch{
+        .patterns = try alloc.dupe(renamer_mod.RPat, &.{pat1}),
+        .rhs = rhs1,
+        .span = syntheticSpan(),
+    };
+    const eq2 = renamer_mod.RMatch{
+        .patterns = try alloc.dupe(renamer_mod.RPat, &.{pat2}),
+        .rhs = rhs2,
+        .span = syntheticSpan(),
+    };
+
+    const expr = try desugarMatch(&ctx, &.{ eq1, eq2 }, fun_ty);
+
+    // It should be a Lam (Case ... -> "zero" ; _ -> "many")
+    try testing.expect(expr.* == .Lam);
+    try testing.expectEqualStrings("arg_0", expr.Lam.binder.name.base);
+
+    const body = expr.Lam.body.*;
+    try testing.expect(body == .Case);
+    try testing.expectEqual(@as(usize, 2), body.Case.alts.len);
+
+    const alt1 = body.Case.alts[0];
+    try testing.expect(alt1.con == .LitAlt);
+    try testing.expectEqual(@as(i64, 0), alt1.con.LitAlt.Int);
+
+    const alt2 = body.Case.alts[1];
+    try testing.expect(alt2.con == .Default);
+    // The default body should be the eq2 translation (which has wildcard so just the string)
+    // Wait, wildcard doesn't emit case, just passes eq_body
+    try testing.expect(alt2.body.* == .Lit);
+    try testing.expectEqualStrings("many", alt2.body.Lit.val.String);
+}
 
 fn testName(base: []const u8, id: u64) Name {
     return .{ .base = base, .unique = .{ .value = id } };
