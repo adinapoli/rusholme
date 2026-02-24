@@ -25,6 +25,7 @@ pub const value = @import("value.zig");
 pub const io = @import("io.zig");
 pub const arith = @import("arith.zig");
 pub const eval = @import("eval.zig");
+pub const string = @import("string.zig");
 
 // Re-export commonly used types
 pub const Value = value.Value;
