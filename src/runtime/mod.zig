@@ -17,6 +17,15 @@
 //! - : Arithmetic primitives (add, sub, mul, etc.)
 //! - : GRIN evaluator with PrimOp dispatch
 //!
+//! ## Known Shortcomings (Being Tracked)
+//!
+//! The initial runtime implementation (issue #56) serves as a minimal skeleton.
+//! Many features are placeholders with follow-up issues:
+//!
+//! - **Thunk evaluation**: https://github.com/adinapoli/rusholme/issues/384
+//! - **Heap node field storage**: https://github.com/adinapoli/rusholme/issues/385
+//! - **Closure support**: https://github.com/adinapoli/rusholme/issues/386
+//!
 //! Reference: docs/decisions/0001-primops-and-rts-architecture.md
 
 const std = @import("std");

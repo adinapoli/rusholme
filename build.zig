@@ -41,6 +41,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    // Runtime module - for LLVM-based runtime tests
+    const runtime_mod = b.addModule("runtime", .{
+        .root_source_file = b.path("src/rts/root.zig"),
+        .target = target,
+    });
+
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
@@ -159,6 +165,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_parser_tests = b.addRunArtifact(parser_tests);
 
+    // Runtime test runner - tests LLVM-based runtime (src/rts/)
+    const runtime_test_module = b.createModule(.{
+        .root_source_file = b.path("tests/runtime_test_runner.zig"),
+        .target = target,
+        .imports = &.{.{ .name = "runtime", .module = runtime_mod }},
+    });
+    const runtime_tests = b.addTest(.{
+        .name = "runtime-tests",
+        .root_module = runtime_test_module,
+    });
+    const run_runtime_tests = b.addRunArtifact(runtime_tests);
+
     // Diagnostic step — reports per-file parser errors for failing tests.
     // Usage: zig build diag
     const diag_module = b.createModule(.{
@@ -182,6 +200,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_golden_tests.step);
     test_step.dependOn(&run_parser_tests.step);
+    test_step.dependOn(&run_runtime_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
