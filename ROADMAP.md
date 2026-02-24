@@ -263,7 +263,8 @@
 | [#302](https://github.com/adinapoli/rusholme/issues/302) | core: fix lint for sc004 (record syntax validation) | [#39](https://github.com/adinapoli/rusholme/issues/39) | :green_circle: |
 | [#307](https://github.com/adinapoli/rusholme/issues/307) | core: fix sc004_record_syntax renamer bug (triggered by record functions) | [#302](https://github.com/adinapoli/rusholme/issues/302) | :green_circle: |
 | [#310](https://github.com/adinapoli/rusholme/issues/310) | core: fix record function recognition in sc004_record_syntax.hs | [#307](https://github.com/adinapoli/rusholme/issues/307) | :green_circle: |
-| [#359](https://github.com/adinapoli/rusholme/issues/359) | core: sc017_string_char_literals.hs doesn't pass the core desugaring | [#38](https://github.com/adinapoli/rusholme/issues/38) | :white_circle: |
+| [#359](https://github.com/adinapoli/rusholme/issues/359) | core: sc017_string_char_literals.hs doesn't pass the core desugaring | [#38](https://github.com/adinapoli/rusholme/issues/38) | :yellow_circle: |
+| [#361](https://github.com/adinapoli/rusholme/issues/361) | Implement remaining RExpr variants in desugarer | [#359](https://github.com/adinapoli/rusholme/issues/359) | :white_circle: |
 
 ### Epic [#6](https://github.com/adinapoli/rusholme/issues/6): GRIN IR and Core→GRIN Translation
 
