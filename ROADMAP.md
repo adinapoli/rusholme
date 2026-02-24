@@ -7,6 +7,12 @@
 - **#0001**: PrimOps and RTS Architecture — defines the contract between compiler and runtime via ~15-30 primitive operations. See `docs/decisions/0001-primops-and-rts-architecture.md`.
 
 **Recent Progress (2026-02-24):**
+- ✓ #361: Implement remaining RExpr variants in desugarer
+- ✓ #359: sc017_string_char_literals.hs doesn't pass the core desugaring
+- ✓ #347: Implement proper backpatching for recursive let bindings in GRIN translator
+- ✓ #351: Custom ADT type unification failures
+- ✓ #350: Multi-equation function definitions treated as duplicates
+- ✓ #349: Desugarer panics on unsolved metavariables in HType.toCore
 - ✓ #317: Handle partial and over-application in Core→GRIN translation
 - ✓ #315: Generate whole-program eval and apply functions for GRIN
 - ✓ #320: Implement GRIN evaluator for App and Case expressions
@@ -263,8 +269,11 @@
 | [#302](https://github.com/adinapoli/rusholme/issues/302) | core: fix lint for sc004 (record syntax validation) | [#39](https://github.com/adinapoli/rusholme/issues/39) | :green_circle: |
 | [#307](https://github.com/adinapoli/rusholme/issues/307) | core: fix sc004_record_syntax renamer bug (triggered by record functions) | [#302](https://github.com/adinapoli/rusholme/issues/302) | :green_circle: |
 | [#310](https://github.com/adinapoli/rusholme/issues/310) | core: fix record function recognition in sc004_record_syntax.hs | [#307](https://github.com/adinapoli/rusholme/issues/307) | :green_circle: |
-| [#359](https://github.com/adinapoli/rusholme/issues/359) | core: sc017_string_char_literals.hs doesn't pass the core desugaring | [#38](https://github.com/adinapoli/rusholme/issues/38) | :yellow_circle: |
-| [#361](https://github.com/adinapoli/rusholme/issues/361) | Implement remaining RExpr variants in desugarer | [#359](https://github.com/adinapoli/rusholme/issues/359) | :white_circle: |
+| [#349](https://github.com/adinapoli/rusholme/issues/349) | core: desugarer panics on unsolved metavariables in HType.toCore | [#38](https://github.com/adinapoli/rusholme/issues/38) | :green_circle: |
+| [#350](https://github.com/adinapoli/rusholme/issues/350) | core: multi-equation function definitions treated as duplicates | [#38](https://github.com/adinapoli/rusholme/issues/38) | :green_circle: |
+| [#351](https://github.com/adinapoli/rusholme/issues/351) | core: custom ADT type unification failures | [#38](https://github.com/adinapoli/rusholme/issues/38) | :green_circle: |
+| [#359](https://github.com/adinapoli/rusholme/issues/359) | core: sc017_string_char_literals.hs doesn't pass the core desugaring | [#38](https://github.com/adinapoli/rusholme/issues/38) | :green_circle: |
+| [#361](https://github.com/adinapoli/rusholme/issues/361) | Implement remaining RExpr variants in desugarer | [#359](https://github.com/adinapoli/rusholme/issues/359) | :green_circle: |
 
 ### Epic [#6](https://github.com/adinapoli/rusholme/issues/6): GRIN IR and Core→GRIN Translation
 
@@ -277,7 +286,7 @@
 | [#314](https://github.com/adinapoli/rusholme/issues/314) | Implement Core to GRIN translation for simple expressions | [#313](https://github.com/adinapoli/rusholme/issues/313), [#41](https://github.com/adinapoli/rusholme/issues/41), [#42](https://github.com/adinapoli/rusholme/issues/42) | :green_circle: |
 | [#315](https://github.com/adinapoli/rusholme/issues/315) | Generate whole-program eval and apply functions for GRIN | [#314](https://github.com/adinapoli/rusholme/issues/314) | :green_circle: |
 | [#317](https://github.com/adinapoli/rusholme/issues/317) | Handle partial application and over-application in Core→GRIN | [#314](https://github.com/adinapoli/rusholme/issues/314), [#315](https://github.com/adinapoli/rusholme/issues/315) | :green_circle: |
-| [#347](https://github.com/adinapoli/rusholme/issues/347) | Implement proper backpatching for recursive let bindings in GRIN translator | [#314](https://github.com/adinapoli/rusholme/issues/314) | :white_circle: |
+| [#347](https://github.com/adinapoli/rusholme/issues/347) | Implement proper backpatching for recursive let bindings in GRIN translator | [#314](https://github.com/adinapoli/rusholme/issues/314) | :green_circle: |
 
 ### Epic: PrimOps and Runtime System (Decision #0001)
 
