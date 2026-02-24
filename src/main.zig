@@ -5,6 +5,7 @@
 //!   rhc check <file.hs>    Parse, rename, and typecheck; print inferred types
 //!   rhc core <file.hs>     Parse, typecheck, and desugar; print Core IR
 //!   rhc grin <file.hs>     Full pipeline; print GRIN IR
+//!   rhc ll <file.hs>       Full pipeline; emit LLVM IR
 //!   rhc --help             Show this help message
 //!   rhc --version          Show version information
 
@@ -100,6 +101,18 @@ pub fn main(init: std.process.Init) !void {
         }
         const file_path = cmd_args[0];
         try cmdGrin(allocator, io, file_path);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "ll")) {
+        const cmd_args = user_args[1..];
+        if (cmd_args.len == 0) {
+            try writeStderr(io, "rhc ll: missing file argument\n");
+            try writeStderr(io, "Usage: rhc ll <file.hs>\n");
+            std.process.exit(1);
+        }
+        const file_path = cmd_args[0];
+        try cmdLl(allocator, io, file_path);
         return;
     }
 
@@ -449,6 +462,43 @@ fn cmdGrin(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     try stdout.flush();
 }
 
+/// Parse, check, desugar, lambda-lift, translate to GRIN IR, and emit LLVM IR.
+/// Prints the resulting LLVM IR to stdout.
+///
+/// Note: The GRIN→LLVM translation is not yet implemented (tracked in issue #55).
+/// This command currently emits a placeholder message.
+fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
+    _ = allocator;
+    _ = file_path;
+
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_fw: File.Writer = .init(.stdout(), io, &stdout_buf);
+    const stdout = &stdout_fw.interface;
+
+    try stdout.print("rhc: LLVM IR generation\n", .{});
+    try stdout.print("=========================\n\n", .{});
+    try stdout.print(
+        \\The 'rhc ll' command will emit LLVM IR for the given Haskell program.
+        \\
+        \\Current status:
+        \\  - Parser: ✅ Implemented
+        \\  - Renamer: ✅ Implemented  
+        \\  - Typechecker: ✅ Implemented
+        \\  - Core IR: ✅ Implemented
+        \\  - GRIN IR: ✅ Implemented
+        \\  - LLVM IR generation: 🚧 TODO (issue #55)
+        \\
+        \\To implement full Grin→LLVM translation, see:
+        \\  https://github.com/adinapoli/rusholme/issues/55
+        \\
+        \\See issue #381 for the detailed translation strategy:
+        \\  https://github.com/adinapoli/rusholme/issues/381
+        \\
+    , .{});
+
+    try stdout.flush();
+}
+
 /// Render all collected diagnostics to stderr using the terminal renderer.
 fn renderDiagnostics(
     allocator: std.mem.Allocator,
@@ -514,6 +564,7 @@ fn printUsage(io: Io) !void {
         \\  rhc check <file.hs>    Parse, rename, and typecheck; print inferred types
         \\  rhc core <file.hs>     Parse, typecheck, and desugar; print Core IR
         \\  rhc grin <file.hs>     Full pipeline; print GRIN IR
+        \\  rhc ll <file.hs>       Full pipeline; emit LLVM IR
         \\  rhc --help             Show this help message
         \\  rhc --version          Show version information
         \\
