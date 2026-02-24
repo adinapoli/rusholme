@@ -23,6 +23,15 @@ const Def = ast.Def;
 const Program = ast.Program;
 const Tag = ast.Tag;
 
+const primop_mod = @import("primop.zig");
+const PrimOp = primop_mod.PrimOp;
+
+const runtime = @import("../runtime/mod.zig");
+const RtValue = runtime.Value;
+const RtEvalError = runtime.EvalError;
+const RtEvalContext = runtime.EvalContext;
+const RtHeap = runtime.Heap;
+
 // ── Heap Pointer ─────────────────────────────────────────────────────────
 
 /// An opaque pointer into the simulated heap.
@@ -363,8 +372,11 @@ pub const GrinEvaluator = struct {
     /// The allocator for temporary allocations during evaluation.
     allocator: Allocator,
 
+    /// IO interface for PrimOp IO operations.
+    io: std.Io,
+
     /// Initialize a new evaluator with the given program.
-    pub fn init(allocator: Allocator, program: *const Program) error{OutOfMemory}!GrinEvaluator {
+    pub fn init(allocator: Allocator, program: *const Program, io: std.Io) error{OutOfMemory}!GrinEvaluator {
         var heap = Heap.init(allocator);
         errdefer heap.deinit();
 
@@ -381,6 +393,7 @@ pub const GrinEvaluator = struct {
             .env = env,
             .funcs = funcs,
             .allocator = allocator,
+            .io = io,
         };
     }
 
@@ -607,6 +620,11 @@ pub const GrinEvaluator = struct {
             .Block => |inner| self.eval(inner),
 
             .App => |app| b: {
+                // Check if this is a PrimOp call
+                if (PrimOp.fromString(app.name.base)) |op| {
+                    break :b try self.evalPrimOp(op, app.args);
+                }
+
                 // Look up the function definition
                 const def = self.funcs.lookup(app.name) orelse return error.UnboundFunction;
 
@@ -687,6 +705,80 @@ pub const GrinEvaluator = struct {
                 break :b val.ConstTagNode.tag.eql(tag_pat);
             },
             .DefaultPat => true, // Wildcard always matches
+        };
+    }
+
+    // ── PrimOp Bridge ────────────────────────────────────────────────────
+
+    /// Evaluate a PrimOp call by bridging GRIN Val args to runtime Values,
+    /// dispatching to the runtime evaluator, and converting back.
+    fn evalPrimOp(self: *GrinEvaluator, op: PrimOp, grin_args: []const Val) EvalError!Val {
+        // Convert GRIN Val args to runtime Values
+        var rt_args_buf: [8]RtValue = undefined;
+        if (grin_args.len > rt_args_buf.len) return error.ArityMismatch;
+
+        for (grin_args, 0..) |arg, i| {
+            const resolved = try self.resolveVal(@constCast(&arg));
+            rt_args_buf[i] = try self.valToRtValue(resolved);
+        }
+        const rt_args = rt_args_buf[0..grin_args.len];
+
+        // Create a runtime eval context
+        var rt_heap = RtHeap.init(self.allocator) catch return error.OutOfMemory;
+        defer rt_heap.deinit();
+        const rt_ctx = RtEvalContext.init(self.allocator, &rt_heap, self.io);
+
+        // Dispatch to runtime PrimOp evaluator
+        const rt_result = runtime.evalPrimOp(rt_ctx, op, rt_args) catch |err| {
+            return switch (err) {
+                RtEvalError.ArityMismatch => error.ArityMismatch,
+                RtEvalError.TypeError => error.TypeMismatch,
+                RtEvalError.DivisionByZero => error.TypeMismatch,
+                RtEvalError.RuntimeError => error.PatternMatchFailure,
+                else => error.TypeMismatch,
+            };
+        };
+
+        // Convert runtime Value back to GRIN Val
+        return self.rtValueToVal(rt_result);
+    }
+
+    /// Convert a GRIN Val to a runtime Value.
+    fn valToRtValue(self: *GrinEvaluator, v: Val) EvalError!RtValue {
+        _ = self;
+        return switch (v) {
+            .Lit => |lit| switch (lit) {
+                .Int => |i| RtValue{ .Int = i },
+                .Float => |f| RtValue{ .Double = f },
+                .Char => |c| RtValue{ .Char = c },
+                .String => |s| RtValue{ .String = s },
+                .Bool => |b| RtValue{ .Bool = b },
+            },
+            .Unit => RtValue.unit,
+            .ConstTagNode => |ctn| b: {
+                // Check for boolean constructors
+                if (ctn.tag.tag_type == .Con) {
+                    if (std.mem.eql(u8, ctn.tag.name.base, "True")) break :b RtValue{ .Bool = true };
+                    if (std.mem.eql(u8, ctn.tag.name.base, "False")) break :b RtValue{ .Bool = false };
+                }
+                // For other constructors, we can't convert directly
+                break :b error.TypeMismatch;
+            },
+            else => error.TypeMismatch,
+        };
+    }
+
+    /// Convert a runtime Value back to a GRIN Val.
+    fn rtValueToVal(self: *GrinEvaluator, v: RtValue) EvalError!Val {
+        _ = self;
+        return switch (v) {
+            .Int => |i| Val{ .Lit = .{ .Int = i } },
+            .Double => |f| Val{ .Lit = .{ .Float = f } },
+            .Char => |c| Val{ .Lit = .{ .Char = c } },
+            .String => |s| Val{ .Lit = .{ .String = s } },
+            .Bool => |b| Val{ .Lit = .{ .Bool = b } },
+            .Unit => Val{ .Unit = {} },
+            else => error.TypeMismatch,
         };
     }
 };
@@ -904,7 +996,7 @@ test "GrinEvaluator: full integration" {
     const program = Program{ .defs = defs };
 
     // Initialize evaluator
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     // Verify function table
@@ -938,7 +1030,7 @@ test "GrinEvaluator: scoped bindings" {
 
     const program = Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const x = testName("x", 1);
@@ -976,7 +1068,7 @@ test "eval: Return literal" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = try evaluator.eval(body);
@@ -1001,7 +1093,7 @@ test "eval: Return variable" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     try evaluator.bind(testName("x", 42), .{ .Lit = .{ .Int = 99 } });
@@ -1045,7 +1137,7 @@ test "eval: Store constructor node and fetch it back" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = try evaluator.eval(body);
@@ -1087,7 +1179,7 @@ test "eval: Store nullary constructor and fetch it back" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = try evaluator.eval(body);
@@ -1131,7 +1223,7 @@ test "eval: Fetch with field index" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = try evaluator.eval(body);
@@ -1190,7 +1282,7 @@ test "eval: Update a heap node" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = try evaluator.eval(body);
@@ -1227,7 +1319,7 @@ test "eval: Nested binds" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = try evaluator.eval(body);
@@ -1256,7 +1348,7 @@ test "eval: Block expression" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = try evaluator.eval(body);
@@ -1280,7 +1372,7 @@ test "eval: Unbound variable error" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = evaluator.eval(body);
@@ -1304,7 +1396,7 @@ test "eval: Return unit" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = try evaluator.eval(body);
@@ -1342,7 +1434,7 @@ test "eval: Store and fetch literal" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = try evaluator.eval(body);
@@ -1388,7 +1480,7 @@ test "eval: Two-element constructor (Cons cell)" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = try evaluator.eval(body);
@@ -1411,11 +1503,13 @@ test "eval: Bind with literal pattern (matching)" {
     return_100.* = .{ .Return = .{ .Lit = .{ .Int = 100 } } };
 
     const bind_expr = try alloc.create(ast.Expr);
-    bind_expr.* = .{ .Bind = .{
-        .lhs = return_42,
-        .pat = ast.Val{ .Lit = .{ .Int = 42 } }, // Matches
-        .rhs = return_100,
-    } };
+    bind_expr.* = .{
+        .Bind = .{
+            .lhs = return_42,
+            .pat = ast.Val{ .Lit = .{ .Int = 42 } }, // Matches
+            .rhs = return_100,
+        },
+    };
 
     const body = bind_expr;
 
@@ -1428,7 +1522,7 @@ test "eval: Bind with literal pattern (matching)" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = try evaluator.eval(body);
@@ -1448,11 +1542,13 @@ test "eval: Bind with literal pattern (non-matching)" {
     return_100.* = .{ .Return = .{ .Lit = .{ .Int = 100 } } };
 
     const bind_expr = try alloc.create(ast.Expr);
-    bind_expr.* = .{ .Bind = .{
-        .lhs = return_42,
-        .pat = ast.Val{ .Lit = .{ .Int = 5 } }, // Doesn't match
-        .rhs = return_100,
-    } };
+    bind_expr.* = .{
+        .Bind = .{
+            .lhs = return_42,
+            .pat = ast.Val{ .Lit = .{ .Int = 5 } }, // Doesn't match
+            .rhs = return_100,
+        },
+    };
 
     const body = bind_expr;
 
@@ -1465,7 +1561,7 @@ test "eval: Bind with literal pattern (non-matching)" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = evaluator.eval(body);
@@ -1514,7 +1610,7 @@ test "eval: App - simple function call" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = try evaluator.eval(main_body);
@@ -1543,7 +1639,7 @@ test "eval: App - unbound function error" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = evaluator.eval(body);
@@ -1587,7 +1683,7 @@ test "eval: App - arity mismatch error" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = evaluator.eval(main_body);
@@ -1656,7 +1752,7 @@ test "eval: App - recursive function" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = try evaluator.eval(main_body);
@@ -1717,7 +1813,7 @@ test "eval: Case - matching node pattern" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = try evaluator.eval(body);
@@ -1774,7 +1870,7 @@ test "eval: Case - default pattern match" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = try evaluator.eval(body);
@@ -1820,7 +1916,7 @@ test "eval: Case - literal pattern match" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = try evaluator.eval(body);
@@ -1871,7 +1967,7 @@ test "eval: Case - tag pattern match" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = try evaluator.eval(body);
@@ -1917,7 +2013,7 @@ test "eval: Case - pattern match failure" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = evaluator.eval(body);
@@ -1995,7 +2091,7 @@ test "eval: Combined - function that cases on its argument" {
 
     const program = ast.Program{ .defs = defs };
 
-    var evaluator = try GrinEvaluator.init(testing.allocator, &program);
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
 
     const result = try evaluator.eval(main_body);

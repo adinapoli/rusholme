@@ -20,6 +20,7 @@ const Heap = value.Heap;
 
 const io_mod = @import("io.zig");
 const arith_mod = @import("arith.zig");
+const string_mod = @import("string.zig");
 
 // ── Evaluator Context ────────────────────────────────────────────────────
 
@@ -87,6 +88,9 @@ pub fn evalPrimOp(ctx: EvalContext, op: PrimOp, args: []const Value) EvalError!V
     } else if (discriminant < 550) {
         // FFI Bridge (500-549)
         return evalFFIPrim(ctx, op, args);
+    } else if (discriminant >= 650 and discriminant < 700) {
+        // String Operations (650-699)
+        return evalStringPrim(ctx, op, args);
     } else {
         // Conversions (600-649) and unknown
         return evalConversionPrim(op, args);
@@ -101,6 +105,7 @@ fn evalIOPrim(ctx: EvalContext, op: PrimOp, args: []const Value) EvalError!Value
         .write_stdout => io_mod.writeStdout(ctx.io, args),
         .write_stderr => io_mod.writeStderr(ctx.io, args),
         .read_stdin => io_mod.readStdin(ctx.io, ctx.allocator, args),
+        .putStrLn_ => io_mod.putStrLn(ctx.io, args),
         else => EvalError.NotImplemented,
     };
 }
@@ -172,6 +177,11 @@ fn evalComparisonPrim(op: PrimOp, args: []const Value) EvalError!Value {
             };
             break :blk Value.fromBool(a == b);
         },
+        .ne_Int => blk: {
+            const a = args[0].asInt() orelse return EvalError.TypeError;
+            const b = args[1].asInt() orelse return EvalError.TypeError;
+            break :blk Value.fromBool(a != b);
+        },
         .eq_Double => blk: {
             const a = switch (args[0]) {
                 .Double => |d| d,
@@ -194,6 +204,61 @@ fn evalComparisonPrim(op: PrimOp, args: []const Value) EvalError!Value {
             };
             break :blk Value.fromBool(a < b);
         },
+        .ne_Double => blk: {
+            const a = switch (args[0]) {
+                .Double => |d| d,
+                else => return EvalError.TypeError,
+            };
+            const b = switch (args[1]) {
+                .Double => |d| d,
+                else => return EvalError.TypeError,
+            };
+            break :blk Value.fromBool(a != b);
+        },
+        .le_Double => blk: {
+            const a = switch (args[0]) {
+                .Double => |d| d,
+                else => return EvalError.TypeError,
+            };
+            const b = switch (args[1]) {
+                .Double => |d| d,
+                else => return EvalError.TypeError,
+            };
+            break :blk Value.fromBool(a <= b);
+        },
+        .gt_Double => blk: {
+            const a = switch (args[0]) {
+                .Double => |d| d,
+                else => return EvalError.TypeError,
+            };
+            const b = switch (args[1]) {
+                .Double => |d| d,
+                else => return EvalError.TypeError,
+            };
+            break :blk Value.fromBool(a > b);
+        },
+        .ge_Double => blk: {
+            const a = switch (args[0]) {
+                .Double => |d| d,
+                else => return EvalError.TypeError,
+            };
+            const b = switch (args[1]) {
+                .Double => |d| d,
+                else => return EvalError.TypeError,
+            };
+            break :blk Value.fromBool(a >= b);
+        },
+        else => EvalError.NotImplemented,
+    };
+}
+
+/// Evaluate string PrimOps.
+fn evalStringPrim(ctx: EvalContext, op: PrimOp, args: []const Value) EvalError!Value {
+    return switch (op) {
+        .str_cons => string_mod.strCons(ctx.allocator, args),
+        .str_head => string_mod.strHead(args),
+        .str_tail => string_mod.strTail(args),
+        .str_null => string_mod.strNull(args),
         else => EvalError.NotImplemented,
     };
 }

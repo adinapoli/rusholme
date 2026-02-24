@@ -53,6 +53,10 @@ pub const PrimOp = enum(u16) {
     /// Type: IO String
     read_stdin = 2,
 
+    /// Write a string + newline to stdout.
+    /// Type: String -> IO ()
+    putStrLn_ = 3,
+
     // ═══════════════════════════════════════════════════════════════════════
     // Integer Arithmetic (100-149)
     // ═══════════════════════════════════════════════════════════════════════
@@ -137,13 +141,33 @@ pub const PrimOp = enum(u16) {
     /// Type: Char# -> Char# -> Bool
     eq_Char = 205,
 
+    /// Integer not-equal.
+    /// Type: Int# -> Int# -> Bool
+    ne_Int = 206,
+
     /// Double equality.
     /// Type: Double# -> Double# -> Bool
-    eq_Double = 206,
+    eq_Double = 207,
 
     /// Double less-than.
     /// Type: Double# -> Double# -> Bool
-    lt_Double = 207,
+    lt_Double = 208,
+
+    /// Double less-than-or-equal.
+    /// Type: Double# -> Double# -> Bool
+    le_Double = 209,
+
+    /// Double greater-than.
+    /// Type: Double# -> Double# -> Bool
+    gt_Double = 210,
+
+    /// Double greater-than-or-equal.
+    /// Type: Double# -> Double# -> Bool
+    ge_Double = 211,
+
+    /// Double not-equal.
+    /// Type: Double# -> Double# -> Bool
+    ne_Double = 212,
 
     // ═══════════════════════════════════════════════════════════════════════
     // Heap Operations (300-349)
@@ -202,6 +226,26 @@ pub const PrimOp = enum(u16) {
     /// Type: Int# -> Char#
     intToChar = 603,
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // String Operations (650-699)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Prepend a character to a string.
+    /// Type: Char# -> String -> String
+    str_cons = 650,
+
+    /// Get the first character of a string.
+    /// Type: String -> Char#
+    str_head = 651,
+
+    /// Get the tail of a string (everything after the first character).
+    /// Type: String -> String
+    str_tail = 652,
+
+    /// Check if a string is empty.
+    /// Type: String -> Bool
+    str_null = 653,
+
     _,
 
     // ── Helpers ───────────────────────────────────────────────────────────
@@ -212,6 +256,7 @@ pub const PrimOp = enum(u16) {
             .write_stdout => "write_stdout",
             .write_stderr => "write_stderr",
             .read_stdin => "read_stdin",
+            .putStrLn_ => "putStrLn_",
             .add_Int => "add_Int",
             .sub_Int => "sub_Int",
             .mul_Int => "mul_Int",
@@ -225,13 +270,18 @@ pub const PrimOp = enum(u16) {
             .div_Double => "div_Double",
             .neg_Double => "neg_Double",
             .eq_Int => "eq_Int",
+            .ne_Int => "ne_Int",
             .lt_Int => "lt_Int",
             .le_Int => "le_Int",
             .gt_Int => "gt_Int",
             .ge_Int => "ge_Int",
             .eq_Char => "eq_Char",
             .eq_Double => "eq_Double",
+            .ne_Double => "ne_Double",
             .lt_Double => "lt_Double",
+            .le_Double => "le_Double",
+            .gt_Double => "gt_Double",
+            .ge_Double => "ge_Double",
             .newMutVar => "newMutVar",
             .readMutVar => "readMutVar",
             .writeMutVar => "writeMutVar",
@@ -242,6 +292,10 @@ pub const PrimOp = enum(u16) {
             .doubleToInt => "doubleToInt",
             .charToInt => "charToInt",
             .intToChar => "intToChar",
+            .str_cons => "str_cons",
+            .str_head => "str_head",
+            .str_tail => "str_tail",
+            .str_null => "str_null",
             _ => "unknown_primop",
         };
     }
@@ -268,6 +322,8 @@ pub const PrimOp = enum(u16) {
             .control
         else if (discriminant < 550)
             .ffi
+        else if (discriminant >= 650 and discriminant < 700)
+            .string
         else
             .conversion;
     }
@@ -288,6 +344,7 @@ pub const PrimOpCategory = enum {
     control,
     ffi,
     conversion,
+    string,
 };
 
 // ── PrimOp Registry ──────────────────────────────────────────────────────
@@ -357,14 +414,17 @@ test "PrimOpRegistry: stable names" {
 test "PrimOp: all ops have name mappings" {
     // Verify that all defined PrimOps have a name() implementation
     const ops = [_]PrimOp{
-        .write_stdout, .write_stderr, .read_stdin,
-        .add_Int, .sub_Int, .mul_Int, .neg_Int, .abs_Int, .quot_Int, .rem_Int,
-        .add_Double, .sub_Double, .mul_Double, .div_Double, .neg_Double,
-        .eq_Int, .lt_Int, .le_Int, .gt_Int, .ge_Int, .eq_Char, .eq_Double, .lt_Double,
-        .newMutVar, .readMutVar, .writeMutVar,
-        .@"error", .unreachable_,
-        .ccall,
-        .intToDouble, .doubleToInt, .charToInt, .intToChar,
+        .write_stdout, .write_stderr, .read_stdin, .putStrLn_,
+        .add_Int,      .sub_Int,      .mul_Int,    .neg_Int,
+        .abs_Int,      .quot_Int,     .rem_Int,    .add_Double,
+        .sub_Double,   .mul_Double,   .div_Double, .neg_Double,
+        .eq_Int,       .ne_Int,       .lt_Int,     .le_Int,
+        .gt_Int,       .ge_Int,       .eq_Char,    .eq_Double,
+        .ne_Double,    .lt_Double,    .le_Double,  .gt_Double,
+        .ge_Double,    .newMutVar,    .readMutVar, .writeMutVar,
+        .@"error",     .unreachable_, .ccall,      .intToDouble,
+        .doubleToInt,  .charToInt,    .intToChar,  .str_cons,
+        .str_head,     .str_tail,     .str_null,
     };
 
     for (ops) |op| {
