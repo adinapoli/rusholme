@@ -177,6 +177,108 @@ fn tryToNullTerminated(s: []const u8) [:0]const u8 {
     return @ptrCast(result);
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Type Helpers
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Get the void type.
+pub fn voidType() Type {
+    return llvm_c.LLVMVoidType();
+}
+
+/// Get the i8 type (character type).
+pub fn i8Type() Type {
+    return llvm_c.LLVMInt8Type();
+}
+
+/// Get the i32 type.
+pub fn i32Type() Type {
+    return llvm_c.LLVMInt32Type();
+}
+
+/// Get the i64 type.
+pub fn i64Type() Type {
+    return llvm_c.LLVMInt64Type();
+}
+
+/// Get a pointer type for the given element type.
+pub fn pointerType(element_type: Type) Type {
+    return llvm_c.LLVMPointerType(element_type, 0);
+}
+
+/// Get the function type from a function value.
+pub fn getFunctionType(function: Value) Type {
+    return llvm_c.LLVMGetFunctionType(function);
+}
+
+/// Get the LLVM type kind as an enum value.
+pub fn getTypeKind(type_: Type) i32 {
+    return @intFromEnum(llvm_c.LLVMGetTypeKind(type_));
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Global Variables and Strings
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Create a global string constant.
+/// Returns a pointer to the global string value.
+pub fn buildGlobalString(module: Module, builder: Builder, string: []const u8, name: []const u8) Value {
+    _ = builder; // Unused for now, but kept for potential future use
+    const name_c = tryToNullTerminated(name);
+    defer std.heap.raw_c_allocator.free(name_c);
+    const string_c = tryToNullTerminated(string);
+    defer std.heap.raw_c_allocator.free(string_c);
+
+    // Create global string in module
+    const global = llvm_c.LLVMAddGlobal(module, llvm_c.LLVMArrayType(llvm_c.LLVMInt8Type(), @intCast(string.len)), name_c);
+    llvm_c.LLVMSetInitializer(global, llvm_c.LLVMConstString(string_c.ptr, string.len, 1));
+    llvm_c.LLVMSetGlobalConstant(global, 1);
+    llvm_c.LLVMSetAlignment(global, 1);
+
+    // Get a pointer to the first element
+    return llvm_c.LLVMConstInBoundsGEP(global, &.{llvm_c.LLVMConstInt(i64Type(), 0), llvm_c.LLVMConstInt(i64Type(), 0)}, 2, "");
+}
+
+/// Add an external declaration to the module.
+/// Useful for declaring libc functions like `puts`.
+pub fn addExternalDeclaration(module: Module, name: []const u8, return_type: Type, param_types: []const Type) Value {
+    const name_c = tryToNullTerminated(name);
+    defer std.heap.raw_c_allocator.free(name_c);
+
+    const fn_type = if (param_types.len > 0)
+        llvm_c.LLVMFunctionType(return_type, @ptrCast(param_types.ptr), @intCast(param_types.len), 0)
+    else
+        llvm_c.LLVMFunctionType(return_type, null, 0, 0);
+
+    const func = llvm_c.LLVMAddFunction(module, name_c, fn_type);
+    llvm_c.LLVMAddAttribute(func, llvm_c.LLVMCreateEnumAttribute(llvm_c.LLVMGetModuleContext(module), 1, 0, @truncate(@as(i32, 1))));
+    return func;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Module Output
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Write a module to a file as LLVM IR (.ll) or bitcode (.bc).
+pub fn writeModuleToFile(module: Module, filename: []const u8) !void {
+    const filename_c = tryToNullTerminated(filename);
+    defer std.heap.raw_c_allocator.free(filename_c);
+
+    if (llvm_c.LLVMWriteBitcodeToFile(module, filename_c) != 0) {
+        // Fallback to IR text output if bitcode fails
+        const msg = llvm_c.LLVMPrintModuleToString(module);
+        defer llvm_c.LLVMDisposeMessage(msg);
+
+        const file = std.fs.cwd().createFile(filename_c, .{}) catch |err| {
+            std.debug.panic("Failed to create output file '{}': {}", .{filename, err});
+        };
+        defer file.close();
+
+        const writer = file.writer();
+        _ = try writer.writeAll(std.mem.span(msg));
+    }
+}
+
 // Note: LLVM tests require C headers and libc, which are not available
 // during `zig test`. These tests should be run with the full build instead.
 // test "LLM-C bindings: create context and module" {
