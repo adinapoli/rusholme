@@ -6,6 +6,22 @@
 **Architecture Decisions:**
 - **#0001**: PrimOps and RTS Architecture — defines the contract between compiler and runtime via ~15-30 primitive operations. See `docs/decisions/0001-primops-and-rts-architecture.md`.
 
+**Recent Progress (2026-02-24):**
+- ✓ #361: Implement remaining RExpr variants in desugarer
+- ✓ #359: sc017_string_char_literals.hs doesn't pass the core desugaring
+- ✓ #347: Implement proper backpatching for recursive let bindings in GRIN translator
+- ✓ #351: Custom ADT type unification failures
+- ✓ #350: Multi-equation function definitions treated as duplicates
+- ✓ #349: Desugarer panics on unsolved metavariables in HType.toCore
+- ✓ #317: Handle partial and over-application in Core→GRIN translation
+- ✓ #315: Generate whole-program eval and apply functions for GRIN
+- ✓ #320: Implement GRIN evaluator for App and Case expressions
+- ✓ #319: Implement GRIN evaluator for simple expressions
+- ✓ #318: Implement GRIN evaluator state: heap, environment, and function table
+- ✓ #316: Add validation for duplicate record field names in data types
+- ✓ #304: Fix unifier to handle rigid type (skolem) unification
+- ✓ #139: Implement parser: field selectors
+
 **Recent Progress (2026-02-23):**
 - ✓ #314: Implement Core to GRIN translation for simple expressions
 - ✓ #313: Implement lambda lifting pass on Core IR
@@ -161,7 +177,7 @@
 | [#216](https://github.com/adinapoli/rusholme/issues/216) | ast: add LetQualifier variant to Qualifier for list comprehension let-bindings | [#136](https://github.com/adinapoli/rusholme/issues/136) | :green_circle: |
 | [#137](https://github.com/adinapoli/rusholme/issues/137) | Implement parser: type operators | [#29](https://github.com/adinapoli/rusholme/issues/29), [#32](https://github.com/adinapoli/rusholme/issues/32) | :green_circle: |
 | [#138](https://github.com/adinapoli/rusholme/issues/138) | Implement parser: bang patterns | [#29](https://github.com/adinapoli/rusholme/issues/29), [#31](https://github.com/adinapoli/rusholme/issues/31) | :green_circle: |
-| [#139](https://github.com/adinapoli/rusholme/issues/139) | Implement parser: field selectors | [#29](https://github.com/adinapoli/rusholme/issues/29), [#135](https://github.com/adinapoli/rusholme/issues/135) | :white_circle: |
+| [#139](https://github.com/adinapoli/rusholme/issues/139) | Implement parser: field selectors | [#29](https://github.com/adinapoli/rusholme/issues/29), [#135](https://github.com/adinapoli/rusholme/issues/135) | :green_circle: |
 | [#140](https://github.com/adinapoli/rusholme/issues/140) | Implement parser: overloaded literals | [#29](https://github.com/adinapoli/rusholme/issues/29), [#32](https://github.com/adinapoli/rusholme/issues/32) | :white_circle: |
 | [#192](https://github.com/adinapoli/rusholme/issues/192) | parser: implement arithmetic sequences ([e..], [e,e..], [e..e], [e,e..e]) | [#29](https://github.com/adinapoli/rusholme/issues/29), [#133](https://github.com/adinapoli/rusholme/issues/133) | :green_circle: |
 | [#193](https://github.com/adinapoli/rusholme/issues/193) | lexer+parser: implement backtick infix operator syntax (`f`) | [#25](https://github.com/adinapoli/rusholme/issues/25), [#30](https://github.com/adinapoli/rusholme/issues/30) | :green_circle: |
@@ -189,6 +205,7 @@
 | [#254](https://github.com/adinapoli/rusholme/issues/254) | lexer: string literal parsing fails when string contains keyword 'of' (resolved by quasiquotation fix) | [#86](https://github.com/adinapoli/rusholme/issues/86) | :green_circle: |
 | [#255](https://github.com/adinapoli/rusholme/issues/255) | parser: support LANGUAGE pragmas ({-# LANGUAGE ... #-}) | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
 | [#256](https://github.com/adinapoli/rusholme/issues/256) | parser: support quasi-quotation syntax ([name\| ... \|]) | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
+| [#316](https://github.com/adinapoli/rusholme/issues/316) | Add validation for duplicate record field names in data types | [#135](https://github.com/adinapoli/rusholme/issues/135) | :green_circle: |
 
 ### CLI
 
@@ -237,6 +254,7 @@
 | [#236](https://github.com/adinapoli/rusholme/issues/236) | typechecker: errors lack source file name and spans - shows '<unknown>:0:0-0' | [#184](https://github.com/adinapoli/rusholme/issues/184) | :green_circle: |
 | [#248](https://github.com/adinapoli/rusholme/issues/248) | typechecker: Improve diagnostics for cycle detection panics | [#184](https://github.com/adinapoli/rusholme/issues/184) | :green_circle: |
 | [#177](https://github.com/adinapoli/rusholme/issues/177) | typechecker: astTypeToHType incomplete — App, Paren, Forall, n-tuples not handled | [#36](https://github.com/adinapoli/rusholme/issues/36) | :green_circle: |
+| [#304](https://github.com/adinapoli/rusholme/issues/304) | Unifier: fix rigid type (skolem) unification | [#36](https://github.com/adinapoli/rusholme/issues/36) | :green_circle: |
 | [#37](https://github.com/adinapoli/rusholme/issues/37) | Implement type class resolution and dictionary passing | [#36](https://github.com/adinapoli/rusholme/issues/36), [#153](https://github.com/adinapoli/rusholme/issues/153) | :green_circle: |
 | [#38](https://github.com/adinapoli/rusholme/issues/38) | Implement desugarer / elaborator (typed AST → Core IR) | [#36](https://github.com/adinapoli/rusholme/issues/36), [#153](https://github.com/adinapoli/rusholme/issues/153) | :green_circle: |
 
@@ -251,6 +269,11 @@
 | [#302](https://github.com/adinapoli/rusholme/issues/302) | core: fix lint for sc004 (record syntax validation) | [#39](https://github.com/adinapoli/rusholme/issues/39) | :green_circle: |
 | [#307](https://github.com/adinapoli/rusholme/issues/307) | core: fix sc004_record_syntax renamer bug (triggered by record functions) | [#302](https://github.com/adinapoli/rusholme/issues/302) | :green_circle: |
 | [#310](https://github.com/adinapoli/rusholme/issues/310) | core: fix record function recognition in sc004_record_syntax.hs | [#307](https://github.com/adinapoli/rusholme/issues/307) | :green_circle: |
+| [#349](https://github.com/adinapoli/rusholme/issues/349) | core: desugarer panics on unsolved metavariables in HType.toCore | [#38](https://github.com/adinapoli/rusholme/issues/38) | :green_circle: |
+| [#350](https://github.com/adinapoli/rusholme/issues/350) | core: multi-equation function definitions treated as duplicates | [#38](https://github.com/adinapoli/rusholme/issues/38) | :green_circle: |
+| [#351](https://github.com/adinapoli/rusholme/issues/351) | core: custom ADT type unification failures | [#38](https://github.com/adinapoli/rusholme/issues/38) | :green_circle: |
+| [#359](https://github.com/adinapoli/rusholme/issues/359) | core: sc017_string_char_literals.hs doesn't pass the core desugaring | [#38](https://github.com/adinapoli/rusholme/issues/38) | :green_circle: |
+| [#361](https://github.com/adinapoli/rusholme/issues/361) | Implement remaining RExpr variants in desugarer | [#359](https://github.com/adinapoli/rusholme/issues/359) | :green_circle: |
 
 ### Epic [#6](https://github.com/adinapoli/rusholme/issues/6): GRIN IR and Core→GRIN Translation
 
@@ -261,9 +284,9 @@
 | [#42](https://github.com/adinapoli/rusholme/issues/42) | Research: Core to GRIN translation strategy | [#34](https://github.com/adinapoli/rusholme/issues/34), [#40](https://github.com/adinapoli/rusholme/issues/40) | :green_circle: |
 | [#313](https://github.com/adinapoli/rusholme/issues/313) | Implement lambda lifting pass on Core IR | [#42](https://github.com/adinapoli/rusholme/issues/42) | :green_circle: |
 | [#314](https://github.com/adinapoli/rusholme/issues/314) | Implement Core to GRIN translation for simple expressions | [#313](https://github.com/adinapoli/rusholme/issues/313), [#41](https://github.com/adinapoli/rusholme/issues/41), [#42](https://github.com/adinapoli/rusholme/issues/42) | :green_circle: |
-| [#315](https://github.com/adinapoli/rusholme/issues/315) | Generate whole-program eval and apply functions for GRIN | [#314](https://github.com/adinapoli/rusholme/issues/314) | :white_circle: |
-| [#317](https://github.com/adinapoli/rusholme/issues/317) | Handle partial application and over-application in Core→GRIN | [#314](https://github.com/adinapoli/rusholme/issues/314), [#315](https://github.com/adinapoli/rusholme/issues/315) | :white_circle: |
-| [#347](https://github.com/adinapoli/rusholme/issues/347) | Implement proper backpatching for recursive let bindings in GRIN translator | [#314](https://github.com/adinapoli/rusholme/issues/314) | :white_circle: |
+| [#315](https://github.com/adinapoli/rusholme/issues/315) | Generate whole-program eval and apply functions for GRIN | [#314](https://github.com/adinapoli/rusholme/issues/314) | :green_circle: |
+| [#317](https://github.com/adinapoli/rusholme/issues/317) | Handle partial application and over-application in Core→GRIN | [#314](https://github.com/adinapoli/rusholme/issues/314), [#315](https://github.com/adinapoli/rusholme/issues/315) | :green_circle: |
+| [#347](https://github.com/adinapoli/rusholme/issues/347) | Implement proper backpatching for recursive let bindings in GRIN translator | [#314](https://github.com/adinapoli/rusholme/issues/314) | :green_circle: |
 
 ### Epic: PrimOps and Runtime System (Decision #0001)
 
@@ -288,9 +311,9 @@
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#318](https://github.com/adinapoli/rusholme/issues/318) | Implement GRIN evaluator state: heap, environment, and function table | [#40](https://github.com/adinapoli/rusholme/issues/40) | :white_circle: |
-| [#319](https://github.com/adinapoli/rusholme/issues/319) | Implement GRIN evaluator for simple expressions (Return, Store, Fetch, Update, Bind) | [#318](https://github.com/adinapoli/rusholme/issues/318) | :white_circle: |
-| [#320](https://github.com/adinapoli/rusholme/issues/320) | Implement GRIN evaluator for App and Case expressions | [#319](https://github.com/adinapoli/rusholme/issues/319) | :white_circle: |
+| [#318](https://github.com/adinapoli/rusholme/issues/318) | Implement GRIN evaluator state: heap, environment, and function table | [#40](https://github.com/adinapoli/rusholme/issues/40) | :green_circle: |
+| [#319](https://github.com/adinapoli/rusholme/issues/319) | Implement GRIN evaluator for simple expressions (Return, Store, Fetch, Update, Bind) | [#318](https://github.com/adinapoli/rusholme/issues/318) | :green_circle: |
+| [#320](https://github.com/adinapoli/rusholme/issues/320) | Implement GRIN evaluator for App and Case expressions | [#319](https://github.com/adinapoli/rusholme/issues/319) | :green_circle: |
 | [#51](https://github.com/adinapoli/rusholme/issues/51) | Implement basic IO primitives for the interpreter (putStrLn, getLine) | [#320](https://github.com/adinapoli/rusholme/issues/320), [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
 | [#52](https://github.com/adinapoli/rusholme/issues/52) | Implement arithmetic and comparison primitives for the interpreter | [#320](https://github.com/adinapoli/rusholme/issues/320), [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
 | [#321](https://github.com/adinapoli/rusholme/issues/321) | End-to-end integration test: main = putStrLn "Hello" through GRIN evaluator | [#320](https://github.com/adinapoli/rusholme/issues/320), [#315](https://github.com/adinapoli/rusholme/issues/315), [#314](https://github.com/adinapoli/rusholme/issues/314), [#51](https://github.com/adinapoli/rusholme/issues/51) | :white_circle: |
