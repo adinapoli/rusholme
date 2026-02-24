@@ -1,5 +1,48 @@
 const std = @import("std");
 
+// ═══════════════════════════════════════════════════════════════════════
+// LLVM-C Discovery
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Configure LLVM-C header and library paths on a module.
+///
+/// Uses `llvm-config` (expected on PATH, provided by the Nix devShell)
+/// to discover the include and library directories at build-graph
+/// construction time. This is necessary because:
+///
+///   1. LLVM does not ship a .pc file in Nixpkgs, so pkg-config
+///      cannot find it.
+///   2. Nix splits LLVM across separate store paths (-dev for headers,
+///      -lib for shared objects), so a single --search-prefix is
+///      insufficient.
+///   3. Zig's build system does NOT inherit NIX_CFLAGS_COMPILE for
+///      @cImport translate-C steps.
+///
+/// See BUILDING.md for the full rationale.
+fn configureLlvm(b: *std.Build, mod: *std.Build.Module) void {
+    var exit_code: u8 = undefined;
+
+    const raw_include = b.runAllowFail(
+        &.{ "llvm-config", "--includedir" },
+        &exit_code,
+        .ignore,
+    ) catch @panic("Failed to run `llvm-config --includedir`. Is LLVM on PATH? Try `nix develop`.");
+
+    const raw_libdir = b.runAllowFail(
+        &.{ "llvm-config", "--libdir" },
+        &exit_code,
+        .ignore,
+    ) catch @panic("Failed to run `llvm-config --libdir`. Is LLVM on PATH? Try `nix develop`.");
+
+    const llvm_include_dir = std.mem.trimEnd(u8, raw_include, &.{ '\n', '\r', ' ' });
+    const llvm_lib_dir = std.mem.trimEnd(u8, raw_libdir, &.{ '\n', '\r', ' ' });
+
+    mod.addSystemIncludePath(.{ .cwd_relative = llvm_include_dir });
+    mod.addLibraryPath(.{ .cwd_relative = llvm_lib_dir });
+    mod.linkSystemLibrary("LLVM-19", .{});
+    mod.link_libc = true;
+}
+
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
 // executed by an external runner. The functions in `std.Build` implement a DSL
@@ -40,6 +83,11 @@ pub fn build(b: *std.Build) void {
         // which requires us to specify a target.
         .target = target,
     });
+
+    // Wire LLVM-C headers and shared library for the backend.
+    // This must be called before any compilation step that transitively
+    // imports src/backend/llvm.zig (which uses @cImport for LLVM-C).
+    configureLlvm(b, mod);
 
     // Runtime module - for LLVM-based runtime tests
     const runtime_mod = b.addModule("runtime", .{

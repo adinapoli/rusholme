@@ -18,34 +18,34 @@ pub const c = llvm_c;
 
 /// Context is an execution context for LLVM operations.
 /// It owns and manages the memory of all LLVM objects created from it.
-pub const Context = *c.LLVMContext;
+pub const Context = c.LLVMContextRef;
 
 /// Module represents a single translation unit in LLVM IR.
-pub const Module = *c.LLVMModule;
+pub const Module = c.LLVMModuleRef;
 
 /// Builder provides a uniform interface for generating instructions.
-pub const Builder = *c.LLVMBuilder;
+pub const Builder = c.LLVMBuilderRef;
 
 /// Value represents a value in LLVM IR (constants, instructions, etc.).
-pub const Value = *c.LLVMValue;
+pub const Value = c.LLVMValueRef;
 
 /// Type represents the type of an LLVM value.
-pub const Type = *c.LLVMType;
+pub const Type = c.LLVMTypeRef;
 
 /// BasicBlock represents a basic block of instructions.
-pub const BasicBlock = *c.LLVMBasicBlock;
+pub const BasicBlock = c.LLVMBasicBlockRef;
 
 /// ExecutionEngine provides JIT compilation and execution capabilities.
-pub const ExecutionEngine = *c.LLVMExecutionEngine;
+pub const ExecutionEngine = c.LLVMExecutionEngineRef;
 
 /// PassManager manages optimization passes.
-pub const PassManager = *c.LLVMPassManager;
+pub const PassManager = c.LLVMPassManagerRef;
 
 /// Target represents a target architecture.
-pub const Target = *c.LLVMTarget;
+pub const Target = c.LLVMTargetRef;
 
 /// TargetMachine represents a specific target configuration.
-pub const TargetMachine = *c.LLVMTargetMachine;
+pub const TargetMachine = c.LLVMTargetMachineRef;
 
 /// Initialize LLVM.
 /// Must be called before using any LLVM functions.
@@ -70,7 +70,7 @@ pub fn disposeContext(context: Context) void {
 /// Create a new module with the given name.
 pub fn createModule(name: []const u8, context: Context) Module {
     const name_c = tryToNullTerminated(name);
-    defer std.heap.raw_c_allocator.free(name_c);
+    defer std.heap.c_allocator.free(name_c);
     return llvm_c.LLVMModuleCreateWithNameInContext(name_c, context);
 }
 
@@ -87,7 +87,7 @@ pub fn disposeBuilder(builder: Builder) void {
 /// Create an entry point basic block for a function.
 pub fn appendBasicBlock(function: Value, name: []const u8) BasicBlock {
     const name_c = tryToNullTerminated(name);
-    defer std.heap.raw_c_allocator.free(name_c);
+    defer std.heap.c_allocator.free(name_c);
     return llvm_c.LLVMAppendBasicBlock(function, name_c);
 }
 
@@ -100,23 +100,22 @@ pub fn positionBuilderAtEnd(builder: Builder, block: BasicBlock) void {
 /// params: array of parameter types (or null for varargs)
 /// is_varargs: true if the function takes variable arguments
 pub fn functionType(return_type: Type, params: []const Type, is_varargs: bool) Type {
-    return llvm_c.LLVMFunctionType(return_type, @ptrCast(params.ptr), @intCast(params.len), @intFromBool(is_varargs));
+    return llvm_c.LLVMFunctionType(return_type, @ptrCast(@constCast(params.ptr)), @intCast(params.len), @intFromBool(is_varargs));
 }
 
 /// Add a function to a module.
 pub fn addFunction(module: Module, name: []const u8, function_type: Type) Value {
     const name_c = tryToNullTerminated(name);
-    defer std.heap.raw_c_allocator.free(name_c);
+    defer std.heap.c_allocator.free(name_c);
     return llvm_c.LLVMAddFunction(module, name_c, function_type);
 }
 
 /// Get the name of a value.
 pub fn getValueName(value: Value) []const u8 {
-    const length = llvm_c.LLVMGetValueName2(value, null, 0);
-    if (length == 0) return &.{};
-    const name = std.heap.raw_c_allocator.allocSentinel(u8, length, 0) catch return &.{};
-    llvm_c.LLVMGetValueName2(value, name.ptr, length);
-    return name;
+    var length: usize = 0;
+    const ptr = llvm_c.LLVMGetValueName2(value, &length);
+    if (length == 0 or ptr == null) return &.{};
+    return ptr[0..length];
 }
 
 /// Set the name of a value.
@@ -129,9 +128,9 @@ pub fn constInt32(value: i32) Value {
     return llvm_c.LLVMConstInt(llvm_c.LLVMInt32Type(), @bitCast(@as(u32, @intCast(value))), 1);
 }
 
-/// Create a void constant (unit type).
-pub fn constVoid() Value {
-    return llvm_c.LLVMGetUndef(llvm_c.LLVMVoidType());
+/// Create an undef i32 value (used as a placeholder for Unit/void returns).
+pub fn constUnit() Value {
+    return llvm_c.LLVMGetUndef(llvm_c.LLVMInt32Type());
 }
 
 /// Print LLVM IR to stdout.
@@ -159,20 +158,20 @@ pub fn buildRetVoid(builder: Builder) Value {
 /// Create an add instruction.
 pub fn buildAdd(builder: Builder, lhs: Value, rhs: Value, name: []const u8) Value {
     const name_c = tryToNullTerminated(name);
-    defer std.heap.raw_c_allocator.free(name_c);
+    defer std.heap.c_allocator.free(name_c);
     return llvm_c.LLVMBuildAdd(builder, lhs, rhs, name_c);
 }
 
 /// Create a call instruction.
 pub fn buildCall(builder: Builder, function: Value, args: []const Value, name: []const u8) Value {
     const name_c = tryToNullTerminated(name);
-    defer std.heap.raw_c_allocator.free(name_c);
+    defer std.heap.c_allocator.free(name_c);
     return llvm_c.LLVMBuildCall2(builder, llvm_c.LLVMGetFunctionType(function), function, @ptrCast(args.ptr), @intCast(args.len), name_c);
 }
 
 /// Convert a slice to a null-terminated string.
 fn tryToNullTerminated(s: []const u8) [:0]const u8 {
-    const result = std.heap.raw_c_allocator.allocSentinel(u8, s.len, 0) catch @panic("OOM");
+    const result = std.heap.c_allocator.allocSentinel(u8, s.len, 0) catch @panic("OOM");
     @memcpy(result, s);
     return @ptrCast(result);
 }
@@ -221,38 +220,39 @@ pub fn getTypeKind(type_: Type) i32 {
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Create a global string constant.
-/// Returns a pointer to the global string value.
+/// Returns a pointer to the first element of the global string.
 pub fn buildGlobalString(module: Module, builder: Builder, string: []const u8, name: []const u8) Value {
-    _ = builder; // Unused for now, but kept for potential future use
+    _ = builder;
     const name_c = tryToNullTerminated(name);
-    defer std.heap.raw_c_allocator.free(name_c);
+    defer std.heap.c_allocator.free(name_c);
     const string_c = tryToNullTerminated(string);
-    defer std.heap.raw_c_allocator.free(string_c);
+    defer std.heap.c_allocator.free(string_c);
 
-    // Create global string in module
-    const global = llvm_c.LLVMAddGlobal(module, llvm_c.LLVMArrayType(llvm_c.LLVMInt8Type(), @intCast(string.len)), name_c);
-    llvm_c.LLVMSetInitializer(global, llvm_c.LLVMConstString(string_c.ptr, string.len, 1));
+    const arr_type = llvm_c.LLVMArrayType(llvm_c.LLVMInt8Type(), @intCast(string.len + 1));
+    const global = llvm_c.LLVMAddGlobal(module, arr_type, name_c);
+    llvm_c.LLVMSetInitializer(global, llvm_c.LLVMConstString(string_c.ptr, @intCast(string.len), 0));
     llvm_c.LLVMSetGlobalConstant(global, 1);
+    llvm_c.LLVMSetLinkage(global, c.LLVMPrivateLinkage);
+    llvm_c.LLVMSetUnnamedAddress(global, c.LLVMGlobalUnnamedAddr);
     llvm_c.LLVMSetAlignment(global, 1);
 
-    // Get a pointer to the first element
-    return llvm_c.LLVMConstInBoundsGEP(global, &.{llvm_c.LLVMConstInt(i64Type(), 0), llvm_c.LLVMConstInt(i64Type(), 0)}, 2, "");
+    const zero = llvm_c.LLVMConstInt(llvm_c.LLVMInt64Type(), 0, 0);
+    var indices = [_]c.LLVMValueRef{ zero, zero };
+    return llvm_c.LLVMConstInBoundsGEP2(arr_type, global, &indices, 2);
 }
 
 /// Add an external declaration to the module.
 /// Useful for declaring libc functions like `puts`.
 pub fn addExternalDeclaration(module: Module, name: []const u8, return_type: Type, param_types: []const Type) Value {
     const name_c = tryToNullTerminated(name);
-    defer std.heap.raw_c_allocator.free(name_c);
+    defer std.heap.c_allocator.free(name_c);
 
     const fn_type = if (param_types.len > 0)
-        llvm_c.LLVMFunctionType(return_type, @ptrCast(param_types.ptr), @intCast(param_types.len), 0)
+        llvm_c.LLVMFunctionType(return_type, @ptrCast(@constCast(param_types.ptr)), @intCast(param_types.len), 0)
     else
         llvm_c.LLVMFunctionType(return_type, null, 0, 0);
 
-    const func = llvm_c.LLVMAddFunction(module, name_c, fn_type);
-    llvm_c.LLVMAddAttribute(func, llvm_c.LLVMCreateEnumAttribute(llvm_c.LLVMGetModuleContext(module), 1, 0, @truncate(@as(i32, 1))));
-    return func;
+    return llvm_c.LLVMAddFunction(module, name_c, fn_type);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -262,7 +262,7 @@ pub fn addExternalDeclaration(module: Module, name: []const u8, return_type: Typ
 /// Write a module to a file as LLVM IR (.ll) or bitcode (.bc).
 pub fn writeModuleToFile(module: Module, filename: []const u8) !void {
     const filename_c = tryToNullTerminated(filename);
-    defer std.heap.raw_c_allocator.free(filename_c);
+    defer std.heap.c_allocator.free(filename_c);
 
     if (llvm_c.LLVMWriteBitcodeToFile(module, filename_c) != 0) {
         // Fallback to IR text output if bitcode fails
@@ -270,7 +270,7 @@ pub fn writeModuleToFile(module: Module, filename: []const u8) !void {
         defer llvm_c.LLVMDisposeMessage(msg);
 
         const file = std.fs.cwd().createFile(filename_c, .{}) catch |err| {
-            std.debug.panic("Failed to create output file '{}': {}", .{filename, err});
+            std.debug.panic("Failed to create output file '{}': {}", .{ filename, err });
         };
         defer file.close();
 

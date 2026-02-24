@@ -464,38 +464,110 @@ fn cmdGrin(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
 
 /// Parse, check, desugar, lambda-lift, translate to GRIN IR, and emit LLVM IR.
 /// Prints the resulting LLVM IR to stdout.
-///
-/// Note: The GRIN→LLVM translation is not yet implemented (tracked in issue #55).
-/// This command currently emits a placeholder message.
 fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
-    _ = allocator;
-    _ = file_path;
+    const source = readSourceFile(allocator, io, file_path) catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        switch (err) {
+            error.FileNotFound => try stderr.print("rhc: file not found: {s}\n", .{file_path}),
+            error.AccessDenied => try stderr.print("rhc: permission denied: {s}\n", .{file_path}),
+            else => try stderr.print("rhc: cannot read file '{s}': {}\n", .{ file_path, err }),
+        }
+        try stderr.flush();
+        std.process.exit(1);
+    };
+    defer allocator.free(source);
+
+    const file_id: FileId = 1;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    // ── Parse ──────────────────────────────────────────────────────────
+    var lexer = Lexer.init(arena_alloc, source, file_id);
+    var layout = LayoutProcessor.init(arena_alloc, &lexer);
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(arena_alloc);
+    layout.setDiagnostics(&diags);
+
+    var parser = Parser.init(arena_alloc, &layout, &diags) catch {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    };
+    const module = parser.parseModule() catch {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    };
+    if (diags.hasErrors()) {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    }
+
+    // ── Rename ─────────────────────────────────────────────────────────
+    var u_supply = rusholme.naming.unique.UniqueSupply{};
+    var rename_env = try renamer_mod.RenameEnv.init(arena_alloc, &u_supply, &diags);
+    defer rename_env.deinit();
+    const renamed = try renamer_mod.rename(module, &rename_env);
+    if (diags.hasErrors()) {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    }
+
+    // ── Typecheck ──────────────────────────────────────────────────────
+    var mv_supply = htype_mod.MetaVarSupply{};
+    var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
+    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
+    var infer_ctx = infer_mod.InferCtx.init(arena_alloc, &ty_env, &mv_supply, &u_supply, &diags);
+    var module_types = try infer_mod.inferModule(&infer_ctx, renamed);
+    defer module_types.deinit(arena_alloc);
+    if (diags.hasErrors()) {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    }
+
+    // ── Desugar ────────────────────────────────────────────────────────
+    const core_prog = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags);
+    if (diags.hasErrors()) {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    }
+
+    // ── Lambda lift ────────────────────────────────────────────────────
+    const core_lifted = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog);
+    if (diags.hasErrors()) {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    }
+
+    // ── Translate to GRIN ───────────────────────────────────────────────
+    const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted);
+    if (diags.hasErrors()) {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    }
+    // ── Translate to LLVM ──────────────────────────────────────────────
+    var translator = rusholme.backend.grin_to_llvm.GrinTranslator.init(arena_alloc);
+    defer translator.deinit();
+
+    const llvm_ir = translator.translateProgram(grin_prog) catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: LLVM codegen failed: {}\n", .{err});
+        try stderr.flush();
+        std.process.exit(1);
+    };
+    defer arena_alloc.free(llvm_ir);
 
     var stdout_buf: [4096]u8 = undefined;
     var stdout_fw: File.Writer = .init(.stdout(), io, &stdout_buf);
     const stdout = &stdout_fw.interface;
-
-    try stdout.print("rhc: LLVM IR generation\n", .{});
-    try stdout.print("=========================\n\n", .{});
-    try stdout.print(
-        \\The 'rhc ll' command will emit LLVM IR for the given Haskell program.
-        \\
-        \\Current status:
-        \\  - Parser: ✅ Implemented
-        \\  - Renamer: ✅ Implemented  
-        \\  - Typechecker: ✅ Implemented
-        \\  - Core IR: ✅ Implemented
-        \\  - GRIN IR: ✅ Implemented
-        \\  - LLVM IR generation: 🚧 TODO (issue #55)
-        \\
-        \\To implement full Grin→LLVM translation, see:
-        \\  https://github.com/adinapoli/rusholme/issues/55
-        \\
-        \\See issue #381 for the detailed translation strategy:
-        \\  https://github.com/adinapoli/rusholme/issues/381
-        \\
-    , .{});
-
+    try stdout.writeAll(llvm_ir);
+    if (llvm_ir.len > 0 and llvm_ir[llvm_ir.len - 1] != '\n') {
+        try stdout.writeByte('\n');
+    }
     try stdout.flush();
 }
 
