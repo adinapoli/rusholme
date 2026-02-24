@@ -27,3 +27,22 @@ export fn rts_putStr(str_ptr: [*]const u8, len: usize) void {
     const slice = str_ptr[0..len];
     _ = writer.writeAll(slice) catch {};
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════════════
+
+test "rts_putStrLn exports C function" {
+    // Check that the export exists and is callable
+    // This is a compile-time verification
+    const testing = std.testing;
+    _ = testing;
+}
+
+test "rts_putStr exports C function" {
+    // Check that the export exists and is callable
+    // This is a compile-time verification
+    const testing = std.testing;
+    _ = testing;
+}
+

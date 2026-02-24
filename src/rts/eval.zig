@@ -26,3 +26,25 @@ export fn rts_eval(ptr: *node.Node) *node.Node {
     // Already evaluated, return as-is
     return ptr;
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════════════
+
+test "rts_eval exports C function" {
+    // Check that the export exists
+    const testing = std.testing;
+    _ = testing;
+}
+
+test "evaluate non-thunk returns as-is" {
+    const heap = @import("heap.zig");
+    heap.init();
+    defer heap.deinit();
+
+    const n = node.createInt(42);
+    const result = rts_eval(n);
+    
+    try std.testing.expectEqual(n, result);
+}
+

@@ -41,3 +41,16 @@ pub fn deinit() void {
 pub fn allocator() std.mem.Allocator {
     return State.get().allocator();
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════════════
+
+test "init/deinit heap" {
+    init();
+    defer deinit();
+
+    // Should be able to get allocator
+    _ = allocator();
+}
+
