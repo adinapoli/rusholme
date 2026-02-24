@@ -334,6 +334,17 @@
 
 > **Goal:** ADTs, pattern matching, type classes, modules, minimal Prelude.
 
+### Epic [#365](https://github.com/adinapoli/rusholme/issues/365): Module System & Multi-Module Compilation
+
+| # | Issue | Deps | Status |
+|---|-------|------|--------|
+| [#366](https://github.com/adinapoli/rusholme/issues/366) | Define module interface representation (ModIface) with `.rhi` serialisation | [#38](https://github.com/adinapoli/rusholme/issues/38) | :white_circle: |
+| [#367](https://github.com/adinapoli/rusholme/issues/367) | Implement module graph and topological compilation order | [#29](https://github.com/adinapoli/rusholme/issues/29) | :white_circle: |
+| [#368](https://github.com/adinapoli/rusholme/issues/368) | Implement compilation session (CompileEnv) | [#366](https://github.com/adinapoli/rusholme/issues/366), [#367](https://github.com/adinapoli/rusholme/issues/367) | :white_circle: |
+| [#369](https://github.com/adinapoli/rusholme/issues/369) | Implement implicit Prelude import | [#368](https://github.com/adinapoli/rusholme/issues/368) | :white_circle: |
+| [#371](https://github.com/adinapoli/rusholme/issues/371) | Implement recompilation avoidance via `.rhi` fingerprinting | [#366](https://github.com/adinapoli/rusholme/issues/366), [#368](https://github.com/adinapoli/rusholme/issues/368) | :white_circle: |
+| [#370](https://github.com/adinapoli/rusholme/issues/370) | Bootstrap Prelude from Haskell source | [#368](https://github.com/adinapoli/rusholme/issues/368), [#58](https://github.com/adinapoli/rusholme/issues/58), [#59](https://github.com/adinapoli/rusholme/issues/59) | :white_circle: |
+
 ### Epic [#10](https://github.com/adinapoli/rusholme/issues/10): Minimal Prelude
 
 | # | Issue | Deps | Status |
