@@ -26,23 +26,58 @@ const c = llvm.c;
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Centralized mapping from GRIN Prelude/PrimOp function base names to
-/// their libc equivalents.
-///
-/// Importantly, this mapping must NOT hold live LLVM type refs — those
-/// are runtime objects that cannot survive as return values from a
-/// function (they'd be dangling pointers to stack-local temporaries).
-/// Instead, the mapping describes the signature abstractly, and the
-/// translator builds the actual LLVM types at the call site.
+/// their LLVM equivalents.
 const PrimOpMapping = struct {
-    fn lookupLibcMapping(name: grin.Name) ?LibcFunction {
+    fn lookup(name: grin.Name) ?PrimOpResult {
+        // Libc function mappings
         if (std.mem.eql(u8, name.base, "putStrLn")) {
             return .{
-                .name = "puts",
-                .return_kind = .i32,
-                .param_kinds = &.{.ptr},
-                .arg_strategy = .string_to_global_ptr,
+                .libcall = .{
+                    .name = "puts",
+                    .return_kind = .i32,
+                    .param_kinds = &.{.ptr},
+                    .arg_strategy = .string_to_global_ptr,
+                },
             };
         }
+        if (std.mem.eql(u8, name.base, "print")) {
+            return .{
+                .libcall = .{
+                    .name = "printf",
+                    .return_kind = .i32,
+                    .param_kinds = &.{.ptr},
+                    .arg_strategy = .string_to_global_ptr,
+                },
+            };
+        }
+        if (std.mem.eql(u8, name.base, "putStr")) {
+            return .{
+                .libcall = .{
+                    .name = "fputs",
+                    .return_kind = .i32,
+                    .param_kinds = &.{.ptr, .ptr}, // string, FILE* (stdout)
+                    .arg_strategy = .string_to_global_ptr,
+                },
+            };
+        }
+
+        // Arithmetic PrimOp mappings
+        if (std.mem.eql(u8, name.base, "add_Int")) return .{ .instruction = .{ .add = {} } };
+        if (std.mem.eql(u8, name.base, "sub_Int")) return .{ .instruction = .{ .sub = {} } };
+        if (std.mem.eql(u8, name.base, "mul_Int")) return .{ .instruction = .{ .mul = {} } };
+        if (std.mem.eql(u8, name.base, "div#")) return .{ .instruction = .{ .sdiv = {} } };
+        if (std.mem.eql(u8, name.base, "mod#")) return .{ .instruction = .{ .srem = {} } };
+        if (std.mem.eql(u8, name.base, "quot#")) return .{ .instruction = .{ .sdiv = {} } };
+        if (std.mem.eql(u8, name.base, "rem#")) return .{ .instruction = .{ .srem = {} } };
+
+        // Comparison PrimOp mappings
+        if (std.mem.eql(u8, name.base, "eq_Int")) return .{ .instruction = .{ .eq = {} } };
+        if (std.mem.eql(u8, name.base, "ne_Int")) return .{ .instruction = .{ .ne = {} } };
+        if (std.mem.eql(u8, name.base, "lt_Int")) return .{ .instruction = .{ .slt = {} } };
+        if (std.mem.eql(u8, name.base, "le_Int")) return .{ .instruction = .{ .sle = {} } };
+        if (std.mem.eql(u8, name.base, "gt_Int")) return .{ .instruction = .{ .sgt = {} } };
+        if (std.mem.eql(u8, name.base, "ge_Int")) return .{ .instruction = .{ .sge = {} } };
+
         return null;
     }
 };
@@ -51,12 +86,14 @@ const PrimOpMapping = struct {
 /// independent of any LLVM context.
 const ParamKind = enum {
     i32,
+    i64,
     ptr,
 };
 
 /// Describes how GRIN arguments map to LLVM call arguments.
 const ArgStrategy = enum {
     string_to_global_ptr,
+    value_passthrough,
 };
 
 /// A libc function descriptor — holds *descriptions* of types,
@@ -72,6 +109,7 @@ const LibcFunction = struct {
     fn llvmReturnType(self: LibcFunction) llvm.Type {
         return switch (self.return_kind) {
             .i32 => llvm.i32Type(),
+            .i64 => llvm.i64Type(),
             .ptr => c.LLVMPointerTypeInContext(c.LLVMGetGlobalContext(), 0),
         };
     }
@@ -82,12 +120,36 @@ const LibcFunction = struct {
         for (self.param_kinds, 0..) |kind, i| {
             buf[i] = switch (kind) {
                 .i32 => llvm.i32Type(),
+                .i64 => llvm.i64Type(),
                 .ptr => c.LLVMPointerTypeInContext(c.LLVMGetGlobalContext(), 0),
             };
         }
         const ret = self.llvmReturnType();
         return c.LLVMFunctionType(ret, @ptrCast(buf.ptr), @intCast(self.param_kinds.len), 0);
     }
+};
+
+/// LLVM instruction-based PrimOp (not a libc call)
+const LLVMInstruction = union(enum) {
+    /// Binary arithmetic instructions
+    add: void,
+    sub: void,
+    mul: void,
+    sdiv: void,
+    srem: void,
+    /// Comparison instructions (icmp)
+    eq: void,
+    ne: void,
+    slt: void,
+    sle: void,
+    sgt: void,
+    sge: void,
+};
+
+/// A translated PrimOp result
+const PrimOpResult = union(enum) {
+    libcall: LibcFunction,
+    instruction: LLVMInstruction,
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -250,31 +312,80 @@ pub const GrinTranslator = struct {
             return;
         }
 
-        if (PrimOpMapping.lookupLibcMapping(name)) |libc_fn| {
-            // Build the LLVM function type on the stack from the
-            // abstract descriptor (avoids dangling-pointer issues).
-            var param_buf: [8]llvm.Type = undefined;
-            const fn_type = libc_fn.llvmFunctionType(&param_buf);
-
-            // Get or declare the external function.
-            const func = c.LLVMGetNamedFunction(self.module, libc_fn.name) orelse
-                llvm.addFunction(self.module, std.mem.span(libc_fn.name), fn_type);
-
-            if (args.len > 0) {
-                var llvm_arg = try self.translateValToLlvm(args[0]);
-                _ = c.LLVMBuildCall2(
-                    self.builder,
-                    fn_type,
-                    func,
-                    @ptrCast(&llvm_arg),
-                    1,
-                    "",
-                );
+        // Lookup the PrimOp mapping
+        if (PrimOpMapping.lookup(name)) |result| {
+            switch (result) {
+                .libcall => |libc_fn| {
+                    try self.emitLibcCall(libc_fn, args);
+                },
+                .instruction => |instr| {
+                    try self.emitInstruction(instr, args);
+                },
             }
         }
 
         // For M1, we don't support arbitrary user-defined function calls.
         // The test case uses pure and PrimOps only, which should be handled above.
+    }
+
+    fn emitLibcCall(self: *GrinTranslator, libc_fn: LibcFunction, args: []const grin.Val) TranslationError!void {
+        // Build the LLVM function type on the stack from the
+        // abstract descriptor (avoids dangling-pointer issues).
+        var param_buf: [8]llvm.Type = undefined;
+        const fn_type = libc_fn.llvmFunctionType(&param_buf);
+
+        // Get or declare the external function.
+        const func = c.LLVMGetNamedFunction(self.module, libc_fn.name) orelse
+            llvm.addFunction(self.module, std.mem.span(libc_fn.name), fn_type);
+
+        // Translate all arguments
+        var llvm_args: [8]llvm.Value = undefined;
+        for (args[0..@min(args.len, 8)], 0..) |val, i| {
+            llvm_args[i] = try self.translateValToLlvm(val);
+        }
+
+        // Special case for putStr: need to pass stdout FILE* as second argument
+        var actual_args = llvm_args[0..args.len];
+        if (std.mem.eql(u8, std.mem.span(libc_fn.name), "fputs") and args.len == 2) {
+            // For M1, we don't have a good way to get stdout. Use stderr for now.
+            // tracked in: https://github.com/adinapoli/rusholme/issues/391
+            _ = llvm_args[1]; // placeholder for FILE*
+        }
+
+        _ = c.LLVMBuildCall2(
+            self.builder,
+            fn_type,
+            func,
+            @ptrCast(actual_args.ptr),
+            @intCast(args.len),
+            "",
+        );
+    }
+
+    fn emitInstruction(self: *GrinTranslator, instr: LLVMInstruction, args: []const grin.Val) TranslationError!void {
+        // For M1, instructions need at least 2 arguments, ignore the rest
+        if (args.len < 2) {
+            return error.UnsupportedGrinVal;
+        }
+
+        const lhs = try self.translateValToLlvm(args[0]);
+        const rhs = try self.translateValToLlvm(args[1]);
+
+        const result = switch (instr) {
+            .add => c.LLVMBuildAdd(self.builder, lhs, rhs, "add"),
+            .sub => c.LLVMBuildSub(self.builder, lhs, rhs, "sub"),
+            .mul => c.LLVMBuildMul(self.builder, lhs, rhs, "mul"),
+            .sdiv => c.LLVMBuildSDiv(self.builder, lhs, rhs, "sdiv"),
+            .srem => c.LLVMBuildSRem(self.builder, lhs, rhs, "rem"),
+            .eq => c.LLVMBuildICmp(self.builder, @as(c_uint, @bitCast(c.LLVMIntEQ)), lhs, rhs, "eq"),
+            .ne => c.LLVMBuildICmp(self.builder, @as(c_uint, @bitCast(c.LLVMIntNE)), lhs, rhs, "ne"),
+            .slt => c.LLVMBuildICmp(self.builder, @as(c_uint, @bitCast(c.LLVMIntSLT)), lhs, rhs, "slt"),
+            .sle => c.LLVMBuildICmp(self.builder, @as(c_uint, @bitCast(c.LLVMIntSLE)), lhs, rhs, "sle"),
+            .sgt => c.LLVMBuildICmp(self.builder, @as(c_uint, @bitCast(c.LLVMIntSGT)), lhs, rhs, "sgt"),
+            .sge => c.LLVMBuildICmp(self.builder, @as(c_uint, @bitCast(c.LLVMIntSGE)), lhs, rhs, "sge"),
+        };
+
+        _ = result;
     }
 
     fn translateValToLlvm(self: *GrinTranslator, val: grin.Val) TranslationError!llvm.Value {
@@ -377,16 +488,16 @@ pub const GrinTranslator = struct {
 // ═══════════════════════════════════════════════════════════════════════
 
 test "PrimOpMapping: putStrLn maps to puts" {
-    const result = PrimOpMapping.lookupLibcMapping(.{
+    const result = PrimOpMapping.lookup(.{
         .base = "putStrLn",
         .unique = .{ .value = 42 },
     });
     try std.testing.expect(result != null);
-    try std.testing.expectEqualStrings("puts", std.mem.span(result.?.name));
+    try std.testing.expectEqualStrings("puts", std.mem.span(result.?.libcall.name));
 }
 
 test "PrimOpMapping: unknown function returns null" {
-    const result = PrimOpMapping.lookupLibcMapping(.{
+    const result = PrimOpMapping.lookup(.{
         .base = "myFunction",
         .unique = .{ .value = 0 },
     });
