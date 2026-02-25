@@ -22,32 +22,31 @@ const ZIG_BITCODE_FLAGS = &[_][]const u8{
 /// This invokes zig build-lib with the appropriate flags to produce
 /// a .bc file instead of a native object.
 pub fn buildRuntimeBitcode(allocator: std.mem.Allocator, output_path: []const u8) !void {
-    const argv_slice = try std.ArrayList([]const u8).initCapacity(allocator, 12);
-    defer argv_slice.deinit();
+    var argv_slice = try std.ArrayList([]const u8).initCapacity(allocator, 12);
+    defer argv_slice.deinit(allocator);
 
     // Build the zig command: zig build-lib src/rts/root.zig [flags] -M output
-    try argv_slice.append("zig");
-    try argv_slice.append("build-lib");
-    try argv_slice.append("src/rts/root.zig");
+    try argv_slice.append(allocator, "zig");
+    try argv_slice.append(allocator, "build-lib");
+    try argv_slice.append(allocator, "src/rts/root.zig");
 
     // Add bitcode emission flags
     for (ZIG_BITCODE_FLAGS) |flag| {
-        try argv_slice.append(flag);
+        try argv_slice.append(allocator, flag);
     }
 
-    try argv_slice.append("--dep");
-    try argv_slice.append("rusholme-rts");
-    try argv_slice.append("-M");
-    try argv_slice.append(output_path);
+    try argv_slice.append(allocator, "--dep");
+    try argv_slice.append(allocator, "rusholme-rts");
+    try argv_slice.append(allocator, "-M");
+    try argv_slice.append(allocator, output_path);
 
-    const result = try std.process.Child.exec(.{
-        .allocator = allocator,
+    var result = try std.process.run(allocator, undefined, .{
         .argv = argv_slice.items,
     });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
-    if (result.term != .Exited or result.exit_code != 0) {
+    if (@intFromEnum(result.term) != 0) {
         std.log.err("zig build-lib failed:\n{s}", .{result.stderr});
         return error.RTSBuildFailed;
     }
@@ -55,23 +54,22 @@ pub fn buildRuntimeBitcode(allocator: std.mem.Allocator, output_path: []const u8
 
 /// Link Haskell and Zig bitcode using llvm-link.
 pub fn linkBitcode(allocator: std.mem.Allocator, haskell_bc: []const u8, zig_bc: []const u8, output_path: []const u8) !void {
-    const argv_slice = try std.ArrayList([]const u8).initCapacity(allocator, 6);
-    defer argv_slice.deinit();
+    var argv_slice = try std.ArrayList([]const u8).initCapacity(allocator, 6);
+    defer argv_slice.deinit(allocator);
 
-    try argv_slice.append("llvm-link");
-    try argv_slice.append(haskell_bc);
-    try argv_slice.append(zig_bc);
-    try argv_slice.append("-o");
-    try argv_slice.append(output_path);
+    try argv_slice.append(allocator, "llvm-link");
+    try argv_slice.append(allocator, haskell_bc);
+    try argv_slice.append(allocator, zig_bc);
+    try argv_slice.append(allocator, "-o");
+    try argv_slice.append(allocator, output_path);
 
-    const result = try std.process.Child.exec(.{
-        .allocator = allocator,
+    var result = try std.process.run(allocator, undefined, .{
         .argv = argv_slice.items,
     });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
-    if (result.term != .Exited or result.exit_code != 0) {
+    if (@intFromEnum(result.term) != 0) {
         std.log.err("llvm-link failed:\n{s}", .{result.stderr});
         return error.BitcodeLinkFailed;
     }
@@ -83,7 +81,7 @@ const emit = struct {
         backend: *const anyopaque,
         context: *const backend_mod.EmitContext,
     ) !backend_mod.EmissionResult {
-        const self_graalvm: *const GraalVMBackend = @ptrCast(backend);
+        const self_graalvm: *const GraalVMBackend = @ptrCast(@alignCast(backend));
 
         // For M1 scope: emit haskell_llvm_to_bc
         // This would call grin_to_llvm.zig translator and then convert to bitcode
@@ -108,7 +106,7 @@ const link_link = struct {
         backend: *const anyopaque,
         context: *const backend_mod.LinkContext,
     ) !void {
-        const self_graalvm: *const GraalVMBackend = @ptrCast(backend);
+        const self_graalvm: *const GraalVMBackend = @ptrCast(@alignCast(backend));
 
         // Expected context: 2 files - [haskell_program.bc, runtime.bc]
         if (context.emitted_files.len < 2) {
@@ -141,14 +139,13 @@ const link_run = struct {
 
         // Invoke lli to execute the bitcode
         // Check GraalVM is available on PATH
-        const result_which = try std.process.Child.exec(.{
-            .allocator = std.heap.page_allocator,
-            .argv = &[_][]const u8{ "which", "lli" },
+        var which_result = try std.process.run(std.heap.page_allocator, undefined, .{
+            .argv = &.{ "which", "lli" },
         });
-        defer std.heap.page_allocator.free(result_which.stdout);
-        defer std.heap.page_allocator.free(result_which.stderr);
+        defer std.heap.page_allocator.free(which_result.stdout);
+        defer std.heap.page_allocator.free(which_result.stderr);
 
-        if (result_which.term != .Exited or result_which.exit_code != 0) {
+        if (@intFromEnum(which_result.term) != 0) {
             return error.GraalVMNotFound;
         }
 

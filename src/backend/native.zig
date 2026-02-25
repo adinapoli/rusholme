@@ -16,7 +16,7 @@ const emit = struct {
         backend: *const anyopaque,
         context: *const backend_mod.EmitContext,
     ) !backend_mod.EmissionResult {
-        const self_native: *const NativeBackend = @ptrCast(backend);
+        const self_native: *const NativeBackend = @ptrCast(@alignCast(backend));
 
         // Translate GRIN to LLVM using existing translator
         var translator = grin_to_llvm.GrinTranslator.init(self_native.allocator);
