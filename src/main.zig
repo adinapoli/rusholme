@@ -6,6 +6,8 @@
 //!   rhc core <file.hs>     Parse, typecheck, and desugar; print Core IR
 //!   rhc grin <file.hs>     Full pipeline; print GRIN IR
 //!   rhc ll <file.hs>       Full pipeline; emit LLVM IR
+//!   rhc build [-o <out>] <file.hs>
+//!                          Full pipeline; compile to native executable
 //!   rhc --help             Show this help message
 //!   rhc --version          Show version information
 
@@ -113,6 +115,39 @@ pub fn main(init: std.process.Init) !void {
         }
         const file_path = cmd_args[0];
         try cmdLl(allocator, io, file_path);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "build")) {
+        const cmd_args = user_args[1..];
+        if (cmd_args.len == 0) {
+            try writeStderr(io, "rhc build: missing file argument\n");
+            try writeStderr(io, "Usage: rhc build [-o <output>] <file.hs>\n");
+            std.process.exit(1);
+        }
+        // Parse optional -o <output> flag.
+        var output_name: ?[]const u8 = null;
+        var file_path: ?[]const u8 = null;
+        var i: usize = 0;
+        while (i < cmd_args.len) : (i += 1) {
+            if (std.mem.eql(u8, cmd_args[i], "-o")) {
+                i += 1;
+                if (i >= cmd_args.len) {
+                    try writeStderr(io, "rhc build: -o requires an argument\n");
+                    try writeStderr(io, "Usage: rhc build [-o <output>] <file.hs>\n");
+                    std.process.exit(1);
+                }
+                output_name = cmd_args[i];
+            } else {
+                file_path = cmd_args[i];
+            }
+        }
+        if (file_path == null) {
+            try writeStderr(io, "rhc build: missing file argument\n");
+            try writeStderr(io, "Usage: rhc build [-o <output>] <file.hs>\n");
+            std.process.exit(1);
+        }
+        try cmdBuild(allocator, io, file_path.?, output_name);
         return;
     }
 
@@ -571,6 +606,159 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     try stdout.flush();
 }
 
+/// Full pipeline: parse, rename, typecheck, desugar, lambda-lift, translate
+/// to GRIN, emit LLVM object code, and link into a native executable.
+///
+/// Output naming: if `output_name` is provided, use it directly; otherwise
+/// derive from the source file (`hello.hs` → `./hello`).
+fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_path: []const u8, output_name: ?[]const u8) !void {
+    const source = readSourceFile(allocator, io, file_path) catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        switch (err) {
+            error.FileNotFound => try stderr.print("rhc: file not found: {s}\n", .{file_path}),
+            error.AccessDenied => try stderr.print("rhc: permission denied: {s}\n", .{file_path}),
+            else => try stderr.print("rhc: cannot read file '{s}': {}\n", .{ file_path, err }),
+        }
+        try stderr.flush();
+        std.process.exit(1);
+    };
+    defer allocator.free(source);
+
+    const file_id: FileId = 1;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    // ── Parse ──────────────────────────────────────────────────────────
+    var lexer = Lexer.init(arena_alloc, source, file_id);
+    var layout = LayoutProcessor.init(arena_alloc, &lexer);
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(arena_alloc);
+    layout.setDiagnostics(&diags);
+
+    var parser = Parser.init(arena_alloc, &layout, &diags) catch {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    };
+    const module = parser.parseModule() catch {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    };
+    if (diags.hasErrors()) {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    }
+
+    // ── Rename ─────────────────────────────────────────────────────────
+    var u_supply = rusholme.naming.unique.UniqueSupply{};
+    var rename_env = try renamer_mod.RenameEnv.init(arena_alloc, &u_supply, &diags);
+    defer rename_env.deinit();
+    const renamed = try renamer_mod.rename(module, &rename_env);
+    if (diags.hasErrors()) {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    }
+
+    // ── Typecheck ──────────────────────────────────────────────────────
+    var mv_supply = htype_mod.MetaVarSupply{};
+    var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
+    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
+    var infer_ctx = infer_mod.InferCtx.init(arena_alloc, &ty_env, &mv_supply, &u_supply, &diags);
+    var module_types = try infer_mod.inferModule(&infer_ctx, renamed);
+    defer module_types.deinit(arena_alloc);
+    if (diags.hasErrors()) {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    }
+
+    // ── Desugar ────────────────────────────────────────────────────────
+    const core_prog = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags);
+    if (diags.hasErrors()) {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    }
+
+    // ── Lambda lift ────────────────────────────────────────────────────
+    const core_lifted = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog);
+    if (diags.hasErrors()) {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    }
+
+    // ── Translate to GRIN ───────────────────────────────────────────────
+    const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted);
+    if (diags.hasErrors()) {
+        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+        std.process.exit(1);
+    }
+
+    // ── Translate to LLVM ──────────────────────────────────────────────
+    var translator = rusholme.backend.grin_to_llvm.GrinTranslator.init(arena_alloc);
+    defer translator.deinit();
+
+    const llvm_module = translator.translateProgramToModule(grin_prog) catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: LLVM codegen failed: {}\n", .{err});
+        try stderr.flush();
+        std.process.exit(1);
+    };
+
+    // ── Emit object file ───────────────────────────────────────────────
+    const llvm = rusholme.backend.llvm;
+    const machine = llvm.createNativeTargetMachine() catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: failed to create target machine: {}\n", .{err});
+        try stderr.flush();
+        std.process.exit(1);
+    };
+    defer llvm.disposeTargetMachine(machine);
+
+    llvm.setModuleDataLayout(llvm_module, machine);
+    llvm.setModuleTriple(llvm_module);
+
+    // Derive output paths: -o name uses name directly; otherwise hello.hs → hello.
+    const exe_path = output_name orelse std.fs.path.stem(std.fs.path.basename(file_path));
+    const obj_path = try std.fmt.allocPrint(arena_alloc, "{s}.o", .{exe_path});
+
+    llvm.emitObjectFile(machine, llvm_module, obj_path) catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: failed to emit object file: {}\n", .{err});
+        try stderr.flush();
+        std.process.exit(1);
+    };
+
+    // ── Link ───────────────────────────────────────────────────────────
+    const linker = rusholme.backend.linker.Linker{
+        .objects = &.{obj_path},
+        .system_libs = &.{"c"},
+        .runtime_objects = &.{},
+        .output_path = exe_path,
+    };
+
+    linker.link(allocator, io) catch |err| {
+        // Clean up the temp object file even on link failure.
+        Dir.deleteFile(.cwd(), io, obj_path) catch {};
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: linking failed: {}\n", .{err});
+        try stderr.flush();
+        std.process.exit(1);
+    };
+
+    // Clean up the temp object file.
+    Dir.deleteFile(.cwd(), io, obj_path) catch {};
+}
+
 /// Render all collected diagnostics to stderr using the terminal renderer.
 fn renderDiagnostics(
     allocator: std.mem.Allocator,
@@ -637,6 +825,8 @@ fn printUsage(io: Io) !void {
         \\  rhc core <file.hs>     Parse, typecheck, and desugar; print Core IR
         \\  rhc grin <file.hs>     Full pipeline; print GRIN IR
         \\  rhc ll <file.hs>       Full pipeline; emit LLVM IR
+        \\  rhc build [-o <out>] <file.hs>
+        \\                         Full pipeline; compile to native executable
         \\  rhc --help             Show this help message
         \\  rhc --version          Show version information
         \\

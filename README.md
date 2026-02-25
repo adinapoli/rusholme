@@ -120,6 +120,17 @@ declare i32 @puts(ptr)
 The full pipeline — from Haskell source through parsing, renaming, typechecking,
 Core desugaring, lambda lifting, GRIN translation, all the way to LLVM IR —
 produces a real program that calls libc `puts` to print "Hello".
+
+**Native executable** — `rhc build hello.hs`:
+
+```bash
+$ rhc build hello.hs
+$ ./hello
+Hello
+```
+
+`rhc build` runs the full pipeline, emits a native object file via LLVM, and
+links it into an executable using the system C compiler.
 ## Development
 
 Requires [Nix](https://nixlang.org/) with flakes enabled, or

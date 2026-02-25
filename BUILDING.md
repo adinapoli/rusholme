@@ -52,6 +52,7 @@ zig build run -- parse  FILE.hs   # pretty-print the AST
 zig build run -- core   FILE.hs   # show desugared Core IR
 zig build run -- grin   FILE.hs   # show GRIN IR
 zig build run -- ll     FILE.hs   # emit LLVM IR
+zig build run -- build  FILE.hs   # compile to native executable
 ```
 
 ## Why `llvm-config` Matters

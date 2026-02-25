@@ -123,10 +123,21 @@ pub const GrinTranslator = struct {
         llvm.disposeContext(self.ctx);
     }
 
-    pub fn translateProgram(self: *GrinTranslator, program: grin.Program) TranslationError![]u8 {
+    /// Translate the entire GRIN program into the LLVM module.
+    /// Returns the underlying LLVM Module for direct use (e.g. object emission).
+    /// The module is owned by this translator's context — do not dispose it
+    /// separately; it is freed when the translator is deinited.
+    pub fn translateProgramToModule(self: *GrinTranslator, program: grin.Program) TranslationError!llvm.Module {
         for (program.defs) |def| {
             try self.translateDef(def);
         }
+        return self.module;
+    }
+
+    /// Translate the GRIN program and return the LLVM IR as a string.
+    /// Convenience wrapper around `translateProgramToModule` for text output.
+    pub fn translateProgram(self: *GrinTranslator, program: grin.Program) TranslationError![]u8 {
+        _ = try self.translateProgramToModule(program);
         return llvm.printModuleToString(self.module, self.allocator) catch
             return error.OutOfMemory;
     }
