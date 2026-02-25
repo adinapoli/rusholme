@@ -50,3 +50,4 @@ test_llvm_types
 test_llvm_types2
 test_llvm_zig
 test_types
+hello
