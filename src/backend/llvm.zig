@@ -35,9 +35,6 @@ pub const Type = c.LLVMTypeRef;
 /// BasicBlock represents a basic block of instructions.
 pub const BasicBlock = c.LLVMBasicBlockRef;
 
-/// ExecutionEngine provides JIT compilation and execution capabilities.
-pub const ExecutionEngine = c.LLVMExecutionEngineRef;
-
 /// PassManager manages optimization passes.
 pub const PassManager = c.LLVMPassManagerRef;
 
