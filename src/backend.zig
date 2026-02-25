@@ -32,14 +32,15 @@ pub const linker = @import("backend/linker.zig");
 pub const codegen = @import("backend/codegen.zig");
 
 // ═══════════════════════════════════════════════════════════════════════
-// Multi-Backend Trait Interface (from PR #335)
+// Multi-Backend Interface (from PR #335)
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Backend trait for multi-target code generation.
+/// Backend interface for multi-target code generation.
 ///
 /// Defines the abstraction layer for pluggable backends
-/// (native, GraalVM, WebAssembly, C, etc.).
-pub const backend_mod = @import("backend/backend_trait.zig");
+/// (native, GraalVM, WebAssembly, C, etc.) using Zig's
+/// function-pointer-in-struct pattern.
+pub const backend_mod = @import("backend/backend_interface.zig");
 
 /// Native LLVM backend implementation.
 pub const native = @import("backend/native.zig");

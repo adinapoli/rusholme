@@ -5,7 +5,7 @@
 
 const std = @import("std");
 
-const backend_mod = @import("backend_trait.zig");
+const backend_mod = @import("backend_interface.zig");
 const grin = @import("../grin/ast.zig");
 
 /// Zig build-lib command flags for emitting LLVM bitcode.

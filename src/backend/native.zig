@@ -5,7 +5,7 @@
 
 const std = @import("std");
 
-const backend_mod = @import("backend_trait.zig");
+const backend_mod = @import("backend_interface.zig");
 const grin = @import("../grin/ast.zig");
 const grin_to_llvm = @import("grin_to_llvm.zig");
 const llvm = @import("llvm.zig");
