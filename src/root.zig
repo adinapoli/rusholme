@@ -62,6 +62,7 @@ pub const grin = struct {
 // Backend
 pub const backend = struct {
     pub const llvm = @import("backend/llvm.zig");
+    pub const grin_to_llvm = @import("backend/grin_to_llvm.zig");
 };
 
 // Runtime

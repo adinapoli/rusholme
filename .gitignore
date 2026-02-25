@@ -43,3 +43,10 @@ refs
 # worktrees
 
 agent-*
+
+# LLVM test binaries
+test_import
+test_llvm_types
+test_llvm_types2
+test_llvm_zig
+test_types

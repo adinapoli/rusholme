@@ -103,6 +103,23 @@ the inner call `g x` is evaluated first and bound to `arg`, then `f arg` is
 called with the result. This is monadic bind (`>>=`) in GRIN's
 imperative notation.
 
+**LLVM IR** — `rhc ll hello.hs` (for `main = putStrLn "Hello"`):
+
+```llvm
+@.str = private unnamed_addr constant [6 x i8] c"Hello\00", align 1
+
+define i32 @main() {
+entry:
+  %0 = call i32 @puts(ptr @.str)
+  ret i32 0
+}
+
+declare i32 @puts(ptr)
+```
+
+The full pipeline — from Haskell source through parsing, renaming, typechecking,
+Core desugaring, lambda lifting, GRIN translation, all the way to LLVM IR —
+produces a real program that calls libc `puts` to print "Hello".
 ## Development
 
 Requires [Nix](https://nixlang.org/) with flakes enabled, or
