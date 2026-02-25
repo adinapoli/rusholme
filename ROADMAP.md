@@ -6,6 +6,10 @@
 **Architecture Decisions:**
 - **#0001**: PrimOps and RTS Architecture — defines the contract between compiler and runtime via ~15-30 primitive operations. See `docs/decisions/0001-primops-and-rts-architecture.md`.
 
+**Recent Progress (2026-02-25):**
+- ✓ #55: Implement LLVM codegen for GRIN expressions (M1 scope: App with PrimOpMapping, BUILDING.md)
+- ✓ #321: End-to-end integration test: main = putStrLn "Hello" through GRIN evaluator
+
 **Recent Progress (2026-02-24):**
 - ✓ #361: Implement remaining RExpr variants in desugarer
 - ✓ #359: sc017_string_char_literals.hs doesn't pass the core desugaring
@@ -316,7 +320,7 @@
 | [#320](https://github.com/adinapoli/rusholme/issues/320) | Implement GRIN evaluator for App and Case expressions | [#319](https://github.com/adinapoli/rusholme/issues/319) | :green_circle: |
 | [#51](https://github.com/adinapoli/rusholme/issues/51) | Implement basic IO primitives for the interpreter (putStrLn, getLine) | [#320](https://github.com/adinapoli/rusholme/issues/320), [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
 | [#52](https://github.com/adinapoli/rusholme/issues/52) | Implement arithmetic and comparison primitives for the interpreter | [#320](https://github.com/adinapoli/rusholme/issues/320), [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
-| [#321](https://github.com/adinapoli/rusholme/issues/321) | End-to-end integration test: main = putStrLn "Hello" through GRIN evaluator | [#320](https://github.com/adinapoli/rusholme/issues/320), [#315](https://github.com/adinapoli/rusholme/issues/315), [#314](https://github.com/adinapoli/rusholme/issues/314), [#51](https://github.com/adinapoli/rusholme/issues/51) | :white_circle: |
+| [#321](https://github.com/adinapoli/rusholme/issues/321) | End-to-end integration test: main = putStrLn "Hello" through GRIN evaluator | [#320](https://github.com/adinapoli/rusholme/issues/320), [#315](https://github.com/adinapoli/rusholme/issues/315), [#314](https://github.com/adinapoli/rusholme/issues/314), [#51](https://github.com/adinapoli/rusholme/issues/51) | :green_circle: |
 
 ### Epic [#9](https://github.com/adinapoli/rusholme/issues/9): LLVM Backend and Zig Runtime
 
@@ -324,7 +328,7 @@
 |---|-------|------|--------|
 | [#53](https://github.com/adinapoli/rusholme/issues/53) | Set up LLVM C API bindings in Zig | — | :green_circle: |
 | [#54](https://github.com/adinapoli/rusholme/issues/54) | Implement LLVM codegen skeleton (module, function defs, entry point) | [#53](https://github.com/adinapoli/rusholme/issues/53), [#40](https://github.com/adinapoli/rusholme/issues/40) | :green_circle: |
-| [#55](https://github.com/adinapoli/rusholme/issues/55) | Implement LLVM codegen for GRIN expressions (store/fetch/update/case/app) | [#54](https://github.com/adinapoli/rusholme/issues/54) | :white_circle: |
+| [#55](https://github.com/adinapoli/rusholme/issues/55) | Implement LLVM codegen for GRIN expressions (store/fetch/update/case/app) | [#54](https://github.com/adinapoli/rusholme/issues/54) | :green_circle: |
 | [#56](https://github.com/adinapoli/rusholme/issues/56) | Implement Zig runtime (heap allocator, thunk evaluator, entry point) | [#53](https://github.com/adinapoli/rusholme/issues/53) | :green_circle: |
 | [#57](https://github.com/adinapoli/rusholme/issues/57) | Implement end-to-end: LLVM compile + link with Zig runtime + produce executable | [#55](https://github.com/adinapoli/rusholme/issues/55), [#56](https://github.com/adinapoli/rusholme/issues/56) | :white_circle: |
 | [#384](https://github.com/adinapoli/rusholme/issues/384) | Implement actual thunk evaluation in runtime | [#56](https://github.com/adinapoli/rusholme/issues/56) | :white_circle: |
