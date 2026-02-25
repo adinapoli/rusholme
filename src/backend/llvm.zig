@@ -14,6 +14,11 @@ const llvm_c = @cImport({
     @cInclude("llvm-c/Linker.h");
 });
 
+// Import C stdio for file I/O
+const c_stdio = @cImport({
+    @cInclude("stdio.h");
+});
+
 pub const c = llvm_c;
 
 /// Context is an execution context for LLVM operations.
@@ -34,9 +39,6 @@ pub const Type = c.LLVMTypeRef;
 
 /// BasicBlock represents a basic block of instructions.
 pub const BasicBlock = c.LLVMBasicBlockRef;
-
-/// ExecutionEngine provides JIT compilation and execution capabilities.
-pub const ExecutionEngine = c.LLVMExecutionEngineRef;
 
 /// PassManager manages optimization passes.
 pub const PassManager = c.LLVMPassManagerRef;
@@ -125,7 +127,7 @@ pub fn setValueName(value: Value, name: []const u8) void {
 
 /// Create an i32 constant.
 pub fn constInt32(value: i32) Value {
-    return llvm_c.LLVMConstInt(llvm_c.LLVMInt32Type(), @bitCast(@as(u32, @intCast(value))), 1);
+    return llvm_c.LLVMConstInt(llvm_c.LLVMInt32Type(), @as(c_ulonglong, @intCast(value)), 1);
 }
 
 /// Create an undef i32 value (used as a placeholder for Unit/void returns).
@@ -166,7 +168,7 @@ pub fn buildAdd(builder: Builder, lhs: Value, rhs: Value, name: []const u8) Valu
 pub fn buildCall(builder: Builder, function: Value, args: []const Value, name: []const u8) Value {
     const name_c = tryToNullTerminated(name);
     defer std.heap.c_allocator.free(name_c);
-    return llvm_c.LLVMBuildCall2(builder, llvm_c.LLVMGetFunctionType(function), function, @ptrCast(args.ptr), @intCast(args.len), name_c);
+    return llvm_c.LLVMBuildCall2(builder, llvm_c.LLVMGlobalGetValueType(function), function, @constCast(@ptrCast(args.ptr)), @intCast(args.len), name_c);
 }
 
 /// Convert a slice to a null-terminated string.
@@ -207,12 +209,12 @@ pub fn pointerType(element_type: Type) Type {
 
 /// Get the function type from a function value.
 pub fn getFunctionType(function: Value) Type {
-    return llvm_c.LLVMGetFunctionType(function);
+    return llvm_c.LLVMGlobalGetValueType(function);
 }
 
 /// Get the LLVM type kind as an enum value.
 pub fn getTypeKind(type_: Type) i32 {
-    return @intFromEnum(llvm_c.LLVMGetTypeKind(type_));
+    return @intCast(llvm_c.LLVMGetTypeKind(type_));
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -261,22 +263,16 @@ pub fn addExternalDeclaration(module: Module, name: []const u8, return_type: Typ
 
 /// Write a module to a file as LLVM IR (.ll) or bitcode (.bc).
 pub fn writeModuleToFile(module: Module, filename: []const u8) !void {
+    const msg = llvm_c.LLVMPrintModuleToString(module);
+    defer llvm_c.LLVMDisposeMessage(msg);
+
     const filename_c = tryToNullTerminated(filename);
     defer std.heap.c_allocator.free(filename_c);
 
-    if (llvm_c.LLVMWriteBitcodeToFile(module, filename_c) != 0) {
-        // Fallback to IR text output if bitcode fails
-        const msg = llvm_c.LLVMPrintModuleToString(module);
-        defer llvm_c.LLVMDisposeMessage(msg);
+    const file_c = c_stdio.fopen(filename_c, "w") orelse @panic("Failed to open file");
+    defer _ = c_stdio.fclose(file_c);
 
-        const file = std.fs.cwd().createFile(filename_c, .{}) catch |err| {
-            std.debug.panic("Failed to create output file '{}': {}", .{ filename, err });
-        };
-        defer file.close();
-
-        const writer = file.writer();
-        _ = try writer.writeAll(std.mem.span(msg));
-    }
+    _ = c_stdio.fputs(msg, file_c);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
