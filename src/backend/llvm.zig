@@ -279,6 +279,87 @@ pub fn writeModuleToFile(module: Module, filename: []const u8) !void {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Target Machine and Object Emission
+// ═══════════════════════════════════════════════════════════════════════
+
+pub const TargetError = error{
+    TargetLookupFailed,
+    TargetMachineCreationFailed,
+    EmitFailed,
+};
+
+/// Create a target machine for the native (host) architecture.
+/// Returns both the machine and the target triple string (caller must
+/// dispose both via `disposeTargetMachine` and `LLVMDisposeMessage`).
+pub fn createNativeTargetMachine() TargetError!TargetMachine {
+    const triple = llvm_c.LLVMGetDefaultTargetTriple();
+    defer llvm_c.LLVMDisposeMessage(triple);
+
+    var target: llvm_c.LLVMTargetRef = null;
+    var error_msg: [*c]u8 = null;
+
+    if (llvm_c.LLVMGetTargetFromTriple(triple, &target, &error_msg) != 0) {
+        if (error_msg) |msg| llvm_c.LLVMDisposeMessage(msg);
+        return error.TargetLookupFailed;
+    }
+
+    const machine = llvm_c.LLVMCreateTargetMachine(
+        target,
+        triple,
+        "generic", // CPU
+        "", // features
+        llvm_c.LLVMCodeGenLevelDefault,
+        llvm_c.LLVMRelocPIC,
+        llvm_c.LLVMCodeModelDefault,
+    );
+
+    if (machine == null) return error.TargetMachineCreationFailed;
+
+    return machine;
+}
+
+/// Dispose of a target machine.
+pub fn disposeTargetMachine(machine: TargetMachine) void {
+    llvm_c.LLVMDisposeTargetMachine(machine);
+}
+
+/// Set the module's data layout to match the target machine.
+pub fn setModuleDataLayout(module: Module, machine: TargetMachine) void {
+    const layout = llvm_c.LLVMCreateTargetDataLayout(machine);
+    defer llvm_c.LLVMDisposeTargetData(layout);
+    llvm_c.LLVMSetModuleDataLayout(module, layout);
+}
+
+/// Set the module's target triple.
+pub fn setModuleTriple(module: Module) void {
+    const triple = llvm_c.LLVMGetDefaultTargetTriple();
+    defer llvm_c.LLVMDisposeMessage(triple);
+    llvm_c.LLVMSetTarget(module, triple);
+}
+
+/// Emit an object file (.o) from a module using the given target machine.
+pub fn emitObjectFile(machine: TargetMachine, module: Module, path: []const u8) TargetError!void {
+    const path_c = tryToNullTerminated(path);
+    defer std.heap.c_allocator.free(path_c);
+
+    var error_msg: [*c]u8 = null;
+    // LLVMTargetMachineEmitToFile takes a mutable char* for the path
+    // (LLVM-C quirk — it doesn't actually modify it).
+    const path_mut: [*c]u8 = @ptrCast(@constCast(path_c.ptr));
+
+    if (llvm_c.LLVMTargetMachineEmitToFile(
+        machine,
+        module,
+        path_mut,
+        llvm_c.LLVMObjectFile,
+        &error_msg,
+    ) != 0) {
+        if (error_msg) |msg| llvm_c.LLVMDisposeMessage(msg);
+        return error.EmitFailed;
+    }
+}
+
 // Note: LLVM tests require C headers and libc, which are not available
 // during `zig test`. These tests should be run with the full build instead.
 // test "LLM-C bindings: create context and module" {
