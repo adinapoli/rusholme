@@ -209,19 +209,19 @@ pub const GrinTranslator = struct {
     }
 
     fn translateDef(self: *GrinTranslator, def: grin.Def) TranslationError!void {
-        // For M1, `main` returns i32 (C convention); other defs return i32 or void
-        // based on whether they use Return or not.
-        // For now, use i32 for all functions that have parameters or are likely
-        // to return values - this is a temporary M1 simplification.
-        // For M1, use base name only (assumes unique names for small test programs)
+        // For M1, `main` follows the C ABI (i32 return, no params).
+        // All other user-defined functions use an untyped `ptr` representation
+        // for parameters and return values — GRIN has no type information at
+        // this stage and all heap values are pointers.
         const is_main = std.mem.eql(u8, def.name.base, "main");
         const has_params = def.params.len > 0;
-        const ret_type = if (is_main) llvm.i32Type() else if (has_params) llvm.i32Type() else llvm.voidType();
+        const value_type = if (is_main) llvm.i32Type() else c.LLVMPointerType(c.LLVMInt8Type(), 0);
+        const ret_type = if (is_main) llvm.i32Type() else if (has_params) value_type else llvm.voidType();
 
-        // Create parameter types (all i32 for M1 scope)
+        // Parameter types: i32 for main (no params), ptr for all others.
         var param_types: [8]llvm.Type = undefined;
         for (def.params[0..@min(def.params.len, 8)], 0..) |_, i| {
-            param_types[i] = llvm.i32Type();
+            param_types[i] = value_type;
         }
 
         const fn_type = llvm.functionType(ret_type, param_types[0..def.params.len], false);
@@ -253,9 +253,9 @@ pub const GrinTranslator = struct {
         if (is_main) {
             _ = llvm.buildRet(self.builder, c.LLVMConstInt(llvm.i32Type(), 0, 0));
         } else if (has_params) {
-            // Functions with parameters should have returned via Return in body
-            // As a fallback, return 0 (this is temporary M1 behavior)
-            _ = llvm.buildRet(self.builder, c.LLVMConstInt(llvm.i32Type(), 0, 0));
+            // Functions with parameters should have returned via Return in body.
+            // As a fallback emit a null pointer return (temporary M1 behaviour).
+            _ = llvm.buildRet(self.builder, c.LLVMConstPointerNull(value_type));
         } else {
             _ = llvm.buildRetVoid(self.builder);
         }
@@ -287,7 +287,7 @@ pub const GrinTranslator = struct {
         const pat_name = switch (pat) {
             .Var => |v| v,
             .Unit => {
-                // Discard the value, just evaluate RHS with no binding
+                // Discard the value, just evaluate the LHS for its side effects.
                 try self.translateExpr(lhs);
                 try self.translateExpr(rhs);
                 return;
@@ -295,20 +295,92 @@ pub const GrinTranslator = struct {
             else => return error.UnimplementedPattern,
         };
 
-        // Evaluate LHS - for M1, only App produces side effects we care about
-        // For Store/Fetch etc., we'll need to capture their return values
-        try self.translateExpr(lhs);
+        // Evaluate LHS and capture its LLVM value so the bound variable is
+        // available to the RHS.  Only App expressions yield a value in M1 scope.
+        switch (lhs.*) {
+            .App => |app| {
+                const call_val = try self.translateAppToValue(app.name, app.args, pat_name.base);
+                if (call_val) |v| {
+                    try self.params.put(pat_name.base, v);
+                }
+            },
+            else => try self.translateExpr(lhs),
+        }
 
-        // For now, in M1 scope, we don't have a good way to capture LHS results
-        // since most expressions (App, Store) don't return usable LLVM values yet
-        // TODO: Proper SSA variable binding requires refactoring translateExpr
-        // tracked in: https://github.com/adinapoli/rusholme/issues/390
-
-        // Store binding (will resolve this later when we have proper value emission)
-        _ = pat_name;
-
-        // Evaluate RHS
         try self.translateExpr(rhs);
+    }
+
+    /// Like translateApp but returns the LLVM call instruction value so the
+    /// caller can bind it to a GRIN variable (identified by `result_name`).
+    /// Returns null for void-result calls (primops that return nothing useful).
+    fn translateAppToValue(
+        self: *GrinTranslator,
+        name: grin.Name,
+        args: []const grin.Val,
+        result_name: []const u8,
+    ) TranslationError!?llvm.Value {
+        if (std.mem.eql(u8, name.base, "pure")) {
+            // `pure` is a no-op in M1 — the argument is the value.
+            if (args.len > 0) {
+                return try self.translateValToLlvm(args[0]);
+            }
+            return null;
+        }
+
+        if (PrimOpMapping.lookup(name)) |result| {
+            switch (result) {
+                .libcall => |libc_fn| try self.emitLibcCall(libc_fn, args),
+                .instruction => |instr| try self.emitInstruction(instr, args),
+            }
+            return null;
+        }
+
+        // User-defined function call — capture and return the call result value.
+        // Translate args first, then resolve the callee.  We prefer the already-
+        // declared function (from translateDef) to avoid LLVM creating a renamed
+        // duplicate (e.g. `id.1`) due to a type mismatch.
+        var llvm_args: [8]llvm.Value = undefined;
+        const arg_count = @min(args.len, 8);
+        for (args[0..arg_count], 0..) |val, i| {
+            llvm_args[i] = try self.translateValToLlvm(val);
+        }
+
+        // Look up the existing declaration; if absent, create one.
+        // Use a stack buffer for the null-terminated name (function names are short).
+        var fn_name_buf: [128]u8 = undefined;
+        std.debug.assert(name.base.len < fn_name_buf.len);
+        @memcpy(fn_name_buf[0..name.base.len], name.base);
+        fn_name_buf[name.base.len] = 0;
+        const fn_name_z = fn_name_buf[0..name.base.len :0];
+        const func = blk: {
+            if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |existing| {
+                break :blk existing;
+            }
+            // No existing declaration — build one from arg types.
+            var param_types: [8]llvm.Type = undefined;
+            for (0..arg_count) |i| {
+                param_types[i] = c.LLVMTypeOf(llvm_args[i]);
+            }
+            const fn_type = llvm.functionType(llvm.i32Type(), param_types[0..arg_count], false);
+            break :blk llvm.addFunction(self.module, name.base, fn_type);
+        };
+
+        // Null-terminate the result name for the LLVM C API.
+        var name_buf: [64]u8 = undefined;
+        const res_z = if (result_name.len < name_buf.len - 1) blk: {
+            @memcpy(name_buf[0..result_name.len], result_name);
+            name_buf[result_name.len] = 0;
+            break :blk name_buf[0..result_name.len :0];
+        } else "";
+
+        return c.LLVMBuildCall2(
+            self.builder,
+            llvm.getFunctionType(func),
+            func,
+            @ptrCast(&llvm_args),
+            @intCast(arg_count),
+            res_z,
+        );
     }
 
     fn translateApp(self: *GrinTranslator, name: grin.Name, args: []const grin.Val) TranslationError!void {
@@ -331,30 +403,35 @@ pub const GrinTranslator = struct {
                 },
             }
         } else {
-            // For user-defined functions: emit a call instruction
-            // Get or Declare the function with generic signature
-            // For M1, assume all non-main functions return i32 and take i32 args
-            var param_types: [8]llvm.Type = undefined;
-            for (0..@min(args.len, 8)) |i| {
-                param_types[i] = llvm.i32Type();
-            }
-            const fn_type = llvm.functionType(llvm.i32Type(), param_types[0..args.len], false);
-            // addFunction returns existing declaration if already present
-            const func = llvm.addFunction(self.module, name.base, fn_type);
-
-            // Translate all arguments
+            // User-defined function call.  Translate args first, then prefer
+            // the already-declared callee to avoid type-mismatch duplicates.
             var llvm_args: [8]llvm.Value = undefined;
-            for (args[0..@min(args.len, 8)], 0..) |val, i| {
+            const arg_count = @min(args.len, 8);
+            for (args[0..arg_count], 0..) |val, i| {
                 llvm_args[i] = try self.translateValToLlvm(val);
             }
-
-            // Build the call - return value is ignored for now in M1 scope
+            var fn_name_buf2: [128]u8 = undefined;
+            std.debug.assert(name.base.len < fn_name_buf2.len);
+            @memcpy(fn_name_buf2[0..name.base.len], name.base);
+            fn_name_buf2[name.base.len] = 0;
+            const fn_name_z2 = fn_name_buf2[0..name.base.len :0];
+            const func = blk: {
+                if (c.LLVMGetNamedFunction(self.module, fn_name_z2)) |existing| {
+                    break :blk existing;
+                }
+                var param_types: [8]llvm.Type = undefined;
+                for (0..arg_count) |i| {
+                    param_types[i] = c.LLVMTypeOf(llvm_args[i]);
+                }
+                const fn_type = llvm.functionType(llvm.i32Type(), param_types[0..arg_count], false);
+                break :blk llvm.addFunction(self.module, name.base, fn_type);
+            };
             _ = c.LLVMBuildCall2(
                 self.builder,
                 llvm.getFunctionType(func),
                 func,
                 @ptrCast(&llvm_args),
-                @intCast(args.len),
+                @intCast(arg_count),
                 "",
             );
         }
@@ -438,11 +515,26 @@ pub const GrinTranslator = struct {
             .Var => |name| blk: {
                 // Look up the variable in the params map.
                 // For M1, this handles function parameters (e.g., `id x = x`).
-                const value = self.params.get(name.base) orelse
+                const value = self.params.get(name.base) orelse {
+                    // Check if this might be a function reference
+                    // tracked in: https://github.com/adinapoli/rusholme/issues/XXX
+                    std.debug.print("UnsupportedGrinVal: Var {s} not found in params (function references not supported in M1)\n", .{name.base});
                     return error.UnsupportedGrinVal;
+                };
                 break :blk value;
             },
-            else => return error.UnsupportedGrinVal,
+            .ConstTagNode => {
+                std.debug.print("UnsupportedGrinVal: Node literals not supported in M1\n", .{});
+                return error.UnsupportedGrinVal;
+            },
+            .VarTagNode => {
+                std.debug.print("UnsupportedGrinVal: Variable tags not supported in M1\n", .{});
+                return error.UnsupportedGrinVal;
+            },
+            .ValTag => {
+                std.debug.print("UnsupportedGrinVal: Tag values not supported in M1\n", .{});
+                return error.UnsupportedGrinVal;
+            },
         };
     }
 
