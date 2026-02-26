@@ -661,7 +661,9 @@ fn desugarMatch(
         var arg_idx: usize = num_args;
         while (arg_idx > 0) {
             arg_idx -= 1;
-            const pat = eq.patterns[arg_idx];
+            // Unwrap Paren layers — `(Pat)` is semantically identical to `Pat`.
+            var pat = eq.patterns[arg_idx];
+            while (pat == .Paren) pat = pat.Paren.*;
 
             const scrut_expr = try ctx.alloc.create(ast_mod.Expr);
             scrut_expr.* = .{ .Var = binders[arg_idx] };
