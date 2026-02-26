@@ -209,10 +209,14 @@ pub const GrinTranslator = struct {
     }
 
     fn translateDef(self: *GrinTranslator, def: grin.Def) TranslationError!void {
-        // For M1, `main` returns i32 (C convention); other defs return void.
+        // For M1, `main` returns i32 (C convention); other defs return i32 or void
+        // based on whether they use Return or not.
+        // For now, use i32 for all functions that have parameters or are likely
+        // to return values - this is a temporary M1 simplification.
         // For M1, use base name only (assumes unique names for small test programs)
         const is_main = std.mem.eql(u8, def.name.base, "main");
-        const ret_type = if (is_main) llvm.i32Type() else llvm.voidType();
+        const has_params = def.params.len > 0;
+        const ret_type = if (is_main) llvm.i32Type() else if (has_params) llvm.i32Type() else llvm.voidType();
 
         // Create parameter types (all i32 for M1 scope)
         var param_types: [8]llvm.Type = undefined;
@@ -245,8 +249,12 @@ pub const GrinTranslator = struct {
 
         try self.translateExpr(def.body);
 
-        // Emit the terminator.
+        // Emit the terminator based on return type.
         if (is_main) {
+            _ = llvm.buildRet(self.builder, c.LLVMConstInt(llvm.i32Type(), 0, 0));
+        } else if (has_params) {
+            // Functions with parameters should have returned via Return in body
+            // As a fallback, return 0 (this is temporary M1 behavior)
             _ = llvm.buildRet(self.builder, c.LLVMConstInt(llvm.i32Type(), 0, 0));
         } else {
             _ = llvm.buildRetVoid(self.builder);
@@ -312,7 +320,7 @@ pub const GrinTranslator = struct {
             return;
         }
 
-        // Lookup the PrimOp mapping
+        // Lookup the PrimOp mapping first - these are special functions
         if (PrimOpMapping.lookup(name)) |result| {
             switch (result) {
                 .libcall => |libc_fn| {
@@ -322,10 +330,34 @@ pub const GrinTranslator = struct {
                     try self.emitInstruction(instr, args);
                 },
             }
-        }
+        } else {
+            // For user-defined functions: emit a call instruction
+            // Get or Declare the function with generic signature
+            // For M1, assume all non-main functions return i32 and take i32 args
+            var param_types: [8]llvm.Type = undefined;
+            for (0..@min(args.len, 8)) |i| {
+                param_types[i] = llvm.i32Type();
+            }
+            const fn_type = llvm.functionType(llvm.i32Type(), param_types[0..args.len], false);
+            // addFunction returns existing declaration if already present
+            const func = llvm.addFunction(self.module, name.base, fn_type);
 
-        // For M1, we don't support arbitrary user-defined function calls.
-        // The test case uses pure and PrimOps only, which should be handled above.
+            // Translate all arguments
+            var llvm_args: [8]llvm.Value = undefined;
+            for (args[0..@min(args.len, 8)], 0..) |val, i| {
+                llvm_args[i] = try self.translateValToLlvm(val);
+            }
+
+            // Build the call - return value is ignored for now in M1 scope
+            _ = c.LLVMBuildCall2(
+                self.builder,
+                llvm.getFunctionType(func),
+                func,
+                @ptrCast(&llvm_args),
+                @intCast(args.len),
+                "",
+            );
+        }
     }
 
     fn emitLibcCall(self: *GrinTranslator, libc_fn: LibcFunction, args: []const grin.Val) TranslationError!void {
@@ -403,6 +435,13 @@ pub const GrinTranslator = struct {
                 .Char => |ch| c.LLVMConstInt(llvm.i32Type(), ch, 0),
             },
             .Unit => c.LLVMGetUndef(llvm.i32Type()),
+            .Var => |name| blk: {
+                // Look up the variable in the params map.
+                // For M1, this handles function parameters (e.g., `id x = x`).
+                const value = self.params.get(name.base) orelse
+                    return error.UnsupportedGrinVal;
+                break :blk value;
+            },
             else => return error.UnsupportedGrinVal,
         };
     }
