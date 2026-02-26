@@ -217,21 +217,31 @@ pub const HType = union(enum) {
 
     // ── Conversion ─────────────────────────────────────────────────────
 
-    /// Convert a fully-solved `HType` to `CoreType`.
+    /// Convert an `HType` to `CoreType`, following all metavar chains.
     ///
     /// Allocates `CoreType` nodes using `alloc` (typically the elaborator's
     /// arena).  Follows all `MetaVar.ref` chains.
     ///
-    /// Panics if any metavariable in the type remains unsolved — an unsolved
-    /// metavar at elaboration time is a compiler bug (the solver should have
-    /// caught all ambiguity as a type error before this point).
+    /// Unsolved metavariables at elaboration time represent genuinely
+    /// polymorphic types — the constraint solver left them unconstrained
+    /// because no equations forced them to a concrete type (e.g. `identity
+    /// x = x` leaves the parameter type as `?n`).  These are converted to
+    /// `TyVar` nodes with a synthetic name `a?N` where N is the meta ID,
+    /// matching the semantics of a forall-bound rigid variable.
+    ///
+    /// This is tracked in: https://github.com/adinapoli/rusholme/issues/407
     pub fn toCore(self: HType, alloc: std.mem.Allocator) std.mem.Allocator.Error!CoreType {
         const current = self.chase();
         return switch (current) {
-            .Meta => |mv| std.debug.panic(
-                "HType.toCore: unsolved metavar ?{d} — constraint solver is incomplete",
-                .{mv.id},
-            ),
+            .Meta => |mv| blk: {
+                // Unsolved meta — treat as a polymorphic type variable.
+                // Allocate a synthetic name "a?N" for readability.
+                const base = try std.fmt.allocPrint(alloc, "a?{d}", .{mv.id});
+                break :blk CoreType{ .TyVar = naming.Name{
+                    .base = base,
+                    .unique = .{ .value = mv.id },
+                } };
+            },
             .Rigid => |name| CoreType{ .TyVar = name },
             .Con => |c| {
                 const core_args = try alloc.alloc(CoreType, c.args.len);
