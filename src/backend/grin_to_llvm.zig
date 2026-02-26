@@ -3,16 +3,31 @@
 //! Translates GRIN IR programs to LLVM IR using the LLVM-C API.
 //! This is issue #55: LLVM codegen for GRIN expressions.
 //!
-//! ## Scope (M1)
+//! ## Heap node layout
 //!
-//! This module implements the minimum translation needed for the M1 Hello
-//! World milestone: `main = putStrLn "Hello World!"`. The GRIN program
-//! is a sequence of `App` and `Store` expressions.
+//! Every constructor node is represented as a heap-allocated struct:
 //!
-//! Supported GRIN constructs:
-//!   - `App` of known Prelude/PrimOp functions (via PrimOpMapping)
-//!   - `Return` with Unit only (M1 scope)
-//!   - `Bind`, `Case`, `Store`, `Fetch`, `Update`, `Block` (placeholders)
+//!   { i64 tag, ptr field0, ptr field1, … }
+//!
+//! The `tag` is an integer discriminant assigned by `TagTable` — each
+//! unique constructor gets a stable `i64` value (0, 1, 2, …) in the
+//! order they are first encountered in the program.  All field values
+//! are opaque `ptr` (i8*) — the M1 backend boxes everything.
+//!
+//! Nullary constructors (no fields) can appear as `Val.Var` references.
+//! When the tag table recognises a name as a nullary constructor, we emit
+//! an unboxed `i64` constant instead of dereferencing a heap pointer.
+//!
+//! ## Supported GRIN constructs (M1 scope)
+//!
+//!   - App  — PrimOps (puts, arithmetic) and user-defined calls
+//!   - Bind — variable binding (Var pattern) and unit discard
+//!   - Case — switch on tag discriminant with per-alt basic blocks (#390)
+//!   - Store — malloc + write tag + fields to heap (#390)
+//!   - Return — emit `ret`
+//!   - Block — transparent scoping
+//!
+//! Fetch and Update remain stubs (tracked in #390).
 
 const std = @import("std");
 
@@ -153,6 +168,151 @@ const PrimOpResult = union(enum) {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
+// Tag Table
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Maps every constructor `Tag` in the GRIN program to a stable `i64`
+/// discriminant (0, 1, 2, …) and records the number of fields each
+/// constructor carries.
+///
+/// Built once before translation starts by scanning all `ConstTagNode`
+/// values in the program.  The unique value of the tag's name is used as
+/// the map key so that identity is name-based, not string-based.
+const TagTable = struct {
+    /// Discriminant assigned to each constructor, keyed by name unique.
+    discriminants: std.AutoHashMapUnmanaged(u64, i64),
+    /// Number of fields for each constructor, keyed by name unique.
+    field_counts: std.AutoHashMapUnmanaged(u64, u32),
+    /// Next discriminant to assign.
+    next: i64,
+
+    fn init() TagTable {
+        return .{
+            .discriminants = .{},
+            .field_counts = .{},
+            .next = 0,
+        };
+    }
+
+    fn deinit(self: *TagTable, alloc: std.mem.Allocator) void {
+        self.discriminants.deinit(alloc);
+        self.field_counts.deinit(alloc);
+    }
+
+    /// Register a constructor tag with the given field count.
+    /// If already registered, this is a no-op (idempotent).
+    fn register(self: *TagTable, alloc: std.mem.Allocator, tag: grin.Tag, n_fields: u32) !void {
+        const key = tag.name.unique.value;
+        if (self.discriminants.contains(key)) return;
+        try self.discriminants.put(alloc, key, self.next);
+        try self.field_counts.put(alloc, key, n_fields);
+        self.next += 1;
+    }
+
+    /// Return the discriminant for a constructor, or null if unknown.
+    fn discriminant(self: *const TagTable, tag: grin.Tag) ?i64 {
+        return self.discriminants.get(tag.name.unique.value);
+    }
+
+    /// Return the field count for a constructor, or null if unknown.
+    fn fieldCount(self: *const TagTable, tag: grin.Tag) ?u32 {
+        return self.field_counts.get(tag.name.unique.value);
+    }
+
+    /// Return true if the named variable is a known nullary constructor.
+    /// We match by base name since the GRIN Val.Var just carries a Name.
+    fn isNullaryByName(self: *const TagTable, name: grin.Name) bool {
+        const fc = self.field_counts.get(name.unique.value) orelse return false;
+        return fc == 0;
+    }
+
+    /// Return the discriminant for a variable if it is a known nullary
+    /// constructor, otherwise null.
+    fn discriminantByName(self: *const TagTable, name: grin.Name) ?i64 {
+        if (!self.isNullaryByName(name)) return null;
+        return self.discriminants.get(name.unique.value);
+    }
+};
+
+/// Scan the entire GRIN program and populate the tag table.
+fn buildTagTable(alloc: std.mem.Allocator, program: grin.Program) !TagTable {
+    var table = TagTable.init();
+    errdefer table.deinit(alloc);
+    for (program.defs) |def| {
+        try scanExprForTags(alloc, def.body, &table);
+    }
+    return table;
+}
+
+fn scanExprForTags(alloc: std.mem.Allocator, expr: *const grin.Expr, table: *TagTable) !void {
+    switch (expr.*) {
+        .Return => |v| try scanValForTags(alloc, v, table),
+        .Store => |v| try scanValForTags(alloc, v, table),
+        .App => |a| for (a.args) |arg| try scanValForTags(alloc, arg, table),
+        .Bind => |b| {
+            try scanExprForTags(alloc, b.lhs, table);
+            try scanValForTags(alloc, b.pat, table);
+            try scanExprForTags(alloc, b.rhs, table);
+        },
+        .Case => |k| {
+            try scanValForTags(alloc, k.scrutinee, table);
+            for (k.alts) |alt| {
+                // Register the pattern tag too.
+                switch (alt.pat) {
+                    .NodePat => |np| try table.register(alloc, np.tag, @intCast(np.fields.len)),
+                    .TagPat => |t| try table.register(alloc, t, 0),
+                    else => {},
+                }
+                try scanExprForTags(alloc, alt.body, table);
+            }
+        },
+        .Update => |u| try scanValForTags(alloc, u.val, table),
+        .Fetch => {},
+        .Block => |inner| try scanExprForTags(alloc, inner, table),
+    }
+}
+
+fn scanValForTags(alloc: std.mem.Allocator, val: grin.Val, table: *TagTable) !void {
+    switch (val) {
+        .ConstTagNode => |ctn| {
+            try table.register(alloc, ctn.tag, @intCast(ctn.fields.len));
+            for (ctn.fields) |f| try scanValForTags(alloc, f, table);
+        },
+        .ValTag => |t| try table.register(alloc, t, 0),
+        .VarTagNode => |vtn| for (vtn.fields) |f| try scanValForTags(alloc, f, table),
+        else => {},
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Heap node helpers
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Return the LLVM opaque pointer type used for all heap pointers.
+fn ptrType() llvm.Type {
+    return c.LLVMPointerTypeInContext(c.LLVMGetGlobalContext(), 0);
+}
+
+/// Return the LLVM struct type for a node with `n_fields` payload fields:
+///   { i64 tag, ptr field0, …, ptr fieldN-1 }
+fn nodeStructType(n_fields: u32) llvm.Type {
+    var members: [9]llvm.Type = undefined; // 1 tag + up to 8 fields
+    members[0] = llvm.i64Type();
+    for (1..n_fields + 1) |i| members[i] = ptrType();
+    return c.LLVMStructType(@ptrCast(&members), n_fields + 1, 0);
+}
+
+/// Declare `malloc` in the module if not already declared.
+fn declareMalloc(module: llvm.Module) llvm.Value {
+    const name = "malloc";
+    if (c.LLVMGetNamedFunction(module, name)) |existing| return existing;
+    const param_ty = llvm.i64Type();
+    var params = [_]llvm.Type{param_ty};
+    const fn_ty = c.LLVMFunctionType(ptrType(), &params, 1, 0);
+    return c.LLVMAddFunction(module, name, fn_ty);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // GRIN-to-LLVM Translator
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -168,7 +328,13 @@ pub const GrinTranslator = struct {
     module: llvm.Module,
     builder: llvm.Builder,
     allocator: std.mem.Allocator,
+    /// Maps GRIN variable names to their current LLVM SSA values.
     params: std.StringHashMap(llvm.Value),
+    /// Constructor tag discriminants, built before translation.
+    tag_table: TagTable,
+    /// The LLVM function currently being translated (needed for
+    /// `LLVMAppendBasicBlock` calls inside Case translation).
+    current_func: llvm.Value,
 
     pub fn init(allocator: std.mem.Allocator) GrinTranslator {
         llvm.initialize();
@@ -179,11 +345,14 @@ pub const GrinTranslator = struct {
             .builder = llvm.createBuilder(ctx),
             .allocator = allocator,
             .params = std.StringHashMap(llvm.Value).init(allocator),
+            .tag_table = TagTable.init(),
+            .current_func = null,
         };
     }
 
     pub fn deinit(self: *GrinTranslator) void {
         self.params.deinit();
+        self.tag_table.deinit(self.allocator);
         llvm.disposeBuilder(self.builder);
         // Disposing the context also disposes modules created within it.
         llvm.disposeContext(self.ctx);
@@ -194,6 +363,8 @@ pub const GrinTranslator = struct {
     /// The module is owned by this translator's context — do not dispose it
     /// separately; it is freed when the translator is deinited.
     pub fn translateProgramToModule(self: *GrinTranslator, program: grin.Program) TranslationError!llvm.Module {
+        // Build the tag table once before any translation.
+        self.tag_table = buildTagTable(self.allocator, program) catch return error.OutOfMemory;
         for (program.defs) |def| {
             try self.translateDef(def);
         }
@@ -210,12 +381,12 @@ pub const GrinTranslator = struct {
 
     fn translateDef(self: *GrinTranslator, def: grin.Def) TranslationError!void {
         // For M1, `main` follows the C ABI (i32 return, no params).
-        // All other user-defined functions use an untyped `ptr` representation
+        // All other user-defined functions use an opaque `ptr` representation
         // for parameters and return values — GRIN has no type information at
         // this stage and all heap values are pointers.
         const is_main = std.mem.eql(u8, def.name.base, "main");
         const has_params = def.params.len > 0;
-        const value_type = if (is_main) llvm.i32Type() else c.LLVMPointerType(c.LLVMInt8Type(), 0);
+        const value_type = if (is_main) llvm.i32Type() else ptrType();
         const ret_type = if (is_main) llvm.i32Type() else if (has_params) value_type else llvm.voidType();
 
         // Parameter types: i32 for main (no params), ptr for all others.
@@ -226,38 +397,34 @@ pub const GrinTranslator = struct {
 
         const fn_type = llvm.functionType(ret_type, param_types[0..def.params.len], false);
         const func = llvm.addFunction(self.module, def.name.base, fn_type);
+        self.current_func = func;
         const entry_bb = llvm.appendBasicBlock(func, "entry");
-
-        // Debug: verify function was created
-        // _ = c.LLVMGetNamedFunction(self.module, fn_name) orelse @panic("Function declaration failed!");
-        // std.debug.print("Declared LLVM function: {s}\n", .{fn_name});
         llvm.positionBuilderAtEnd(self.builder, entry_bb);
 
-        // Clear previous function's parameter mapping and set up current one
+        // Clear previous function's parameter mapping and set up current one.
         self.params.deinit();
         self.params = std.StringHashMap(llvm.Value).init(self.allocator);
 
-        // Store each parameter as a named value in the params map
+        // Store each parameter as a named value in the params map.
         for (def.params, 0..) |param_name, i| {
-            // Get the LLVM parameter value at this index
             const param_val = c.LLVMGetParam(func, @intCast(i));
             if (param_val == null) return error.OutOfMemory;
-
-            // Store the base name as the key (param_name.base is a slice)
             try self.params.put(param_name.base, param_val);
         }
 
         try self.translateExpr(def.body);
 
-        // Emit the terminator based on return type.
-        if (is_main) {
-            _ = llvm.buildRet(self.builder, c.LLVMConstInt(llvm.i32Type(), 0, 0));
-        } else if (has_params) {
-            // Functions with parameters should have returned via Return in body.
-            // As a fallback emit a null pointer return (temporary M1 behaviour).
-            _ = llvm.buildRet(self.builder, c.LLVMConstPointerNull(value_type));
-        } else {
-            _ = llvm.buildRetVoid(self.builder);
+        // Emit the terminator based on return type — only if the current
+        // block does not already have one (a Return expr may have emitted it).
+        const current_bb = c.LLVMGetInsertBlock(self.builder);
+        if (current_bb != null and c.LLVMGetBasicBlockTerminator(current_bb) == null) {
+            if (is_main) {
+                _ = llvm.buildRet(self.builder, c.LLVMConstInt(llvm.i32Type(), 0, 0));
+            } else if (has_params) {
+                _ = llvm.buildRet(self.builder, c.LLVMConstPointerNull(value_type));
+            } else {
+                _ = llvm.buildRetVoid(self.builder);
+            }
         }
     }
 
@@ -280,34 +447,69 @@ pub const GrinTranslator = struct {
         pat: grin.Val,
         rhs: *const grin.Expr,
     ) TranslationError!void {
-        // TODO: For full M1, we need to handle complex patterns (ConstTagNode, etc.)
-        // For now, only handle simple variable bindings (Var pattern) and discard (Unit)
-        // tracked in: https://github.com/adinapoli/rusholme/issues/390
-
-        const pat_name = switch (pat) {
-            .Var => |v| v,
+        switch (pat) {
             .Unit => {
-                // Discard the value, just evaluate the LHS for its side effects.
+                // Discard the value — evaluate LHS for side effects only.
                 try self.translateExpr(lhs);
                 try self.translateExpr(rhs);
-                return;
+            },
+            .Var => |v| {
+                // Bind the LHS result to a named variable.
+                const result = try self.translateExprToValue(lhs, v.base);
+                if (result) |val| {
+                    try self.params.put(v.base, val);
+                }
+                try self.translateExpr(rhs);
+            },
+            .ConstTagNode => |ctn| {
+                // Destructure: the LHS produced a heap pointer to a node
+                // matching this tag. Extract each field and bind the field
+                // names into params so the RHS can reference them.
+                const ptr_val = try self.translateExprToValue(lhs, "node") orelse
+                    return error.UnsupportedGrinVal;
+                const n_fields: u32 = @intCast(ctn.fields.len);
+                const struct_ty = nodeStructType(n_fields);
+                for (ctn.fields, 0..) |field_val, fi| {
+                    if (field_val != .Var) continue;
+                    const field_name = field_val.Var.base;
+                    // GEP: index 0 = tag, index fi+1 = field fi.
+                    var indices = [_]llvm.Value{
+                        c.LLVMConstInt(llvm.i32Type(), 0, 0),
+                        c.LLVMConstInt(llvm.i32Type(), @intCast(fi + 1), 0),
+                    };
+                    const gep = c.LLVMBuildGEP2(
+                        self.builder,
+                        struct_ty,
+                        ptr_val,
+                        &indices,
+                        2,
+                        nullTerminate(field_name).ptr,
+                    );
+                    const loaded = c.LLVMBuildLoad2(self.builder, ptrType(), gep, nullTerminate(field_name).ptr);
+                    try self.params.put(field_name, loaded);
+                }
+                try self.translateExpr(rhs);
             },
             else => return error.UnimplementedPattern,
-        };
-
-        // Evaluate LHS and capture its LLVM value so the bound variable is
-        // available to the RHS.  Only App expressions yield a value in M1 scope.
-        switch (lhs.*) {
-            .App => |app| {
-                const call_val = try self.translateAppToValue(app.name, app.args, pat_name.base);
-                if (call_val) |v| {
-                    try self.params.put(pat_name.base, v);
-                }
-            },
-            else => try self.translateExpr(lhs),
         }
+    }
 
-        try self.translateExpr(rhs);
+    /// Translate an expression and return the resulting LLVM value.
+    /// Returns null for expressions that produce no SSA value (void calls).
+    fn translateExprToValue(
+        self: *GrinTranslator,
+        expr: *const grin.Expr,
+        result_name: []const u8,
+    ) TranslationError!?llvm.Value {
+        return switch (expr.*) {
+            .App => |app| self.translateAppToValue(app.name, app.args, result_name),
+            .Return => |v| @as(?llvm.Value, try self.translateValToLlvm(v)),
+            .Store => |v| self.translateStoreToValue(v, result_name),
+            else => {
+                try self.translateExpr(expr);
+                return null;
+            },
+        };
     }
 
     /// Like translateApp but returns the LLVM call instruction value so the
@@ -335,18 +537,13 @@ pub const GrinTranslator = struct {
             return null;
         }
 
-        // User-defined function call — capture and return the call result value.
-        // Translate args first, then resolve the callee.  We prefer the already-
-        // declared function (from translateDef) to avoid LLVM creating a renamed
-        // duplicate (e.g. `id.1`) due to a type mismatch.
+        // User-defined function call.
         var llvm_args: [8]llvm.Value = undefined;
         const arg_count = @min(args.len, 8);
         for (args[0..arg_count], 0..) |val, i| {
             llvm_args[i] = try self.translateValToLlvm(val);
         }
 
-        // Look up the existing declaration; if absent, create one.
-        // Use a stack buffer for the null-terminated name (function names are short).
         var fn_name_buf: [128]u8 = undefined;
         std.debug.assert(name.base.len < fn_name_buf.len);
         @memcpy(fn_name_buf[0..name.base.len], name.base);
@@ -356,18 +553,16 @@ pub const GrinTranslator = struct {
             if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |existing| {
                 break :blk existing;
             }
-            // No existing declaration — build one from arg types.
             var param_types: [8]llvm.Type = undefined;
             for (0..arg_count) |i| {
                 param_types[i] = c.LLVMTypeOf(llvm_args[i]);
             }
-            const fn_type = llvm.functionType(llvm.i32Type(), param_types[0..arg_count], false);
+            const fn_type = llvm.functionType(ptrType(), param_types[0..arg_count], false);
             break :blk llvm.addFunction(self.module, name.base, fn_type);
         };
 
-        // Null-terminate the result name for the LLVM C API.
         var name_buf: [64]u8 = undefined;
-        const res_z = if (result_name.len < name_buf.len - 1) blk: {
+        const res_z: [*:0]const u8 = if (result_name.len < name_buf.len - 1) blk: {
             @memcpy(name_buf[0..result_name.len], result_name);
             name_buf[result_name.len] = 0;
             break :blk name_buf[0..result_name.len :0];
@@ -384,83 +579,61 @@ pub const GrinTranslator = struct {
     }
 
     fn translateApp(self: *GrinTranslator, name: grin.Name, args: []const grin.Val) TranslationError!void {
-        // Handle `pure` as a special built-in: pure x = x (identity, wraps in monadic context)
-        // For LLVM codegen, this is essentially a no-op - we just translate the value
-        // and the result is the translated value (which gets returned via the Return in the function body)
-        if (std.mem.eql(u8, name.base, "pure")) {
-            // For M1, no-op - the value will be handled by the surrounding Return
+        if (std.mem.eql(u8, name.base, "pure")) return;
+
+        if (PrimOpMapping.lookup(name)) |result| {
+            switch (result) {
+                .libcall => |libc_fn| try self.emitLibcCall(libc_fn, args),
+                .instruction => |instr| try self.emitInstruction(instr, args),
+            }
             return;
         }
 
-        // Lookup the PrimOp mapping first - these are special functions
-        if (PrimOpMapping.lookup(name)) |result| {
-            switch (result) {
-                .libcall => |libc_fn| {
-                    try self.emitLibcCall(libc_fn, args);
-                },
-                .instruction => |instr| {
-                    try self.emitInstruction(instr, args);
-                },
-            }
-        } else {
-            // User-defined function call.  Translate args first, then prefer
-            // the already-declared callee to avoid type-mismatch duplicates.
-            var llvm_args: [8]llvm.Value = undefined;
-            const arg_count = @min(args.len, 8);
-            for (args[0..arg_count], 0..) |val, i| {
-                llvm_args[i] = try self.translateValToLlvm(val);
-            }
-            var fn_name_buf2: [128]u8 = undefined;
-            std.debug.assert(name.base.len < fn_name_buf2.len);
-            @memcpy(fn_name_buf2[0..name.base.len], name.base);
-            fn_name_buf2[name.base.len] = 0;
-            const fn_name_z2 = fn_name_buf2[0..name.base.len :0];
-            const func = blk: {
-                if (c.LLVMGetNamedFunction(self.module, fn_name_z2)) |existing| {
-                    break :blk existing;
-                }
-                var param_types: [8]llvm.Type = undefined;
-                for (0..arg_count) |i| {
-                    param_types[i] = c.LLVMTypeOf(llvm_args[i]);
-                }
-                const fn_type = llvm.functionType(llvm.i32Type(), param_types[0..arg_count], false);
-                break :blk llvm.addFunction(self.module, name.base, fn_type);
-            };
-            _ = c.LLVMBuildCall2(
-                self.builder,
-                llvm.getFunctionType(func),
-                func,
-                @ptrCast(&llvm_args),
-                @intCast(arg_count),
-                "",
-            );
+        // User-defined function call (result discarded).
+        var llvm_args: [8]llvm.Value = undefined;
+        const arg_count = @min(args.len, 8);
+        for (args[0..arg_count], 0..) |val, i| {
+            llvm_args[i] = try self.translateValToLlvm(val);
         }
+        var fn_name_buf: [128]u8 = undefined;
+        std.debug.assert(name.base.len < fn_name_buf.len);
+        @memcpy(fn_name_buf[0..name.base.len], name.base);
+        fn_name_buf[name.base.len] = 0;
+        const fn_name_z = fn_name_buf[0..name.base.len :0];
+        const func = blk: {
+            if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |existing| {
+                break :blk existing;
+            }
+            var param_types: [8]llvm.Type = undefined;
+            for (0..arg_count) |i| {
+                param_types[i] = c.LLVMTypeOf(llvm_args[i]);
+            }
+            const fn_type = llvm.functionType(ptrType(), param_types[0..arg_count], false);
+            break :blk llvm.addFunction(self.module, name.base, fn_type);
+        };
+        _ = c.LLVMBuildCall2(
+            self.builder,
+            llvm.getFunctionType(func),
+            func,
+            @ptrCast(&llvm_args),
+            @intCast(arg_count),
+            "",
+        );
     }
 
     fn emitLibcCall(self: *GrinTranslator, libc_fn: LibcFunction, args: []const grin.Val) TranslationError!void {
-        // Build the LLVM function type on the stack from the
-        // abstract descriptor (avoids dangling-pointer issues).
         var param_buf: [8]llvm.Type = undefined;
         const fn_type = libc_fn.llvmFunctionType(&param_buf);
 
-        // Get or declare the external function.
         const func = c.LLVMGetNamedFunction(self.module, libc_fn.name) orelse
             llvm.addFunction(self.module, std.mem.span(libc_fn.name), fn_type);
 
-        // Translate all arguments
         var llvm_args: [8]llvm.Value = undefined;
         for (args[0..@min(args.len, 8)], 0..) |val, i| {
             llvm_args[i] = try self.translateValToLlvm(val);
         }
 
-        // Special case for putStr: need to pass stdout FILE* as second argument
-        var actual_args = llvm_args[0..args.len];
-        if (std.mem.eql(u8, std.mem.span(libc_fn.name), "fputs") and args.len == 2) {
-            // For M1, we don't have a good way to get stdout. Use stderr for now.
-            // tracked in: https://github.com/adinapoli/rusholme/issues/391
-            _ = llvm_args[1]; // placeholder for FILE*
-        }
-
+        const actual_args = llvm_args[0..args.len];
         _ = c.LLVMBuildCall2(
             self.builder,
             fn_type,
@@ -472,10 +645,7 @@ pub const GrinTranslator = struct {
     }
 
     fn emitInstruction(self: *GrinTranslator, instr: LLVMInstruction, args: []const grin.Val) TranslationError!void {
-        // For M1, instructions need at least 2 arguments, ignore the rest
-        if (args.len < 2) {
-            return error.UnsupportedGrinVal;
-        }
+        if (args.len < 2) return error.UnsupportedGrinVal;
 
         const lhs = try self.translateValToLlvm(args[0]);
         const rhs = try self.translateValToLlvm(args[1]);
@@ -493,7 +663,6 @@ pub const GrinTranslator = struct {
             .sgt => c.LLVMBuildICmp(self.builder, @as(c_uint, @bitCast(c.LLVMIntSGT)), lhs, rhs, "sgt"),
             .sge => c.LLVMBuildICmp(self.builder, @as(c_uint, @bitCast(c.LLVMIntSGE)), lhs, rhs, "sge"),
         };
-
         _ = result;
     }
 
@@ -513,62 +682,250 @@ pub const GrinTranslator = struct {
             },
             .Unit => c.LLVMGetUndef(llvm.i32Type()),
             .Var => |name| blk: {
-                // Look up the variable in the params map.
-                // For M1, this handles function parameters (e.g., `id x = x`).
-                const value = self.params.get(name.base) orelse {
-                    // Check if this might be a function reference or nullary constructor.
-                    // tracked in: https://github.com/adinapoli/rusholme/issues/410
-                    std.debug.print("UnsupportedGrinVal: Var {s} not found in params (function references not supported in M1)\n", .{name.base});
-                    return error.UnsupportedGrinVal;
-                };
-                break :blk value;
-            },
-            .ConstTagNode => {
-                std.debug.print("UnsupportedGrinVal: Node literals not supported in M1\n", .{});
+                // 1. Check params (function parameters and let-bound variables).
+                if (self.params.get(name.base)) |v| break :blk v;
+                // 2. Nullary constructor: emit its tag discriminant as an i64.
+                //    Tracked in: https://github.com/adinapoli/rusholme/issues/410
+                if (self.tag_table.discriminantByName(name)) |disc| {
+                    break :blk c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0);
+                }
+                std.debug.print("UnsupportedGrinVal: Var {s} not found in params or tag table\n", .{name.base});
                 return error.UnsupportedGrinVal;
+            },
+            .ConstTagNode => |ctn| blk: {
+                // Allocate a heap node and return the pointer.
+                break :blk try self.translateStoreToValue(.{ .ConstTagNode = ctn }, "node") orelse
+                    return error.UnsupportedGrinVal;
             },
             .VarTagNode => {
-                std.debug.print("UnsupportedGrinVal: Variable tags not supported in M1\n", .{});
+                // Variable-tag nodes appear in eval/apply stubs — not yet lowerable.
+                // tracked in: https://github.com/adinapoli/rusholme/issues/410
+                std.debug.print("UnsupportedGrinVal: VarTagNode not yet supported\n", .{});
                 return error.UnsupportedGrinVal;
             },
-            .ValTag => {
-                std.debug.print("UnsupportedGrinVal: Tag values not supported in M1\n", .{});
-                return error.UnsupportedGrinVal;
+            .ValTag => |t| blk: {
+                // Bare tag value — emit its discriminant as i64.
+                const disc = self.tag_table.discriminant(t) orelse {
+                    std.debug.print("UnsupportedGrinVal: ValTag {s} not in tag table\n", .{t.name.base});
+                    return error.UnsupportedGrinVal;
+                };
+                break :blk c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0);
             },
         };
     }
 
+    /// Allocate a heap node for a `Val` and return the pointer.
+    /// This is the value-returning variant of `translateStore`.
+    fn translateStoreToValue(self: *GrinTranslator, val: grin.Val, result_name: []const u8) TranslationError!?llvm.Value {
+        switch (val) {
+            .ConstTagNode => |ctn| {
+                const tag = ctn.tag;
+                const n_fields: u32 = @intCast(ctn.fields.len);
+                const disc = self.tag_table.discriminant(tag) orelse return error.UnsupportedGrinVal;
+                const struct_ty = nodeStructType(n_fields);
+
+                // sizeof(struct_ty) via LLVMSizeOf gives an i64 constant.
+                const size_val = c.LLVMSizeOf(struct_ty);
+                const malloc_fn = declareMalloc(self.module);
+                var malloc_args = [_]llvm.Value{size_val};
+                const node_ptr = c.LLVMBuildCall2(
+                    self.builder,
+                    llvm.getFunctionType(malloc_fn),
+                    malloc_fn,
+                    &malloc_args,
+                    1,
+                    nullTerminate(result_name).ptr,
+                );
+
+                // Store the tag discriminant at field index 0.
+                var tag_idx = [_]llvm.Value{
+                    c.LLVMConstInt(llvm.i32Type(), 0, 0),
+                    c.LLVMConstInt(llvm.i32Type(), 0, 0),
+                };
+                const tag_gep = c.LLVMBuildGEP2(self.builder, struct_ty, node_ptr, &tag_idx, 2, "tag_ptr");
+                _ = c.LLVMBuildStore(
+                    self.builder,
+                    c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0),
+                    tag_gep,
+                );
+
+                // Store each field at index fi+1, cast to ptr if needed.
+                for (ctn.fields, 0..) |field, fi| {
+                    var raw_val = try self.translateValToLlvm(field);
+                    // Fields are stored as opaque ptr; box integers by alloca+store.
+                    const field_ty = c.LLVMTypeOf(raw_val);
+                    const kind = c.LLVMGetTypeKind(field_ty);
+                    // LLVMPointerTypeKind == 7 in LLVM 19 C API (c_int constant, not enum)
+                    const is_ptr = kind == 7;
+                    if (!is_ptr) {
+                        // Box the scalar: alloca + store, use the pointer.
+                        const slot = c.LLVMBuildAlloca(self.builder, field_ty, "box");
+                        _ = c.LLVMBuildStore(self.builder, raw_val, slot);
+                        raw_val = slot;
+                    }
+                    var field_idx = [_]llvm.Value{
+                        c.LLVMConstInt(llvm.i32Type(), 0, 0),
+                        c.LLVMConstInt(llvm.i32Type(), @intCast(fi + 1), 0),
+                    };
+                    const field_gep = c.LLVMBuildGEP2(self.builder, struct_ty, node_ptr, &field_idx, 2, "field_ptr");
+                    _ = c.LLVMBuildStore(self.builder, raw_val, field_gep);
+                }
+
+                return node_ptr;
+            },
+            .Unit => return @as(?llvm.Value, c.LLVMGetUndef(llvm.i32Type())),
+            .Var => |name| return @as(?llvm.Value, try self.translateValToLlvm(.{ .Var = name })),
+            else => return @as(?llvm.Value, try self.translateValToLlvm(val)),
+        }
+    }
+
+    fn translateStore(self: *GrinTranslator, val: grin.Val) TranslationError!void {
+        _ = try self.translateStoreToValue(val, "stored");
+    }
+
+    /// Translate a Case expression into an LLVM switch + per-alt basic blocks.
+    ///
+    /// The scrutinee is expected to be either:
+    ///   a) A heap pointer to a `{ i64 tag, … }` node  (for NodePat / TagPat),
+    ///   b) An i64 tag value directly                   (for nullary constructors).
+    ///
+    /// We load the i64 tag word then emit `LLVMBuildSwitch`.  Each alternative
+    /// gets its own basic block; a shared `merge` block is appended after all
+    /// alts and becomes the new insertion point.
     fn translateCase(
         self: *GrinTranslator,
         scrutinee: grin.Val,
         alts: []const grin.Alt,
     ) TranslationError!void {
-        // TODO: For M1, we need to implement the actual pattern matching and branching logic:
-        // 1. Translate scrutinee to LLVM value
-        // 2. For node patterns: create LLVM switch on tag value
-        // 3. For literal patterns: compare and branch
-        // 4. For default: unconditional branch to default block
-        //
-        // For now, structural placeholder - each alternative's body would be generated
-        // in its own basic block joined by an incoming edge from the switch.
-        // tracked in: https://github.com/adinapoli/rusholme/issues/390
-        _ = self;
-        _ = scrutinee;
-        _ = alts;
-    }
+        if (alts.len == 0) return;
 
-    fn translateStore(self: *GrinTranslator, val: grin.Val) TranslationError!void {
-        // TODO: For M1, Store should:
-        // 1. Call RTS allocation function to get heap pointer
-        // 2. Write tag value to first word
-        // 3. Write each field to subsequent words
-        // 4. Return pointer to stored node
-        //
-        // This requires RTS integration which is a separate milestone.
-        // For now, structural placeholder.
-        // tracked in: https://github.com/adinapoli/rusholme/issues/390
-        _ = self;
-        _ = val;
+        // ── 1. Obtain the tag integer ──────────────────────────────────────
+        const scrut_llvm = try self.translateValToLlvm(scrutinee);
+        const scrut_ty = c.LLVMTypeOf(scrut_llvm);
+        const scrut_kind = c.LLVMGetTypeKind(scrut_ty);
+        // LLVMPointerTypeKind == 7 in LLVM 19 C API (c_int constant, not enum)
+        const is_ptr = scrut_kind == 7;
+
+        const tag_val: llvm.Value = if (is_ptr) blk: {
+            // Load the first field (i64 tag) from the heap node.
+            // We use a synthetic struct type with 1 field for GEP purposes;
+            // the actual node may have more fields but GEP only cares about
+            // the type used for offset calculation.
+            const base_struct = nodeStructType(0); // {i64} — enough for tag GEP
+            var idx = [_]llvm.Value{
+                c.LLVMConstInt(llvm.i32Type(), 0, 0),
+                c.LLVMConstInt(llvm.i32Type(), 0, 0),
+            };
+            const tag_gep = c.LLVMBuildGEP2(self.builder, base_struct, scrut_llvm, &idx, 2, "tag_gep");
+            break :blk c.LLVMBuildLoad2(self.builder, llvm.i64Type(), tag_gep, "tag");
+        } else scrut_llvm; // Already an i64 discriminant (nullary constructor).
+
+        // ── 2. Build basic blocks ──────────────────────────────────────────
+        const merge_bb = c.LLVMAppendBasicBlock(self.current_func, "case.merge");
+
+        // Identify default alt (if any) and non-default alts.
+        var default_bb: llvm.BasicBlock = null;
+        var default_alt: ?*const grin.Alt = null;
+
+        var alt_bbs = self.allocator.alloc(llvm.BasicBlock, alts.len) catch return error.OutOfMemory;
+        defer self.allocator.free(alt_bbs);
+
+        for (alts, 0..) |*alt, i| {
+            switch (alt.pat) {
+                .DefaultPat => {
+                    default_bb = c.LLVMAppendBasicBlock(self.current_func, "case.default");
+                    alt_bbs[i] = default_bb;
+                    default_alt = alt;
+                },
+                else => {
+                    var name_buf: [32]u8 = undefined;
+                    const bb_name = std.fmt.bufPrintZ(&name_buf, "case.alt{d}", .{i}) catch "case.alt";
+                    alt_bbs[i] = c.LLVMAppendBasicBlock(self.current_func, bb_name.ptr);
+                },
+            }
+        }
+
+        // If no default alt was found, use the merge block as the default
+        // (non-exhaustive match — UB at runtime, acceptable for M1).
+        if (default_bb == null) default_bb = merge_bb;
+
+        // ── 3. Emit the switch instruction ────────────────────────────────
+        // Count non-default cases for the switch.
+        var n_cases: u32 = 0;
+        for (alts) |alt| {
+            if (alt.pat != .DefaultPat) n_cases += 1;
+        }
+        const switch_inst = c.LLVMBuildSwitch(self.builder, tag_val, default_bb, n_cases);
+
+        for (alts, 0..) |alt, i| {
+            switch (alt.pat) {
+                .DefaultPat => {}, // already set as default above
+                .NodePat => |np| {
+                    const disc = self.tag_table.discriminant(np.tag) orelse return error.UnsupportedGrinVal;
+                    const case_val = c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0);
+                    c.LLVMAddCase(switch_inst, case_val, alt_bbs[i]);
+                },
+                .TagPat => |t| {
+                    const disc = self.tag_table.discriminant(t) orelse return error.UnsupportedGrinVal;
+                    const case_val = c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0);
+                    c.LLVMAddCase(switch_inst, case_val, alt_bbs[i]);
+                },
+                .LitPat => |lit| {
+                    const case_val: llvm.Value = switch (lit) {
+                        .Int => |int_val| c.LLVMConstInt(llvm.i64Type(), @bitCast(int_val), 1),
+                        .Bool => |b| c.LLVMConstInt(llvm.i64Type(), @intFromBool(b), 0),
+                        .Char => |ch| c.LLVMConstInt(llvm.i64Type(), ch, 0),
+                        else => return error.UnsupportedGrinVal,
+                    };
+                    c.LLVMAddCase(switch_inst, case_val, alt_bbs[i]);
+                },
+            }
+        }
+
+        // ── 4. Emit each alternative body ────────────────────────────────
+        for (alts, 0..) |alt, i| {
+            llvm.positionBuilderAtEnd(self.builder, alt_bbs[i]);
+
+            // For NodePat alts: GEP-load each field into params.
+            if (alt.pat == .NodePat and is_ptr) {
+                const np = alt.pat.NodePat;
+                const n_fields: u32 = @intCast(np.fields.len);
+                // Use a struct type sized for this specific constructor.
+                const struct_ty = nodeStructType(n_fields);
+                for (np.fields, 0..) |field_name, fi| {
+                    var idx = [_]llvm.Value{
+                        c.LLVMConstInt(llvm.i32Type(), 0, 0),
+                        c.LLVMConstInt(llvm.i32Type(), @intCast(fi + 1), 0),
+                    };
+                    const gep = c.LLVMBuildGEP2(
+                        self.builder,
+                        struct_ty,
+                        scrut_llvm,
+                        &idx,
+                        2,
+                        nullTerminate(field_name.base).ptr,
+                    );
+                    const loaded = c.LLVMBuildLoad2(
+                        self.builder,
+                        ptrType(),
+                        gep,
+                        nullTerminate(field_name.base).ptr,
+                    );
+                    try self.params.put(field_name.base, loaded);
+                }
+            }
+
+            try self.translateExpr(alt.body);
+
+            // Branch to merge if the alt didn't produce a terminator.
+            const cur_bb = c.LLVMGetInsertBlock(self.builder);
+            if (cur_bb != null and c.LLVMGetBasicBlockTerminator(cur_bb) == null) {
+                _ = c.LLVMBuildBr(self.builder, merge_bb);
+            }
+        }
+
+        // ── 5. Continue from merge block ──────────────────────────────────
+        llvm.positionBuilderAtEnd(self.builder, merge_bb);
     }
 
     fn translateFetch(
@@ -576,12 +933,6 @@ pub const GrinTranslator = struct {
         ptr: grin.Name,
         index: ?u32,
     ) TranslationError!void {
-        // TODO: For M1, Fetch should:
-        // 1. Load the heap pointer from variable
-        // 2. Read tag or field value from memory
-        // 3. Return the loaded GRIN value
-        //
-        // This requires proper SSA variable tracking for `ptr`.
         // tracked in: https://github.com/adinapoli/rusholme/issues/390
         _ = self;
         _ = ptr;
@@ -593,12 +944,6 @@ pub const GrinTranslator = struct {
         ptr: grin.Name,
         val: grin.Val,
     ) TranslationError!void {
-        // TODO: For M1, Update should:
-        // 1. Load the heap pointer from variable
-        // 2. Overwrite the node at that location with new value
-        //
-        // This requires proper SSA variable tracking for `ptr` and
-        // value translation for `val`.
         // tracked in: https://github.com/adinapoli/rusholme/issues/390
         _ = self;
         _ = ptr;
@@ -606,13 +951,26 @@ pub const GrinTranslator = struct {
     }
 
     fn translateReturn(self: *GrinTranslator, val: grin.Val) TranslationError!void {
-        // Return a value from the function.
-        // For now, return i32 (M1 scope) - later this should use the
-        // proper return type from function signature.
         const llvm_val = try self.translateValToLlvm(val);
         _ = llvm.buildRet(self.builder, llvm_val);
     }
 };
+
+// ═══════════════════════════════════════════════════════════════════════
+// Utilities
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Return a stack-allocated null-terminated version of `s`.
+/// Only safe for names short enough to fit in 128 bytes.
+fn nullTerminate(s: []const u8) [:0]const u8 {
+    const Buf = struct {
+        var buf: [128]u8 = undefined;
+    };
+    const len = @min(s.len, Buf.buf.len - 1);
+    @memcpy(Buf.buf[0..len], s[0..len]);
+    Buf.buf[len] = 0;
+    return Buf.buf[0..len :0];
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // Tests
@@ -633,4 +991,50 @@ test "PrimOpMapping: unknown function returns null" {
         .unique = .{ .value = 0 },
     });
     try std.testing.expect(result == null);
+}
+
+test "TagTable: register and discriminant" {
+    const alloc = std.testing.allocator;
+    var table = TagTable.init();
+    defer table.deinit(alloc);
+
+    const nil_tag = grin.Tag{ .tag_type = .Con, .name = .{ .base = "Nil", .unique = .{ .value = 1 } } };
+    const cons_tag = grin.Tag{ .tag_type = .Con, .name = .{ .base = "Cons", .unique = .{ .value = 2 } } };
+
+    try table.register(alloc, nil_tag, 0);
+    try table.register(alloc, cons_tag, 2);
+
+    try std.testing.expectEqual(@as(?i64, 0), table.discriminant(nil_tag));
+    try std.testing.expectEqual(@as(?i64, 1), table.discriminant(cons_tag));
+    try std.testing.expectEqual(@as(?u32, 0), table.fieldCount(nil_tag));
+    try std.testing.expectEqual(@as(?u32, 2), table.fieldCount(cons_tag));
+}
+
+test "TagTable: isNullaryByName" {
+    const alloc = std.testing.allocator;
+    var table = TagTable.init();
+    defer table.deinit(alloc);
+
+    const nil_tag = grin.Tag{ .tag_type = .Con, .name = .{ .base = "Nil", .unique = .{ .value = 5 } } };
+    const cons_tag = grin.Tag{ .tag_type = .Con, .name = .{ .base = "Cons", .unique = .{ .value = 6 } } };
+
+    try table.register(alloc, nil_tag, 0);
+    try table.register(alloc, cons_tag, 2);
+
+    const nil_name = grin.Name{ .base = "Nil", .unique = .{ .value = 5 } };
+    const cons_name = grin.Name{ .base = "Cons", .unique = .{ .value = 6 } };
+    try std.testing.expect(table.isNullaryByName(nil_name));
+    try std.testing.expect(!table.isNullaryByName(cons_name));
+}
+
+test "TagTable: idempotent re-registration" {
+    const alloc = std.testing.allocator;
+    var table = TagTable.init();
+    defer table.deinit(alloc);
+
+    const tag = grin.Tag{ .tag_type = .Con, .name = .{ .base = "Just", .unique = .{ .value = 10 } } };
+    try table.register(alloc, tag, 1);
+    try table.register(alloc, tag, 1); // second call must not change discriminant
+
+    try std.testing.expectEqual(@as(?i64, 0), table.discriminant(tag));
 }
