@@ -281,7 +281,7 @@
 | [#351](https://github.com/adinapoli/rusholme/issues/351) | core: custom ADT type unification failures | [#38](https://github.com/adinapoli/rusholme/issues/38) | :green_circle: |
 | [#359](https://github.com/adinapoli/rusholme/issues/359) | core: sc017_string_char_literals.hs doesn't pass the core desugaring | [#38](https://github.com/adinapoli/rusholme/issues/38) | :green_circle: |
 | [#361](https://github.com/adinapoli/rusholme/issues/361) | Implement remaining RExpr variants in desugarer | [#359](https://github.com/adinapoli/rusholme/issues/359) | :green_circle: |
-| [#407](https://github.com/adinapoli/rusholme/issues/407) | Multiple equations not accepted (renamer Prelude shadowing + desugar InfixApp crash) | [#38](https://github.com/adinapoli/rusholme/issues/38) | :yellow_circle: |
+| [#407](https://github.com/adinapoli/rusholme/issues/407) | Multiple equations not accepted (renamer Prelude shadowing + desugar InfixApp crash) | [#38](https://github.com/adinapoli/rusholme/issues/38) | :green_circle: |
 
 ### Epic [#6](https://github.com/adinapoli/rusholme/issues/6): GRIN IR and Core→GRIN Translation
 
@@ -338,10 +338,10 @@
 | [#384](https://github.com/adinapoli/rusholme/issues/384) | Implement actual thunk evaluation in runtime | [#56](https://github.com/adinapoli/rusholme/issues/56) | :white_circle: |
 | [#385](https://github.com/adinapoli/rusholme/issues/385) | Implement proper heap node field storage for GRIN values | [#56](https://github.com/adinapoli/rusholme/issues/56) | :white_circle: |
 | [#386](https://github.com/adinapoli/rusholme/issues/386) | Implement runtime closure support | [#56](https://github.com/adinapoli/rusholme/issues/56) | :white_circle: |
-| [#390](https://github.com/adinapoli/rusholme/issues/390) | LLVM codegen: translate remaining GRIN expression types (Bind, Case, Store, Fetch, Update, Return) | [#55](https://github.com/adinapoli/rusholme/issues/55) | :yellow_circle: |
-| [#391](https://github.com/adinapoli/rusholme/issues/391) | LLVM codegen: expand PrimOpMapping and support multi-arg calls | [#55](https://github.com/adinapoli/rusholme/issues/55) | :yellow_circle: |
-| [#392](https://github.com/adinapoli/rusholme/issues/392) | LLVM codegen: translate function parameters in GRIN defs | [#55](https://github.com/adinapoli/rusholme/issues/55) | :yellow_circle: |
-| [#410](https://github.com/adinapoli/rusholme/issues/410) | backend: nullary constructors not handled in GRIN→LLVM codegen (Val.Var lookup fails) | [#55](https://github.com/adinapoli/rusholme/issues/55) | :yellow_circle: |
+| [#390](https://github.com/adinapoli/rusholme/issues/390) | LLVM codegen: translate remaining GRIN expression types (Bind, Case, Store, Fetch, Update, Return) | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
+| [#391](https://github.com/adinapoli/rusholme/issues/391) | LLVM codegen: expand PrimOpMapping and support multi-arg calls | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
+| [#392](https://github.com/adinapoli/rusholme/issues/392) | LLVM codegen: translate function parameters in GRIN defs | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
+| [#410](https://github.com/adinapoli/rusholme/issues/410) | backend: nullary constructors not handled in GRIN→LLVM codegen (Val.Var lookup fails) | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
 
 ---
 
