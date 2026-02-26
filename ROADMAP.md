@@ -334,7 +334,7 @@
 | [#384](https://github.com/adinapoli/rusholme/issues/384) | Implement actual thunk evaluation in runtime | [#56](https://github.com/adinapoli/rusholme/issues/56) | :white_circle: |
 | [#385](https://github.com/adinapoli/rusholme/issues/385) | Implement proper heap node field storage for GRIN values | [#56](https://github.com/adinapoli/rusholme/issues/56) | :white_circle: |
 | [#386](https://github.com/adinapoli/rusholme/issues/386) | Implement runtime closure support | [#56](https://github.com/adinapoli/rusholme/issues/56) | :white_circle: |
-| [#390](https://github.com/adinapoli/rusholme/issues/390) | LLVM codegen: translate remaining GRIN expression types (Bind, Case, Store, Fetch, Update, Return) | [#55](https://github.com/adinapoli/rusholme/issues/55) | :white_circle: |
+| [#390](https://github.com/adinapoli/rusholme/issues/390) | LLVM codegen: translate remaining GRIN expression types (Bind, Case, Store, Fetch, Update, Return) | [#55](https://github.com/adinapoli/rusholme/issues/55) | :yellow_circle: |
 | [#391](https://github.com/adinapoli/rusholme/issues/391) | LLVM codegen: expand PrimOpMapping and support multi-arg calls | [#55](https://github.com/adinapoli/rusholme/issues/55) | :white_circle: |
 | [#392](https://github.com/adinapoli/rusholme/issues/392) | LLVM codegen: translate function parameters in GRIN defs | [#55](https://github.com/adinapoli/rusholme/issues/55) | :white_circle: |
 

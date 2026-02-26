@@ -98,6 +98,7 @@ pub const TranslationError = error{
     UnsupportedGrinVal,
     UnknownFunction,
     OutOfMemory,
+    UnimplementedPattern,
 };
 
 pub const GrinTranslator = struct {
@@ -170,10 +171,51 @@ pub const GrinTranslator = struct {
     fn translateExpr(self: *GrinTranslator, expr: *const grin.Expr) TranslationError!void {
         switch (expr.*) {
             .App => |app| try self.translateApp(app.name, app.args),
-            // ── Not yet implemented ─────────────────────────────────────
-            // tracked in: https://github.com/adinapoli/rusholme/issues/55
-            .Return, .Bind, .Case, .Store, .Fetch, .Update, .Block => {},
+            .Bind => |b| try self.translateBind(b.lhs, b.pat, b.rhs),
+            .Case => |case_| try self.translateCase(case_.scrutinee, case_.alts),
+            .Store => |val| try self.translateStore(val),
+            .Fetch => |f| try self.translateFetch(f.ptr, f.index),
+            .Update => |u| try self.translateUpdate(u.ptr, u.val),
+            .Return => |r| try self.translateReturn(r),
+            .Block => |e| try self.translateExpr(e),
         }
+    }
+
+    fn translateBind(
+        self: *GrinTranslator,
+        lhs: *const grin.Expr,
+        pat: grin.Val,
+        rhs: *const grin.Expr,
+    ) TranslationError!void {
+        // TODO: For full M1, we need to handle complex patterns (ConstTagNode, etc.)
+        // For now, only handle simple variable bindings (Var pattern) and discard (Unit)
+        // tracked in: https://github.com/adinapoli/rusholme/issues/390
+
+        const pat_name = switch (pat) {
+            .Var => |v| v,
+            .Unit => {
+                // Discard the value, just evaluate RHS with no binding
+                try self.translateExpr(lhs);
+                try self.translateExpr(rhs);
+                return;
+            },
+            else => return error.UnimplementedPattern,
+        };
+
+        // Evaluate LHS - for M1, only App produces side effects we care about
+        // For Store/Fetch etc., we'll need to capture their return values
+        try self.translateExpr(lhs);
+
+        // For now, in M1 scope, we don't have a good way to capture LHS results
+        // since most expressions (App, Store) don't return usable LLVM values yet
+        // TODO: Proper SSA variable binding requires refactoring translateExpr
+        // tracked in: https://github.com/adinapoli/rusholme/issues/390
+
+        // Store binding (will resolve this later when we have proper value emission)
+        _ = pat_name;
+
+        // Evaluate RHS
+        try self.translateExpr(rhs);
     }
 
     fn translateApp(self: *GrinTranslator, name: grin.Name, args: []const grin.Val) TranslationError!void {
@@ -229,6 +271,81 @@ pub const GrinTranslator = struct {
             .Unit => c.LLVMGetUndef(llvm.i32Type()),
             else => return error.UnsupportedGrinVal,
         };
+    }
+
+    fn translateCase(
+        self: *GrinTranslator,
+        scrutinee: grin.Val,
+        alts: []const grin.Alt,
+    ) TranslationError!void {
+        // TODO: For M1, we need to implement the actual pattern matching and branching logic:
+        // 1. Translate scrutinee to LLVM value
+        // 2. For node patterns: create LLVM switch on tag value
+        // 3. For literal patterns: compare and branch
+        // 4. For default: unconditional branch to default block
+        //
+        // For now, structural placeholder - each alternative's body would be generated
+        // in its own basic block joined by an incoming edge from the switch.
+        // tracked in: https://github.com/adinapoli/rusholme/issues/390
+        _ = self;
+        _ = scrutinee;
+        _ = alts;
+    }
+
+    fn translateStore(self: *GrinTranslator, val: grin.Val) TranslationError!void {
+        // TODO: For M1, Store should:
+        // 1. Call RTS allocation function to get heap pointer
+        // 2. Write tag value to first word
+        // 3. Write each field to subsequent words
+        // 4. Return pointer to stored node
+        //
+        // This requires RTS integration which is a separate milestone.
+        // For now, structural placeholder.
+        // tracked in: https://github.com/adinapoli/rusholme/issues/390
+        _ = self;
+        _ = val;
+    }
+
+    fn translateFetch(
+        self: *GrinTranslator,
+        ptr: grin.Name,
+        index: ?u32,
+    ) TranslationError!void {
+        // TODO: For M1, Fetch should:
+        // 1. Load the heap pointer from variable
+        // 2. Read tag or field value from memory
+        // 3. Return the loaded GRIN value
+        //
+        // This requires proper SSA variable tracking for `ptr`.
+        // tracked in: https://github.com/adinapoli/rusholme/issues/390
+        _ = self;
+        _ = ptr;
+        _ = index;
+    }
+
+    fn translateUpdate(
+        self: *GrinTranslator,
+        ptr: grin.Name,
+        val: grin.Val,
+    ) TranslationError!void {
+        // TODO: For M1, Update should:
+        // 1. Load the heap pointer from variable
+        // 2. Overwrite the node at that location with new value
+        //
+        // This requires proper SSA variable tracking for `ptr` and
+        // value translation for `val`.
+        // tracked in: https://github.com/adinapoli/rusholme/issues/390
+        _ = self;
+        _ = ptr;
+        _ = val;
+    }
+
+    fn translateReturn(self: *GrinTranslator, val: grin.Val) TranslationError!void {
+        // Return a value from the function.
+        // For now, return i32 (M1 scope) - later this should use the
+        // proper return type from function signature.
+        const llvm_val = try self.translateValToLlvm(val);
+        _ = llvm.buildRet(self.builder, llvm_val);
     }
 };
 
