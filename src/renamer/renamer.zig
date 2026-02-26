@@ -499,18 +499,33 @@ pub fn rename(module: ast.Module, env: *RenameEnv) !RenamedModule {
         switch (decl) {
             .FunBind => |fb| {
                 if (env.scope.boundInCurrentFrame(fb.name)) {
-                    // Duplicate top-level binding.
-                    const msg = try std.fmt.allocPrint(
-                        env.alloc,
-                        "duplicate definition: `{s}`",
-                        .{fb.name},
-                    );
-                    try env.diags.emit(env.alloc, .{
-                        .severity = .@"error",
-                        .code = .duplicate_definition,
-                        .span = fb.span,
-                        .message = msg,
-                    });
+                    // Check if it is a Prelude built-in being shadowed.
+                    // User-defined functions are allowed to shadow built-ins
+                    // (e.g. defining a custom `head`).  Only genuine
+                    // duplicate user-level definitions are rejected.
+                    const existing = env.scope.lookup(fb.name).?;
+                    const is_builtin = existing.unique.value < Known.reserved_range_end;
+                    if (!is_builtin) {
+                        // Genuine duplicate top-level binding.
+                        const msg = try std.fmt.allocPrint(
+                            env.alloc,
+                            "duplicate definition: `{s}`",
+                            .{fb.name},
+                        );
+                        try env.diags.emit(env.alloc, .{
+                            .severity = .@"error",
+                            .code = .duplicate_definition,
+                            .span = fb.span,
+                            .message = msg,
+                        });
+                    } else {
+                        // Shadowing a Prelude built-in — rebind to the
+                        // user's definition.  Scope.bind overwrites the
+                        // existing entry, which is exactly what we want.
+                        const n = env.freshName(fb.name);
+                        try env.scope.bind(fb.name, n);
+                        try top_names.put(env.alloc, fb.name, n);
+                    }
                 } else {
                     const n = env.freshName(fb.name);
                     try env.scope.bind(fb.name, n);
@@ -1718,4 +1733,41 @@ test "rename: two distinct functions get distinct Names" {
     const name_a = rm.declarations[0].FunBind.name;
     const name_b = rm.declarations[1].FunBind.name;
     try testing.expect(!name_a.eql(name_b));
+}
+
+test "rename: user-defined function may shadow a Prelude built-in" {
+    // Regression test for issue #407: defining `head x = x` must not
+    // emit a "duplicate definition" error even though `head` is pre-bound
+    // as a Prelude built-in by populateBuiltins.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var supply = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var env = try RenameEnv.init(alloc, &supply, &diags);
+    defer env.deinit();
+
+    // `head x = x`  (shadows the Prelude `head`)
+    const body = ast.Expr{ .Var = testQName("x") };
+    const decls = [_]ast.Decl{.{ .FunBind = .{
+        .name = "head",
+        .equations = &.{.{
+            .patterns = &.{testPatternVar("x")},
+            .rhs = .{ .UnGuarded = body },
+            .where_clause = null,
+            .span = testSpan(),
+        }},
+        .span = testSpan(),
+    } }};
+    const module = makeModule(&decls);
+    const rm = try rename(module, &env);
+
+    // Must not emit a "duplicate definition" error.
+    try testing.expect(!diags.hasErrors());
+    // The renamed `head` must have a fresh unique (not the Prelude's).
+    const head_name = rm.declarations[0].FunBind.name;
+    try testing.expectEqualStrings("head", head_name.base);
+    try testing.expect(head_name.unique.value >= Known.reserved_range_end);
 }
