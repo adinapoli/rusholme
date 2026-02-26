@@ -322,8 +322,8 @@
 | [#318](https://github.com/adinapoli/rusholme/issues/318) | Implement GRIN evaluator state: heap, environment, and function table | [#40](https://github.com/adinapoli/rusholme/issues/40) | :green_circle: |
 | [#319](https://github.com/adinapoli/rusholme/issues/319) | Implement GRIN evaluator for simple expressions (Return, Store, Fetch, Update, Bind) | [#318](https://github.com/adinapoli/rusholme/issues/318) | :green_circle: |
 | [#320](https://github.com/adinapoli/rusholme/issues/320) | Implement GRIN evaluator for App and Case expressions | [#319](https://github.com/adinapoli/rusholme/issues/319) | :green_circle: |
-| [#51](https://github.com/adinapoli/rusholme/issues/51) | Implement basic IO primitives for the interpreter (putStrLn, getLine) | [#320](https://github.com/adinapoli/rusholme/issues/320), [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
-| [#52](https://github.com/adinapoli/rusholme/issues/52) | Implement arithmetic and comparison primitives for the interpreter | [#320](https://github.com/adinapoli/rusholme/issues/320), [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
+| [#51](https://github.com/adinapoli/rusholme/issues/51) | Implement basic IO primitives for the interpreter (putStrLn, getLine) | [#320](https://github.com/adinapoli/rusholme/issues/320), [#330](https://github.com/adinapoli/rusholme/issues/330) | :green_circle: |
+| [#52](https://github.com/adinapoli/rusholme/issues/52) | Implement arithmetic and comparison primitives for the interpreter | [#320](https://github.com/adinapoli/rusholme/issues/320), [#330](https://github.com/adinapoli/rusholme/issues/330) | :green_circle: |
 | [#321](https://github.com/adinapoli/rusholme/issues/321) | End-to-end integration test: main = putStrLn "Hello" through GRIN evaluator | [#320](https://github.com/adinapoli/rusholme/issues/320), [#315](https://github.com/adinapoli/rusholme/issues/315), [#314](https://github.com/adinapoli/rusholme/issues/314), [#51](https://github.com/adinapoli/rusholme/issues/51) | :green_circle: |
 
 ### Epic [#9](https://github.com/adinapoli/rusholme/issues/9): LLVM Backend and Zig Runtime
