@@ -12,6 +12,7 @@
 
 **Recent Progress (2026-02-26):**
 - ◷ #407: Multiple equations not accepted (renamer Prelude shadowing + desugar InfixApp crash) — PR #408 open
+- ◷ #63: Implement golden/snapshot test runner (Core output comparison, `RUSHOLME_GOLDEN_UPDATE` mode) — PR #416 open
 
 **Recent Progress (2026-02-24):**
 - ✓ #361: Implement remaining RExpr variants in desugarer
@@ -135,9 +136,10 @@
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#62](https://github.com/adinapoli/rusholme/issues/62) | Set up Zig test harness and project test structure | — | :green_circle: |
-| [#63](https://github.com/adinapoli/rusholme/issues/63) | Implement golden/snapshot test runner | [#62](https://github.com/adinapoli/rusholme/issues/62) | :white_circle: |
+| [#63](https://github.com/adinapoli/rusholme/issues/63) | Implement golden/snapshot test runner | [#62](https://github.com/adinapoli/rusholme/issues/62) | :yellow_circle: |
 | [#64](https://github.com/adinapoli/rusholme/issues/64) | Implement end-to-end test runner (compile + run + check stdout) | [#63](https://github.com/adinapoli/rusholme/issues/63) | :white_circle: |
 | [#65](https://github.com/adinapoli/rusholme/issues/65) | Research and import simple test programs from GHC's testsuite | [#63](https://github.com/adinapoli/rusholme/issues/63) | :green_circle: |
+| [#415](https://github.com/adinapoli/rusholme/issues/415) | testing: add parse and GRIN output golden variants to test runner | [#63](https://github.com/adinapoli/rusholme/issues/63) | :white_circle: |
 
 ### Epic [#106](https://github.com/adinapoli/rusholme/issues/106): Zero-Leak Compiler
 
