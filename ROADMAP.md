@@ -13,6 +13,7 @@
 **Recent Progress (2026-02-26):**
 - ◷ #407: Multiple equations not accepted (renamer Prelude shadowing + desugar InfixApp crash) — PR #408 open
 - ◷ #63: Implement golden/snapshot test runner (Core output comparison, `RUSHOLME_GOLDEN_UPDATE` mode) — PR #416 open
+- ◷ #377: Tier 2 match compiler — nested patterns, as-patterns, tuples, infix cons — PR #419 open
 
 **Recent Progress (2026-02-24):**
 - ✓ #361: Implement remaining RExpr variants in desugarer
@@ -284,6 +285,11 @@
 | [#359](https://github.com/adinapoli/rusholme/issues/359) | core: sc017_string_char_literals.hs doesn't pass the core desugaring | [#38](https://github.com/adinapoli/rusholme/issues/38) | :green_circle: |
 | [#361](https://github.com/adinapoli/rusholme/issues/361) | Implement remaining RExpr variants in desugarer | [#359](https://github.com/adinapoli/rusholme/issues/359) | :green_circle: |
 | [#407](https://github.com/adinapoli/rusholme/issues/407) | Multiple equations not accepted (renamer Prelude shadowing + desugar InfixApp crash) | [#38](https://github.com/adinapoli/rusholme/issues/38) | :green_circle: |
+| [#376](https://github.com/adinapoli/rusholme/issues/376) | Tier 1: Simple match compiler (variable, literal, wildcard, single constructor patterns) | [#407](https://github.com/adinapoli/rusholme/issues/407) | :green_circle: |
+| [#377](https://github.com/adinapoli/rusholme/issues/377) | Tier 2: Match compiler for nested/complex patterns (nested constructors, as-patterns, tuples, infix cons) | [#376](https://github.com/adinapoli/rusholme/issues/376) | :yellow_circle: |
+| [#417](https://github.com/adinapoli/rusholme/issues/417) | Desugar guarded equations in pattern match compiler | [#377](https://github.com/adinapoli/rusholme/issues/377) | :white_circle: |
+| [#418](https://github.com/adinapoli/rusholme/issues/418) | Desugar list patterns in match compiler | [#377](https://github.com/adinapoli/rusholme/issues/377) | :white_circle: |
+| [#378](https://github.com/adinapoli/rusholme/issues/378) | Tier 3: Optimal decision trees with exhaustiveness/redundancy checking | [#377](https://github.com/adinapoli/rusholme/issues/377) | :white_circle: |
 
 ### Epic [#6](https://github.com/adinapoli/rusholme/issues/6): GRIN IR and Core→GRIN Translation
 
