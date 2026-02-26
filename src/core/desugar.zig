@@ -416,14 +416,49 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                 .span = syntheticSpan(),
             } };
         },
-        .InfixApp => {
-            // Infix operator application
+        .InfixApp => |infix| {
+            // Infix operator application: `left op right` desugars to
+            // `App(App(op, left), right)` using curried form.
             // tracked in: https://github.com/adinapoli/rusholme/issues/361
-            node.* = .{ .Var = .{
-                .name = Name{ .base = "todo_infixapp", .unique = .{ .value = 0 } },
-                .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
+            // First, desugar the operator to a variable
+            const op_ty = ctx.types.local_binders.get(infix.op.unique);
+            const core_op_ty = if (op_ty) |ty|
+                try htypeToCore(alloc, ty)
+            else if (ctx.types.schemes.get(infix.op.unique)) |scheme|
+                try schemeToCore(alloc, scheme)
+            else
+                @panic("Operator type not found");
+
+            const op_var = try alloc.create(ast_mod.Expr);
+            op_var.* = .{ .Var = .{
+                .name = Name{ .base = infix.op.base, .unique = infix.op.unique },
+                .ty = core_op_ty,
                 .span = syntheticSpan(),
             } };
+
+            // Desugar left operand
+            const left_result = try desugarExpr(ctx, infix.left.*);
+
+            // Create app: op left
+            const app1 = try alloc.create(ast_mod.Expr);
+            app1.* = .{ .App = .{
+                .fn_expr = op_var,
+                .arg = left_result,
+                .span = syntheticSpan(),
+            } };
+
+            // Desugar right operand
+            const right_result = try desugarExpr(ctx, infix.right.*);
+
+            // Create app: (op left) right
+            const app2 = try alloc.create(ast_mod.Expr);
+            app2.* = .{ .App = .{
+                .fn_expr = app1,
+                .arg = right_result,
+                .span = syntheticSpan(),
+            } };
+
+            node.* = app2.*;
         },
         .LeftSection => {
             // Left operator section (e.g., (x +))

@@ -185,6 +185,9 @@ pub fn translateProgram(alloc: std.mem.Allocator, core_prog: CoreProgram) !GrinP
     for (core_prog.binds) |bind| {
         switch (bind) {
             .NonRec => |pair| {
+                // Skip `$` — it is inlined at every call site in translateApp
+                // and never needs a runtime GRIN definition.
+                if (std.mem.eql(u8, pair.binder.name.base, "$")) continue;
                 const grinning = try translateDef(&ctx, pair);
                 try defs.append(alloc, grinning);
             },
@@ -332,15 +335,32 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
     }
 
     // `current` is now the function expression (should be a Var)
-    const fn_expr = current;
+    var fn_expr: *const CoreExpr = current;
 
-    // Translate the function name.
+    // Inline `$`: `App(App($, f), x)` → `App(f, x)`.
+    //
+    // `$` is purely syntactic function application sugar; it never needs a
+    // runtime representation.  After the arg-collection loop, `args` is in
+    // right-to-left order, so `args[args.items.len - 1]` is the leftmost
+    // argument — the function to be applied.  We promote that expression to
+    // be the new head and drop it from the argument list.
+    //
+    // This is iterated so that a chain like `($) ($) f x` is also handled.
+    while (true) {
+        switch (fn_expr.*) {
+            .Var => |v| {
+                if (!std.mem.eql(u8, v.name.base, "$")) break;
+                if (args.items.len == 0) break;
+                fn_expr = args.items[args.items.len - 1];
+                args.items.len -= 1;
+            },
+            else => break,
+        }
+    }
+
+    // Translate the function head.
     const translated_fn = try translateExpr(ctx, fn_expr);
 
-    // Reverse the arguments (we collected them right-to-left)
-    std.mem.reverse(*const CoreExpr, args.items);
-
-    // Get the function name and arity for partial/over-application handling
     const FnNameAndArity = struct {
         name: ?GrinName,
         arity: ?u32,
@@ -351,31 +371,21 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
             .Return => |v| {
                 switch (v) {
                     .Var => |name| {
-                        // Look up the function arity
                         const arity = ctx.getFunctionArity(name);
                         break :blk FnNameAndArity{
                             .name = name,
                             .arity = arity,
                         };
                     },
-                    else => {
-                        // Not a simple variable - we can't determine arity
-                        break :blk FnNameAndArity{
-                            .name = null,
-                            .arity = null,
-                        };
-                    },
+                    else => break :blk FnNameAndArity{ .name = null, .arity = null },
                 }
             },
-            else => {
-                // Not a simple return - we can't determine arity
-                break :blk FnNameAndArity{
-                    .name = null,
-                    .arity = null,
-                };
-            },
+            else => break :blk FnNameAndArity{ .name = null, .arity = null },
         }
     };
+
+    // Reverse the arguments (we collected them right-to-left)
+    std.mem.reverse(*const CoreExpr, args.items);
 
     // Translate all arguments.
     // GRIN requires all App arguments to be simple values (variables or literals).
