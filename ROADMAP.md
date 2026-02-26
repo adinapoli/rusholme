@@ -212,7 +212,7 @@
 | [#254](https://github.com/adinapoli/rusholme/issues/254) | lexer: string literal parsing fails when string contains keyword 'of' (resolved by quasiquotation fix) | [#86](https://github.com/adinapoli/rusholme/issues/86) | :green_circle: |
 | [#255](https://github.com/adinapoli/rusholme/issues/255) | parser: support LANGUAGE pragmas ({-# LANGUAGE ... #-}) | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
 | [#256](https://github.com/adinapoli/rusholme/issues/256) | parser: support quasi-quotation syntax ([name\| ... \|]) | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
-| [#316](https://github.com/adinapoli/rusholme/issues/316) | Add validation for duplicate record field names in data types | [#135](https://github.com/adinapoli/rusholme/issues/135) | :white_circle: |
+| [#316](https://github.com/adinapoli/rusholme/issues/316) | Add validation for duplicate record field names in data types | [#135](https://github.com/adinapoli/rusholme/issues/135) | :yellow_circle: |
 
 ### CLI
 
