@@ -106,6 +106,7 @@ pub const GrinTranslator = struct {
     module: llvm.Module,
     builder: llvm.Builder,
     allocator: std.mem.Allocator,
+    params: std.StringHashMap(llvm.Value),
 
     pub fn init(allocator: std.mem.Allocator) GrinTranslator {
         llvm.initialize();
@@ -115,10 +116,12 @@ pub const GrinTranslator = struct {
             .module = llvm.createModule("haskell", ctx),
             .builder = llvm.createBuilder(ctx),
             .allocator = allocator,
+            .params = std.StringHashMap(llvm.Value).init(allocator),
         };
     }
 
     pub fn deinit(self: *GrinTranslator) void {
+        self.params.deinit();
         llvm.disposeBuilder(self.builder);
         // Disposing the context also disposes modules created within it.
         llvm.disposeContext(self.ctx);
@@ -149,7 +152,13 @@ pub const GrinTranslator = struct {
         const is_main = std.mem.eql(u8, def.name.base, "main");
         const ret_type = if (is_main) llvm.i32Type() else llvm.voidType();
 
-        const fn_type = llvm.functionType(ret_type, &.{}, false);
+        // Create parameter types (all i32 for M1 scope)
+        var param_types: [8]llvm.Type = undefined;
+        for (def.params[0..@min(def.params.len, 8)], 0..) |_, i| {
+            param_types[i] = llvm.i32Type();
+        }
+
+        const fn_type = llvm.functionType(ret_type, param_types[0..def.params.len], false);
         const func = llvm.addFunction(self.module, def.name.base, fn_type);
         const entry_bb = llvm.appendBasicBlock(func, "entry");
 
@@ -157,6 +166,20 @@ pub const GrinTranslator = struct {
         // _ = c.LLVMGetNamedFunction(self.module, fn_name) orelse @panic("Function declaration failed!");
         // std.debug.print("Declared LLVM function: {s}\n", .{fn_name});
         llvm.positionBuilderAtEnd(self.builder, entry_bb);
+
+        // Clear previous function's parameter mapping and set up current one
+        self.params.deinit();
+        self.params = std.StringHashMap(llvm.Value).init(self.allocator);
+
+        // Store each parameter as a named value in the params map
+        for (def.params, 0..) |param_name, i| {
+            // Get the LLVM parameter value at this index
+            const param_val = c.LLVMGetParam(func, @intCast(i));
+            if (param_val == null) return error.OutOfMemory;
+
+            // Store the base name as the key (param_name.base is a slice)
+            try self.params.put(param_name.base, param_val);
+        }
 
         try self.translateExpr(def.body);
 
