@@ -14,6 +14,7 @@
 - ✓ #407: Multiple equations not accepted (renamer Prelude shadowing + desugar InfixApp crash)
 - ◷ #63: Implement golden/snapshot test runner (Core output comparison, `RUSHOLME_GOLDEN_UPDATE` mode) — PR #416 open
 - ◷ #377: Tier 2 match compiler — nested patterns, as-patterns, tuples, infix cons — PR #419 open
+- ◷ #384: Implement actual thunk evaluation in runtime (STG blackholing, Ind chains, memoization) — PR #420 open
 
 **Recent Progress (2026-02-24):**
 - ✓ #361: Implement remaining RExpr variants in desugarer
@@ -343,7 +344,8 @@
 | [#55](https://github.com/adinapoli/rusholme/issues/55) | Implement LLVM codegen for GRIN expressions (store/fetch/update/case/app) | [#54](https://github.com/adinapoli/rusholme/issues/54) | :green_circle: |
 | [#56](https://github.com/adinapoli/rusholme/issues/56) | Implement Zig runtime (heap allocator, thunk evaluator, entry point) | [#53](https://github.com/adinapoli/rusholme/issues/53) | :green_circle: |
 | [#57](https://github.com/adinapoli/rusholme/issues/57) | Implement end-to-end: LLVM compile + link with Zig runtime + produce executable | [#55](https://github.com/adinapoli/rusholme/issues/55), [#56](https://github.com/adinapoli/rusholme/issues/56) | :green_circle: |
-| [#384](https://github.com/adinapoli/rusholme/issues/384) | Implement actual thunk evaluation in runtime | [#56](https://github.com/adinapoli/rusholme/issues/56) | :white_circle: |
+| [#384](https://github.com/adinapoli/rusholme/issues/384) | Implement actual thunk evaluation in runtime | [#56](https://github.com/adinapoli/rusholme/issues/56) | :yellow_circle: |
+| [#421](https://github.com/adinapoli/rusholme/issues/421) | Fix ThunkFn calling convention ABI for LLVM interop | [#384](https://github.com/adinapoli/rusholme/issues/384) | :white_circle: |
 | [#385](https://github.com/adinapoli/rusholme/issues/385) | Implement proper heap node field storage for GRIN values | [#56](https://github.com/adinapoli/rusholme/issues/56) | :white_circle: |
 | [#386](https://github.com/adinapoli/rusholme/issues/386) | Implement runtime closure support | [#56](https://github.com/adinapoli/rusholme/issues/56) | :white_circle: |
 | [#390](https://github.com/adinapoli/rusholme/issues/390) | LLVM codegen: translate remaining GRIN expression types (Bind, Case, Store, Fetch, Update, Return) | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
