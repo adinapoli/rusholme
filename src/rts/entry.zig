@@ -17,7 +17,7 @@ extern fn haskell_main() i32;
 
 /// Program entry point.
 /// Initializes the runtime and calls the Haskell `main` function.
-export fn _start() callconv(.C) noreturn {
+export fn _start() callconv(.auto) noreturn {
     // Initialize heap
     heap.init();
     // Call the Haskell main function
