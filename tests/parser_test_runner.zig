@@ -227,6 +227,7 @@ test "should_compile: sc042_ghc_real_world_002" { try testShouldCompile(std.test
 test "should_compile: sc043_infix_constructors_in_types" { try testShouldCompile(std.testing.allocator, "sc043_infix_constructors_in_types"); }
 test "should_compile: sc044_vtt_parser" { try testShouldCompile(std.testing.allocator, "sc044_vtt_parser"); }
 test "should_compile: sc045_mutual_recursive_let" { try testShouldCompile(std.testing.allocator, "sc045_mutual_recursive_let"); }
+test "should_compile: sc046_multi_equation_adt" { try testShouldCompile(std.testing.allocator, "sc046_multi_equation_adt"); }
 
 // ── should_fail test declarations ─────────────────────────────────────────
 
