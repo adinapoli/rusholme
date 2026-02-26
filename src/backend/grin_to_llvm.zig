@@ -516,8 +516,8 @@ pub const GrinTranslator = struct {
                 // Look up the variable in the params map.
                 // For M1, this handles function parameters (e.g., `id x = x`).
                 const value = self.params.get(name.base) orelse {
-                    // Check if this might be a function reference
-                    // tracked in: https://github.com/adinapoli/rusholme/issues/XXX
+                    // Check if this might be a function reference or nullary constructor.
+                    // tracked in: https://github.com/adinapoli/rusholme/issues/410
                     std.debug.print("UnsupportedGrinVal: Var {s} not found in params (function references not supported in M1)\n", .{name.base});
                     return error.UnsupportedGrinVal;
                 };
