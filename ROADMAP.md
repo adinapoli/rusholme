@@ -11,7 +11,7 @@
 - ✓ #321: End-to-end integration test: main = putStrLn "Hello" through GRIN evaluator
 
 **Recent Progress (2026-02-26):**
-- ◷ #407: Multiple equations not accepted (renamer Prelude shadowing + desugar InfixApp crash) — PR #408 open
+- ✓ #407: Multiple equations not accepted (renamer Prelude shadowing + desugar InfixApp crash)
 - ◷ #63: Implement golden/snapshot test runner (Core output comparison, `RUSHOLME_GOLDEN_UPDATE` mode) — PR #416 open
 - ◷ #377: Tier 2 match compiler — nested patterns, as-patterns, tuples, infix cons — PR #419 open
 
