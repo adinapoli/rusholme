@@ -420,14 +420,47 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
             // Infix operator application: `left op right` desugars to
             // `App(App(op, left), right)` using curried form.
             // tracked in: https://github.com/adinapoli/rusholme/issues/361
-            // First, desugar the operator to a variable
-            const op_ty = ctx.types.local_binders.get(infix.op.unique);
-            const core_op_ty = if (op_ty) |ty|
-                try htypeToCore(alloc, ty)
-            else if (ctx.types.schemes.get(infix.op.unique)) |scheme|
+
+            // Special case: `$` (function application operator) is purely
+            // syntactic — `f $ x` is identical to `f x`.  Desugar directly
+            // to `App(left, right)` without materialising an operator node.
+            if (std.mem.eql(u8, infix.op.base, "$")) {
+                const left_result = try desugarExpr(ctx, infix.left.*);
+                const right_result = try desugarExpr(ctx, infix.right.*);
+                const app = try alloc.create(ast_mod.Expr);
+                app.* = .{ .App = .{
+                    .fn_expr = left_result,
+                    .arg = right_result,
+                    .span = syntheticSpan(),
+                } };
+                node.* = app.*;
+                return node;
+            }
+
+            // General case: look up the operator's Core type.
+            const op_ty_ptr = ctx.types.local_binders.get(infix.op.unique);
+            const core_op_ty: ast_mod.CoreType = if (op_ty_ptr) |ty| blk: {
+                // Guard against unsolved metavariables — if the operator type
+                // is still a free meta the solver could not determine it.
+                const chased = ty.chase();
+                if (chased == .Meta) {
+                    // Operator type could not be resolved (constraint solver
+                    // incomplete). Use a synthetic TyVar as a placeholder so
+                    // downstream passes do not crash.
+                    // tracked in: https://github.com/adinapoli/rusholme/issues/407
+                    break :blk ast_mod.CoreType{ .TyVar = Name{ .base = infix.op.base, .unique = infix.op.unique } };
+                }
+                break :blk try htypeToCore(alloc, ty);
+            } else if (ctx.types.schemes.get(infix.op.unique)) |scheme|
                 try schemeToCore(alloc, scheme)
-            else
-                @panic("Operator type not found");
+            else blk: {
+                // Operator is not in local_binders or schemes (e.g. a free
+                // variable that the renamer could not resolve).  Use a
+                // synthetic type rather than panicking — the program is
+                // already ill-typed but we produce a best-effort Core IR.
+                // tracked in: https://github.com/adinapoli/rusholme/issues/407
+                break :blk ast_mod.CoreType{ .TyVar = Name{ .base = infix.op.base, .unique = infix.op.unique } };
+            };
 
             const op_var = try alloc.create(ast_mod.Expr);
             op_var.* = .{ .Var = .{
@@ -628,7 +661,9 @@ fn desugarMatch(
         var arg_idx: usize = num_args;
         while (arg_idx > 0) {
             arg_idx -= 1;
-            const pat = eq.patterns[arg_idx];
+            // Unwrap Paren layers — `(Pat)` is semantically identical to `Pat`.
+            var pat = eq.patterns[arg_idx];
+            while (pat == .Paren) pat = pat.Paren.*;
 
             const scrut_expr = try ctx.alloc.create(ast_mod.Expr);
             scrut_expr.* = .{ .Var = binders[arg_idx] };
