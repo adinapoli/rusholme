@@ -10,11 +10,15 @@
 - ✓ #55: Implement LLVM codegen for GRIN expressions (M1 scope: App with PrimOpMapping, BUILDING.md)
 - ✓ #321: End-to-end integration test: main = putStrLn "Hello" through GRIN evaluator
 
+**Recent Progress (2026-02-27):**
+- ✓ #425: Fix GRIN→LLVM codegen for programs with ADTs and higher-order functions
+
 **Recent Progress (2026-02-26):**
 - ✓ #407: Multiple equations not accepted (renamer Prelude shadowing + desugar InfixApp crash)
-- ◷ #63: Implement golden/snapshot test runner (Core output comparison, `RUSHOLME_GOLDEN_UPDATE` mode) — PR #416 open
-- ◷ #377: Tier 2 match compiler — nested patterns, as-patterns, tuples, infix cons — PR #419 open
-- ◷ #384: Implement rts_eval Ind-following for GRIN runtime — PR #424 open
+- ✓ #63: Implement golden/snapshot test runner (Core output comparison, `RUSHOLME_GOLDEN_UPDATE` mode) — PR #416 merged
+- ✓ #377: Tier 2 match compiler — nested patterns, as-patterns, tuples, infix cons — PR #419 merged
+- ✓ #384: Implement rts_eval Ind-following for GRIN runtime — PR #424 merged
+- ✓ #385: Implement proper heap node field storage for GRIN values — PR #423 merged
 
 **Recent Progress (2026-02-24):**
 - ✓ #361: Implement remaining RExpr variants in desugarer
@@ -138,7 +142,7 @@
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#62](https://github.com/adinapoli/rusholme/issues/62) | Set up Zig test harness and project test structure | — | :green_circle: |
-| [#63](https://github.com/adinapoli/rusholme/issues/63) | Implement golden/snapshot test runner | [#62](https://github.com/adinapoli/rusholme/issues/62) | :yellow_circle: |
+| [#63](https://github.com/adinapoli/rusholme/issues/63) | Implement golden/snapshot test runner | [#62](https://github.com/adinapoli/rusholme/issues/62) | :green_circle: |
 | [#64](https://github.com/adinapoli/rusholme/issues/64) | Implement end-to-end test runner (compile + run + check stdout) | [#63](https://github.com/adinapoli/rusholme/issues/63) | :white_circle: |
 | [#65](https://github.com/adinapoli/rusholme/issues/65) | Research and import simple test programs from GHC's testsuite | [#63](https://github.com/adinapoli/rusholme/issues/63) | :green_circle: |
 | [#415](https://github.com/adinapoli/rusholme/issues/415) | testing: add parse and GRIN output golden variants to test runner | [#63](https://github.com/adinapoli/rusholme/issues/63) | :white_circle: |
@@ -287,7 +291,7 @@
 | [#361](https://github.com/adinapoli/rusholme/issues/361) | Implement remaining RExpr variants in desugarer | [#359](https://github.com/adinapoli/rusholme/issues/359) | :green_circle: |
 | [#407](https://github.com/adinapoli/rusholme/issues/407) | Multiple equations not accepted (renamer Prelude shadowing + desugar InfixApp crash) | [#38](https://github.com/adinapoli/rusholme/issues/38) | :green_circle: |
 | [#376](https://github.com/adinapoli/rusholme/issues/376) | Tier 1: Simple match compiler (variable, literal, wildcard, single constructor patterns) | [#407](https://github.com/adinapoli/rusholme/issues/407) | :green_circle: |
-| [#377](https://github.com/adinapoli/rusholme/issues/377) | Tier 2: Match compiler for nested/complex patterns (nested constructors, as-patterns, tuples, infix cons) | [#376](https://github.com/adinapoli/rusholme/issues/376) | :yellow_circle: |
+| [#377](https://github.com/adinapoli/rusholme/issues/377) | Tier 2: Match compiler for nested/complex patterns (nested constructors, as-patterns, tuples, infix cons) | [#376](https://github.com/adinapoli/rusholme/issues/376) | :green_circle: |
 | [#417](https://github.com/adinapoli/rusholme/issues/417) | Desugar guarded equations in pattern match compiler | [#377](https://github.com/adinapoli/rusholme/issues/377) | :white_circle: |
 | [#418](https://github.com/adinapoli/rusholme/issues/418) | Desugar list patterns in match compiler | [#377](https://github.com/adinapoli/rusholme/issues/377) | :white_circle: |
 | [#378](https://github.com/adinapoli/rusholme/issues/378) | Tier 3: Optimal decision trees with exhaustiveness/redundancy checking | [#377](https://github.com/adinapoli/rusholme/issues/377) | :white_circle: |
@@ -344,14 +348,15 @@
 | [#55](https://github.com/adinapoli/rusholme/issues/55) | Implement LLVM codegen for GRIN expressions (store/fetch/update/case/app) | [#54](https://github.com/adinapoli/rusholme/issues/54) | :green_circle: |
 | [#56](https://github.com/adinapoli/rusholme/issues/56) | Implement Zig runtime (heap allocator, thunk evaluator, entry point) | [#53](https://github.com/adinapoli/rusholme/issues/53) | :green_circle: |
 | [#57](https://github.com/adinapoli/rusholme/issues/57) | Implement end-to-end: LLVM compile + link with Zig runtime + produce executable | [#55](https://github.com/adinapoli/rusholme/issues/55), [#56](https://github.com/adinapoli/rusholme/issues/56) | :green_circle: |
-| [#384](https://github.com/adinapoli/rusholme/issues/384) | Implement rts_eval Ind-following for GRIN runtime | [#56](https://github.com/adinapoli/rusholme/issues/56) | :yellow_circle: |
-| [#385](https://github.com/adinapoli/rusholme/issues/385) | Implement proper heap node field storage for GRIN values | [#56](https://github.com/adinapoli/rusholme/issues/56) | :yellow_circle: |
+| [#384](https://github.com/adinapoli/rusholme/issues/384) | Implement rts_eval Ind-following for GRIN runtime | [#56](https://github.com/adinapoli/rusholme/issues/56) | :green_circle: |
+| [#385](https://github.com/adinapoli/rusholme/issues/385) | Implement proper heap node field storage for GRIN values | [#56](https://github.com/adinapoli/rusholme/issues/56) | :green_circle: |
 | [#422](https://github.com/adinapoli/rusholme/issues/422) | rts: unify LLVM codegen node layout with Zig RTS node layout | [#385](https://github.com/adinapoli/rusholme/issues/385) | :white_circle: |
 | [#386](https://github.com/adinapoli/rusholme/issues/386) | Implement runtime closure support | [#56](https://github.com/adinapoli/rusholme/issues/56) | :white_circle: |
 | [#390](https://github.com/adinapoli/rusholme/issues/390) | LLVM codegen: translate remaining GRIN expression types (Bind, Case, Store, Fetch, Update, Return) | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
 | [#391](https://github.com/adinapoli/rusholme/issues/391) | LLVM codegen: expand PrimOpMapping and support multi-arg calls | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
 | [#392](https://github.com/adinapoli/rusholme/issues/392) | LLVM codegen: translate function parameters in GRIN defs | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
 | [#410](https://github.com/adinapoli/rusholme/issues/410) | backend: nullary constructors not handled in GRIN→LLVM codegen (Val.Var lookup fails) | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
+| [#425](https://github.com/adinapoli/rusholme/issues/425) | Fix GRIN→LLVM codegen for programs with ADTs and higher-order functions | [#410](https://github.com/adinapoli/rusholme/issues/410) | :green_circle: |
 
 ---
 
