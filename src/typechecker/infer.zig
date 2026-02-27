@@ -186,6 +186,21 @@ pub const InferCtx = struct {
     ) std.mem.Allocator.Error!void {
         unify_mod.unify(self.alloc, lhs, rhs) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.RigidMismatch => {
+                const lhs_str = try fmtHType(self.alloc, lhs.*);
+                const rhs_str = try fmtHType(self.alloc, rhs.*);
+                const msg = try std.fmt.allocPrint(
+                    self.alloc,
+                    "cannot unify `{s}` with `{s}` (rigid type variable mismatch)",
+                    .{ lhs_str, rhs_str },
+                );
+                try self.diags.emit(self.alloc, .{
+                    .severity = .@"error",
+                    .code = .type_error,
+                    .span = span,
+                    .message = msg,
+                });
+            },
             error.InfiniteType => {
                 const lhs_str = try fmtHType(self.alloc, lhs.*);
                 const rhs_str = try fmtHType(self.alloc, rhs.*);
@@ -904,9 +919,35 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
         // ── Var ────────────────────────────────────────────────────────
         //
         // Look up the name in the env and instantiate its scheme.
+        //
+        // For MONOMORPHIC bindings (binders.len == 0) that appear in
+        // `local_binders`, we return the *original* arena pointer created by
+        // `inferPat` / Pass 1.  This is critical for signature checking:
+        // the unifier writes solutions into `MetaVar.ref` in place, and all
+        // use sites of the same pattern-bound variable must share that cell.
+        // Without this, `env.lookup` → `instantiate` → `instantiateType`
+        // creates a fresh copy of the unsolved meta at a different arena
+        // address, so binding the parameter's meta never propagates to the
+        // copy used in the RHS.  See #304.
+        //
+        // For POLYMORPHIC bindings (binders.len > 0), we must instantiate
+        // with fresh metas so that each use site gets an independent copy —
+        // this is the standard let-polymorphism rule (Damas & Milner).
         .Var => |v| blk: {
-            const ty = try ctx.env.lookup(v.name.unique, ctx.alloc, ctx.mv_supply);
-            if (ty) |t| break :blk ctx.alloc_ty(t);
+            const scheme = ctx.env.lookupScheme(v.name.unique);
+            if (scheme) |s| {
+                if (s.binders.len == 0) {
+                    // Monomorphic: return the original pointer if available,
+                    // to preserve meta chain identity across uses.
+                    if (ctx.local_binders.get(v.name.unique)) |ptr| break :blk ptr;
+                    // No pointer in local_binders (e.g. a built-in constant):
+                    // allocate a fresh copy on the arena.
+                    break :blk try ctx.alloc_ty(s.body);
+                }
+                // Polymorphic: instantiate with fresh metavars.
+                const inst = try s.instantiate(ctx.alloc, ctx.mv_supply);
+                break :blk try ctx.alloc_ty(inst.ty);
+            }
             const msg = try std.fmt.allocPrint(
                 ctx.alloc,
                 "unbound variable `{s}` in typechecker (renamer bug?)",
@@ -3424,6 +3465,153 @@ test "inferModule: type variables in signature are scoped correctly" {
 
     const scheme = module_types.get(f_name.unique).?;
     try testing.expectEqual(@as(usize, 1), scheme.binders.len);
+}
+
+// ── Issue #304: Rigid-variable signature checking ─────────────────────
+
+/// Build a 3-part Fun AST type: `t0 -> t1 -> t2`.
+fn makeAstFun3(
+    alloc: std.mem.Allocator,
+    t0: anytype,
+    t1: anytype,
+    t2: anytype,
+) !@import("../frontend/ast.zig").Type {
+    const AstType = @import("../frontend/ast.zig").Type;
+    const p0 = try alloc.create(AstType);
+    p0.* = t0;
+    const p1 = try alloc.create(AstType);
+    p1.* = t1;
+    const p2 = try alloc.create(AstType);
+    p2.* = t2;
+    const parts = try alloc.alloc(*const AstType, 3);
+    parts[0] = p0;
+    parts[1] = p1;
+    parts[2] = p2;
+    return AstType{ .Fun = parts };
+}
+
+test "inferModule: #304 bad x y = x with sig a -> b -> b produces RigidMismatch" {
+    // Regression test for issue #304.
+    //
+    // `bad :: a -> b -> b` with body `bad x y = x` is a type error because
+    // the function returns its first argument (of type `a`) but the signature
+    // says the result type is `b`.  Distinct rigid type variables must not
+    // unify.
+    //
+    // Before the fix, the inferred equation type was `?1 -> ?2 -> ?1` and
+    // the body's occurrence of `x` was freshly allocated at a different arena
+    // address from the pattern's meta, so the second `?1 := b` binding
+    // silently overwrote the first `?1 := a` without raising RigidMismatch.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = try TyEnv.init(alloc);
+    defer env.deinit();
+    var mv = MetaVarSupply{};
+    var us = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+    try env_mod.initBuiltins(&env, alloc, &us);
+
+    var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
+
+    // bad :: a -> b -> b
+    // bad x y = x
+    const bad_name = testName("bad", 9400);
+    const x_name = testName("x", 9401);
+    const y_name = testName("y", 9402);
+
+    const AstType = @import("../frontend/ast.zig").Type;
+
+    // Signature type: a -> b -> b
+    const sig_type = try makeAstFun3(alloc, AstType{ .Var = "a" }, AstType{ .Var = "b" }, AstType{ .Var = "b" });
+    const sig = RDecl{ .TypeSig = .{
+        .names = &.{bad_name},
+        .type = sig_type,
+        .span = testSpan(),
+    } };
+
+    // Body: bad x y = x  (returns first argument, not second)
+    const body = RExpr{ .Var = .{ .name = x_name, .span = testSpan() } };
+    const funbind = RDecl{ .FunBind = .{
+        .name = bad_name,
+        .equations = &.{.{
+            .patterns = &.{ .{ .Var = .{ .name = x_name, .span = testSpan() } }, .{ .Var = .{ .name = y_name, .span = testSpan() } } },
+            .rhs = .{ .UnGuarded = body },
+            .span = testSpan(),
+        }},
+        .span = testSpan(),
+    } };
+
+    const module = RenamedModule{
+        .module_name = "Bad",
+        .declarations = &.{ sig, funbind },
+        .span = testSpan(),
+    };
+
+    var module_types = try inferModule(&ctx, module);
+    defer module_types.deinit(alloc);
+
+    // The body returns `x :: a` but the signature declares the result as `b`.
+    // This must be a type error.
+    try testing.expect(diags.hasErrors());
+}
+
+test "inferModule: #304 good x y = y with sig a -> b -> b succeeds" {
+    // Positive counterpart: `good x y = y` correctly satisfies `a -> b -> b`.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = try TyEnv.init(alloc);
+    defer env.deinit();
+    var mv = MetaVarSupply{};
+    var us = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+    try env_mod.initBuiltins(&env, alloc, &us);
+
+    var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
+
+    // good :: a -> b -> b
+    // good x y = y
+    const good_name = testName("good", 9500);
+    const x_name = testName("x", 9501);
+    const y_name = testName("y", 9502);
+
+    const AstType = @import("../frontend/ast.zig").Type;
+
+    // Signature type: a -> b -> b
+    const sig_type = try makeAstFun3(alloc, AstType{ .Var = "a" }, AstType{ .Var = "b" }, AstType{ .Var = "b" });
+    const sig = RDecl{ .TypeSig = .{
+        .names = &.{good_name},
+        .type = sig_type,
+        .span = testSpan(),
+    } };
+
+    // Body: good x y = y  (returns second argument — matches `b -> b` result)
+    const body = RExpr{ .Var = .{ .name = y_name, .span = testSpan() } };
+    const funbind = RDecl{ .FunBind = .{
+        .name = good_name,
+        .equations = &.{.{
+            .patterns = &.{ .{ .Var = .{ .name = x_name, .span = testSpan() } }, .{ .Var = .{ .name = y_name, .span = testSpan() } } },
+            .rhs = .{ .UnGuarded = body },
+            .span = testSpan(),
+        }},
+        .span = testSpan(),
+    } };
+
+    const module = RenamedModule{
+        .module_name = "Good",
+        .declarations = &.{ sig, funbind },
+        .span = testSpan(),
+    };
+
+    var module_types = try inferModule(&ctx, module);
+    defer module_types.deinit(alloc);
+
+    try testing.expect(!diags.hasErrors());
 }
 
 // ── Issue #177: astTypeToHType Tests ─────────────────────────────────

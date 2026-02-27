@@ -489,6 +489,56 @@ test "unify: rigid a ~ Int returns TypeMismatch" {
     try testing.expectError(UnifyError.TypeMismatch, unify(arena.allocator(), &a, &int_ty));
 }
 
+// ── Rigid ~ Meta ───────────────────────────────────────────────────────
+
+test "unify: rigid a ~ ?0 solves ?0 to rigid a" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var supply = MetaVarSupply{};
+    var rigid_a = HType{ .Rigid = testName("a", 1) };
+    var meta0 = HType{ .Meta = supply.fresh() };
+
+    try unify(alloc, &rigid_a, &meta0);
+
+    const chased = meta0.chase();
+    try testing.expect(chased == .Rigid);
+    try testing.expectEqualStrings("a", chased.Rigid.base);
+}
+
+test "unify: ?0 -> ?0 ~ (a -> b -> b) with shared ?0 emits RigidMismatch" {
+    // Simulates checking `bad x y = x` against `bad :: a -> b -> b`.
+    // eq_ty = ?0 -> (?1 -> ?0)   (x is ?0, y is ?1, result is ?0)
+    // sig   = a  -> (b  -> b )
+    // Unifying ?0 with a binds ?0 := Rigid(a).
+    // Then unifying ?0 with b (the result slot) chases to Rigid(a), which
+    // must not unify with Rigid(b) — RigidMismatch expected.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var supply = MetaVarSupply{};
+
+    // Two distinct rigids, as skolemiseSignature would produce.
+    var rigid_a = HType{ .Rigid = testName("a", 1) };
+    var rigid_b_arg = HType{ .Rigid = testName("b", 2) };
+    var rigid_b_res = HType{ .Rigid = testName("b", 2) };
+
+    // sig_inner = b -> b
+    var sig_inner = HType{ .Fun = .{ .arg = &rigid_b_arg, .res = &rigid_b_res } };
+    // sig = a -> (b -> b)
+    var sig = HType{ .Fun = .{ .arg = &rigid_a, .res = &sig_inner } };
+
+    // eq: ?0 -> (?1 -> ?0)  — both outer arg and inner res share the same ?0 node.
+    var meta0 = HType{ .Meta = supply.fresh() };
+    var meta1 = HType{ .Meta = supply.fresh() };
+    var eq_inner = HType{ .Fun = .{ .arg = &meta1, .res = &meta0 } };
+    var eq = HType{ .Fun = .{ .arg = &meta0, .res = &eq_inner } };
+
+    try testing.expectError(UnifyError.RigidMismatch, unify(alloc, &eq, &sig));
+}
+
 // ── Arity mismatch ─────────────────────────────────────────────────────
 
 test "unify: Maybe Int ~ Maybe Int Bool returns ArityMismatch" {
