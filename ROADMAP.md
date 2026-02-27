@@ -424,11 +424,17 @@
 | [#75](https://github.com/adinapoli/rusholme/issues/75) | Implement basic REPL loop (read-eval-print with interpreter) | [#50](https://github.com/adinapoli/rusholme/issues/50), [#51](https://github.com/adinapoli/rusholme/issues/51) | :white_circle: |
 | [#76](https://github.com/adinapoli/rusholme/issues/76) | Implement REPL auto-completion and multi-line input | [#75](https://github.com/adinapoli/rusholme/issues/75) | :white_circle: |
 
+### Epic: Multi-Backend Architecture
+
+| # | Issue | Deps | Status |
+|---|-------|------|--------|
+| [#395](https://github.com/adinapoli/rusholme/issues/395) | Implement multi-backend architecture with GraalVM via Sulong | [#57](https://github.com/adinapoli/rusholme/issues/57) | :yellow_circle: |
+
 ### Epic [#16](https://github.com/adinapoli/rusholme/issues/16): WebAssembly Output
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#77](https://github.com/adinapoli/rusholme/issues/77) | Configure LLVM backend to emit WebAssembly | [#57](https://github.com/adinapoli/rusholme/issues/57) | :white_circle: |
+| [#77](https://github.com/adinapoli/rusholme/issues/77) | Configure LLVM backend to emit WebAssembly | [#57](https://github.com/adinapoli/rusholme/issues/57), [#395](https://github.com/adinapoli/rusholme/issues/395) | :white_circle: |
 | [#78](https://github.com/adinapoli/rusholme/issues/78) | Port Zig runtime to WebAssembly (WASI) | [#77](https://github.com/adinapoli/rusholme/issues/77), [#56](https://github.com/adinapoli/rusholme/issues/56) | :white_circle: |
 | [#79](https://github.com/adinapoli/rusholme/issues/79) | Run compiled Haskell in the browser via Wasm | [#78](https://github.com/adinapoli/rusholme/issues/78) | :white_circle: |
 
