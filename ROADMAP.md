@@ -220,7 +220,7 @@
 | [#254](https://github.com/adinapoli/rusholme/issues/254) | lexer: string literal parsing fails when string contains keyword 'of' (resolved by quasiquotation fix) | [#86](https://github.com/adinapoli/rusholme/issues/86) | :green_circle: |
 | [#255](https://github.com/adinapoli/rusholme/issues/255) | parser: support LANGUAGE pragmas ({-# LANGUAGE ... #-}) | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
 | [#256](https://github.com/adinapoli/rusholme/issues/256) | parser: support quasi-quotation syntax ([name\| ... \|]) | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
-| [#316](https://github.com/adinapoli/rusholme/issues/316) | Add validation for duplicate record field names in data types | [#135](https://github.com/adinapoli/rusholme/issues/135) | :yellow_circle: |
+| [#316](https://github.com/adinapoli/rusholme/issues/316) | Add validation for duplicate record field names in data types | [#135](https://github.com/adinapoli/rusholme/issues/135) | :green_circle: |
 
 ### CLI
 
@@ -269,7 +269,7 @@
 | [#236](https://github.com/adinapoli/rusholme/issues/236) | typechecker: errors lack source file name and spans - shows '<unknown>:0:0-0' | [#184](https://github.com/adinapoli/rusholme/issues/184) | :green_circle: |
 | [#248](https://github.com/adinapoli/rusholme/issues/248) | typechecker: Improve diagnostics for cycle detection panics | [#184](https://github.com/adinapoli/rusholme/issues/184) | :green_circle: |
 | [#177](https://github.com/adinapoli/rusholme/issues/177) | typechecker: astTypeToHType incomplete — App, Paren, Forall, n-tuples not handled | [#36](https://github.com/adinapoli/rusholme/issues/36) | :green_circle: |
-| [#304](https://github.com/adinapoli/rusholme/issues/304) | Unifier: fix rigid type (skolem) unification | [#36](https://github.com/adinapoli/rusholme/issues/36) | :yellow_circle: |
+| [#304](https://github.com/adinapoli/rusholme/issues/304) | Unifier: fix rigid type (skolem) unification | [#36](https://github.com/adinapoli/rusholme/issues/36) | :green_circle: |
 | [#37](https://github.com/adinapoli/rusholme/issues/37) | Implement type class resolution and dictionary passing | [#36](https://github.com/adinapoli/rusholme/issues/36), [#153](https://github.com/adinapoli/rusholme/issues/153) | :green_circle: |
 | [#38](https://github.com/adinapoli/rusholme/issues/38) | Implement desugarer / elaborator (typed AST → Core IR) | [#36](https://github.com/adinapoli/rusholme/issues/36), [#153](https://github.com/adinapoli/rusholme/issues/153) | :green_circle: |
 
@@ -292,8 +292,8 @@
 | [#407](https://github.com/adinapoli/rusholme/issues/407) | Multiple equations not accepted (renamer Prelude shadowing + desugar InfixApp crash) | [#38](https://github.com/adinapoli/rusholme/issues/38) | :green_circle: |
 | [#376](https://github.com/adinapoli/rusholme/issues/376) | Tier 1: Simple match compiler (variable, literal, wildcard, single constructor patterns) | [#407](https://github.com/adinapoli/rusholme/issues/407) | :green_circle: |
 | [#377](https://github.com/adinapoli/rusholme/issues/377) | Tier 2: Match compiler for nested/complex patterns (nested constructors, as-patterns, tuples, infix cons) | [#376](https://github.com/adinapoli/rusholme/issues/376) | :green_circle: |
-| [#417](https://github.com/adinapoli/rusholme/issues/417) | Desugar guarded equations in pattern match compiler | [#377](https://github.com/adinapoli/rusholme/issues/377) | :yellow_circle: |
-| [#418](https://github.com/adinapoli/rusholme/issues/418) | Desugar list patterns in match compiler | [#377](https://github.com/adinapoli/rusholme/issues/377) | :yellow_circle: |
+| [#417](https://github.com/adinapoli/rusholme/issues/417) | Desugar guarded equations in pattern match compiler | [#377](https://github.com/adinapoli/rusholme/issues/377) | :green_circle: |
+| [#418](https://github.com/adinapoli/rusholme/issues/418) | Desugar list patterns in match compiler | [#377](https://github.com/adinapoli/rusholme/issues/377) | :green_circle: |
 | [#378](https://github.com/adinapoli/rusholme/issues/378) | Tier 3: Optimal decision trees with exhaustiveness/redundancy checking | [#377](https://github.com/adinapoli/rusholme/issues/377) | :white_circle: |
 
 ### Epic [#6](https://github.com/adinapoli/rusholme/issues/6): GRIN IR and Core→GRIN Translation
@@ -429,7 +429,7 @@
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#395](https://github.com/adinapoli/rusholme/issues/395) | Implement multi-backend architecture with GraalVM via Sulong | [#57](https://github.com/adinapoli/rusholme/issues/57) | :yellow_circle: |
+| [#395](https://github.com/adinapoli/rusholme/issues/395) | Implement multi-backend architecture with GraalVM via Sulong | [#57](https://github.com/adinapoli/rusholme/issues/57) | :green_circle: |
 
 ### Epic [#16](https://github.com/adinapoli/rusholme/issues/16): WebAssembly Output
 
