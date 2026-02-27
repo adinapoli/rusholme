@@ -1771,3 +1771,162 @@ test "rename: user-defined function may shadow a Prelude built-in" {
     try testing.expectEqualStrings("head", head_name.base);
     try testing.expect(head_name.unique.value >= Known.reserved_range_end);
 }
+
+// ── Issue #316: Duplicate record field name validation ─────────────────
+
+/// Build a minimal `ast.Type.Con` for use in field type annotations.
+fn testTypeCon(name: []const u8) ast.Type {
+    return ast.Type{ .Con = .{ .name = name, .span = testSpan() } };
+}
+
+test "rename #316: duplicate field name across constructors emits error" {
+    // Haskell 2010 §4.2.1 forbids the same field name appearing in multiple
+    // constructors of a single data type.
+    //
+    // data Person = Person { name :: String, age :: Int }
+    //            | Address { name :: String, street :: String }
+    //                        ^^^^^ duplicate — must be rejected
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var supply = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var env = try RenameEnv.init(alloc, &supply, &diags);
+    defer env.deinit();
+
+    const string_ty = testTypeCon("String");
+    const int_ty = testTypeCon("Int");
+
+    // Constructor 1: Person { name :: String, age :: Int }
+    const con1_fields = [_]ast.FieldDecl{
+        .{ .Record = .{ .name = "name", .type = string_ty } },
+        .{ .Record = .{ .name = "age",  .type = int_ty } },
+    };
+    const con1 = ast.ConDecl{
+        .name   = "Person",
+        .fields = &con1_fields,
+        .span   = testSpan(),
+    };
+
+    // Constructor 2: Address { name :: String, street :: String }
+    // 'name' is duplicated from constructor 1.
+    const con2_fields = [_]ast.FieldDecl{
+        .{ .Record = .{ .name = "name",   .type = string_ty } },
+        .{ .Record = .{ .name = "street", .type = string_ty } },
+    };
+    const con2 = ast.ConDecl{
+        .name   = "Address",
+        .fields = &con2_fields,
+        .span   = testSpan(),
+    };
+
+    const data_decl = ast.Decl{ .Data = .{
+        .name         = "Person",
+        .tyvars       = &.{},
+        .constructors = &.{ con1, con2 },
+        .deriving     = &.{},
+        .span         = testSpan(),
+    } };
+
+    const module = makeModule(&.{data_decl});
+    _ = try rename(module, &env);
+
+    try testing.expect(diags.hasErrors());
+    // Exactly one error: the duplicate 'name' field.
+    try testing.expectEqual(@as(usize, 1), diags.diagnostics.items.len);
+    try testing.expectEqual(DiagnosticCode.duplicate_definition, diags.diagnostics.items[0].code);
+}
+
+test "rename #316: unique field names across constructors does not error" {
+    // A data type where all field names are distinct across constructors is valid.
+    //
+    // data Shape = Circle { radius :: Int }
+    //            | Rect   { width :: Int, height :: Int }
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var supply = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var env = try RenameEnv.init(alloc, &supply, &diags);
+    defer env.deinit();
+
+    const int_ty = testTypeCon("Int");
+
+    const con1_fields = [_]ast.FieldDecl{
+        .{ .Record = .{ .name = "radius", .type = int_ty } },
+    };
+    const con1 = ast.ConDecl{
+        .name   = "Circle",
+        .fields = &con1_fields,
+        .span   = testSpan(),
+    };
+
+    const con2_fields = [_]ast.FieldDecl{
+        .{ .Record = .{ .name = "width",  .type = int_ty } },
+        .{ .Record = .{ .name = "height", .type = int_ty } },
+    };
+    const con2 = ast.ConDecl{
+        .name   = "Rect",
+        .fields = &con2_fields,
+        .span   = testSpan(),
+    };
+
+    const data_decl = ast.Decl{ .Data = .{
+        .name         = "Shape",
+        .tyvars       = &.{},
+        .constructors = &.{ con1, con2 },
+        .deriving     = &.{},
+        .span         = testSpan(),
+    } };
+
+    const module = makeModule(&.{data_decl});
+    _ = try rename(module, &env);
+
+    try testing.expect(!diags.hasErrors());
+}
+
+test "rename #316: repeated field within the same constructor emits error" {
+    // A single constructor may also not repeat a field name.
+    //
+    // data Bad = Bad { x :: Int, x :: Int }
+    //                             ^ duplicate
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var supply = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var env = try RenameEnv.init(alloc, &supply, &diags);
+    defer env.deinit();
+
+    const int_ty = testTypeCon("Int");
+
+    const con_fields = [_]ast.FieldDecl{
+        .{ .Record = .{ .name = "x", .type = int_ty } },
+        .{ .Record = .{ .name = "x", .type = int_ty } },
+    };
+    const con = ast.ConDecl{
+        .name   = "Bad",
+        .fields = &con_fields,
+        .span   = testSpan(),
+    };
+
+    const data_decl = ast.Decl{ .Data = .{
+        .name         = "Bad",
+        .tyvars       = &.{},
+        .constructors = &.{con},
+        .deriving     = &.{},
+        .span         = testSpan(),
+    } };
+
+    const module = makeModule(&.{data_decl});
+    _ = try rename(module, &env);
+
+    try testing.expect(diags.hasErrors());
+    try testing.expectEqual(DiagnosticCode.duplicate_definition, diags.diagnostics.items[0].code);
+}
