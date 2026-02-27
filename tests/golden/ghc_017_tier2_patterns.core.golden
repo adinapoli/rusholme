@@ -1,0 +1,31 @@
+=== Core Program (2 data, 4 bindings) ===
+data Tree_1007 a = (Leaf_1000 :: forall a_1013. Tree_1007 a_1013) | (Node_1001 :: forall a_1013. (Tree_1007 a_1013) -> a_1013 -> (Tree_1007 a_1013) -> Tree_1007 a_1013)
+
+data Wrapper_1008 a = (Wrap_1002 :: forall a_1014. a_1014 -> Wrapper_1008 a_1014)
+
+(unwrapNode_1003 :: (Tree_1007 Int_100) -> Int_100) = \(arg_0 :: Tree_1007 Int_100) -> case arg_0 of (arg_0 :: Tree_1007 Int_100) {
+  Node_1001 (_field_0_0_0 :: _t) (x_1009 :: Int_100) (_field_0_0_2 :: _t) -> x_1009
+  _ -> case arg_0 of (arg_0 :: Tree_1007 Int_100) {
+    Leaf_1000 -> 0
+    _ -> "Non-exhaustive patterns in function"
+  }
+}
+
+(leftValue_1004 :: (Tree_1007 Int_100) -> Int_100) = \(arg_0 :: Tree_1007 Int_100) -> case arg_0 of (arg_0 :: Tree_1007 Int_100) {
+  Node_1001 (_field_0_0_0 :: _t) (_field_0_0_1 :: _t) (_field_0_0_2 :: _t) -> case _field_0_0_0 of (_field_0_0_0 :: _t) {
+    Node_1001 (_field_0_1_0 :: _t) (x_1010 :: Int_100) (_field_0_1_2 :: _t) -> x_1010
+    _ -> 0
+  }
+  _ -> 0
+}
+
+(wrapOrDefault_1005 :: (Wrapper_1008 Int_100) -> Wrapper_1008 Int_100) = \(arg_0 :: Wrapper_1008 Int_100) -> let (w_1011 :: Wrapper_1008 Int_100) = arg_0
+in case arg_0 of (arg_0 :: Wrapper_1008 Int_100) {
+  Wrap_1002 (_field_0_0_0 :: _t) -> w_1011
+  _ -> Wrap_1002 0
+}
+
+(sumPair_1006 :: ((,)_209 Int_100 Int_100) -> Int_100) = \(arg_0 :: (,)_209 Int_100 Int_100) -> case arg_0 of (arg_0 :: (,)_209 Int_100 Int_100) {
+  (,) (a_1012 :: Int_100) (_field_0_0_1 :: _t) -> a_1012
+  _ -> "Non-exhaustive patterns in function"
+}
