@@ -379,7 +379,7 @@ fn cmdCore(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     }
 
     // ── Desugar ────────────────────────────────────────────────────────
-    const core_prog = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags);
+    const core_prog = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags, &u_supply);
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
@@ -464,7 +464,7 @@ fn cmdGrin(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     }
 
     // ── Desugar ────────────────────────────────────────────────────────
-    const core_prog = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags);
+    const core_prog = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags, &u_supply);
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
@@ -563,7 +563,7 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     }
 
     // ── Desugar ────────────────────────────────────────────────────────
-    const core_prog = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags);
+    const core_prog = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags, &u_supply);
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
@@ -675,7 +675,7 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_path: []const u8, output_
     }
 
     // ── Desugar ────────────────────────────────────────────────────────
-    const core_prog = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags);
+    const core_prog = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags, &u_supply);
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);

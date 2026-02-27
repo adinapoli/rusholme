@@ -328,8 +328,10 @@ pub const GrinTranslator = struct {
     module: llvm.Module,
     builder: llvm.Builder,
     allocator: std.mem.Allocator,
-    /// Maps GRIN variable names to their current LLVM SSA values.
-    params: std.StringHashMap(llvm.Value),
+    /// Maps GRIN variable unique IDs to their current LLVM SSA values.
+    /// Keyed by `Name.unique.value` so that variables with the same base name
+    /// but different uniques (e.g. `arg_20`, `arg_21`) are kept distinct.
+    params: std.AutoHashMap(u64, llvm.Value),
     /// Constructor tag discriminants, built before translation.
     tag_table: TagTable,
     /// The LLVM function currently being translated (needed for
@@ -344,7 +346,7 @@ pub const GrinTranslator = struct {
             .module = llvm.createModule("haskell", ctx),
             .builder = llvm.createBuilder(ctx),
             .allocator = allocator,
-            .params = std.StringHashMap(llvm.Value).init(allocator),
+            .params = std.AutoHashMap(u64, llvm.Value).init(allocator),
             .tag_table = TagTable.init(),
             .current_func = null,
         };
@@ -403,13 +405,13 @@ pub const GrinTranslator = struct {
 
         // Clear previous function's parameter mapping and set up current one.
         self.params.deinit();
-        self.params = std.StringHashMap(llvm.Value).init(self.allocator);
+        self.params = std.AutoHashMap(u64, llvm.Value).init(self.allocator);
 
         // Store each parameter as a named value in the params map.
         for (def.params, 0..) |param_name, i| {
             const param_val = c.LLVMGetParam(func, @intCast(i));
             if (param_val == null) return error.OutOfMemory;
-            try self.params.put(param_name.base, param_val);
+            try self.params.put(param_name.unique.value, param_val);
         }
 
         try self.translateExpr(def.body);
@@ -457,7 +459,7 @@ pub const GrinTranslator = struct {
                 // Bind the LHS result to a named variable.
                 const result = try self.translateExprToValue(lhs, v.base);
                 if (result) |val| {
-                    try self.params.put(v.base, val);
+                    try self.params.put(v.unique.value, val);
                 }
                 try self.translateExpr(rhs);
             },
@@ -471,7 +473,7 @@ pub const GrinTranslator = struct {
                 const struct_ty = nodeStructType(n_fields);
                 for (ctn.fields, 0..) |field_val, fi| {
                     if (field_val != .Var) continue;
-                    const field_name = field_val.Var.base;
+                    const field_var = field_val.Var;
                     // GEP: index 0 = tag, index fi+1 = field fi.
                     var indices = [_]llvm.Value{
                         c.LLVMConstInt(llvm.i32Type(), 0, 0),
@@ -483,10 +485,10 @@ pub const GrinTranslator = struct {
                         ptr_val,
                         &indices,
                         2,
-                        nullTerminate(field_name).ptr,
+                        nullTerminate(field_var.base).ptr,
                     );
-                    const loaded = c.LLVMBuildLoad2(self.builder, ptrType(), gep, nullTerminate(field_name).ptr);
-                    try self.params.put(field_name, loaded);
+                    const loaded = c.LLVMBuildLoad2(self.builder, ptrType(), gep, nullTerminate(field_var.base).ptr);
+                    try self.params.put(field_var.unique.value, loaded);
                 }
                 try self.translateExpr(rhs);
             },
@@ -496,6 +498,10 @@ pub const GrinTranslator = struct {
 
     /// Translate an expression and return the resulting LLVM value.
     /// Returns null for expressions that produce no SSA value (void calls).
+    ///
+    /// For `Bind(lhs, pat, rhs)` — which arises from left-associative ANF chains —
+    /// we evaluate the inner bind sequence imperatively (each step binding its
+    /// result into `params`) and then return the value of the final `rhs`.
     fn translateExprToValue(
         self: *GrinTranslator,
         expr: *const grin.Expr,
@@ -505,6 +511,40 @@ pub const GrinTranslator = struct {
             .App => |app| self.translateAppToValue(app.name, app.args, result_name),
             .Return => |v| @as(?llvm.Value, try self.translateValToLlvm(v)),
             .Store => |v| self.translateStoreToValue(v, result_name),
+            .Bind => |b| {
+                // Evaluate the lhs, bind result to pat, then return the value of rhs.
+                // This handles left-leaning ANF bind chains produced by wrapWithPendingBinds.
+                const inner_name: []const u8 = switch (b.pat) {
+                    .Var => |v| v.base,
+                    else => result_name,
+                };
+                const inner_result = try self.translateExprToValue(b.lhs, inner_name);
+                switch (b.pat) {
+                    .Var => |v| {
+                        if (inner_result) |val| try self.params.put(v.unique.value, val);
+                    },
+                    .Unit => {},
+                    .ConstTagNode => |ctn| {
+                        if (inner_result) |ptr_val| {
+                            const n_fields: u32 = @intCast(ctn.fields.len);
+                            const struct_ty = nodeStructType(n_fields);
+                            for (ctn.fields, 0..) |field_val, fi| {
+                                if (field_val != .Var) continue;
+                                const fv = field_val.Var;
+                                var indices = [_]llvm.Value{
+                                    c.LLVMConstInt(llvm.i32Type(), 0, 0),
+                                    c.LLVMConstInt(llvm.i32Type(), @intCast(fi + 1), 0),
+                                };
+                                const gep = c.LLVMBuildGEP2(self.builder, struct_ty, ptr_val, &indices, 2, nullTerminate(fv.base).ptr);
+                                const loaded = c.LLVMBuildLoad2(self.builder, ptrType(), gep, nullTerminate(fv.base).ptr);
+                                try self.params.put(fv.unique.value, loaded);
+                            }
+                        }
+                    },
+                    else => return error.UnimplementedPattern,
+                }
+                return self.translateExprToValue(b.rhs, result_name);
+            },
             else => {
                 try self.translateExpr(expr);
                 return null;
@@ -544,20 +584,24 @@ pub const GrinTranslator = struct {
             llvm_args[i] = try self.translateValToLlvm(val);
         }
 
-        var fn_name_buf: [128]u8 = undefined;
-        std.debug.assert(name.base.len < fn_name_buf.len);
-        @memcpy(fn_name_buf[0..name.base.len], name.base);
-        fn_name_buf[name.base.len] = 0;
-        const fn_name_z = fn_name_buf[0..name.base.len :0];
-        const func = blk: {
-            if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |existing| {
-                break :blk existing;
-            }
-            var param_types: [8]llvm.Type = undefined;
-            for (0..arg_count) |i| {
-                param_types[i] = c.LLVMTypeOf(llvm_args[i]);
-            }
-            const fn_type = llvm.functionType(ptrType(), param_types[0..arg_count], false);
+        // Build a ptr-returning function type for indirect/forward calls.
+        var param_types: [8]llvm.Type = undefined;
+        for (0..arg_count) |i| param_types[i] = ptrType();
+        const fn_type = llvm.functionType(ptrType(), param_types[0..arg_count], false);
+
+        // Resolve the callee:
+        //   1. Local variable holding a function pointer (higher-order call) — use
+        //      an indirect call via the pointer stored in `params`.
+        //   2. Named LLVM function (direct call to a known def).
+        //   3. Forward-declare and call (for functions not yet translated).
+        const func: llvm.Value = blk: {
+            if (self.params.get(name.unique.value)) |fn_ptr| break :blk fn_ptr;
+            var fn_name_buf: [128]u8 = undefined;
+            std.debug.assert(name.base.len < fn_name_buf.len);
+            @memcpy(fn_name_buf[0..name.base.len], name.base);
+            fn_name_buf[name.base.len] = 0;
+            const fn_name_z = fn_name_buf[0..name.base.len :0];
+            if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |existing| break :blk existing;
             break :blk llvm.addFunction(self.module, name.base, fn_type);
         };
 
@@ -570,7 +614,7 @@ pub const GrinTranslator = struct {
 
         return c.LLVMBuildCall2(
             self.builder,
-            llvm.getFunctionType(func),
+            fn_type,
             func,
             @ptrCast(&llvm_args),
             @intCast(arg_count),
@@ -595,25 +639,24 @@ pub const GrinTranslator = struct {
         for (args[0..arg_count], 0..) |val, i| {
             llvm_args[i] = try self.translateValToLlvm(val);
         }
-        var fn_name_buf: [128]u8 = undefined;
-        std.debug.assert(name.base.len < fn_name_buf.len);
-        @memcpy(fn_name_buf[0..name.base.len], name.base);
-        fn_name_buf[name.base.len] = 0;
-        const fn_name_z = fn_name_buf[0..name.base.len :0];
-        const func = blk: {
-            if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |existing| {
-                break :blk existing;
-            }
-            var param_types: [8]llvm.Type = undefined;
-            for (0..arg_count) |i| {
-                param_types[i] = c.LLVMTypeOf(llvm_args[i]);
-            }
-            const fn_type = llvm.functionType(ptrType(), param_types[0..arg_count], false);
+
+        var param_types: [8]llvm.Type = undefined;
+        for (0..arg_count) |i| param_types[i] = ptrType();
+        const fn_type = llvm.functionType(ptrType(), param_types[0..arg_count], false);
+
+        const func: llvm.Value = blk: {
+            if (self.params.get(name.unique.value)) |fn_ptr| break :blk fn_ptr;
+            var fn_name_buf: [128]u8 = undefined;
+            std.debug.assert(name.base.len < fn_name_buf.len);
+            @memcpy(fn_name_buf[0..name.base.len], name.base);
+            fn_name_buf[name.base.len] = 0;
+            const fn_name_z = fn_name_buf[0..name.base.len :0];
+            if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |existing| break :blk existing;
             break :blk llvm.addFunction(self.module, name.base, fn_type);
         };
         _ = c.LLVMBuildCall2(
             self.builder,
-            llvm.getFunctionType(func),
+            fn_type,
             func,
             @ptrCast(&llvm_args),
             @intCast(arg_count),
@@ -682,14 +725,28 @@ pub const GrinTranslator = struct {
             },
             .Unit => c.LLVMGetUndef(llvm.i32Type()),
             .Var => |name| blk: {
-                // 1. Check params (function parameters and let-bound variables).
-                if (self.params.get(name.base)) |v| break :blk v;
+                // 1. Check params (function parameters and let-bound variables),
+                //    keyed by unique ID to distinguish variables with the same base.
+                if (self.params.get(name.unique.value)) |v| break :blk v;
                 // 2. Nullary constructor: emit its tag discriminant as an i64.
                 //    Tracked in: https://github.com/adinapoli/rusholme/issues/410
                 if (self.tag_table.discriminantByName(name)) |disc| {
                     break :blk c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0);
                 }
-                std.debug.print("UnsupportedGrinVal: Var {s} not found in params or tag table\n", .{name.base});
+                // 3. Top-level function reference: look up the LLVM function by
+                //    name and return its pointer (for higher-order use).
+                //    This handles passing named functions as arguments, e.g.:
+                //      map_it identity xs  =>  identity is a global function ptr.
+                var fn_name_buf: [128]u8 = undefined;
+                if (name.base.len < fn_name_buf.len) {
+                    @memcpy(fn_name_buf[0..name.base.len], name.base);
+                    fn_name_buf[name.base.len] = 0;
+                    const fn_name_z = fn_name_buf[0..name.base.len :0];
+                    if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |fn_val| {
+                        break :blk fn_val;
+                    }
+                }
+                std.debug.print("UnsupportedGrinVal: Var {s}_{d} not found in params, tag table, or module\n", .{ name.base, name.unique.value });
                 return error.UnsupportedGrinVal;
             },
             .ConstTagNode => |ctn| blk: {
@@ -755,8 +812,7 @@ pub const GrinTranslator = struct {
                     // Fields are stored as opaque ptr; box integers by alloca+store.
                     const field_ty = c.LLVMTypeOf(raw_val);
                     const kind = c.LLVMGetTypeKind(field_ty);
-                    // LLVMPointerTypeKind == 7 in LLVM 19 C API (c_int constant, not enum)
-                    const is_ptr = kind == 7;
+                    const is_ptr = kind == c.LLVMPointerTypeKind;
                     if (!is_ptr) {
                         // Box the scalar: alloca + store, use the pointer.
                         const slot = c.LLVMBuildAlloca(self.builder, field_ty, "box");
@@ -803,8 +859,7 @@ pub const GrinTranslator = struct {
         const scrut_llvm = try self.translateValToLlvm(scrutinee);
         const scrut_ty = c.LLVMTypeOf(scrut_llvm);
         const scrut_kind = c.LLVMGetTypeKind(scrut_ty);
-        // LLVMPointerTypeKind == 7 in LLVM 19 C API (c_int constant, not enum)
-        const is_ptr = scrut_kind == 7;
+        const is_ptr = scrut_kind == c.LLVMPointerTypeKind;
 
         const tag_val: llvm.Value = if (is_ptr) blk: {
             // Load the first field (i64 tag) from the heap node.
@@ -911,7 +966,7 @@ pub const GrinTranslator = struct {
                         gep,
                         nullTerminate(field_name.base).ptr,
                     );
-                    try self.params.put(field_name.base, loaded);
+                    try self.params.put(field_name.unique.value, loaded);
                 }
             }
 

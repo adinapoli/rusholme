@@ -55,6 +55,11 @@ const TranslateCtx = struct {
     // Maps function names to their arity (number of parameters).
     // Used for partial/over-application handling (issue #317).
     arity_map: std.AutoHashMapUnmanaged(u64, u32),
+    // Maps data constructor uniques to their field count (number of value
+    // arguments, excluding type arguments).  Built from CoreProgram.data_decls.
+    // Used to distinguish constructor applications from function calls in
+    // translateApp, and to emit ValTag for nullary constructors in translateExpr.
+    con_map: std.AutoHashMapUnmanaged(u64, u32),
     // Counter for generating fresh GRIN variable names.
     name_counter: u64 = 0,
 
@@ -63,12 +68,24 @@ const TranslateCtx = struct {
             .alloc = alloc,
             .var_map = .{},
             .arity_map = .{},
+            .con_map = .{},
         };
     }
 
     pub fn deinit(self: *TranslateCtx) void {
         self.var_map.deinit(self.alloc);
         self.arity_map.deinit(self.alloc);
+        self.con_map.deinit(self.alloc);
+    }
+
+    /// Return true if the given unique belongs to a known data constructor.
+    fn isConstructor(self: TranslateCtx, unique: u64) bool {
+        return self.con_map.contains(unique);
+    }
+
+    /// Return the field count for a constructor, or null if unknown.
+    fn conFieldCount(self: TranslateCtx, unique: u64) ?u32 {
+        return self.con_map.get(unique);
     }
 
     /// Generate a fresh GRIN variable name.
@@ -147,6 +164,55 @@ fn buildArityMap(alloc: std.mem.Allocator, core_prog: CoreProgram) !std.AutoHash
     return arity_map;
 }
 
+/// Build a map from data constructor uniques to their field counts.
+///
+/// The field count of a constructor is the number of value-level arguments
+/// its type has, i.e. the number of leading `FunTy` arrows after stripping
+/// `ForAllTy` quantifiers.
+///
+/// Example:
+///   Nil  :: forall a. List a         → 0 fields
+///   Cons :: forall a. a -> List a -> List a  → 2 fields
+fn buildConMap(alloc: std.mem.Allocator, core_prog: CoreProgram) !std.AutoHashMapUnmanaged(u64, u32) {
+    var con_map = std.AutoHashMapUnmanaged(u64, u32){};
+    errdefer con_map.deinit(alloc);
+
+    for (core_prog.data_decls) |decl| {
+        for (decl.constructors) |con| {
+            const unique = con.name.unique.value;
+            const n_fields = countConFields(con.ty);
+            try con_map.put(alloc, unique, n_fields);
+        }
+    }
+
+    return con_map;
+}
+
+/// Count the value-level field count of a constructor type by counting
+/// leading FunTy arrows, stripping ForAllTy quantifiers first.
+fn countConFields(ty: CoreType) u32 {
+    var current = ty;
+    // Strip leading ForAllTy quantifiers.
+    while (true) {
+        switch (current) {
+            .ForAllTy => |fa| current = fa.body.*,
+            else => break,
+        }
+    }
+    // Count FunTy arrows.
+    var fields: u32 = 0;
+    while (true) {
+        switch (current) {
+            .FunTy => |ft| {
+                fields += 1;
+                current = ft.res.*;
+            },
+            else => break,
+        }
+    }
+    return fields;
+}
+
 /// Count the number of lambda parameters in a Core expression.
 fn countLambdaArity(expr: *const CoreExpr) !u32 {
     var arity: u32 = 0;
@@ -169,13 +235,23 @@ pub fn translateProgram(alloc: std.mem.Allocator, core_prog: CoreProgram) !GrinP
     var arity_map = try buildArityMap(alloc, core_prog);
     defer arity_map.deinit(alloc);
 
+    // Build the constructor map from data declarations.
+    var con_map = try buildConMap(alloc, core_prog);
+    defer con_map.deinit(alloc);
+
     var ctx = TranslateCtx.init(alloc);
     defer ctx.deinit();
 
-    // Copy the arity map into the context
+    // Copy the arity map into the context.
     var iter = arity_map.iterator();
     while (iter.next()) |entry| {
         try ctx.arity_map.put(alloc, entry.key_ptr.*, entry.value_ptr.*);
+    }
+
+    // Copy the constructor map into the context.
+    var con_iter = con_map.iterator();
+    while (con_iter.next()) |entry| {
+        try ctx.con_map.put(alloc, entry.key_ptr.*, entry.value_ptr.*);
     }
 
     var defs = std.ArrayListUnmanaged(GrinDef){};
@@ -249,9 +325,26 @@ fn translateExpr(ctx: *TranslateCtx, expr: *const CoreExpr) !*GrinExpr {
 
     switch (expr.*) {
         .Var => |v| {
-            // Variable reference becomes a variable value.
-            const grin_name = try ctx.getCoreVar(v.name);
-            new_expr.* = .{ .Return = .{ .Var = grin_name } };
+            const unique = v.name.unique.value;
+            if (ctx.conFieldCount(unique)) |n_fields| {
+                if (n_fields == 0) {
+                    // Nullary constructor (e.g. Nil, True, Nothing): emit a bare tag value.
+                    // In GRIN, nullary constructors are immediate tag constants — no heap
+                    // allocation needed.  The LLVM backend emits an i64 discriminant for them.
+                    const tag = GrinTag{ .tag_type = .Con, .name = v.name };
+                    new_expr.* = .{ .Return = .{ .ValTag = tag } };
+                } else {
+                    // Non-nullary constructor used as a value (e.g. partially applied).
+                    // Fall back to a variable reference; proper closure support is tracked in:
+                    // https://github.com/adinapoli/rusholme/issues/386
+                    const grin_name = try ctx.getCoreVar(v.name);
+                    new_expr.* = .{ .Return = .{ .Var = grin_name } };
+                }
+            } else {
+                // Ordinary variable reference.
+                const grin_name = try ctx.getCoreVar(v.name);
+                new_expr.* = .{ .Return = .{ .Var = grin_name } };
+            }
         },
         .Lit => |l| {
             // Literal becomes a return with literal value.
@@ -358,6 +451,14 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
         }
     }
 
+    // Check whether the function head is a data constructor *before* translating
+    // it.  We need the original Core unique to look up the con_map, because
+    // translateExpr assigns a fresh GRIN unique that won't match.
+    const core_con_unique: ?u64 = switch (fn_expr.*) {
+        .Var => |v| if (ctx.isConstructor(v.name.unique.value)) v.name.unique.value else null,
+        else => null,
+    };
+
     // Translate the function head.
     const translated_fn = try translateExpr(ctx, fn_expr);
 
@@ -416,6 +517,47 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
                     .complex_expr = arg_result,
                 });
             },
+        }
+    }
+
+    // ── Constructor application ────────────────────────────────────────────
+    //
+    // If the function head is a known data constructor, emit a heap allocation
+    // instead of a function call:
+    //   `Cons x xs`  →  store (CCons [x, xs])
+    //
+    // This handles saturated constructor applications.  Partial application of
+    // constructors (tracked in https://github.com/adinapoli/rusholme/issues/386)
+    // falls through to the general partial-application path below.
+    if (core_con_unique) |con_unique| {
+        if (fn_name_and_arity.name) |fn_name| {
+            const n_fields = ctx.conFieldCount(con_unique).?;
+            const arg_count = @as(u32, @intCast(args.items.len));
+            if (arg_count == n_fields) {
+                // Saturated constructor application → Store (ConstTagNode).
+                // Use the original Core name so the tag carries the stable unique.
+                const core_name = switch (fn_expr.*) {
+                    .Var => |v| v.name,
+                    else => fn_name,
+                };
+                const tag = GrinTag{ .tag_type = .Con, .name = core_name };
+                const store_expr = try ctx.alloc.create(GrinExpr);
+                store_expr.* = .{ .Store = .{ .ConstTagNode = .{
+                    .tag = tag,
+                    .fields = grin_args,
+                } } };
+                const ptr_var = try ctx.freshName("node");
+                const return_expr = try ctx.alloc.create(GrinExpr);
+                return_expr.* = .{ .Return = .{ .Var = ptr_var } };
+                const bind_expr = try ctx.alloc.create(GrinExpr);
+                bind_expr.* = .{ .Bind = .{
+                    .lhs = store_expr,
+                    .pat = .{ .Var = ptr_var },
+                    .rhs = return_expr,
+                } };
+                return try wrapWithPendingBinds(ctx, bind_expr, pending_binds.items);
+            }
+            // Under-saturated constructor: fall through to partial-application path.
         }
     }
 
@@ -589,17 +731,18 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
                 break :blk e;
             };
 
-            // Bind the stored value to a variable.
-            const fresh_ptr = try ctx.freshName("p");
+            // Bind the stored value using the actual let-bound binder name so the
+            // body's references (via var_map) resolve correctly.
+            const binder_name = try ctx.mapBinder(&pair.binder);
 
             // Translate the body.
             const body_expr = try translateExpr(ctx, let_expr.body);
 
-            // Create the bind expression: store X >>= \p -> body
+            // Create the bind expression: store X >>= \binder_name -> body
             const bind_expr = try ctx.alloc.create(GrinExpr);
             bind_expr.* = .{ .Bind = .{
                 .lhs = store_expr,
-                .pat = .{ .Var = fresh_ptr },
+                .pat = .{ .Var = binder_name },
                 .rhs = body_expr,
             } };
 
