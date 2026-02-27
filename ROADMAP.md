@@ -292,8 +292,8 @@
 | [#407](https://github.com/adinapoli/rusholme/issues/407) | Multiple equations not accepted (renamer Prelude shadowing + desugar InfixApp crash) | [#38](https://github.com/adinapoli/rusholme/issues/38) | :green_circle: |
 | [#376](https://github.com/adinapoli/rusholme/issues/376) | Tier 1: Simple match compiler (variable, literal, wildcard, single constructor patterns) | [#407](https://github.com/adinapoli/rusholme/issues/407) | :green_circle: |
 | [#377](https://github.com/adinapoli/rusholme/issues/377) | Tier 2: Match compiler for nested/complex patterns (nested constructors, as-patterns, tuples, infix cons) | [#376](https://github.com/adinapoli/rusholme/issues/376) | :green_circle: |
-| [#417](https://github.com/adinapoli/rusholme/issues/417) | Desugar guarded equations in pattern match compiler | [#377](https://github.com/adinapoli/rusholme/issues/377) | :white_circle: |
-| [#418](https://github.com/adinapoli/rusholme/issues/418) | Desugar list patterns in match compiler | [#377](https://github.com/adinapoli/rusholme/issues/377) | :white_circle: |
+| [#417](https://github.com/adinapoli/rusholme/issues/417) | Desugar guarded equations in pattern match compiler | [#377](https://github.com/adinapoli/rusholme/issues/377) | :yellow_circle: |
+| [#418](https://github.com/adinapoli/rusholme/issues/418) | Desugar list patterns in match compiler | [#377](https://github.com/adinapoli/rusholme/issues/377) | :yellow_circle: |
 | [#378](https://github.com/adinapoli/rusholme/issues/378) | Tier 3: Optimal decision trees with exhaustiveness/redundancy checking | [#377](https://github.com/adinapoli/rusholme/issues/377) | :white_circle: |
 
 ### Epic [#6](https://github.com/adinapoli/rusholme/issues/6): GRIN IR and Core→GRIN Translation
