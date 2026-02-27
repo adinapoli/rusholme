@@ -6,8 +6,9 @@
 //!   rhc core <file.hs>     Parse, typecheck, and desugar; print Core IR
 //!   rhc grin <file.hs>     Full pipeline; print GRIN IR
 //!   rhc ll <file.hs>       Full pipeline; emit LLVM IR
-//!   rhc build [-o <out>] <file.hs>
+//!   rhc build [--backend <kind>] [-o <out>] <file.hs>
 //!                          Full pipeline; compile to native executable
+//!                          Backends: native (default), graalvm, wasm, c
 //!   rhc --help             Show this help message
 //!   rhc --version          Show version information
 
@@ -122,32 +123,49 @@ pub fn main(init: std.process.Init) !void {
         const cmd_args = user_args[1..];
         if (cmd_args.len == 0) {
             try writeStderr(io, "rhc build: missing file argument\n");
-            try writeStderr(io, "Usage: rhc build [-o <output>] <file.hs>\n");
+            try writeStderr(io, "Usage: rhc build [--backend <kind>] [-o <output>] <file.hs>\n");
             std.process.exit(1);
         }
-        // Parse optional -o <output> flag.
+        // Parse optional flags: -o <output>, --backend <kind>.
         var output_name: ?[]const u8 = null;
         var file_path: ?[]const u8 = null;
+        var backend_kind = rusholme.backend.backend_mod.BackendKind.native;
         var i: usize = 0;
         while (i < cmd_args.len) : (i += 1) {
             if (std.mem.eql(u8, cmd_args[i], "-o")) {
                 i += 1;
                 if (i >= cmd_args.len) {
                     try writeStderr(io, "rhc build: -o requires an argument\n");
-                    try writeStderr(io, "Usage: rhc build [-o <output>] <file.hs>\n");
+                    try writeStderr(io, "Usage: rhc build [--backend <kind>] [-o <output>] <file.hs>\n");
                     std.process.exit(1);
                 }
                 output_name = cmd_args[i];
+            } else if (std.mem.eql(u8, cmd_args[i], "--backend")) {
+                i += 1;
+                if (i >= cmd_args.len) {
+                    try writeStderr(io, "rhc build: --backend requires an argument\n");
+                    try writeStderr(io, "Usage: rhc build [--backend <kind>] [-o <output>] <file.hs>\n");
+                    std.process.exit(1);
+                }
+                backend_kind = rusholme.backend.backend_mod.parseBackendKind(cmd_args[i]) orelse {
+                    var stderr_buf: [4096]u8 = undefined;
+                    var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+                    const stderr = &stderr_fw.interface;
+                    try stderr.print("rhc build: unknown backend '{s}'\n", .{cmd_args[i]});
+                    try stderr.print("Valid backends: native, graalvm, wasm, c\n", .{});
+                    try stderr.flush();
+                    std.process.exit(1);
+                };
             } else {
                 file_path = cmd_args[i];
             }
         }
         if (file_path == null) {
             try writeStderr(io, "rhc build: missing file argument\n");
-            try writeStderr(io, "Usage: rhc build [-o <output>] <file.hs>\n");
+            try writeStderr(io, "Usage: rhc build [--backend <kind>] [-o <output>] <file.hs>\n");
             std.process.exit(1);
         }
-        try cmdBuild(allocator, io, file_path.?, output_name);
+        try cmdBuild(allocator, io, file_path.?, output_name, backend_kind);
         return;
     }
 
@@ -611,7 +629,24 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
 ///
 /// Output naming: if `output_name` is provided, use it directly; otherwise
 /// derive from the source file (`hello.hs` → `./hello`).
-fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_path: []const u8, output_name: ?[]const u8) !void {
+///
+/// Only the `native` backend is fully implemented. Other backends are stubs
+/// that will be fleshed out in follow-up issues.
+fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_path: []const u8, output_name: ?[]const u8, backend_kind: rusholme.backend.backend_mod.BackendKind) !void {
+    // Dispatch non-native backends early; only `native` is implemented.
+    switch (backend_kind) {
+        .native => {}, // handled below
+        .graalvm, .wasm, .c => {
+            var stderr_buf: [4096]u8 = undefined;
+            var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+            const stderr = &stderr_fw.interface;
+            try stderr.print("rhc build: backend '{s}' is not yet implemented\n", .{
+                rusholme.backend.backend_mod.backendName(backend_kind),
+            });
+            try stderr.flush();
+            std.process.exit(1);
+        },
+    }
     const source = readSourceFile(allocator, io, file_path) catch |err| {
         var stderr_buf: [4096]u8 = undefined;
         var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
@@ -825,8 +860,9 @@ fn printUsage(io: Io) !void {
         \\  rhc core <file.hs>     Parse, typecheck, and desugar; print Core IR
         \\  rhc grin <file.hs>     Full pipeline; print GRIN IR
         \\  rhc ll <file.hs>       Full pipeline; emit LLVM IR
-        \\  rhc build [-o <out>] <file.hs>
-        \\                         Full pipeline; compile to native executable
+        \\  rhc build [--backend <kind>] [-o <out>] <file.hs>
+        \\                         Full pipeline; compile to an executable
+        \\                         Backends: native (default), graalvm, wasm, c
         \\  rhc --help             Show this help message
         \\  rhc --version          Show version information
         \\

@@ -48,6 +48,12 @@ pub const native = @import("backend/native.zig");
 /// GraalVM/Sulong backend implementation.
 pub const graalvm = @import("backend/graalvm.zig");
 
+/// WebAssembly backend stub (issues #77–#79).
+pub const wasm = @import("backend/wasm.zig");
+
+/// C source backend stub.
+pub const c_backend = @import("backend/c.zig");
+
 // ═══════════════════════════════════════════════════════════════════════
 // Test discovery
 // ═══════════════════════════════════════════════════════════════════════
@@ -60,4 +66,6 @@ test {
     @import("std").testing.refAllDecls(backend_mod);
     @import("std").testing.refAllDecls(native);
     @import("std").testing.refAllDecls(graalvm);
+    @import("std").testing.refAllDecls(wasm);
+    @import("std").testing.refAllDecls(c_backend);
 }
