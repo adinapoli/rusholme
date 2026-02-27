@@ -110,9 +110,25 @@ test "runtime: evaluate non-thunk returns as-is" {
     defer heap.deinit();
 
     const n = node.createInt(42);
-    const result = eval.rts_eval(n);
+    try std.testing.expectEqual(n, eval.rts_eval(n));
+}
 
-    try std.testing.expectEqual(n, result);
+test "runtime: evaluate single Ind follows to target" {
+    heap.init();
+    defer heap.deinit();
+
+    const target = node.createInt(7);
+    const ind = node.createInd(target);
+    try std.testing.expectEqual(target, eval.rts_eval(ind));
+}
+
+test "runtime: evaluate chained Inds reaches final value" {
+    heap.init();
+    defer heap.deinit();
+
+    const target = node.createInt(99);
+    const ind = node.createInd(node.createInd(target));
+    try std.testing.expectEqual(target, eval.rts_eval(ind));
 }
 
 test "runtime: rts_putStrLn exports C function" {
