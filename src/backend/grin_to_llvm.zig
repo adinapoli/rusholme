@@ -3,16 +3,26 @@
 //! Translates GRIN IR programs to LLVM IR using the LLVM-C API.
 //! This is issue #55: LLVM codegen for GRIN expressions.
 //!
-//! ## Heap node layout
+//! ## Heap node layout (unified with Zig RTS — #422)
 //!
-//! Every constructor node is represented as a heap-allocated struct:
+//! Every constructor node is allocated via `rts_alloc(tag, n_fields)` and
+//! uses the Zig RTS `Node` layout:
 //!
-//!   { i64 tag, ptr field0, ptr field1, … }
+//!   ┌─────────────┬──────────────┬────────────┬────────────────────────┐
+//!   │  tag (u64)  │ n_fields(u32)│  _pad(u32) │ field[0] … field[N-1] │
+//!   └─────────────┴──────────────┴────────────┴────────────────────────┘
 //!
-//! The `tag` is an integer discriminant assigned by `TagTable` — each
-//! unique constructor gets a stable `i64` value (0, 1, 2, …) in the
-//! order they are first encountered in the program.  All field values
-//! are opaque `ptr` (i8*) — the M1 backend boxes everything.
+//! The header is 16 bytes; each field slot is 8 bytes (u64).  Field values
+//! are stored as raw u64 — either a pointer cast to uintptr (for *Node
+//! children) or an integer bit-pattern (for scalars such as Int/Char).
+//!
+//! Allocation and field I/O go through three RTS helpers:
+//!   - `rts_alloc(tag: u64, n_fields: u32) -> *Node`
+//!   - `rts_store_field(node: *Node, index: u32, value: u64)`
+//!   - `rts_load_field(node: *const Node, index: u32) -> u64`
+//!
+//! The `tag` discriminant is assigned by `TagTable` — each unique
+//! constructor gets a stable `i64` value (0, 1, 2, …).
 //!
 //! Nullary constructors (no fields) can appear as `Val.Var` references.
 //! When the tag table recognises a name as a nullary constructor, we emit
@@ -23,7 +33,7 @@
 //!   - App  — PrimOps (puts, arithmetic) and user-defined calls
 //!   - Bind — variable binding (Var pattern) and unit discard
 //!   - Case — switch on tag discriminant with per-alt basic blocks (#390)
-//!   - Store — malloc + write tag + fields to heap (#390)
+//!   - Store — rts_alloc + rts_store_field (#422)
 //!   - Return — emit `ret`
 //!   - Block — transparent scoping
 //!
@@ -293,22 +303,45 @@ fn ptrType() llvm.Type {
     return c.LLVMPointerTypeInContext(c.LLVMGetGlobalContext(), 0);
 }
 
-/// Return the LLVM struct type for a node with `n_fields` payload fields:
-///   { i64 tag, ptr field0, …, ptr fieldN-1 }
-fn nodeStructType(n_fields: u32) llvm.Type {
-    var members: [9]llvm.Type = undefined; // 1 tag + up to 8 fields
-    members[0] = llvm.i64Type();
-    for (1..n_fields + 1) |i| members[i] = ptrType();
-    return c.LLVMStructType(@ptrCast(&members), n_fields + 1, 0);
+/// Return the LLVM struct type for the unified node header:
+///   { i64 tag, i32 n_fields, i32 _pad }   (16 bytes)
+///
+/// Used only for GEP into the tag word when loading the discriminant
+/// in Case expressions.  Field I/O uses the rts_load_field / rts_store_field
+/// RTS helpers instead of direct GEP.
+fn nodeHeaderType() llvm.Type {
+    var members = [_]llvm.Type{
+        llvm.i64Type(), // tag
+        llvm.i32Type(), // n_fields
+        llvm.i32Type(), // _pad
+    };
+    return c.LLVMStructType(@ptrCast(&members), 3, 0);
 }
 
-/// Declare `malloc` in the module if not already declared.
-fn declareMalloc(module: llvm.Module) llvm.Value {
-    const name = "malloc";
+/// Declare `rts_alloc(tag: i64, n_fields: i32) -> ptr` in the module if needed.
+fn declareRtsAlloc(module: llvm.Module) llvm.Value {
+    const name = "rts_alloc";
     if (c.LLVMGetNamedFunction(module, name)) |existing| return existing;
-    const param_ty = llvm.i64Type();
-    var params = [_]llvm.Type{param_ty};
-    const fn_ty = c.LLVMFunctionType(ptrType(), &params, 1, 0);
+    var params = [_]llvm.Type{ llvm.i64Type(), llvm.i32Type() };
+    const fn_ty = c.LLVMFunctionType(ptrType(), &params, 2, 0);
+    return c.LLVMAddFunction(module, name, fn_ty);
+}
+
+/// Declare `rts_store_field(node: ptr, index: i32, value: i64) -> void`.
+fn declareRtsStoreField(module: llvm.Module) llvm.Value {
+    const name = "rts_store_field";
+    if (c.LLVMGetNamedFunction(module, name)) |existing| return existing;
+    var params = [_]llvm.Type{ ptrType(), llvm.i32Type(), llvm.i64Type() };
+    const fn_ty = c.LLVMFunctionType(llvm.voidType(), &params, 3, 0);
+    return c.LLVMAddFunction(module, name, fn_ty);
+}
+
+/// Declare `rts_load_field(node: ptr, index: i32) -> i64`.
+fn declareRtsLoadField(module: llvm.Module) llvm.Value {
+    const name = "rts_load_field";
+    if (c.LLVMGetNamedFunction(module, name)) |existing| return existing;
+    var params = [_]llvm.Type{ ptrType(), llvm.i32Type() };
+    const fn_ty = c.LLVMFunctionType(llvm.i64Type(), &params, 2, 0);
     return c.LLVMAddFunction(module, name, fn_ty);
 }
 
@@ -465,29 +498,26 @@ pub const GrinTranslator = struct {
             },
             .ConstTagNode => |ctn| {
                 // Destructure: the LHS produced a heap pointer to a node
-                // matching this tag. Extract each field and bind the field
-                // names into params so the RHS can reference them.
+                // matching this tag. Load each field via rts_load_field and
+                // bind the names into params so the RHS can reference them.
                 const ptr_val = try self.translateExprToValue(lhs, "node") orelse
                     return error.UnsupportedGrinVal;
-                const n_fields: u32 = @intCast(ctn.fields.len);
-                const struct_ty = nodeStructType(n_fields);
+                const rts_load_fn = declareRtsLoadField(self.module);
                 for (ctn.fields, 0..) |field_val, fi| {
                     if (field_val != .Var) continue;
                     const field_var = field_val.Var;
-                    // GEP: index 0 = tag, index fi+1 = field fi.
-                    var indices = [_]llvm.Value{
-                        c.LLVMConstInt(llvm.i32Type(), 0, 0),
-                        c.LLVMConstInt(llvm.i32Type(), @intCast(fi + 1), 0),
-                    };
-                    const gep = c.LLVMBuildGEP2(
-                        self.builder,
-                        struct_ty,
+                    var load_args = [_]llvm.Value{
                         ptr_val,
-                        &indices,
+                        c.LLVMConstInt(llvm.i32Type(), fi, 0),
+                    };
+                    const loaded = c.LLVMBuildCall2(
+                        self.builder,
+                        llvm.getFunctionType(rts_load_fn),
+                        rts_load_fn,
+                        &load_args,
                         2,
                         nullTerminate(field_var.base).ptr,
                     );
-                    const loaded = c.LLVMBuildLoad2(self.builder, ptrType(), gep, nullTerminate(field_var.base).ptr);
                     try self.params.put(field_var.unique.value, loaded);
                 }
                 try self.translateExpr(rhs);
@@ -526,17 +556,22 @@ pub const GrinTranslator = struct {
                     .Unit => {},
                     .ConstTagNode => |ctn| {
                         if (inner_result) |ptr_val| {
-                            const n_fields: u32 = @intCast(ctn.fields.len);
-                            const struct_ty = nodeStructType(n_fields);
+                            const rts_load_fn = declareRtsLoadField(self.module);
                             for (ctn.fields, 0..) |field_val, fi| {
                                 if (field_val != .Var) continue;
                                 const fv = field_val.Var;
-                                var indices = [_]llvm.Value{
-                                    c.LLVMConstInt(llvm.i32Type(), 0, 0),
-                                    c.LLVMConstInt(llvm.i32Type(), @intCast(fi + 1), 0),
+                                var load_args = [_]llvm.Value{
+                                    ptr_val,
+                                    c.LLVMConstInt(llvm.i32Type(), fi, 0),
                                 };
-                                const gep = c.LLVMBuildGEP2(self.builder, struct_ty, ptr_val, &indices, 2, nullTerminate(fv.base).ptr);
-                                const loaded = c.LLVMBuildLoad2(self.builder, ptrType(), gep, nullTerminate(fv.base).ptr);
+                                const loaded = c.LLVMBuildCall2(
+                                    self.builder,
+                                    llvm.getFunctionType(rts_load_fn),
+                                    rts_load_fn,
+                                    &load_args,
+                                    2,
+                                    nullTerminate(fv.base).ptr,
+                                );
                                 try self.params.put(fv.unique.value, loaded);
                             }
                         }
@@ -779,52 +814,50 @@ pub const GrinTranslator = struct {
                 const tag = ctn.tag;
                 const n_fields: u32 = @intCast(ctn.fields.len);
                 const disc = self.tag_table.discriminant(tag) orelse return error.UnsupportedGrinVal;
-                const struct_ty = nodeStructType(n_fields);
 
-                // sizeof(struct_ty) via LLVMSizeOf gives an i64 constant.
-                const size_val = c.LLVMSizeOf(struct_ty);
-                const malloc_fn = declareMalloc(self.module);
-                var malloc_args = [_]llvm.Value{size_val};
+                // Allocate a node via rts_alloc(tag, n_fields).
+                const rts_alloc_fn = declareRtsAlloc(self.module);
+                var alloc_args = [_]llvm.Value{
+                    c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0),
+                    c.LLVMConstInt(llvm.i32Type(), n_fields, 0),
+                };
                 const node_ptr = c.LLVMBuildCall2(
                     self.builder,
-                    llvm.getFunctionType(malloc_fn),
-                    malloc_fn,
-                    &malloc_args,
-                    1,
+                    llvm.getFunctionType(rts_alloc_fn),
+                    rts_alloc_fn,
+                    &alloc_args,
+                    2,
                     nullTerminate(result_name).ptr,
                 );
 
-                // Store the tag discriminant at field index 0.
-                var tag_idx = [_]llvm.Value{
-                    c.LLVMConstInt(llvm.i32Type(), 0, 0),
-                    c.LLVMConstInt(llvm.i32Type(), 0, 0),
-                };
-                const tag_gep = c.LLVMBuildGEP2(self.builder, struct_ty, node_ptr, &tag_idx, 2, "tag_ptr");
-                _ = c.LLVMBuildStore(
-                    self.builder,
-                    c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0),
-                    tag_gep,
-                );
-
-                // Store each field at index fi+1, cast to ptr if needed.
+                // Write each field via rts_store_field(node, index, value_as_u64).
+                // Pointer values are cast to i64 via ptrtoint; integer values are
+                // already i64.  No boxing via alloca is needed — the RTS field
+                // slots are plain u64.
+                const rts_store_fn = declareRtsStoreField(self.module);
                 for (ctn.fields, 0..) |field, fi| {
-                    var raw_val = try self.translateValToLlvm(field);
-                    // Fields are stored as opaque ptr; box integers by alloca+store.
+                    const raw_val = try self.translateValToLlvm(field);
                     const field_ty = c.LLVMTypeOf(raw_val);
                     const kind = c.LLVMGetTypeKind(field_ty);
                     const is_ptr = kind == c.LLVMPointerTypeKind;
-                    if (!is_ptr) {
-                        // Box the scalar: alloca + store, use the pointer.
-                        const slot = c.LLVMBuildAlloca(self.builder, field_ty, "box");
-                        _ = c.LLVMBuildStore(self.builder, raw_val, slot);
-                        raw_val = slot;
-                    }
-                    var field_idx = [_]llvm.Value{
-                        c.LLVMConstInt(llvm.i32Type(), 0, 0),
-                        c.LLVMConstInt(llvm.i32Type(), @intCast(fi + 1), 0),
+                    // Convert to i64: ptrtoint for pointers, keep as-is for integers.
+                    const as_u64: llvm.Value = if (is_ptr)
+                        c.LLVMBuildPtrToInt(self.builder, raw_val, llvm.i64Type(), "field_u64")
+                    else
+                        raw_val;
+                    var store_args = [_]llvm.Value{
+                        node_ptr,
+                        c.LLVMConstInt(llvm.i32Type(), fi, 0),
+                        as_u64,
                     };
-                    const field_gep = c.LLVMBuildGEP2(self.builder, struct_ty, node_ptr, &field_idx, 2, "field_ptr");
-                    _ = c.LLVMBuildStore(self.builder, raw_val, field_gep);
+                    _ = c.LLVMBuildCall2(
+                        self.builder,
+                        llvm.getFunctionType(rts_store_fn),
+                        rts_store_fn,
+                        &store_args,
+                        3,
+                        "",
+                    );
                 }
 
                 return node_ptr;
@@ -862,16 +895,14 @@ pub const GrinTranslator = struct {
         const is_ptr = scrut_kind == c.LLVMPointerTypeKind;
 
         const tag_val: llvm.Value = if (is_ptr) blk: {
-            // Load the first field (i64 tag) from the heap node.
-            // We use a synthetic struct type with 1 field for GEP purposes;
-            // the actual node may have more fields but GEP only cares about
-            // the type used for offset calculation.
-            const base_struct = nodeStructType(0); // {i64} — enough for tag GEP
+            // Load the i64 tag from the unified node header { i64 tag, i32 n_fields, i32 _pad }.
+            // GEP [0, 0] reaches the `tag` field at byte offset 0.
+            const header_ty = nodeHeaderType();
             var idx = [_]llvm.Value{
                 c.LLVMConstInt(llvm.i32Type(), 0, 0),
                 c.LLVMConstInt(llvm.i32Type(), 0, 0),
             };
-            const tag_gep = c.LLVMBuildGEP2(self.builder, base_struct, scrut_llvm, &idx, 2, "tag_gep");
+            const tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, scrut_llvm, &idx, 2, "tag_gep");
             break :blk c.LLVMBuildLoad2(self.builder, llvm.i64Type(), tag_gep, "tag");
         } else scrut_llvm; // Already an i64 discriminant (nullary constructor).
 
@@ -941,29 +972,23 @@ pub const GrinTranslator = struct {
         for (alts, 0..) |alt, i| {
             llvm.positionBuilderAtEnd(self.builder, alt_bbs[i]);
 
-            // For NodePat alts: GEP-load each field into params.
+            // For NodePat alts: load each field via rts_load_field(node, index).
+            // The result is a raw u64; it is stored in the params map as an
+            // i64 value.  Call sites that need a pointer must inttoptr it.
             if (alt.pat == .NodePat and is_ptr) {
                 const np = alt.pat.NodePat;
-                const n_fields: u32 = @intCast(np.fields.len);
-                // Use a struct type sized for this specific constructor.
-                const struct_ty = nodeStructType(n_fields);
+                const rts_load_fn = declareRtsLoadField(self.module);
                 for (np.fields, 0..) |field_name, fi| {
-                    var idx = [_]llvm.Value{
-                        c.LLVMConstInt(llvm.i32Type(), 0, 0),
-                        c.LLVMConstInt(llvm.i32Type(), @intCast(fi + 1), 0),
-                    };
-                    const gep = c.LLVMBuildGEP2(
-                        self.builder,
-                        struct_ty,
+                    var load_args = [_]llvm.Value{
                         scrut_llvm,
-                        &idx,
-                        2,
-                        nullTerminate(field_name.base).ptr,
-                    );
-                    const loaded = c.LLVMBuildLoad2(
+                        c.LLVMConstInt(llvm.i32Type(), fi, 0),
+                    };
+                    const loaded = c.LLVMBuildCall2(
                         self.builder,
-                        ptrType(),
-                        gep,
+                        llvm.getFunctionType(rts_load_fn),
+                        rts_load_fn,
+                        &load_args,
+                        2,
                         nullTerminate(field_name.base).ptr,
                     );
                     try self.params.put(field_name.unique.value, loaded);
@@ -1092,4 +1117,47 @@ test "TagTable: idempotent re-registration" {
     try table.register(alloc, tag, 1); // second call must not change discriminant
 
     try std.testing.expectEqual(@as(?i64, 0), table.discriminant(tag));
+}
+
+test "Store emits rts_alloc and rts_store_field instead of malloc" {
+    // Build a minimal GRIN program:
+    //   main = store (CJust []) ; return ()
+    // and verify that the LLVM IR contains calls to rts_alloc / rts_store_field
+    // but does NOT contain calls to malloc (i.e. the old layout is gone).
+    const alloc = std.testing.allocator;
+
+    const just_tag = grin.Tag{ .tag_type = .Con, .name = .{ .base = "Just", .unique = .{ .value = 1 } } };
+    const unit_val = grin.Val{ .Unit = {} };
+
+    // Store (CJust [unit]) ; Return unit
+    var store_expr = grin.Expr{ .Store = .{ .ConstTagNode = .{ .tag = just_tag, .fields = &.{unit_val} } } };
+    var ret_expr = grin.Expr{ .Return = unit_val };
+    var bind_expr = grin.Expr{ .Bind = .{
+        .lhs = &store_expr,
+        .pat = unit_val,
+        .rhs = &ret_expr,
+    } };
+
+    const main_def = grin.Def{
+        .name = .{ .base = "main", .unique = .{ .value = 0 } },
+        .params = &.{},
+        .body = &bind_expr,
+    };
+    const program = grin.Program{ .defs = &.{main_def} };
+
+    var translator = GrinTranslator.init(alloc);
+    defer translator.deinit();
+
+    // translateProgram → printModuleToString → dupeZ allocates len+1 bytes
+    // (string + null terminator).  Free as [:0]u8 so the GPA size accounting
+    // matches the allocation size.
+    const ir_raw = try translator.translateProgram(program);
+    const ir: [:0]u8 = ir_raw.ptr[0..ir_raw.len :0];
+    defer alloc.free(ir);
+
+    // Must call rts_alloc and rts_store_field.
+    try std.testing.expect(std.mem.indexOf(u8, ir, "rts_alloc") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ir, "rts_store_field") != null);
+    // Must NOT call malloc (the old layout is removed).
+    try std.testing.expect(std.mem.indexOf(u8, ir, "@malloc") == null);
 }
