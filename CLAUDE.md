@@ -292,6 +292,28 @@ Some issues are `type:research` — their deliverable is a written document, not
 
 ## 9. Common Pitfalls
 
+- **Verify that issue deliverables are architecturally coherent before writing
+  any code.** GitHub issues are written by humans (and LLMs) and can contain
+  framing errors — terminology borrowed from the wrong model, deliverables that
+  contradict the design, or references to the wrong literature. An issue
+  description is a *proposal*, not a specification.
+
+  Before starting implementation, cross-check the deliverable against
+  `DESIGN.md` and the relevant `docs/` files. If the issue says "implement X"
+  but `DESIGN.md` says the project uses a different model that makes X
+  meaningless or wrong, **do not implement X**. Instead:
+  1. Note the contradiction in a comment on the issue.
+  2. Update the issue description with the correct framing.
+  3. Then implement what the architecture actually requires.
+
+  Concrete example: issue #384 described thunk evaluation in STG terms ("code
+  pointer and environment", "call the thunk code"). Rusholme uses GRIN, where
+  thunk forcing is static dispatch on a node tag — there is no `fn_ptr` field.
+  An agent that read only the issue text produced an STG runtime; an agent that
+  cross-checked `docs/rts-design.md` would have caught the mismatch immediately.
+
+  **The design documents outrank the issue text. Always.**
+
 - **Don't take "kitchen sink" shortcuts for deferred features.** When a AST node or
   expression type cannot be fully implemented yet, do **not** group it into a catch-all
   `ListComp, RecordCon, RecordUpdate =>` block that returns a generic `<unsupported>` placeholder.
