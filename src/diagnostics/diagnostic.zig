@@ -43,6 +43,7 @@ pub const DiagnosticCode = enum {
     missing_instance,
     overlapping_instances,
     ambiguous_type,
+    import_cycle,
 
     /// Returns a stable string code like "E001" for programmatic use.
     pub fn code(self: DiagnosticCode) []const u8 {
@@ -55,6 +56,7 @@ pub const DiagnosticCode = enum {
             .missing_instance => "E006",
             .overlapping_instances => "E007",
             .ambiguous_type => "E008",
+            .import_cycle => "E009",
         };
     }
 
