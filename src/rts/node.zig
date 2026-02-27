@@ -61,9 +61,26 @@ pub const Tag = enum(u64) {
     Char = 2,        // Unboxed character — n_fields = 1, field[0] = u8
     String = 3,      // String literal — n_fields = 1, field[0] = ptr
 
-    // ── Thunks ─────────────────────────────────────────────────────────
-    Thunk = 0x100,   // Lazy value (placeholder awaiting evaluation)
-                     // field[0] = fn_ptr as usize, field[1] = *Node env
+    // ── Thunks and Indirections ────────────────────────────────────────
+    //
+    // In GRIN, a thunk is a heap node whose tag identifies a specific named
+    // GRIN function and whose fields hold its arguments.  There is no opaque
+    // code pointer — the LLVM backend lowers GRIN `eval` to a switch on the
+    // node tag, calling the appropriate generated function statically.
+    //
+    // The RTS's role is to support the surrounding machinery:
+    //   - Ind: after GRIN `update`, the thunk node is overwritten with an
+    //     indirection to the WHNF result.  rts_eval chases Ind chains.
+    //   - Thunk: a suspension that has not yet been forced.  Forcing is done
+    //     by the LLVM-generated eval wrapper, not by a generic RTS function.
+    //
+    Thunk = 0x100,   // Suspended GRIN application (tag identifies the function;
+                     // fields hold the arguments).  Forced by LLVM-generated
+                     // eval dispatch — tracked in:
+                     // https://github.com/adinapoli/rusholme/issues/55
+    Ind   = 0x101,   // Indirection to an already-evaluated node.
+                     // n_fields = 1, field[0] = *Node target (as uintptr).
+                     // Written by GRIN `update` after forcing a thunk.
 
     // ── Function Closures ──────────────────────────────────────────────
     // tracked in: https://github.com/adinapoli/rusholme/issues/386
@@ -160,6 +177,24 @@ pub fn createData(disc: u64, field_vals: []const u64) *Node {
     n.* = .{ .tag = @enumFromInt(disc), .n_fields = n_fields };
     @memcpy(fields(n), field_vals);
     return n;
+}
+
+/// Allocate an Ind (indirection) node pointing at `target`.
+///
+/// Written by GRIN `update` after a thunk has been forced to WHNF.
+/// `rts_eval` follows Ind chains to reach the final value.
+pub fn createInd(target: *Node) *Node {
+    const n = allocNode(1);
+    n.* = .{ .tag = .Ind, .n_fields = 1 };
+    fields(n)[0] = @intFromPtr(target);
+    return n;
+}
+
+/// Read the target pointer from an Ind node.
+/// Caller must ensure `n.tag == .Ind`.
+pub fn indTarget(n: *const Node) *Node {
+    std.debug.assert(n.tag == .Ind and n.n_fields >= 1);
+    return @ptrFromInt(fieldsConst(n)[0]);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
