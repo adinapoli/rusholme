@@ -433,7 +433,7 @@ fn parseImportHeaders(alloc: std.mem.Allocator, file_path: []const u8) std.mem.A
 ///
 /// `Data/Map/Strict.hs` → `"Data.Map.Strict"`.
 /// If the file has no directory component, returns the stem: `Main.hs` → `"Main"`.
-fn inferModuleName(alloc: std.mem.Allocator, path: []const u8) std.mem.Allocator.Error![]const u8 {
+pub fn inferModuleName(alloc: std.mem.Allocator, path: []const u8) std.mem.Allocator.Error![]const u8 {
     const base = std.fs.path.basename(path);
     const stem = if (std.mem.endsWith(u8, base, ".hs"))
         base[0 .. base.len - 3]
