@@ -199,6 +199,7 @@
                     <a href="#about" class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">About</a>
                     <a href="#pipeline" class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">Pipeline</a>
                     <a href="#roadmap" class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">Roadmap</a>
+                    <a href="#grin" class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">GRIN</a>
                     <a href="#design" class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">Design</a>
                 </div>
 
@@ -220,6 +221,7 @@
                 <a href="#about" class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">About</a>
                 <a href="#pipeline" class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">Pipeline</a>
                 <a href="#roadmap" class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">Roadmap</a>
+                <a href="#grin" class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">GRIN</a>
                 <a href="#design" class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">Design</a>
             </div>
         </div>
@@ -568,6 +570,208 @@
     </div>
     </section>
 
+    <!-- GRIN Showcase Section -->
+    <section id="grin" class="py-24 px-4 sm:px-6 lg:px-8 bg-gray-950 relative">
+        <div class="max-w-7xl mx-auto">
+            <div class="text-center mb-16">
+                <span class="text-purple-400 font-semibold text-sm uppercase tracking-wider">Intermediate Representation</span>
+                <h2 class="text-4xl md:text-5xl font-bold text-white mt-4 mb-6">
+                    Why <span class="gradient-text">GRIN</span>?
+                </h2>
+                <p class="text-gray-400 max-w-3xl mx-auto text-lg">
+                    GRIN (Graph Reduction Intermediate Notation) is Rusholme's central IR,
+                    sitting between Core and the machine backends. Unlike GHC's STG, GRIN
+                    makes every heap operation <em class="text-white">explicit</em> — there is no implicit
+                    allocation hiding behind calling conventions.
+                </p>
+            </div>
+
+            <!-- IR Correspondence table -->
+            <div class="mb-16 overflow-x-auto">
+                <table class="w-full text-sm border-collapse">
+                    <thead>
+                        <tr class="border-b border-gray-800">
+                            <th class="text-left py-3 px-4 text-gray-400 font-medium">Stage</th>
+                            <th class="text-left py-3 px-4 text-zig font-medium">Rusholme</th>
+                            <th class="text-left py-3 px-4 text-purple-400 font-medium">GHC</th>
+                            <th class="text-left py-3 px-4 text-gray-400 font-medium">Role</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-800/50">
+                        <tr class="hover:bg-gray-900/30 transition-colors">
+                            <td class="py-3 px-4 text-gray-400">High-level IR</td>
+                            <td class="py-3 px-4 text-white font-mono">Core (System F<sub>C</sub>)</td>
+                            <td class="py-3 px-4 text-white font-mono">GHC Core (System F<sub>C</sub>)</td>
+                            <td class="py-3 px-4 text-gray-500">Type-checked, explicit types</td>
+                        </tr>
+                        <tr class="hover:bg-gray-900/30 transition-colors">
+                            <td class="py-3 px-4 text-gray-400">Explicit-heap IR</td>
+                            <td class="py-3 px-4 font-mono"><span class="text-purple-400 font-semibold">GRIN</span></td>
+                            <td class="py-3 px-4 text-white font-mono">STG</td>
+                            <td class="py-3 px-4 text-gray-500">Allocation, thunks, evaluation</td>
+                        </tr>
+                        <tr class="hover:bg-gray-900/30 transition-colors">
+                            <td class="py-3 px-4 text-gray-400">Low-level IR</td>
+                            <td class="py-3 px-4 text-white font-mono">LLVM IR</td>
+                            <td class="py-3 px-4 text-white font-mono">Cmm / LLVM IR</td>
+                            <td class="py-3 px-4 text-gray-500">Machine-level operations</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Side-by-side comparison -->
+            <div class="mb-12">
+                <h3 class="text-2xl font-bold text-white mb-4 text-center">
+                    A Concrete Comparison: <code class="text-purple-400 text-xl">swap</code>
+                </h3>
+                <p class="text-gray-400 text-center mb-10 max-w-2xl mx-auto">
+                    Consider this simple Haskell function that swaps the fields of a pair:
+                </p>
+
+                <!-- Source program -->
+                <div class="max-w-lg mx-auto mb-10">
+                    <div class="bg-gray-900 rounded-2xl border border-gray-800 overflow-hidden">
+                        <div class="px-4 py-3 border-b border-gray-800 flex items-center gap-3">
+                            <div class="flex gap-1.5">
+                                <div class="w-3 h-3 rounded-full bg-red-500/60"></div>
+                                <div class="w-3 h-3 rounded-full bg-yellow-500/60"></div>
+                                <div class="w-3 h-3 rounded-full bg-green-500/60"></div>
+                            </div>
+                            <span class="text-gray-500 text-xs font-mono">Nodes.hs</span>
+                        </div>
+                        <pre class="p-6 text-sm font-mono leading-relaxed overflow-x-auto"><code><span class="text-gray-500">module</span> <span class="text-white">Nodes</span> <span class="text-gray-500">where</span>
+
+<span class="text-gray-500">data</span> <span class="text-white">Pair</span> <span class="text-zig">=</span> <span class="text-white">Pair</span> <span class="text-blue-300">Int</span> <span class="text-blue-300">Int</span>
+
+<span class="text-zig">swap</span> <span class="text-gray-400">::</span> <span class="text-blue-300">Pair</span> <span class="text-gray-400">-&gt;</span> <span class="text-blue-300">Pair</span>
+<span class="text-zig">swap</span> (<span class="text-white">Pair</span> <span class="text-green-300">a</span> <span class="text-green-300">b</span>) <span class="text-zig">=</span> <span class="text-white">Pair</span> <span class="text-green-300">b</span> <span class="text-green-300">a</span></code></pre>
+                    </div>
+                </div>
+
+                <!-- Two-column comparison -->
+                <div class="grid lg:grid-cols-2 gap-6">
+                    <!-- GHC STG -->
+                    <div class="bg-gray-900 rounded-2xl border border-gray-800 overflow-hidden">
+                        <div class="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+                            <div class="flex items-center gap-3">
+                                <div class="flex gap-1.5">
+                                    <div class="w-3 h-3 rounded-full bg-red-500/60"></div>
+                                    <div class="w-3 h-3 rounded-full bg-yellow-500/60"></div>
+                                    <div class="w-3 h-3 rounded-full bg-green-500/60"></div>
+                                </div>
+                                <span class="text-gray-500 text-xs font-mono">ghc -ddump-stg-final Nodes.hs</span>
+                            </div>
+                            <span class="text-xs px-2 py-1 bg-gray-800 text-purple-300 rounded-full font-mono">GHC STG</span>
+                        </div>
+                        <pre class="p-6 text-sm font-mono leading-relaxed overflow-x-auto"><code><span class="text-zig">swap</span> <span class="text-gray-400">=</span> <span class="text-purple-300">\r</span> [<span class="text-green-300">ds</span>]
+  <span class="text-blue-300">case</span> <span class="text-green-300">ds</span> <span class="text-blue-300">of</span> {
+    <span class="text-white">Pair</span> <span class="text-green-300">a</span> <span class="text-green-300">b</span> <span class="text-gray-400">-&gt;</span>
+      <span class="text-white">Pair</span> [<span class="text-green-300">b</span> <span class="text-green-300">a</span>];
+  };</code></pre>
+                        <div class="px-6 pb-6 space-y-2">
+                            <p class="text-xs text-gray-500 leading-relaxed">
+                                <span class="text-yellow-400 font-mono">\r</span> is a calling convention marker ("re-entrant"), not explicit code.
+                                <span class="text-yellow-400 font-mono">Pair [b a]</span> allocates on the heap — but this is <em>implicit</em>, inferred
+                                by the STG-to-Cmm lowering from info tables and closure entry points.
+                            </p>
+                        </div>
+                    </div>
+
+                    <!-- Rusholme GRIN -->
+                    <div class="bg-gray-900 rounded-2xl border border-purple-900/50 overflow-hidden">
+                        <div class="px-4 py-3 border-b border-purple-900/50 flex items-center justify-between">
+                            <div class="flex items-center gap-3">
+                                <div class="flex gap-1.5">
+                                    <div class="w-3 h-3 rounded-full bg-red-500/60"></div>
+                                    <div class="w-3 h-3 rounded-full bg-yellow-500/60"></div>
+                                    <div class="w-3 h-3 rounded-full bg-green-500/60"></div>
+                                </div>
+                                <span class="text-gray-500 text-xs font-mono">rhc grin Nodes.hs</span>
+                            </div>
+                            <span class="text-xs px-2 py-1 bg-purple-900/40 text-purple-300 rounded-full font-mono">Rusholme GRIN</span>
+                        </div>
+                        <pre class="p-6 text-sm font-mono leading-relaxed overflow-x-auto"><code><span class="text-zig">swap</span> <span class="text-green-300">arg_0_1</span> <span class="text-gray-400">=</span>
+  <span class="text-blue-300">case</span> <span class="text-green-300">arg_0_1</span> <span class="text-blue-300">of</span>
+    (<span class="text-white">CPair</span> <span class="text-green-300">a_2</span> <span class="text-green-300">b_3</span>) <span class="text-gray-400">-&gt;</span>
+      <span class="text-purple-400 font-semibold">store</span> (<span class="text-white">CPair</span> <span class="text-green-300">b_3</span> <span class="text-green-300">a_2</span>) <span class="text-gray-400">;</span>
+      <span class="text-gray-400">\</span><span class="text-green-300">node_5</span> <span class="text-gray-400">-&gt;</span>
+        <span class="text-blue-300">pure</span> <span class="text-green-300">node_5</span>
+    _ <span class="text-gray-400">-&gt;</span>
+      <span class="text-blue-300">pure</span> <span class="text-yellow-300">#"Non-exhaustive patterns"</span></code></pre>
+                        <div class="px-6 pb-6 space-y-2">
+                            <p class="text-xs text-gray-500 leading-relaxed">
+                                <span class="text-purple-400 font-mono">store</span> is the <em>only</em> way to allocate on the heap — it is a
+                                first-class monadic operation. The result is bound to <span class="text-green-300 font-mono">node_5</span>
+                                via a monadic continuation <span class="text-gray-400 font-mono">\node_5 -&gt;</span>, making the
+                                heap address explicit and inspectable at every optimisation pass.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Key differences -->
+            <div class="grid md:grid-cols-3 gap-6">
+                <div class="card-hover p-6 bg-gray-900 rounded-2xl border border-gray-800">
+                    <div class="w-12 h-12 rounded-xl bg-purple-500/10 flex items-center justify-center mb-4">
+                        <i data-lucide="eye" class="w-6 h-6 text-purple-400"></i>
+                    </div>
+                    <h3 class="text-lg font-bold text-white mb-2">Explicit Allocation</h3>
+                    <p class="text-sm text-gray-500">
+                        Every heap write is a <code class="text-purple-400">store</code> instruction.
+                        Every heap read is a <code class="text-purple-400">fetch</code>.
+                        Every thunk update is an <code class="text-purple-400">update</code>.
+                        No hidden operations behind info tables or closure entry points.
+                    </p>
+                </div>
+
+                <div class="card-hover p-6 bg-gray-900 rounded-2xl border border-gray-800">
+                    <div class="w-12 h-12 rounded-xl bg-zig/10 flex items-center justify-center mb-4">
+                        <i data-lucide="git-branch" class="w-6 h-6 text-zig"></i>
+                    </div>
+                    <h3 class="text-lg font-bold text-white mb-2">Monadic Continuations</h3>
+                    <p class="text-sm text-gray-500">
+                        GRIN is a monadic IR: <code class="text-zig">store</code> returns a heap
+                        pointer that is bound to a fresh variable via <code class="text-zig">\x -&gt;</code>.
+                        This gives every allocated node a named identity, perfect for
+                        whole-program heap analyses.
+                    </p>
+                </div>
+
+                <div class="card-hover p-6 bg-gray-900 rounded-2xl border border-gray-800">
+                    <div class="w-12 h-12 rounded-xl bg-blue-500/10 flex items-center justify-center mb-4">
+                        <i data-lucide="search" class="w-6 h-6 text-blue-400"></i>
+                    </div>
+                    <h3 class="text-lg font-bold text-white mb-2">Analysis-Friendly</h3>
+                    <p class="text-sm text-gray-500">
+                        Because allocation is explicit and first-class, heap analyses
+                        (points-to, sharing, liveness) can operate directly on the IR
+                        without needing a separate abstract interpretation of calling
+                        conventions or info tables.
+                    </p>
+                </div>
+            </div>
+
+            <!-- Reference -->
+            <div class="mt-12 p-6 bg-gray-900/50 rounded-2xl border border-gray-800 flex flex-col sm:flex-row items-start sm:items-center gap-4">
+                <div class="w-12 h-12 rounded-xl bg-gray-800 flex items-center justify-center flex-shrink-0">
+                    <i data-lucide="book-open" class="w-6 h-6 text-gray-400"></i>
+                </div>
+                <div>
+                    <p class="text-white font-medium mb-1">Further Reading</p>
+                    <p class="text-sm text-gray-500">
+                        GRIN was introduced by Boquist &amp; Johnsson (1996) in
+                        <em>"The GRIN Project: A Highly Optimising Back End for Lazy Functional Languages"</em>.
+                        The key insight is that making heap operations first-class enables a family of
+                        whole-program transformations — including sharing analysis, dead heap elimination,
+                        and update avoidance — that are difficult to express on STG.
+                    </p>
+                </div>
+            </div>
+        </div>
+    </section>
+
     <!-- Design Section -->
     <section id="design" class="py-24 px-4 sm:px-6 lg:px-8 bg-gray-900/50 relative">
         <div class="max-w-7xl mx-auto">
@@ -690,6 +894,7 @@
                         <li><a href="#about" class="text-gray-500 hover:text-zig transition-colors text-sm">About</a></li>
                         <li><a href="#pipeline" class="text-gray-500 hover:text-zig transition-colors text-sm">Pipeline</a></li>
                         <li><a href="#roadmap" class="text-gray-500 hover:text-zig transition-colors text-sm">Roadmap</a></li>
+                        <li><a href="#grin" class="text-gray-500 hover:text-zig transition-colors text-sm">GRIN</a></li>
                     </ul>
                 </div>
                 <div>
