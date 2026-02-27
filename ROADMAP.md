@@ -370,7 +370,7 @@
 |---|-------|------|--------|
 | [#366](https://github.com/adinapoli/rusholme/issues/366) | Define module interface representation (ModIface) with `.rhi` serialisation | [#38](https://github.com/adinapoli/rusholme/issues/38) | :green_circle: |
 | [#367](https://github.com/adinapoli/rusholme/issues/367) | Implement module graph and topological compilation order | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
-| [#368](https://github.com/adinapoli/rusholme/issues/368) | Implement compilation session (CompileEnv) | [#366](https://github.com/adinapoli/rusholme/issues/366), [#367](https://github.com/adinapoli/rusholme/issues/367) | :white_circle: |
+| [#368](https://github.com/adinapoli/rusholme/issues/368) | Implement compilation session (CompileEnv) | [#366](https://github.com/adinapoli/rusholme/issues/366), [#367](https://github.com/adinapoli/rusholme/issues/367) | :yellow_circle: |
 | [#369](https://github.com/adinapoli/rusholme/issues/369) | Implement implicit Prelude import | [#368](https://github.com/adinapoli/rusholme/issues/368) | :white_circle: |
 | [#371](https://github.com/adinapoli/rusholme/issues/371) | Implement recompilation avoidance via `.rhi` fingerprinting | [#366](https://github.com/adinapoli/rusholme/issues/366), [#368](https://github.com/adinapoli/rusholme/issues/368) | :white_circle: |
 | [#370](https://github.com/adinapoli/rusholme/issues/370) | Bootstrap Prelude from Haskell source | [#368](https://github.com/adinapoli/rusholme/issues/368), [#58](https://github.com/adinapoli/rusholme/issues/58), [#59](https://github.com/adinapoli/rusholme/issues/59) | :white_circle: |
