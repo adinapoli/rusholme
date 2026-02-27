@@ -1,14 +1,14 @@
 === Core Program (1 data, 2 bindings) ===
 data Color_1005 = (Red_1000 :: Color_1005) | (Green_1001 :: Color_1005) | (Blue_1002 :: Color_1005)
 
-(isRed_1003 :: Color_1005 -> Bool_104) = \(arg_0 :: Color_1005) -> case arg_0 of (arg_0 :: Color_1005) {
+(isRed_1003 :: Color_1005 -> Bool_104) = \(arg_0_1006 :: Color_1005) -> case arg_0_1006 of (arg_0_1006 :: Color_1005) {
   Red_1000 -> True_200
   _ -> False_201
 }
 
-(describeNumber_1004 :: Int_100 -> []_110 Char_105) = \(arg_0 :: Int_100) -> case arg_0 of (arg_0 :: Int_100) {
+(describeNumber_1004 :: Int_100 -> []_110 Char_105) = \(arg_0_1007 :: Int_100) -> case arg_0_1007 of (arg_0_1007 :: Int_100) {
   0 -> "zero"
-  _ -> case arg_0 of (arg_0 :: Int_100) {
+  _ -> case arg_0_1007 of (arg_0_1007 :: Int_100) {
     1 -> "one"
     _ -> "many"
   }

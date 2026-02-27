@@ -5,6 +5,7 @@ const infer_mod = @import("../typechecker/infer.zig");
 const htype_mod = @import("../typechecker/htype.zig");
 const env_mod = @import("../typechecker/env.zig");
 const Known = @import("../naming/known.zig");
+const naming_mod = @import("../naming/unique.zig");
 const Name = ast_mod.Name;
 const SourceSpan = ast_mod.SourceSpan;
 const SourcePos = ast_mod.SourcePos;
@@ -14,6 +15,11 @@ pub const DesugarCtx = struct {
     alloc: std.mem.Allocator,
     types: *const infer_mod.ModuleTypes,
     diags: *DiagnosticCollector,
+    /// Used to generate fresh unique values for synthetic binders (lambda
+    /// parameters created by the pattern-match compiler, constructor field
+    /// binders, etc.). Each synthetic binder must get a globally unique ID so
+    /// that the GRIN translator can distinguish them in its `var_map`.
+    u_supply: *naming_mod.UniqueSupply,
 };
 
 // Synthetic span for desugared constructs
@@ -48,11 +54,13 @@ pub fn desugarModule(
     module: renamer_mod.RenamedModule,
     module_types: *const infer_mod.ModuleTypes,
     diags: *DiagnosticCollector,
+    u_supply: *naming_mod.UniqueSupply,
 ) std.mem.Allocator.Error!ast_mod.CoreProgram {
     var ctx = DesugarCtx{
         .alloc = alloc,
         .types = module_types,
         .diags = diags,
+        .u_supply = u_supply,
     };
 
     var binds = std.ArrayListUnmanaged(ast_mod.Bind){};
@@ -638,11 +646,14 @@ fn desugarMatch(
     const arg_tys = try getArgTypes(ctx.alloc, core_ty, num_args);
 
     // Create fresh lambda binders: `arg_0, arg_1, ...`
+    // Each binder gets a fresh unique so that the GRIN translator's var_map
+    // can distinguish parameters that share the same base name (e.g. when the
+    // pattern-match compiler generates multiple `arg_N` parameters).
     var binders = try ctx.alloc.alloc(ast_mod.Id, num_args);
     for (0..num_args) |i| {
         const arg_name = try std.fmt.allocPrint(ctx.alloc, "arg_{d}", .{i});
         binders[i] = .{
-            .name = .{ .base = arg_name, .unique = .{ .value = 0 } },
+            .name = .{ .base = arg_name, .unique = ctx.u_supply.fresh() },
             .ty = arg_tys[i],
             .span = syntheticSpan(),
         };
@@ -797,7 +808,7 @@ fn applyPat(
                 var sub_pat = c.args[field_i];
                 while (sub_pat == .Paren) sub_pat = sub_pat.Paren.*;
 
-                const field_binder = try freshFieldBinder(ctx.alloc, arg_idx, depth, field_i);
+                const field_binder = try freshFieldBinder(ctx.alloc, ctx.u_supply, arg_idx, depth, field_i);
 
                 // The binder always captures the field value, regardless of whether
                 // the sub-pattern matches.
@@ -891,7 +902,7 @@ fn applyPat(
                 var sub_pat = elems[field_i];
                 while (sub_pat == .Paren) sub_pat = sub_pat.Paren.*;
 
-                const field_binder = try freshFieldBinder(ctx.alloc, arg_idx, depth, field_i);
+                const field_binder = try freshFieldBinder(ctx.alloc, ctx.u_supply, arg_idx, depth, field_i);
                 con_binders[field_i] = field_binder;
 
                 switch (sub_pat) {
@@ -1009,16 +1020,20 @@ fn applyPat(
 }
 
 /// Allocate a fresh `Id` for a constructor field binder.
-/// Name format: `_field_{arg_idx}_{depth}_{field_i}` — unique within a match clause.
+/// Create a fresh binder for a constructor field in a pattern match.
+///
+/// Each binder gets a fresh unique from `u_supply` so that the downstream
+/// passes can distinguish field binders that share a base name pattern.
 fn freshFieldBinder(
     alloc: std.mem.Allocator,
+    u_supply: *naming_mod.UniqueSupply,
     arg_idx: usize,
     depth: usize,
     field_i: usize,
 ) !ast_mod.Id {
     const name = try std.fmt.allocPrint(alloc, "_field_{d}_{d}_{d}", .{ arg_idx, depth, field_i });
     return .{
-        .name = .{ .base = name, .unique = .{ .value = 0 } },
+        .name = .{ .base = name, .unique = u_supply.fresh() },
         .ty = dummyCoreType(),
         .span = syntheticSpan(),
     };
@@ -1060,10 +1075,12 @@ test "desugarMatch: Tier 1 literal and wildcard" {
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
 
+    var u_supply = naming_mod.UniqueSupply{};
     var ctx = DesugarCtx{
         .alloc = alloc,
         .types = &types,
         .diags = &diags,
+        .u_supply = &u_supply,
     };
 
     // f 0 = "zero"
@@ -1141,10 +1158,12 @@ test "desugarExpr: Var and Lit" {
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
 
+    var u_supply = naming_mod.UniqueSupply{};
     var ctx = DesugarCtx{
         .alloc = alloc,
         .types = &types,
         .diags = &diags,
+        .u_supply = &u_supply,
     };
 
     // Add a local binder type mapping
@@ -1223,10 +1242,12 @@ test "desugarExpr: List desugars to Cons/Nil chain" {
         try types.schemes.put(alloc, Known.Con.Nil.unique, .{ .binders = binders, .constraints = &.{}, .body = nil_body });
     }
 
+    var u_supply = naming_mod.UniqueSupply{};
     var ctx = DesugarCtx{
         .alloc = alloc,
         .types = &types,
         .diags = &diags,
+        .u_supply = &u_supply,
     };
 
     // Test empty list: [] desugars to Var(Nil)
@@ -1297,10 +1318,12 @@ test "desugarExpr: Paren unwraps inner expression" {
     const x_name = testName("x", 42);
     try types.local_binders.put(alloc, x_name.unique, int_h_ty);
 
+    var u_supply = naming_mod.UniqueSupply{};
     var ctx = DesugarCtx{
         .alloc = alloc,
         .types = &types,
         .diags = &diags,
+        .u_supply = &u_supply,
     };
 
     const inner = try alloc.create(renamer_mod.RExpr);
@@ -1316,8 +1339,8 @@ test "desugarExpr: Paren unwraps inner expression" {
 // ── Tier 2 pattern match tests ──────────────────────────────────────────────
 
 /// Helper: build a DesugarCtx backed by an ArenaAllocator for pattern tests.
-fn makeCtx(alloc: std.mem.Allocator, types: *infer_mod.ModuleTypes, diags: *DiagnosticCollector) DesugarCtx {
-    return .{ .alloc = alloc, .types = types, .diags = diags };
+fn makeCtx(alloc: std.mem.Allocator, types: *infer_mod.ModuleTypes, diags: *DiagnosticCollector, u_supply: *naming_mod.UniqueSupply) DesugarCtx {
+    return .{ .alloc = alloc, .types = types, .diags = diags, .u_supply = u_supply };
 }
 
 /// Helper: build a simple `Con_name -> T` function type for single-arg functions.
@@ -1341,7 +1364,8 @@ test "desugarMatch: Tier 2 constructor pattern with Var sub-pattern" {
     defer types.deinit(alloc);
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    var ctx = makeCtx(alloc, &types, &diags);
+    var u_supply = naming_mod.UniqueSupply{};
+    var ctx = makeCtx(alloc, &types, &diags, &u_supply);
 
     const maybe_ty_name = testName("Maybe", 10);
     const int_ty_name = testName("Int", 1);
@@ -1407,7 +1431,8 @@ test "desugarMatch: Tier 2 as-pattern" {
     defer types.deinit(alloc);
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    var ctx = makeCtx(alloc, &types, &diags);
+    var u_supply = naming_mod.UniqueSupply{};
+    var ctx = makeCtx(alloc, &types, &diags, &u_supply);
 
     const maybe_ty_name = testName("Maybe", 10);
     const int_ty_name = testName("Int", 1);
@@ -1471,7 +1496,8 @@ test "desugarMatch: Tier 2 tuple pattern" {
     defer types.deinit(alloc);
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    var ctx = makeCtx(alloc, &types, &diags);
+    var u_supply = naming_mod.UniqueSupply{};
+    var ctx = makeCtx(alloc, &types, &diags, &u_supply);
 
     const int_ty_name = testName("Int", 1);
     const int_ty = ast_mod.CoreType{ .TyCon = .{ .name = int_ty_name, .args = &.{} } };
