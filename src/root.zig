@@ -59,6 +59,11 @@ pub const grin = struct {
     pub const evaluator = @import("grin/evaluator.zig");
 };
 
+// Module system
+pub const modules = struct {
+    pub const mod_iface = @import("modules/mod_iface.zig");
+};
+
 // Backend
 pub const backend = @import("backend.zig");
 
@@ -94,4 +99,5 @@ test {
     testing.refAllDecls(backend);
     testing.refAllDecls(tc);
     testing.refAllDecls(runtime);
+    testing.refAllDecls(modules);
 }
