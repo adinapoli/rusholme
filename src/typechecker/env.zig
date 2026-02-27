@@ -509,6 +509,9 @@ pub fn initBuiltins(env: *TyEnv, alloc: std.mem.Allocator, supply: *UniqueSupply
     try env.bindMono(Known.Con.True, bool_ty);
     try env.bindMono(Known.Con.False, bool_ty);
 
+    // otherwise : Bool  (always-true guard sentinel, identical to True)
+    try env.bindMono(Known.Fn.otherwise, bool_ty);
+
     // Unit constructor
     try env.bindMono(Known.Con.Unit, unit_ty);
 

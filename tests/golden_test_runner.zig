@@ -267,3 +267,5 @@ test "golden: ghc_015_tuples" { try testParseGolden(std.testing.allocator, "ghc_
 
 test "golden: ghc_016_tier1_patterns core" { try testCoreGolden(std.testing.allocator, "ghc_016_tier1_patterns"); }
 test "golden: ghc_017_tier2_patterns core" { try testCoreGolden(std.testing.allocator, "ghc_017_tier2_patterns"); }
+test "golden: ghc_018_list_patterns core" { try testCoreGolden(std.testing.allocator, "ghc_018_list_patterns"); }
+test "golden: ghc_019_guards core" { try testCoreGolden(std.testing.allocator, "ghc_019_guards"); }
