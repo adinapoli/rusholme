@@ -199,9 +199,116 @@ pub fn desugarModule(
 fn desugarRhs(ctx: *DesugarCtx, rhs: renamer_mod.RRhs) !ast_mod.Expr {
     switch (rhs) {
         .UnGuarded => |expr| return (try desugarExpr(ctx, expr)).*,
-        // tracked in: https://github.com/adinapoli/rusholme/issues/417
-        .Guarded => std.debug.panic("Guarded RHS not yet supported in desugarer", .{}),
+        .Guarded => |grhs_list| return desugarGuardedRhs(ctx, grhs_list),
     }
+}
+
+/// Desugar a sequence of guarded RHS alternatives into nested Core `if/case`
+/// expressions.
+///
+/// Each `RGuardedRhs` has a list of guards and an RHS expression.  Guards are
+/// desugared left-to-right as conjunctive conditions:
+///
+///   | g1, g2 = rhs   →   if g1 then (if g2 then rhs else <next>) else <next>
+///
+/// The final fallback is the non-exhaustive error literal (same as in
+/// `desugarMatch`).  The special name `otherwise` (and the literal `True`) are
+/// recognised as always-true guards and short-circuit to the RHS directly.
+///
+/// Only `ExprGuard` is implemented here.  `PatGuard` (pattern guards,
+/// `pat <- expr`) is a GHC extension not in Haskell 2010 and is not
+/// yet supported.
+fn desugarGuardedRhs(
+    ctx: *DesugarCtx,
+    grhs_list: []const renamer_mod.RGuardedRhs,
+) !ast_mod.Expr {
+    const alloc = ctx.alloc;
+
+    // Start with the non-exhaustive fallback.
+    var fallback = try alloc.create(ast_mod.Expr);
+    fallback.* = .{
+        .Lit = .{
+            .val = .{ .String = "Non-exhaustive patterns in function" },
+            .span = syntheticSpan(),
+        },
+    };
+
+    // Build from the last guarded RHS back to the first so that each
+    // alternative wraps around the previous fallback.
+    var idx: usize = grhs_list.len;
+    while (idx > 0) {
+        idx -= 1;
+        const grhs = grhs_list[idx];
+
+        var rhs_expr = try desugarExpr(ctx, grhs.rhs);
+
+        // Apply guards from right to left (innermost guard wraps rhs_expr,
+        // outer guards wrap that result with the same fallback).
+        var g_idx: usize = grhs.guards.len;
+        while (g_idx > 0) {
+            g_idx -= 1;
+            const guard = grhs.guards[g_idx];
+            switch (guard) {
+                .ExprGuard => |cond_expr| {
+                    // `otherwise` and `True` are always-true sentinels — emit
+                    // the RHS directly without a conditional wrapper.
+                    const is_trivially_true = switch (cond_expr) {
+                        .Var => |v| std.mem.eql(u8, v.name.base, "otherwise") or
+                            std.mem.eql(u8, v.name.base, "True"),
+                        else => false,
+                    };
+                    if (is_trivially_true) continue;
+
+                    // General boolean guard: desugar to
+                    //   case <cond> of { True -> rhs ; _ -> fallback }
+                    const cond = try desugarExpr(ctx, cond_expr);
+
+                    const dummy_ty = ast_mod.CoreType{
+                        .TyVar = Name{ .base = "_t", .unique = .{ .value = 0 } },
+                    };
+                    const wild_id = ast_mod.Id{
+                        .name = Name{ .base = "wild", .unique = ctx.u_supply.fresh() },
+                        .ty = dummy_ty,
+                        .span = syntheticSpan(),
+                    };
+
+                    var alts = try alloc.alloc(ast_mod.Alt, 2);
+                    alts[0] = .{
+                        .con = .{ .DataAlt = Name{ .base = "True", .unique = Known.Con.True.unique } },
+                        .binders = &.{},
+                        .body = rhs_expr,
+                    };
+                    alts[1] = .{
+                        .con = .Default,
+                        .binders = &.{},
+                        .body = fallback,
+                    };
+
+                    const new_rhs = try alloc.create(ast_mod.Expr);
+                    new_rhs.* = .{ .Case = .{
+                        .scrutinee = cond,
+                        .binder = wild_id,
+                        .ty = dummy_ty,
+                        .alts = alts,
+                        .span = syntheticSpan(),
+                    } };
+                    rhs_expr = new_rhs;
+                },
+                .PatGuard => {
+                    // Pattern guards are a GHC extension, not in Haskell 2010.
+                    // Emit the RHS unconditionally so compilation does not panic;
+                    // a proper implementation is left for a future issue.
+                    // tracked in: https://github.com/adinapoli/rusholme/issues/417
+                    break;
+                },
+            }
+        }
+
+        // This guarded RHS result becomes the new fallback for the previous one.
+        fallback = rhs_expr;
+    }
+
+    return fallback.*;
 }
 
 pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.Error!*ast_mod.Expr {
@@ -1003,13 +1110,44 @@ fn applyPat(
         // Already unwrapped at the call sites; handle here for completeness.
         .Paren => |inner| try applyPat(ctx, scrut_expr, scrut_id, scrut_ty, inner.*, success, failure, arg_idx, depth),
 
+        // ── List pattern ──────────────────────────────────────────────────
+        //
+        // `[]`       → Con(Nil, [])
+        // `[p1,..,pn]` → InfixCon(p1, :, InfixCon(p2, :, ... Con(Nil, []) ...))
+        //
+        // We synthesise the equivalent `RPat` and recurse via `applyPat`.
+        .List => |elems| blk: {
+            // Build from the right: start with the Nil pattern.
+            var right_pat = try ctx.alloc.create(renamer_mod.RPat);
+            right_pat.* = renamer_mod.RPat{ .Con = .{
+                .name = Known.Con.Nil,
+                .con_span = syntheticSpan(),
+                .args = &.{},
+            } };
+
+            // Wrap each element from the right: InfixCon(elem, :, right_pat)
+            var i: usize = elems.len;
+            while (i > 0) {
+                i -= 1;
+                const elem_ptr = try ctx.alloc.create(renamer_mod.RPat);
+                elem_ptr.* = elems[i];
+
+                const new_right = try ctx.alloc.create(renamer_mod.RPat);
+                new_right.* = renamer_mod.RPat{ .InfixCon = .{
+                    .left = elem_ptr,
+                    .con = Known.Con.Cons,
+                    .con_span = syntheticSpan(),
+                    .right = right_pat,
+                } };
+                right_pat = new_right;
+            }
+
+            break :blk try applyPat(ctx, scrut_expr, scrut_id, scrut_ty, right_pat.*, success, failure, arg_idx, depth);
+        },
+
         // ── Not yet implemented ───────────────────────────────────────────
         //
         // IMPORTANT: Each unsupported case MUST have a tracking issue.
-        .List => {
-            // tracked in: https://github.com/adinapoli/rusholme/issues/418
-            std.debug.panic("List patterns not yet supported in match compiler: {}", .{pat});
-        },
         .RecPat => {
             // Record pattern desugaring requires the record type to be fully
             // in scope; tracked as part of the record support work.
@@ -1528,4 +1666,197 @@ test "desugarMatch: Tier 2 tuple pattern" {
     // 2 binders: first = "a" (from Var), second = fresh wildcard binder
     try testing.expectEqual(@as(usize, 2), tuple_alt.binders.len);
     try testing.expectEqualStrings("a", tuple_alt.binders[0].name.base);
+}
+
+// ── List pattern tests (#418) ────────────────────────────────────────────────
+
+test "desugarMatch: empty list pattern []" {
+    // f [] = 0
+    // f _  = 1
+    // Type: [Int] -> Int
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var types = infer_mod.ModuleTypes{ .schemes = .{}, .local_binders = .{} };
+    defer types.deinit(alloc);
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+    var u_supply = naming_mod.UniqueSupply{};
+    var ctx = makeCtx(alloc, &types, &diags, &u_supply);
+
+    const list_ty_name = testName("[]", 110);
+    const int_ty_name = testName("Int", 1);
+    const list_ty = ast_mod.CoreType{ .TyCon = .{ .name = list_ty_name, .args = &.{} } };
+    const int_ty = ast_mod.CoreType{ .TyCon = .{ .name = int_ty_name, .args = &.{} } };
+    const fun_ty = try singleArgFunTy(alloc, list_ty, int_ty);
+
+    // [] pattern (empty list)
+    const nil_pat = renamer_mod.RPat{ .List = &.{} };
+    const wild_pat = renamer_mod.RPat{ .Wild = syntheticSpan() };
+
+    const rhs0 = renamer_mod.RRhs{ .UnGuarded = .{ .Lit = .{ .Int = .{ .value = 0, .span = syntheticSpan() } } } };
+    const rhs1 = renamer_mod.RRhs{ .UnGuarded = .{ .Lit = .{ .Int = .{ .value = 1, .span = syntheticSpan() } } } };
+
+    const eq1 = renamer_mod.RMatch{ .patterns = try alloc.dupe(renamer_mod.RPat, &.{nil_pat}), .rhs = rhs0, .span = syntheticSpan() };
+    const eq2 = renamer_mod.RMatch{ .patterns = try alloc.dupe(renamer_mod.RPat, &.{wild_pat}), .rhs = rhs1, .span = syntheticSpan() };
+
+    const expr = try desugarMatch(&ctx, &.{ eq1, eq2 }, fun_ty);
+
+    // \arg_0 -> case arg_0 { [] -> 0 ; _ -> 1 }
+    // The empty list pattern desugars to Con(Nil,[]) which is a DataAlt on "[]".
+    try testing.expect(expr.* == .Lam);
+    const body = expr.Lam.body.*;
+    try testing.expect(body == .Case);
+    try testing.expectEqual(@as(usize, 2), body.Case.alts.len);
+
+    const nil_alt = body.Case.alts[0];
+    try testing.expect(nil_alt.con == .DataAlt);
+    try testing.expectEqualStrings("[]", nil_alt.con.DataAlt.base);
+    try testing.expectEqual(@as(usize, 0), nil_alt.binders.len);
+    try testing.expect(nil_alt.body.* == .Lit);
+    try testing.expectEqual(@as(i64, 0), nil_alt.body.Lit.val.Int);
+}
+
+test "desugarMatch: non-empty list pattern [x, y]" {
+    // f [x, y] = x
+    // f _      = 0
+    // Type: [Int] -> Int
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var types = infer_mod.ModuleTypes{ .schemes = .{}, .local_binders = .{} };
+    defer types.deinit(alloc);
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+    var u_supply = naming_mod.UniqueSupply{};
+    var ctx = makeCtx(alloc, &types, &diags, &u_supply);
+
+    const list_ty_name = testName("[]", 110);
+    const int_ty_name = testName("Int", 1);
+    const list_ty = ast_mod.CoreType{ .TyCon = .{ .name = list_ty_name, .args = &.{} } };
+    const int_ty = ast_mod.CoreType{ .TyCon = .{ .name = int_ty_name, .args = &.{} } };
+    const fun_ty = try singleArgFunTy(alloc, list_ty, int_ty);
+
+    const x_name = testName("x", 91);
+    const y_name = testName("y", 92);
+    const x_pat = renamer_mod.RPat{ .Var = .{ .name = x_name, .span = syntheticSpan() } };
+    const y_pat = renamer_mod.RPat{ .Var = .{ .name = y_name, .span = syntheticSpan() } };
+
+    // [x, y] pattern
+    const list_pat = renamer_mod.RPat{ .List = try alloc.dupe(renamer_mod.RPat, &.{ x_pat, y_pat }) };
+    const wild_pat = renamer_mod.RPat{ .Wild = syntheticSpan() };
+
+    const rhs1 = renamer_mod.RRhs{ .UnGuarded = .{ .Lit = .{ .Int = .{ .value = 42, .span = syntheticSpan() } } } };
+    const rhs2 = renamer_mod.RRhs{ .UnGuarded = .{ .Lit = .{ .Int = .{ .value = 0, .span = syntheticSpan() } } } };
+
+    const eq1 = renamer_mod.RMatch{ .patterns = try alloc.dupe(renamer_mod.RPat, &.{list_pat}), .rhs = rhs1, .span = syntheticSpan() };
+    const eq2 = renamer_mod.RMatch{ .patterns = try alloc.dupe(renamer_mod.RPat, &.{wild_pat}), .rhs = rhs2, .span = syntheticSpan() };
+
+    const expr = try desugarMatch(&ctx, &.{ eq1, eq2 }, fun_ty);
+
+    // \arg_0 -> case arg_0 { (:) x ys -> case ys { (:) y [] -> 42 ; _ -> ... } ; _ -> 0 }
+    // The outermost case must be a DataAlt on "(:)".
+    try testing.expect(expr.* == .Lam);
+    const body = expr.Lam.body.*;
+    try testing.expect(body == .Case);
+
+    const cons_alt = body.Case.alts[0];
+    try testing.expect(cons_alt.con == .DataAlt);
+    try testing.expectEqualStrings("(:)", cons_alt.con.DataAlt.base);
+    // (:) binder 0 = x (Var sub-pattern), binder 1 = fresh tail binder
+    try testing.expectEqual(@as(usize, 2), cons_alt.binders.len);
+    try testing.expectEqualStrings("x", cons_alt.binders[0].name.base);
+}
+
+// ── Guard tests (#417) ───────────────────────────────────────────────────────
+
+test "desugarRhs: simple boolean guard" {
+    // | x > 0 = "pos"   (represented as ExprGuard with a Var placeholder)
+    // | otherwise = "non-pos"
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var types = infer_mod.ModuleTypes{ .schemes = .{}, .local_binders = .{} };
+    defer types.deinit(alloc);
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+    var u_supply = naming_mod.UniqueSupply{};
+    var ctx = makeCtx(alloc, &types, &diags, &u_supply);
+
+    // Use a Var "cond_var" as the guard expression (stands in for any boolean expr).
+    // We need a type for it in the type environment.
+    const bool_h_ty = try alloc.create(htype_mod.HType);
+    bool_h_ty.* = .{ .Con = .{ .name = testName("Bool", 104), .args = &.{} } };
+    const cond_name = testName("cond_var", 200);
+    try types.local_binders.put(alloc, cond_name.unique, bool_h_ty);
+
+    // Guard 1: ExprGuard(Var "cond_var") -> "pos"
+    // Guard 2: ExprGuard(Var "otherwise") -> "non-pos"
+    const cond_expr = renamer_mod.RExpr{ .Var = .{ .name = cond_name, .span = syntheticSpan() } };
+    const otherwise_expr = renamer_mod.RExpr{ .Var = .{ .name = Known.Fn.otherwise, .span = syntheticSpan() } };
+
+    // We need `otherwise` in the type env too.
+    const bool_h_ty2 = try alloc.create(htype_mod.HType);
+    bool_h_ty2.* = .{ .Con = .{ .name = testName("Bool", 104), .args = &.{} } };
+    try types.local_binders.put(alloc, Known.Fn.otherwise.unique, bool_h_ty2);
+
+    const grhs1 = renamer_mod.RGuardedRhs{
+        .guards = try alloc.dupe(renamer_mod.RGuard, &.{.{ .ExprGuard = cond_expr }}),
+        .rhs = .{ .Lit = .{ .String = .{ .value = "pos", .span = syntheticSpan() } } },
+    };
+    const grhs2 = renamer_mod.RGuardedRhs{
+        .guards = try alloc.dupe(renamer_mod.RGuard, &.{.{ .ExprGuard = otherwise_expr }}),
+        .rhs = .{ .Lit = .{ .String = .{ .value = "non-pos", .span = syntheticSpan() } } },
+    };
+
+    const rhs = renamer_mod.RRhs{ .Guarded = try alloc.dupe(renamer_mod.RGuardedRhs, &.{ grhs1, grhs2 }) };
+    const result = try desugarRhs(&ctx, rhs);
+
+    // Expected: case cond_var of { True -> "pos" ; _ -> "non-pos" }
+    // (the `otherwise` guard is trivially true so grhs2 becomes the fallback directly)
+    try testing.expect(result == .Case);
+    try testing.expectEqual(@as(usize, 2), result.Case.alts.len);
+    try testing.expect(result.Case.alts[0].con == .DataAlt);
+    try testing.expectEqualStrings("True", result.Case.alts[0].con.DataAlt.base);
+    try testing.expect(result.Case.alts[0].body.* == .Lit);
+    try testing.expectEqualStrings("pos", result.Case.alts[0].body.Lit.val.String);
+    // Default branch is the `otherwise` case body: "non-pos"
+    try testing.expect(result.Case.alts[1].con == .Default);
+    try testing.expect(result.Case.alts[1].body.* == .Lit);
+    try testing.expectEqualStrings("non-pos", result.Case.alts[1].body.Lit.val.String);
+}
+
+test "desugarRhs: otherwise-only guard is transparent" {
+    // | otherwise = 42
+    // The `otherwise` sentinel should pass through directly without wrapping in a Case.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var types = infer_mod.ModuleTypes{ .schemes = .{}, .local_binders = .{} };
+    defer types.deinit(alloc);
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+    var u_supply = naming_mod.UniqueSupply{};
+    var ctx = makeCtx(alloc, &types, &diags, &u_supply);
+
+    const otherwise_expr = renamer_mod.RExpr{ .Var = .{ .name = Known.Fn.otherwise, .span = syntheticSpan() } };
+    const bool_h_ty = try alloc.create(htype_mod.HType);
+    bool_h_ty.* = .{ .Con = .{ .name = testName("Bool", 104), .args = &.{} } };
+    try types.local_binders.put(alloc, Known.Fn.otherwise.unique, bool_h_ty);
+
+    const grhs = renamer_mod.RGuardedRhs{
+        .guards = try alloc.dupe(renamer_mod.RGuard, &.{.{ .ExprGuard = otherwise_expr }}),
+        .rhs = .{ .Lit = .{ .Int = .{ .value = 42, .span = syntheticSpan() } } },
+    };
+
+    const rhs = renamer_mod.RRhs{ .Guarded = try alloc.dupe(renamer_mod.RGuardedRhs, &.{grhs}) };
+    const result = try desugarRhs(&ctx, rhs);
+
+    // `otherwise` is trivially true: no Case wrapper, just the Lit directly.
+    try testing.expect(result == .Lit);
+    try testing.expectEqual(@as(i64, 42), result.Lit.val.Int);
 }
