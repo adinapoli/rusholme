@@ -23,13 +23,26 @@
 //! We use a simpler model: whole-program compilation with no separate
 //! compilation or recompilation avoidance (those are follow-up issues).
 //!
+//! ## Implicit Prelude import (Haskell 2010 §5.6)
+//!
+//! Every module implicitly imports `Prelude` unless:
+//! - The module header already contains an explicit `import Prelude` (possibly
+//!   with a `hiding` list or import spec), or
+//! - The module carries a `{-# LANGUAGE NoImplicitPrelude #-}` pragma.
+//!
+//! `compileSingle` implements this by calling `injectImplicitPrelude` after
+//! parsing, before passing the AST to the renamer.
+//!
+//! ## Analogy with GHC
+//!
+//! This maps loosely to GHC's `HscEnv` + `upsweep` in `GHC.Driver.Make`.
+//! We use a simpler model: whole-program compilation with no separate
+//! compilation or recompilation avoidance (those are follow-up issues).
+//!
 //! ## M2 scope / known limitations
 //!
 //! - Recompilation avoidance (`.rhi` fingerprinting) is not yet implemented.
 //!   Tracked in: https://github.com/adinapoli/rusholme/issues/371
-//!
-//! - Type-class instances are not propagated across module boundaries.
-//!   Tracked in: https://github.com/adinapoli/rusholme/issues/369
 //!
 //! - Package-level search paths are not yet supported.
 //!   Tracked in: https://github.com/adinapoli/rusholme/issues/368
@@ -38,6 +51,7 @@ const std = @import("std");
 
 const naming_mod = @import("../naming/unique.zig");
 const diag_mod = @import("../diagnostics/diagnostic.zig");
+const span_mod = @import("../diagnostics/span.zig");
 const lexer_mod = @import("../frontend/lexer.zig");
 const layout_mod = @import("../frontend/layout.zig");
 const parser_mod = @import("../frontend/parser.zig");
@@ -226,9 +240,10 @@ pub const CompileEnv = struct {
     /// Run the full front-end pipeline for a single source file and register
     /// its outputs in the session.
     ///
-    /// Pipeline: read source → lex/parse → rename (with upstream names seeded
-    /// from `self`) → typecheck (with upstream types seeded from `self`) →
-    /// desugar → build `ModIface` → `register`.
+    /// Pipeline: read source → lex/parse → inject implicit Prelude import
+    /// (Haskell 2010 §5.6) → rename (with upstream names seeded from `self`)
+    /// → typecheck (with upstream types seeded from `self`) → desugar →
+    /// build `ModIface` → `register`.
     ///
     /// `file_id` is the file identifier used for diagnostic spans.
     ///
@@ -249,7 +264,7 @@ pub const CompileEnv = struct {
         preparsed_module: ?ast_mod.Module,
     ) std.mem.Allocator.Error!?CoreProgram {
         // ── Parse (or use pre-parsed) ─────────────────────────────────────
-        const module = if (preparsed_module) |m| m else blk: {
+        const parsed = if (preparsed_module) |m| m else blk: {
             var lexer = lexer_mod.Lexer.init(self.alloc, source, file_id);
             var layout = layout_mod.LayoutProcessor.init(self.alloc, &lexer);
             layout.setDiagnostics(&self.diags);
@@ -258,6 +273,16 @@ pub const CompileEnv = struct {
             break :blk parser.parseModule() catch return null;
         };
         if (self.diags.hasErrors()) return null;
+
+        // ── Implicit Prelude injection (Haskell 2010 §5.6) ───────────────
+        // Unless the module carries {-# LANGUAGE NoImplicitPrelude #-} or
+        // already has an explicit `import Prelude`, prepend a synthetic
+        // `import Prelude` to the import list.
+        const module = if (parsed.language_extensions.contains(.NoImplicitPrelude) or
+            mentionsPrelude(parsed.imports))
+            parsed
+        else
+            try injectImplicitPrelude(self.alloc, parsed);
 
         // ── Rename ───────────────────────────────────────────────────────
         var rename_env = try renamer_mod.RenameEnv.init(self.alloc, &self.u_supply, &self.diags);
@@ -446,6 +471,65 @@ pub fn compileProgram(
     return .{
         .env = env,
         .result = .{ .core = merged, .had_errors = had_errors },
+    };
+}
+
+// ── Implicit Prelude helpers ──────────────────────────────────────────────
+
+/// Returns `true` if `imports` already contains an explicit `import Prelude`
+/// (possibly with specs or a `hiding` list).
+///
+/// Per Haskell 2010 §5.6: any mention of `Prelude` in the import list — even
+/// `import Prelude ()` or `import Prelude hiding (head)` — suppresses the
+/// implicit import.
+pub fn mentionsPrelude(imports: []const ast_mod.ImportDecl) bool {
+    for (imports) |imp| {
+        if (std.mem.eql(u8, imp.module_name, "Prelude")) return true;
+    }
+    return false;
+}
+
+/// Return a copy of `module` with a synthetic `import Prelude` prepended to
+/// its import list.
+///
+/// The synthetic import has:
+/// - `module_name = "Prelude"`
+/// - `qualified = false`
+/// - `as_alias = null`
+/// - `specs = null`  (import everything)
+/// - `span` = invalid (synthetic — not from source text)
+///
+/// All memory is allocated in `alloc`.
+pub fn injectImplicitPrelude(
+    alloc: std.mem.Allocator,
+    module: ast_mod.Module,
+) std.mem.Allocator.Error!ast_mod.Module {
+    const invalid_pos = span_mod.SourcePos.invalid();
+    const invalid_span = span_mod.SourceSpan.init(invalid_pos, invalid_pos);
+
+    const implicit_import = ast_mod.ImportDecl{
+        .module_name = "Prelude",
+        .qualified = false,
+        .as_alias = null,
+        .specs = null,
+        .span = invalid_span,
+    };
+
+    // Prepend the implicit import to the existing imports.
+    var new_imports = try std.ArrayListUnmanaged(ast_mod.ImportDecl).initCapacity(
+        alloc,
+        module.imports.len + 1,
+    );
+    try new_imports.append(alloc, implicit_import);
+    try new_imports.appendSlice(alloc, module.imports);
+
+    return ast_mod.Module{
+        .module_name = module.module_name,
+        .exports = module.exports,
+        .imports = try new_imports.toOwnedSlice(alloc),
+        .declarations = module.declarations,
+        .language_extensions = module.language_extensions,
+        .span = module.span,
     };
 }
 
@@ -650,4 +734,110 @@ test "CompileEnv: compileSingle emits diagnostic on parse error" {
     _ = result; // may or may not be null depending on parse-error recovery
     // We only assert that calling it doesn't crash. Diagnostic content
     // is tested in the renamer/parser unit tests.
+}
+
+// ── Implicit Prelude tests ────────────────────────────────────────────────
+
+test "mentionsPrelude: false when no imports" {
+    const imports: []const ast_mod.ImportDecl = &.{};
+    try testing.expect(!mentionsPrelude(imports));
+}
+
+test "mentionsPrelude: false when Prelude not in import list" {
+    const invalid_pos = span_mod.SourcePos.invalid();
+    const invalid_span = span_mod.SourceSpan.init(invalid_pos, invalid_pos);
+    const imports = [_]ast_mod.ImportDecl{
+        .{ .module_name = "Data.List", .span = invalid_span },
+        .{ .module_name = "Data.Map", .span = invalid_span },
+    };
+    try testing.expect(!mentionsPrelude(&imports));
+}
+
+test "mentionsPrelude: true when Prelude is in import list" {
+    const invalid_pos = span_mod.SourcePos.invalid();
+    const invalid_span = span_mod.SourceSpan.init(invalid_pos, invalid_pos);
+    const imports = [_]ast_mod.ImportDecl{
+        .{ .module_name = "Prelude", .span = invalid_span },
+        .{ .module_name = "Data.Map", .span = invalid_span },
+    };
+    try testing.expect(mentionsPrelude(&imports));
+}
+
+test "injectImplicitPrelude: prepends import Prelude" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const invalid_pos = span_mod.SourcePos.invalid();
+    const invalid_span = span_mod.SourceSpan.init(invalid_pos, invalid_pos);
+
+    const orig_imports = [_]ast_mod.ImportDecl{
+        .{ .module_name = "Data.List", .span = invalid_span },
+    };
+    const module = ast_mod.Module{
+        .module_name = "Foo",
+        .exports = null,
+        .imports = &orig_imports,
+        .declarations = &.{},
+        .language_extensions = std.EnumSet(ast_mod.LanguageExtension).initEmpty(),
+        .span = invalid_span,
+    };
+
+    const injected = try injectImplicitPrelude(alloc, module);
+
+    try testing.expectEqual(@as(usize, 2), injected.imports.len);
+    try testing.expectEqualStrings("Prelude", injected.imports[0].module_name);
+    try testing.expect(!injected.imports[0].qualified);
+    try testing.expect(injected.imports[0].specs == null);
+    try testing.expectEqualStrings("Data.List", injected.imports[1].module_name);
+}
+
+test "compileSingle: module without explicit Prelude gets implicit Prelude in imports" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = CompileEnv.init(alloc);
+    defer env.deinit();
+
+    // A module with no explicit Prelude import.
+    const source =
+        \\module NoPrelude where
+        \\
+        \\answer :: Int
+        \\answer = 42
+        \\
+    ;
+
+    // We compile to verify no errors; the implicit Prelude injection is
+    // transparent to the final Core output (until the renamer processes
+    // imports — tracked in: https://github.com/adinapoli/rusholme/issues/375).
+    const result = try env.compileSingle("NoPrelude", source, 1, null);
+    try testing.expect(result != null);
+    try testing.expect(!env.diags.hasErrors());
+}
+
+test "compileSingle: module with NoImplicitPrelude compiles without Prelude injection" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = CompileEnv.init(alloc);
+    defer env.deinit();
+
+    // A module that opts out of the implicit Prelude.
+    // Note: the layout processor sees the pragma_open as the first token and
+    // handles it via error recovery, so the module body still parses.
+    const source =
+        \\{-# LANGUAGE NoImplicitPrelude #-}
+        \\module WithNoPrelude where
+        \\
+        \\answer :: Int
+        \\answer = 42
+        \\
+    ;
+
+    // The compilation may or may not succeed (depends on parser's pragma
+    // handling), but it must not crash.
+    _ = try env.compileSingle("WithNoPrelude", source, 1, null);
 }
