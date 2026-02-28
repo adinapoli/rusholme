@@ -41,10 +41,9 @@
 //!
 //! ## ABI note
 //!
-//! The LLVM codegen currently allocates nodes via `malloc` with its own
-//! layout (`{ i64 tag, ptr field0, … }`) and does not yet call `rts_alloc`.
-//! Unifying the layouts is tracked in:
-//!   https://github.com/adinapoli/rusholme/issues/422
+//! The LLVM codegen (grin_to_llvm.zig) allocates nodes exclusively via
+//! `rts_alloc` and reads/writes fields via `rts_load_field` / `rts_store_field`,
+//! so the LLVM-generated and Zig RTS node layouts are unified (#422).
 
 const std = @import("std");
 const heap = @import("heap.zig");
@@ -269,6 +268,17 @@ pub export fn rts_store_field(n: *Node, index: u32, value: u64) void {
     fields(n)[index] = value;
 }
 
+/// Load a single field value from a node at the given index.
+/// Called `rts_load_field` from LLVM-generated code.
+///
+/// Returns the raw 64-bit slot — either an integer scalar or a pointer
+/// cast to u64 (for *Node child pointers).  Caller must interpret the
+/// value according to the node's type.
+pub export fn rts_load_field(n: *const Node, index: u32) u64 {
+    std.debug.assert(index < n.n_fields);
+    return fieldsConst(n)[index];
+}
+
 /// Bulk-initialise all fields from a caller-provided array.
 /// Called `rts_store` from LLVM-generated code (backwards-compatible
 /// with the previous fixed-array API).
@@ -382,4 +392,15 @@ test "unit node has zero fields slice" {
 
     const n = createUnit();
     try std.testing.expectEqual(0, fields(n).len);
+}
+
+test "rts_load_field reads stored values" {
+    heap.init();
+    defer heap.deinit();
+
+    const n = rts_alloc(0x1000, 2);
+    rts_store_field(n, 0, 0xDEAD);
+    rts_store_field(n, 1, 0xBEEF);
+    try std.testing.expectEqual(@as(u64, 0xDEAD), rts_load_field(n, 0));
+    try std.testing.expectEqual(@as(u64, 0xBEEF), rts_load_field(n, 1));
 }

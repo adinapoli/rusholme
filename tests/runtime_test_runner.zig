@@ -131,6 +131,17 @@ test "runtime: evaluate chained Inds reaches final value" {
     try std.testing.expectEqual(target, eval.rts_eval(ind));
 }
 
+test "runtime: rts_load_field reads stored values" {
+    heap.init();
+    defer heap.deinit();
+
+    const n = node.rts_alloc(0x1000, 2);
+    node.rts_store_field(n, 0, 0xDEAD);
+    node.rts_store_field(n, 1, 0xBEEF);
+    try std.testing.expectEqual(@as(u64, 0xDEAD), node.rts_load_field(n, 0));
+    try std.testing.expectEqual(@as(u64, 0xBEEF), node.rts_load_field(n, 1));
+}
+
 test "runtime: rts_putStrLn exports C function" {
     _ = io.rts_putStrLn;
 }
