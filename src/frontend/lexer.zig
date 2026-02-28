@@ -482,6 +482,21 @@ pub const Lexer = struct {
             return self.scanNumericLiteral();
         }
 
+        // Check for pragma close: #-}
+        // This must be checked before operator scanning because # is a symbol
+        if (c == '#') {
+            if (self.peekNext()) |next1| {
+                if (next1 == '-') {
+                    if (self.pos + 2 < self.source.len and self.source[self.pos + 2] == '}') {
+                        _ = self.advance(); // consume #
+                        _ = self.advance(); // consume -
+                        _ = self.advance(); // consume }
+                        return LocatedToken.init(.pragma_close, span_mod.SourceSpan.init(start_pos, self.currentPos()));
+                    }
+                }
+            }
+        }
+
         // Operators
         if (unicode.isUniSymbol(@intCast(c)) or c == ':') {
             return self.scanOperator();
@@ -557,7 +572,14 @@ pub const Lexer = struct {
                 },
                 '{' => {
                     if (self.peekNext() == '-') {
-                        // Block comment. Nested.
+                        // {-# is a pragma open, not a block comment — let nextToken handle it.
+                        const after_dash = if (self.pos + 2 < self.source.len)
+                            self.source[self.pos + 2]
+                        else
+                            @as(u8, 0);
+                        if (after_dash == '#') break;
+
+                        // Block comment {- ... -}. Nested.
                         _ = self.advance(); // {
                         _ = self.advance(); // -
                         var depth: usize = 1;
@@ -711,6 +733,7 @@ pub const Lexer = struct {
             .{ "qualified", .kw_qualified },
             .{ "hiding", .kw_hiding },
             .{ "forall", .kw_forall },
+            .{ "LANGUAGE", .kw_LANGUAGE },
             .{ "_", .underscore },
         });
         return map.get(s);
@@ -1549,4 +1572,17 @@ test "Lexer: Qualified Operators" {
     try std.testing.expectEqualStrings("Prelude.+", lexer.nextToken().token.varsym);
     try std.testing.expectEqualStrings("Data.Map.!", lexer.nextToken().token.varsym);
     try std.testing.expectEqualStrings("M.:+:", lexer.nextToken().token.consym);
+}
+
+test "lexer: {-# ... #-} emits pragma_open, not consumed as block comment" {
+    var lexer = Lexer.init(std.testing.allocator, "{-# LANGUAGE NoImplicitPrelude #-}", 0);
+    const tok = lexer.nextToken();
+    try std.testing.expect(std.meta.activeTag(tok.token) == .pragma_open);
+}
+
+test "lexer: {- ... -} is still a block comment (skipped)" {
+    var lexer = Lexer.init(std.testing.allocator, "{- this is a comment -} foo", 0);
+    const tok = lexer.nextToken();
+    // The block comment is skipped; first real token is the varid `foo`
+    try std.testing.expect(std.meta.activeTag(tok.token) == .varid);
 }
