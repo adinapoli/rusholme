@@ -41,6 +41,7 @@ const diag_mod = @import("../diagnostics/diagnostic.zig");
 const lexer_mod = @import("../frontend/lexer.zig");
 const layout_mod = @import("../frontend/layout.zig");
 const parser_mod = @import("../frontend/parser.zig");
+const ast_mod = @import("../frontend/ast.zig");
 const renamer_mod = @import("../renamer/renamer.zig");
 const htype_mod = @import("../typechecker/htype.zig");
 const env_mod = @import("../typechecker/env.zig");
@@ -82,6 +83,13 @@ pub const CompileEnv = struct {
     /// GRIN translation.
     programs: std.StringHashMapUnmanaged(CoreProgram),
 
+    /// Map: module name → pre-parsed AST module.
+    ///
+    /// Populated by `compileProgram` after parsing each module once.
+    /// Used to avoid redundant parsing when both import extraction and
+    /// full compilation need the same AST.
+    parsed_modules: std.StringHashMapUnmanaged(ast_mod.Module),
+
     /// Shared unique-ID supply across all modules in the session.
     ///
     /// Threading a single supply through all compilation units ensures that
@@ -102,6 +110,7 @@ pub const CompileEnv = struct {
             .alloc = alloc,
             .ifaces = .{},
             .programs = .{},
+            .parsed_modules = .{},
             .u_supply = .{},
             .mv_supply = .{},
             .diags = DiagnosticCollector.init(),
@@ -111,6 +120,7 @@ pub const CompileEnv = struct {
     pub fn deinit(self: *CompileEnv) void {
         self.ifaces.deinit(self.alloc);
         self.programs.deinit(self.alloc);
+        self.parsed_modules.deinit(self.alloc);
         self.diags.deinit(self.alloc);
         self.* = undefined;
     }
@@ -222,6 +232,10 @@ pub const CompileEnv = struct {
     ///
     /// `file_id` is the file identifier used for diagnostic spans.
     ///
+    /// If `preparsed_module` is provided, skips parsing and uses the given AST.
+    /// This is used by `compileProgram` to avoid redundant parsing when the
+    /// module has already been parsed once for import extraction.
+    ///
     /// Returns the desugared `CoreProgram` (which is also stored in `self`).
     ///
     /// On parse, rename, or typecheck failure the diagnostics are accumulated
@@ -232,14 +246,17 @@ pub const CompileEnv = struct {
         module_name: []const u8,
         source: []const u8,
         file_id: u32,
+        preparsed_module: ?ast_mod.Module,
     ) std.mem.Allocator.Error!?CoreProgram {
-        // ── Parse ────────────────────────────────────────────────────────
-        var lexer = lexer_mod.Lexer.init(self.alloc, source, file_id);
-        var layout = layout_mod.LayoutProcessor.init(self.alloc, &lexer);
-        layout.setDiagnostics(&self.diags);
+        // ── Parse (or use pre-parsed) ─────────────────────────────────────
+        const module = if (preparsed_module) |m| m else blk: {
+            var lexer = lexer_mod.Lexer.init(self.alloc, source, file_id);
+            var layout = layout_mod.LayoutProcessor.init(self.alloc, &lexer);
+            layout.setDiagnostics(&self.diags);
 
-        var parser = parser_mod.Parser.init(self.alloc, &layout, &self.diags) catch return null;
-        const module = parser.parseModule() catch return null;
+            var parser = parser_mod.Parser.init(self.alloc, &layout, &self.diags) catch return null;
+            break :blk parser.parseModule() catch return null;
+        };
         if (self.diags.hasErrors()) return null;
 
         // ── Rename ───────────────────────────────────────────────────────
@@ -353,10 +370,12 @@ pub const CompileResult = struct {
 /// use whatever `Io` abstraction is appropriate (test harness, real FS, etc).
 ///
 /// The function:
-/// 1. Builds a `ModuleGraph` by parsing import headers of each source.
-/// 2. Topologically sorts the graph (import cycles → error).
-/// 3. Compiles each module in dependency-first order via `CompileEnv.compileSingle`.
-/// 4. Merges all `CoreProgram`s into a single whole-program Core.
+/// 1. Parses each module once, storing the AST in `env.parsed_modules`.
+/// 2. Builds a `ModuleGraph` from the parsed imports.
+/// 3. Topologically sorts the graph (import cycles → error).
+/// 4. Compiles each module in dependency-first order via `CompileEnv.compileSingle`,
+///    passing the pre-parsed AST to avoid redundant lexing/parsing.
+/// 5. Merges all `CoreProgram`s into a single whole-program Core.
 ///
 /// `alloc` should be an arena that outlives the returned result.
 pub fn compileProgram(
@@ -364,16 +383,35 @@ pub fn compileProgram(
     modules: []const SourceModule,
 ) std.mem.Allocator.Error!struct { env: CompileEnv, result: CompileResult } {
     var env = CompileEnv.init(alloc);
+    errdefer env.deinit();
 
-    // ── Build module graph ────────────────────────────────────────────────
+    // ── Phase 1: Parse all modules once and cache ──────────────────────────
+    for (modules) |m| {
+        var dummy_diags = DiagnosticCollector.init();
+        defer dummy_diags.deinit(alloc);
+
+        var lexer = lexer_mod.Lexer.init(alloc, m.source, m.file_id);
+        var layout = layout_mod.LayoutProcessor.init(alloc, &lexer);
+        layout.setDiagnostics(&dummy_diags);
+
+        var parser = parser_mod.Parser.init(alloc, &layout, &dummy_diags) catch continue;
+        const parsed_module = parser.parseModule() catch continue;
+
+        const owned_name = try alloc.dupe(u8, m.module_name);
+        try env.parsed_modules.put(alloc, owned_name, parsed_module);
+    }
+
+    // ── Phase 2: Build module graph from cached parses ─────────────────────
     var graph = ModuleGraph.init(alloc);
     defer graph.deinit();
 
-    for (modules) |m| {
-        _ = try graph.addModule(m.module_name);
-        const imports = parseImportNames(alloc, m.source) catch continue;
-        for (imports) |imp| {
-            try graph.addEdge(m.module_name, imp);
+    var iter = env.parsed_modules.iterator();
+    while (iter.next()) |entry| {
+        const mod_name = entry.key_ptr.*;
+        const parsed = entry.value_ptr.*;
+        _ = try graph.addModule(mod_name);
+        for (parsed.imports) |imp| {
+            try graph.addEdge(mod_name, imp.module_name);
         }
     }
 
@@ -395,10 +433,11 @@ pub fn compileProgram(
         try src_map.put(alloc, m.module_name, m);
     }
 
-    // ── Compile each module in topological order ──────────────────────────
+    // ── Phase 3: Compile each module using cached AST ──────────────────────
     for (topo.order) |mod_name| {
         const m = src_map.get(mod_name) orelse continue;
-        _ = try env.compileSingle(m.module_name, m.source, m.file_id);
+        const parsed = env.parsed_modules.get(mod_name);
+        _ = try env.compileSingle(m.module_name, m.source, m.file_id, parsed);
     }
 
     const had_errors = env.diags.hasErrors();
@@ -408,28 +447,6 @@ pub fn compileProgram(
         .env = env,
         .result = .{ .core = merged, .had_errors = had_errors },
     };
-}
-
-// ── Internal helpers ──────────────────────────────────────────────────────
-
-/// Parse just the import names from a Haskell source string.
-/// Best-effort: returns empty on any parse error.
-fn parseImportNames(alloc: std.mem.Allocator, source: []const u8) std.mem.Allocator.Error![]const []const u8 {
-    var dummy_diags = DiagnosticCollector.init();
-    defer dummy_diags.deinit(alloc);
-
-    var lexer = lexer_mod.Lexer.init(alloc, source, 0);
-    var layout = layout_mod.LayoutProcessor.init(alloc, &lexer);
-    layout.setDiagnostics(&dummy_diags);
-
-    var parser = parser_mod.Parser.init(alloc, &layout, &dummy_diags) catch return &.{};
-    const module = parser.parseModule() catch return &.{};
-
-    var names: std.ArrayListUnmanaged([]const u8) = .{};
-    for (module.imports) |imp| {
-        try names.append(alloc, try alloc.dupe(u8, imp.module_name));
-    }
-    return names.toOwnedSlice(alloc);
 }
 
 /// Convert a `SerialisedScheme` back to a `TyScheme` (HType-based).
@@ -608,7 +625,7 @@ test "CompileEnv: compileSingle compiles a trivial module" {
         \\
     ;
 
-    const result = try env.compileSingle("Trivial", source, 1);
+    const result = try env.compileSingle("Trivial", source, 1, null);
 
     try testing.expect(result != null);
     try testing.expect(!env.diags.hasErrors());
@@ -627,7 +644,7 @@ test "CompileEnv: compileSingle emits diagnostic on parse error" {
     // Deliberately broken Haskell.
     const bad_source = "module Bad where\nfoo = @@@\n";
 
-    const result = try env.compileSingle("Bad", bad_source, 1);
+    const result = try env.compileSingle("Bad", bad_source, 1, null);
 
     // compileSingle returns null on error; diags should have errors.
     _ = result; // may or may not be null depending on parse-error recovery
