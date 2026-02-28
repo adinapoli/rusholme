@@ -76,9 +76,9 @@ pub const TypeSpec = struct {
 pub const LanguageExtension = enum {
     NoImplicitPrelude,
     OverloadedStrings,
-    ScopedTypeVariables,
+    ScopedTypeVariables, // tracked in: https://github.com/adinapoli/rusholme/issues/443
     TypeApplications,
-    // Add new variants here; std.EnumSet widens automatically.
+    // std.EnumSet backing integer widens automatically when variants are added.
 };
 
 /// A Haskell module
@@ -585,4 +585,18 @@ test "LanguageExtension EnumSet: union" {
     a.setUnion(b);
     try std.testing.expect(a.contains(.NoImplicitPrelude));
     try std.testing.expect(a.contains(.TypeApplications));
+}
+
+test "Module: language_extensions defaults to empty set" {
+    const invalid_pos = span_mod.SourcePos.invalid();
+    const invalid_span = span_mod.SourceSpan.init(invalid_pos, invalid_pos);
+    const m = Module{
+        .module_name = "Test",
+        .exports = null,
+        .imports = &.{},
+        .declarations = &.{},
+        .span = invalid_span,
+        // language_extensions intentionally omitted — must default to empty
+    };
+    try std.testing.expect(m.language_extensions.count() == 0);
 }
