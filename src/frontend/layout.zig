@@ -59,6 +59,8 @@ pub const LayoutProcessor = struct {
     last_token_was_virtual_delimiter: bool,
     // Diagnostic collector for reporting layout errors.
     diagnostics: ?*diag_mod.DiagnosticCollector,
+    // Track when we're inside a pragma {-# ... #-}. Pragmas are transparent to layout.
+    inside_pragma: bool,
 
     pub fn init(allocator: std.mem.Allocator, lexer: *Lexer) LayoutProcessor {
         return .{
@@ -74,6 +76,7 @@ pub const LayoutProcessor = struct {
             .last_token_line = 0,
             .last_token_was_virtual_delimiter = false,
             .diagnostics = null,
+            .inside_pragma = false,
         };
     }
 
@@ -114,6 +117,20 @@ pub const LayoutProcessor = struct {
         // 3. Handle EOF.
         if (tok.token == .eof) {
             return self.handleEOF(tok);
+        }
+
+        // 3.5 Handle pragmas - they are transparent to layout.
+        // Track when we're inside a pragma and pass through all tokens unchanged.
+        if (tok.token == .pragma_open) {
+            self.inside_pragma = true;
+            return tok;
+        }
+        if (tok.token == .pragma_close) {
+            self.inside_pragma = false;
+            return tok;
+        }
+        if (self.inside_pragma) {
+            return tok;
         }
 
         // 4. Handle Module-level layout.

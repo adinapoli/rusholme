@@ -527,18 +527,118 @@ pub const Parser = struct {
         return try result.toOwnedSlice(self.allocator);
     }
 
+    /// Skip a single `{-# ... #-}` pragma block without interpreting it.
+    ///
+    /// Pragmas at the top of a file (e.g. `{-# OPTIONS_GHC ... #-}`) are
+    /// transparent to the layout algorithm and to most parse rules. When the
+    /// parser encounters a `pragma_open` token in a position where a
+    /// declaration or import is expected, it calls this helper to consume the
+    /// entire pragma and move on.
+    fn skipPragma(self: *Parser) ParseError!void {
+        _ = try self.expect(.pragma_open);
+        var fuel: usize = max_loop_iterations;
+        while (fuel > 0) : (fuel -= 1) {
+            if (try self.check(.pragma_close)) {
+                _ = try self.advance();
+                return;
+            }
+            if (try self.atEnd()) return;
+            const t = try self.advance();
+            t.token.deinit(self.allocator);
+        }
+    }
+
+    /// Parse a single `{-# LANGUAGE Ext1, Ext2 ... #-}` pragma.
+    ///
+    /// Returns an EnumSet with the recognised extensions. Emits a warning
+    /// diagnostic (with span) for each unrecognised extension name.
+    /// If the pragma is not a LANGUAGE pragma, returns an empty set and
+    /// consumes the pragma without interpreting it.
+    fn parseLangPragma(self: *Parser) ParseError!std.EnumSet(ast_mod.LanguageExtension) {
+        _ = try self.expect(.pragma_open);
+
+        var extensions = std.EnumSet(ast_mod.LanguageExtension).initEmpty();
+
+        // Check if this is a LANGUAGE pragma
+        if (try self.check(.kw_LANGUAGE)) {
+            _ = try self.advance(); // consume LANGUAGE
+
+            // Parse comma-separated extension names until pragma_close
+            while (!try self.check(.pragma_close) and !try self.atEnd()) {
+                const ext_tok = try self.peek();
+                const ext_name: []const u8 = switch (std.meta.activeTag(ext_tok.token)) {
+                    .varid => blk: {
+                        _ = try self.advance();
+                        break :blk ext_tok.token.varid;
+                    },
+                    .conid => blk: {
+                        _ = try self.advance();
+                        break :blk ext_tok.token.conid;
+                    },
+                    else => {
+                        // Unexpected token in pragma — skip and continue
+                        const t = try self.advance();
+                        t.token.deinit(self.allocator);
+                        _ = try self.match(.comma);
+                        continue;
+                    },
+                };
+
+                // Map extension name to enum
+                if (std.meta.stringToEnum(ast_mod.LanguageExtension, ext_name)) |ext| {
+                    extensions.insert(ext);
+                } else {
+                    // Unrecognised extension — emit warning
+                    const msg = try std.fmt.allocPrint(self.allocator, "unrecognised LANGUAGE extension: {s}", .{ext_name});
+                    try self.diagnostics.emit(self.allocator, Diagnostic{
+                        .severity = .warning,
+                        .code = .parse_error,
+                        .span = ext_tok.span,
+                        .message = msg,
+                    });
+                }
+
+                // Consume comma if present
+                _ = try self.match(.comma);
+            }
+        } else {
+            // Not a LANGUAGE pragma — skip remaining tokens
+            var fuel: usize = max_loop_iterations;
+            while (fuel > 0) : (fuel -= 1) {
+                if (try self.check(.pragma_close)) break;
+                if (try self.atEnd()) return extensions;
+                const t = try self.advance();
+                t.token.deinit(self.allocator);
+            }
+        }
+
+        _ = try self.expect(.pragma_close);
+        return extensions;
+    }
+
     /// Parse a complete Haskell module.
     ///
     /// ```
-    /// module  ->  module modid [exports] where body
-    ///         |   body
-    /// body    ->  { topdecls }
+    /// module  ->  [pragmas] (module modid [exports] where body | body)
+    /// pragmas -> { pragma }
+    /// body    ->  { impdecls ; topdecls }
     /// ```
+    ///
+    /// LANGUAGE pragmas may appear before the `module` keyword or after `where`.
     pub fn parseModule(self: *Parser) ParseError!ast_mod.Module {
         const start = try self.currentSpan();
 
         var module_name: []const u8 = "Main";
         var exports: ?[]const ast_mod.ExportSpec = null;
+        var language_extensions = std.EnumSet(ast_mod.LanguageExtension).initEmpty();
+
+        // Parse any leading pragmas BEFORE the module keyword.
+        // In Haskell, {-# LANGUAGE ... #-} may appear at the very top of the file.
+        while (try self.check(.pragma_open)) {
+            const exts = try self.parseLangPragma();
+            language_extensions.setUnion(exts);
+        }
+        while (try self.matchSemi()) {}
 
         if (try self.check(.kw_module)) {
             _ = try self.advance(); // consume 'module'
@@ -556,17 +656,38 @@ pub const Parser = struct {
         var imports: std.ArrayListUnmanaged(ast_mod.ImportDecl) = .empty;
         var decls: std.ArrayListUnmanaged(ast_mod.Decl) = .empty;
 
+        // Parse any pragmas after `where` (inside the layout block).
+        while (try self.matchSemi()) {}
+        while (try self.check(.pragma_open)) {
+            const exts = try self.parseLangPragma();
+            language_extensions.setUnion(exts);
+            while (try self.matchSemi()) {}
+        }
+
         // Parse imports (they come first)
         while (try self.check(.kw_import)) {
             const imp = try self.parseImportDecl();
             try imports.append(self.allocator, imp);
             while (try self.matchSemi()) {}
+            // Skip any pragmas between imports (these are not collected as they
+            // appear after the module header; GHC also ignores them for LANGUAGE).
+            while (try self.check(.pragma_open)) {
+                try self.skipPragma();
+                while (try self.matchSemi()) {}
+            }
         }
 
         // Parse top-level declarations
         while (true) {
             if (try self.checkCloseBrace()) break;
             if (try self.atEnd()) break;
+
+            // Skip pragmas that appear between top-level declarations.
+            if (try self.check(.pragma_open)) {
+                try self.skipPragma();
+                while (try self.matchSemi()) {}
+                continue;
+            }
 
             const decl = self.parseTopDecl() catch |err| switch (err) {
                 error.UnexpectedToken, error.InvalidSyntax => {
@@ -592,6 +713,7 @@ pub const Parser = struct {
             .exports = exports,
             .imports = try imports.toOwnedSlice(self.allocator),
             .declarations = merged_decls,
+            .language_extensions = language_extensions,
             .span = self.spanFrom(start),
         };
     }
@@ -5319,4 +5441,61 @@ test "record: pattern with field punning" {
     try std.testing.expectEqualStrings("Point", pat.RecPat.con.name);
     try std.testing.expectEqual(@as(usize, 1), pat.RecPat.fields.len);
     try std.testing.expectEqualStrings("x", pat.RecPat.fields[0].field_name);
+}
+
+// ── LANGUAGE Pragma Tests ────────────────────────────────────────────────────
+
+test "parseLangPragma: known extension populates EnumSet" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Pragmas before imports (implicit Main module, like VTT test)
+    const mod = try parseTestModule(allocator,
+        \\{-# LANGUAGE NoImplicitPrelude #-}
+        \\
+        \\x = 1
+    );
+    try std.testing.expect(mod.language_extensions.contains(.NoImplicitPrelude));
+    try std.testing.expect(!mod.language_extensions.contains(.TypeApplications));
+}
+
+test "parseLangPragma: multiple extensions in one pragma" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\{-# LANGUAGE NoImplicitPrelude, TypeApplications #-}
+        \\
+        \\x = 1
+    );
+    try std.testing.expect(mod.language_extensions.contains(.NoImplicitPrelude));
+    try std.testing.expect(mod.language_extensions.contains(.TypeApplications));
+}
+
+test "parseLangPragma: multiple pragmas accumulate" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\{-# LANGUAGE NoImplicitPrelude #-}
+        \\{-# LANGUAGE TypeApplications #-}
+        \\
+        \\x = 1
+    );
+    try std.testing.expect(mod.language_extensions.contains(.NoImplicitPrelude));
+    try std.testing.expect(mod.language_extensions.contains(.TypeApplications));
+}
+
+test "parseLangPragma: no pragmas yields empty EnumSet" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\x = 1
+    );
+    try std.testing.expectEqual(@as(usize, 0), mod.language_extensions.count());
 }

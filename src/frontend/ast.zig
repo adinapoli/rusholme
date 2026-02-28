@@ -68,12 +68,29 @@ pub const TypeSpec = struct {
     with_constructors: bool = false,
 };
 
+/// GHC/Haskell LANGUAGE extensions that Rusholme recognises.
+///
+/// Extensions encountered in source but not listed here cause the parser to
+/// emit a `warning` diagnostic with the unrecognised name's `SourceSpan`.
+/// Add new variants here as new issues require support for additional extensions.
+pub const LanguageExtension = enum {
+    NoImplicitPrelude,
+    OverloadedStrings,
+    ScopedTypeVariables, // tracked in: https://github.com/adinapoli/rusholme/issues/443
+    TypeApplications,
+    // std.EnumSet backing integer widens automatically when variants are added.
+};
+
 /// A Haskell module
 pub const Module = struct {
     module_name: []const u8,
     exports: ?[]const ExportSpec,
     imports: []const ImportDecl,
     declarations: []const Decl,
+    /// Extensions declared via `{-# LANGUAGE … #-}` pragmas in this module.
+    /// Populated by the parser; authoritative for all downstream phases.
+    /// Query with: `module.language_extensions.contains(.SomeExtension)`.
+    language_extensions: std.EnumSet(LanguageExtension) = std.EnumSet(LanguageExtension).initEmpty(),
     span: SourceSpan,
 };
 
@@ -545,4 +562,41 @@ test "TypeDecl construction" {
     };
 
     try std.testing.expectEqualStrings("Point", decl.name);
+}
+
+test "LanguageExtension EnumSet: empty set contains nothing" {
+    const set = std.EnumSet(LanguageExtension).initEmpty();
+    try std.testing.expect(!set.contains(.NoImplicitPrelude));
+    try std.testing.expect(!set.contains(.TypeApplications));
+}
+
+test "LanguageExtension EnumSet: insert and query" {
+    var set = std.EnumSet(LanguageExtension).initEmpty();
+    set.insert(.NoImplicitPrelude);
+    try std.testing.expect(set.contains(.NoImplicitPrelude));
+    try std.testing.expect(!set.contains(.TypeApplications));
+}
+
+test "LanguageExtension EnumSet: union" {
+    var a = std.EnumSet(LanguageExtension).initEmpty();
+    a.insert(.NoImplicitPrelude);
+    var b = std.EnumSet(LanguageExtension).initEmpty();
+    b.insert(.TypeApplications);
+    a.setUnion(b);
+    try std.testing.expect(a.contains(.NoImplicitPrelude));
+    try std.testing.expect(a.contains(.TypeApplications));
+}
+
+test "Module: language_extensions defaults to empty set" {
+    const invalid_pos = span_mod.SourcePos.invalid();
+    const invalid_span = span_mod.SourceSpan.init(invalid_pos, invalid_pos);
+    const m = Module{
+        .module_name = "Test",
+        .exports = null,
+        .imports = &.{},
+        .declarations = &.{},
+        .span = invalid_span,
+        // language_extensions intentionally omitted — must default to empty
+    };
+    try std.testing.expect(m.language_extensions.count() == 0);
 }
