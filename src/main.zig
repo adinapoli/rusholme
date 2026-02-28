@@ -123,12 +123,12 @@ pub fn main(init: std.process.Init) !void {
         const cmd_args = user_args[1..];
         if (cmd_args.len == 0) {
             try writeStderr(io, "rhc build: missing file argument\n");
-            try writeStderr(io, "Usage: rhc build [--backend <kind>] [-o <output>] <file.hs>\n");
+            try writeStderr(io, "Usage: rhc build [--backend <kind>] [-o <output>] <file.hs> [<file2.hs> ...]\n");
             std.process.exit(1);
         }
-        // Parse optional flags: -o <output>, --backend <kind>.
+        // Parse optional flags: -o <output>, --backend <kind>; collect file paths.
         var output_name: ?[]const u8 = null;
-        var file_path: ?[]const u8 = null;
+        var file_paths: std.ArrayListUnmanaged([]const u8) = .{};
         var backend_kind = rusholme.backend.backend_mod.BackendKind.native;
         var i: usize = 0;
         while (i < cmd_args.len) : (i += 1) {
@@ -136,7 +136,7 @@ pub fn main(init: std.process.Init) !void {
                 i += 1;
                 if (i >= cmd_args.len) {
                     try writeStderr(io, "rhc build: -o requires an argument\n");
-                    try writeStderr(io, "Usage: rhc build [--backend <kind>] [-o <output>] <file.hs>\n");
+                    try writeStderr(io, "Usage: rhc build [--backend <kind>] [-o <output>] <file.hs> [<file2.hs> ...]\n");
                     std.process.exit(1);
                 }
                 output_name = cmd_args[i];
@@ -144,7 +144,7 @@ pub fn main(init: std.process.Init) !void {
                 i += 1;
                 if (i >= cmd_args.len) {
                     try writeStderr(io, "rhc build: --backend requires an argument\n");
-                    try writeStderr(io, "Usage: rhc build [--backend <kind>] [-o <output>] <file.hs>\n");
+                    try writeStderr(io, "Usage: rhc build [--backend <kind>] [-o <output>] <file.hs> [<file2.hs> ...]\n");
                     std.process.exit(1);
                 }
                 backend_kind = rusholme.backend.backend_mod.parseBackendKind(cmd_args[i]) orelse {
@@ -157,15 +157,17 @@ pub fn main(init: std.process.Init) !void {
                     std.process.exit(1);
                 };
             } else {
-                file_path = cmd_args[i];
+                try file_paths.append(arena_alloc, cmd_args[i]);
             }
         }
-        if (file_path == null) {
+        if (file_paths.items.len == 0) {
             try writeStderr(io, "rhc build: missing file argument\n");
-            try writeStderr(io, "Usage: rhc build [--backend <kind>] [-o <output>] <file.hs>\n");
+            try writeStderr(io, "Usage: rhc build [--backend <kind>] [-o <output>] <file.hs> [<file2.hs> ...]\n");
             std.process.exit(1);
         }
-        try cmdBuild(allocator, io, file_path.?, output_name, backend_kind);
+        // Derive output name from the first file when -o is not given.
+        const out = output_name orelse std.fs.path.stem(std.fs.path.basename(file_paths.items[0]));
+        try cmdBuild(allocator, io, file_paths.items, out, backend_kind);
         return;
     }
 
@@ -624,15 +626,18 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     try stdout.flush();
 }
 
-/// Full pipeline: parse, rename, typecheck, desugar, lambda-lift, translate
-/// to GRIN, emit LLVM object code, and link into a native executable.
+/// Full pipeline: parse, rename, typecheck, desugar (for each module in
+/// topological order), merge, lambda-lift, translate to GRIN, emit LLVM
+/// object code, and link into a native executable.
 ///
-/// Output naming: if `output_name` is provided, use it directly; otherwise
-/// derive from the source file (`hello.hs` → `./hello`).
+/// `file_paths` is a list of `.hs` source files to compile.  When multiple
+/// files are given, the compiler builds a module graph, determines the
+/// topological order, and compiles each module in turn using `CompileEnv`
+/// so that cross-module names and types are available to downstream modules.
 ///
 /// Only the `native` backend is fully implemented. Other backends are stubs
 /// that will be fleshed out in follow-up issues.
-fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_path: []const u8, output_name: ?[]const u8, backend_kind: rusholme.backend.backend_mod.BackendKind) !void {
+fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8, output_name: []const u8, backend_kind: rusholme.backend.backend_mod.BackendKind) !void {
     // Dispatch non-native backends early; only `native` is implemented.
     switch (backend_kind) {
         .native => {}, // handled below
@@ -647,88 +652,52 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_path: []const u8, output_
             std.process.exit(1);
         },
     }
-    const source = readSourceFile(allocator, io, file_path) catch |err| {
-        var stderr_buf: [4096]u8 = undefined;
-        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
-        const stderr = &stderr_fw.interface;
-        switch (err) {
-            error.FileNotFound => try stderr.print("rhc: file not found: {s}\n", .{file_path}),
-            error.AccessDenied => try stderr.print("rhc: permission denied: {s}\n", .{file_path}),
-            else => try stderr.print("rhc: cannot read file '{s}': {}\n", .{ file_path, err }),
-        }
-        try stderr.flush();
-        std.process.exit(1);
-    };
-    defer allocator.free(source);
-
-    const file_id: FileId = 1;
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    // ── Parse ──────────────────────────────────────────────────────────
-    var lexer = Lexer.init(arena_alloc, source, file_id);
-    var layout = LayoutProcessor.init(arena_alloc, &lexer);
-    var diags = DiagnosticCollector.init();
-    defer diags.deinit(arena_alloc);
-    layout.setDiagnostics(&diags);
+    // ── Read all source files ──────────────────────────────────────────
+    const compile_env_mod = rusholme.modules.compile_env;
+    var source_modules: std.ArrayListUnmanaged(compile_env_mod.SourceModule) = .{};
+    for (file_paths, 0..) |fp, idx| {
+        const source = readSourceFile(arena_alloc, io, fp) catch |err| {
+            var stderr_buf: [4096]u8 = undefined;
+            var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+            const stderr = &stderr_fw.interface;
+            switch (err) {
+                error.FileNotFound => try stderr.print("rhc: file not found: {s}\n", .{fp}),
+                error.AccessDenied => try stderr.print("rhc: permission denied: {s}\n", .{fp}),
+                else => try stderr.print("rhc: cannot read file '{s}': {}\n", .{ fp, err }),
+            }
+            try stderr.flush();
+            std.process.exit(1);
+        };
+        const mod_name = try rusholme.modules.module_graph.inferModuleName(arena_alloc, fp);
+        try source_modules.append(arena_alloc, .{
+            .module_name = mod_name,
+            .source = source,
+            .file_id = @intCast(idx + 1),
+        });
+    }
 
-    var parser = Parser.init(arena_alloc, &layout, &diags) catch {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
-        std.process.exit(1);
-    };
-    const module = parser.parseModule() catch {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
-        std.process.exit(1);
-    };
-    if (diags.hasErrors()) {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+    // ── Compile all modules via CompileEnv ─────────────────────────────
+    var session_result = try compile_env_mod.compileProgram(arena_alloc, source_modules.items);
+    var session = &session_result.env;
+    defer session.deinit();
+
+    if (session_result.result.had_errors) {
+        try renderMultiFileDiagnostics(allocator, io, &session.diags);
         std.process.exit(1);
     }
 
-    // ── Rename ─────────────────────────────────────────────────────────
-    var u_supply = rusholme.naming.unique.UniqueSupply{};
-    var rename_env = try renamer_mod.RenameEnv.init(arena_alloc, &u_supply, &diags);
-    defer rename_env.deinit();
-    const renamed = try renamer_mod.rename(module, &rename_env);
-    if (diags.hasErrors()) {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
-        std.process.exit(1);
-    }
-
-    // ── Typecheck ──────────────────────────────────────────────────────
-    var mv_supply = htype_mod.MetaVarSupply{};
-    var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
-    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
-    var infer_ctx = infer_mod.InferCtx.init(arena_alloc, &ty_env, &mv_supply, &u_supply, &diags);
-    var module_types = try infer_mod.inferModule(&infer_ctx, renamed);
-    defer module_types.deinit(arena_alloc);
-    if (diags.hasErrors()) {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
-        std.process.exit(1);
-    }
-
-    // ── Desugar ────────────────────────────────────────────────────────
-    const core_prog = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags, &u_supply);
-    if (diags.hasErrors()) {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
-        std.process.exit(1);
-    }
+    const core_prog = session_result.result.core;
 
     // ── Lambda lift ────────────────────────────────────────────────────
     const core_lifted = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog);
-    if (diags.hasErrors()) {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
-        std.process.exit(1);
-    }
 
     // ── Translate to GRIN ───────────────────────────────────────────────
     const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted);
-    if (diags.hasErrors()) {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
-        std.process.exit(1);
-    }
 
     // ── Translate to LLVM ──────────────────────────────────────────────
     var translator = rusholme.backend.grin_to_llvm.GrinTranslator.init(arena_alloc);
@@ -758,9 +727,7 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_path: []const u8, output_
     llvm.setModuleDataLayout(llvm_module, machine);
     llvm.setModuleTriple(llvm_module);
 
-    // Derive output paths: -o name uses name directly; otherwise hello.hs → hello.
-    const exe_path = output_name orelse std.fs.path.stem(std.fs.path.basename(file_path));
-    const obj_path = try std.fmt.allocPrint(arena_alloc, "{s}.o", .{exe_path});
+    const obj_path = try std.fmt.allocPrint(arena_alloc, "{s}.o", .{output_name});
 
     llvm.emitObjectFile(machine, llvm_module, obj_path) catch |err| {
         var stderr_buf: [4096]u8 = undefined;
@@ -776,11 +743,10 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_path: []const u8, output_
         .objects = &.{obj_path},
         .system_libs = &.{"c"},
         .runtime_objects = &.{},
-        .output_path = exe_path,
+        .output_path = output_name,
     };
 
     linker.link(allocator, io) catch |err| {
-        // Clean up the temp object file even on link failure.
         Dir.deleteFile(.cwd(), io, obj_path) catch {};
         var stderr_buf: [4096]u8 = undefined;
         var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
@@ -790,8 +756,44 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_path: []const u8, output_
         std.process.exit(1);
     };
 
-    // Clean up the temp object file.
     Dir.deleteFile(.cwd(), io, obj_path) catch {};
+}
+
+/// Render diagnostics from a multi-file compilation (no source text available).
+///
+/// Used by `cmdBuild` after `compileProgram`, which accumulates diagnostics
+/// across multiple source files.  Without per-file source text we fall back
+/// to printing the raw diagnostic messages.
+fn renderMultiFileDiagnostics(
+    allocator: std.mem.Allocator,
+    io: Io,
+    diags: *DiagnosticCollector,
+) !void {
+    var stderr_buf: [4096]u8 = undefined;
+    var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+    const stderr = &stderr_fw.interface;
+
+    const sorted = diags.getAll(allocator) catch diags.diagnostics.items;
+    defer if (sorted.ptr != diags.diagnostics.items.ptr) allocator.free(sorted);
+
+    for (sorted) |diag| {
+        const sev = switch (diag.severity) {
+            .@"error" => "error",
+            .warning => "warning",
+            .info => "info",
+            .hint => "hint",
+        };
+        try stderr.print("{s}[{s}]: {s}\n", .{ sev, diag.code.code(), diag.message });
+    }
+
+    const err_count = diags.errorCount();
+    if (err_count > 0) {
+        try stderr.print("rhc: aborting due to {d} error{s}\n", .{
+            err_count,
+            if (err_count == 1) "" else "s",
+        });
+    }
+    try stderr.flush();
 }
 
 /// Render all collected diagnostics to stderr using the terminal renderer.

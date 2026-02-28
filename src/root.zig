@@ -63,6 +63,7 @@ pub const grin = struct {
 pub const modules = struct {
     pub const mod_iface = @import("modules/mod_iface.zig");
     pub const module_graph = @import("modules/module_graph.zig");
+    pub const compile_env = @import("modules/compile_env.zig");
 };
 
 // Backend
