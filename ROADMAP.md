@@ -350,14 +350,14 @@
 | [#57](https://github.com/adinapoli/rusholme/issues/57) | Implement end-to-end: LLVM compile + link with Zig runtime + produce executable | [#55](https://github.com/adinapoli/rusholme/issues/55), [#56](https://github.com/adinapoli/rusholme/issues/56) | :green_circle: |
 | [#384](https://github.com/adinapoli/rusholme/issues/384) | Implement rts_eval Ind-following for GRIN runtime | [#56](https://github.com/adinapoli/rusholme/issues/56) | :green_circle: |
 | [#385](https://github.com/adinapoli/rusholme/issues/385) | Implement proper heap node field storage for GRIN values | [#56](https://github.com/adinapoli/rusholme/issues/56) | :green_circle: |
-| [#422](https://github.com/adinapoli/rusholme/issues/422) | rts: unify LLVM codegen node layout with Zig RTS node layout | [#385](https://github.com/adinapoli/rusholme/issues/385) | :yellow_circle: |
+| [#422](https://github.com/adinapoli/rusholme/issues/422) | rts: unify LLVM codegen node layout with Zig RTS node layout | [#385](https://github.com/adinapoli/rusholme/issues/385) | :green_circle: |
 | [#386](https://github.com/adinapoli/rusholme/issues/386) | Implement runtime closure support | [#56](https://github.com/adinapoli/rusholme/issues/56) | :white_circle: |
 | [#390](https://github.com/adinapoli/rusholme/issues/390) | LLVM codegen: translate remaining GRIN expression types (Bind, Case, Store, Fetch, Update, Return) | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
 | [#391](https://github.com/adinapoli/rusholme/issues/391) | LLVM codegen: expand PrimOpMapping and support multi-arg calls | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
 | [#392](https://github.com/adinapoli/rusholme/issues/392) | LLVM codegen: translate function parameters in GRIN defs | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
 | [#410](https://github.com/adinapoli/rusholme/issues/410) | backend: nullary constructors not handled in GRIN→LLVM codegen (Val.Var lookup fails) | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
 | [#425](https://github.com/adinapoli/rusholme/issues/425) | Fix GRIN→LLVM codegen for programs with ADTs and higher-order functions | [#410](https://github.com/adinapoli/rusholme/issues/410) | :green_circle: |
-| [#447](https://github.com/adinapoli/rusholme/issues/447) | LLVM backend: undefined reference to RTS functions during linking | [#57](https://github.com/adinapoli/rusholme/issues/57) | :yellow_circle: |
+| [#447](https://github.com/adinapoli/rusholme/issues/447) | LLVM backend: undefined reference to RTS functions during linking | [#57](https://github.com/adinapoli/rusholme/issues/57) | :green_circle: |
 
 ---
 
@@ -371,13 +371,14 @@
 |---|-------|------|--------|
 | [#366](https://github.com/adinapoli/rusholme/issues/366) | Define module interface representation (ModIface) with `.rhi` serialisation | [#38](https://github.com/adinapoli/rusholme/issues/38) | :green_circle: |
 | [#367](https://github.com/adinapoli/rusholme/issues/367) | Implement module graph and topological compilation order | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
-| [#368](https://github.com/adinapoli/rusholme/issues/368) | Implement compilation session (CompileEnv) | [#366](https://github.com/adinapoli/rusholme/issues/366), [#367](https://github.com/adinapoli/rusholme/issues/367) | :yellow_circle: |
-| [#369](https://github.com/adinapoli/rusholme/issues/369) | Implement implicit Prelude import | [#368](https://github.com/adinapoli/rusholme/issues/368) | :yellow_circle: |
-| [#443](https://github.com/adinapoli/rusholme/issues/443) | Introduce LanguageExtension EnumSet and module parse cache | [#368](https://github.com/adinapoli/rusholme/issues/368) | :yellow_circle: |
-| [#371](https://github.com/adinapoli/rusholme/issues/371) | Implement recompilation avoidance via `.rhi` fingerprinting | [#366](https://github.com/adinapoli/rusholme/issues/366), [#368](https://github.com/adinapoli/rusholme/issues/368) | :white_circle: |
+| [#368](https://github.com/adinapoli/rusholme/issues/368) | Implement compilation session (CompileEnv) | [#366](https://github.com/adinapoli/rusholme/issues/366), [#367](https://github.com/adinapoli/rusholme/issues/367) | :green_circle: |
+| [#369](https://github.com/adinapoli/rusholme/issues/369) | Implement implicit Prelude import | [#368](https://github.com/adinapoli/rusholme/issues/368) | :green_circle: |
+| [#443](https://github.com/adinapoli/rusholme/issues/443) | Introduce LanguageExtension EnumSet and module parse cache | [#368](https://github.com/adinapoli/rusholme/issues/368) | :green_circle: |
+| [#371](https://github.com/adinapoli/rusholme/issues/371) | Implement recompilation avoidance via `.rhi` fingerprinting | [#366](https://github.com/adinapoli/rusholme/issues/366), [#368](https://github.com/adinapoli/rusholme/issues/368) | :yellow_circle: |
+| [#456](https://github.com/adinapoli/rusholme/issues/456) | 371 follow-up: enable full end-to-end caching once per-module .bc artifacts land | [#371](https://github.com/adinapoli/rusholme/issues/371), [#436](https://github.com/adinapoli/rusholme/issues/436) | :white_circle: |
 | [#370](https://github.com/adinapoli/rusholme/issues/370) | Bootstrap Prelude from Haskell source | [#368](https://github.com/adinapoli/rusholme/issues/368), [#58](https://github.com/adinapoli/rusholme/issues/58), [#59](https://github.com/adinapoli/rusholme/issues/59) | :white_circle: |
-| [#436](https://github.com/adinapoli/rusholme/issues/436) | design: use LLVM bitcode (`.bc`) as per-module backend artifact | [#366](https://github.com/adinapoli/rusholme/issues/366), [#368](https://github.com/adinapoli/rusholme/issues/368) | :white_circle: |
-| [#433](https://github.com/adinapoli/rusholme/issues/433) | Research: Definition-level inter-module dependency graph (beyond `.hs-boot`) | [#366](https://github.com/adinapoli/rusholme/issues/366), [#367](https://github.com/adinapoli/rusholme/issues/367), [#368](https://github.com/adinapoli/rusholme/issues/368) | :white_circle: |
+| [#436](https://github.com/adinapoli/rusholme/issues/436) | design: use LLVM bitcode (`.bc`) as per-module backend artifact | [#366](https://github.com/adinapoli/rusholme/issues/366), [#368](https://github.com/adinapoli/rusholme/issues/368) | :yellow_circle: |
+| [#433](https://github.com/adinapoli/rusholme/issues/433) | Research: Definition-level inter-module dependency graph (beyond `.hs-boot`) | [#366](https://github.com/adinapoli/rusholme/issues/366), [#367](https://github.com/adinapoli/rusholme/issues/367), [#368](https://github.com/adinapoli/rusholme/issues/368) | :yellow_circle: |
 
 ### Epic [#10](https://github.com/adinapoli/rusholme/issues/10): Minimal Prelude
 
