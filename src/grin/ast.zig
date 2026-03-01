@@ -61,6 +61,24 @@ pub const Tag = struct {
     }
 };
 
+// ── Field types for HPT-lite ───────────────────────────────────────────
+
+/// Field types tracked by HPT-lite for LLVM codegen.
+/// This is a simplified type system that will be extended when
+/// implementing full Heap Points-to Analysis (M2.4).
+///
+/// See: https://github.com/adinapoli/rusholme/issues/449
+/// Reference: Podlovics, Hruska & Pénzes, "Compiling Lazy Functional
+/// Programs to LLVM IR", 2020, Section 4.2.
+pub const FieldType = enum {
+    /// Integer or character (64-bit).
+    i64,
+    /// Floating-point (64-bit).
+    f64,
+    /// Heap pointer (to another node).
+    ptr,
+};
+
 // ── Literals ───────────────────────────────────────────────────────────
 
 /// GRIN-level literal values.
