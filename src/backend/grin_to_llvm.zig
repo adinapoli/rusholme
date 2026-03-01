@@ -380,6 +380,74 @@ pub const TranslationError = error{
     UnimplementedPattern,
 };
 
+// ═══════════════════════════════════════════════════════════════════════
+// HPT-Lite Type Environment
+// ═══════════════════════════════════════════════════════════════════════
+
+/// HPT-Lite: Lightweight type propagation environment for LLVM codegen.
+///
+/// This is a simplified version of full Heap Points-to Analysis.
+/// It tracks the FieldType of each GRIN variable so the LLVM backend
+/// can emit correctly-typed IR (ptr vs i64 vs f64).
+///
+/// See: https://github.com/adinapoli/rusholme/issues/449
+/// TODO: Replace with full HPT when implementing M2.4.
+const TypeEnv = struct {
+    /// Maps variable unique IDs to their FieldType.
+    var_types: std.AutoHashMapUnmanaged(u64, FieldType),
+    /// Reference to the tag table for constructor field types.
+    tag_table: *const TagTable,
+
+    fn init() TypeEnv {
+        return .{
+            .var_types = .{},
+            .tag_table = undefined,
+        };
+    }
+
+    fn deinit(self: *TypeEnv, alloc: std.mem.Allocator) void {
+        self.var_types.deinit(alloc);
+    }
+
+    fn setTagTable(self: *TypeEnv, table: *const TagTable) void {
+        self.tag_table = table;
+    }
+
+    fn setVarType(self: *TypeEnv, alloc: std.mem.Allocator, name: grin.Name, ft: FieldType) !void {
+        try self.var_types.put(alloc, name.unique.value, ft);
+    }
+
+    fn getVarType(self: *const TypeEnv, name: grin.Name) ?FieldType {
+        return self.var_types.get(name.unique.value);
+    }
+
+    /// Get the type of a GRIN value for LLVM codegen.
+    /// Falls back to .ptr (conservative) if type is unknown.
+    fn getValType(self: *const TypeEnv, val: grin.Val) FieldType {
+        return switch (val) {
+            .Lit => |lit| switch (lit) {
+                .Int => .i64,
+                .Float => .f64,
+                .Char => .i64,
+                .String => .ptr,
+                .Bool => .i64,
+            },
+            .Unit => .i64, // Unit is unboxed
+            .Var => |name| self.getVarType(name) orelse .ptr,
+            .ConstTagNode => .ptr, // Allocated node is always a pointer
+            .ValTag => .i64, // Bare tags are i64 discriminants
+            .VarTagNode => .ptr, // Variable-tag nodes are pointers
+        };
+    }
+
+    /// Get the type of a field at the given index for a constructor.
+    fn getFieldTagType(self: *const TypeEnv, tag: grin.Tag, index: u32) FieldType {
+        const types = self.tag_table.fieldTypes(tag) orelse return .ptr;
+        if (index >= types.len) return .ptr;
+        return types[index];
+    }
+};
+
 pub const GrinTranslator = struct {
     ctx: llvm.Context,
     module: llvm.Module,
@@ -391,6 +459,9 @@ pub const GrinTranslator = struct {
     params: std.AutoHashMap(u64, llvm.Value),
     /// Constructor tag discriminants, built before translation.
     tag_table: TagTable,
+    /// HPT-lite type environment for type-correct LLVM codegen.
+    /// See: https://github.com/adinapoli/rusholme/issues/449
+    type_env: TypeEnv,
     /// The LLVM function currently being translated (needed for
     /// `LLVMAppendBasicBlock` calls inside Case translation).
     current_func: llvm.Value,
@@ -405,6 +476,7 @@ pub const GrinTranslator = struct {
             .allocator = allocator,
             .params = std.AutoHashMap(u64, llvm.Value).init(allocator),
             .tag_table = TagTable.init(),
+            .type_env = TypeEnv.init(),
             .current_func = null,
         };
     }
@@ -412,6 +484,7 @@ pub const GrinTranslator = struct {
     pub fn deinit(self: *GrinTranslator) void {
         self.params.deinit();
         self.tag_table.deinit(self.allocator);
+        self.type_env.deinit(self.allocator);
         llvm.disposeBuilder(self.builder);
         // Disposing the context also disposes modules created within it.
         llvm.disposeContext(self.ctx);
@@ -424,6 +497,8 @@ pub const GrinTranslator = struct {
     pub fn translateProgramToModule(self: *GrinTranslator, program: grin.Program) TranslationError!llvm.Module {
         // Build the tag table once before any translation.
         self.tag_table = buildTagTable(self.allocator, program) catch return error.OutOfMemory;
+        // Link TypeEnv to the tag table for field type lookups.
+        self.type_env.setTagTable(&self.tag_table);
         for (program.defs) |def| {
             try self.translateDef(def);
         }
