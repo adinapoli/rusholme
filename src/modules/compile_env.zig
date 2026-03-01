@@ -376,6 +376,17 @@ pub const SourceModule = struct {
     source: []const u8,
     /// File identifier for diagnostic spans (must be unique per module).
     file_id: u32,
+    /// Absolute or relative path to the source file on disk.
+    ///
+    /// When non-null, `compileProgram` will:
+    /// - Look for a `.rhi` file at the same path with `.rhi` extension to
+    ///   check for a valid cached interface (fingerprint match).
+    /// - Write a fresh `.rhi` after a successful compilation.
+    ///
+    /// Leave `null` to disable caching for this module (e.g. in tests that
+    /// supply source text without a backing file, or in `cmdBuild` until
+    /// per-module `.bc` backend caching is implemented — see #436).
+    source_path: ?[]const u8 = null,
 };
 
 /// The result of a whole-program compilation.
@@ -405,6 +416,7 @@ pub const CompileResult = struct {
 /// `alloc` should be an arena that outlives the returned result.
 pub fn compileProgram(
     alloc: std.mem.Allocator,
+    io: std.Io,
     modules: []const SourceModule,
 ) std.mem.Allocator.Error!struct { env: CompileEnv, result: CompileResult } {
     var env = CompileEnv.init(alloc);
@@ -458,11 +470,73 @@ pub fn compileProgram(
         try src_map.put(alloc, m.module_name, m);
     }
 
-    // ── Phase 3: Compile each module using cached AST ──────────────────────
+    // ── Phase 3: Compile each module (with .rhi cache check) ──────────────
+    //
+    // For each module in topo order:
+    //   1. Collect fingerprints from already-compiled direct imports.
+    //   2. Compute the expected fingerprint = Wyhash(source ++ dep_fps).
+    //   3. If `source_path` is set, try to load a matching `.rhi` from disk.
+    //      On cache hit: register the cached iface + an empty CoreProgram
+    //      and skip compilation.  The empty Core is acceptable for frontend
+    //      caching; full backend reuse requires per-module .bc artifacts
+    //      (tracked in #436).
+    //   4. On cache miss: run `compileSingle`, then tag the iface with its
+    //      fingerprint and write it to disk for future runs.
     for (topo.order) |mod_name| {
         const m = src_map.get(mod_name) orelse continue;
-        const parsed = env.parsed_modules.get(mod_name);
-        _ = try env.compileSingle(m.module_name, m.source, m.file_id, parsed);
+
+        // Collect dep fingerprints in import-declaration order.
+        // dep_fps items are arena-allocated; no explicit free needed.
+        var dep_fps: std.ArrayListUnmanaged(u64) = .{};
+        if (env.parsed_modules.get(mod_name)) |pm| {
+            for (pm.imports) |imp| {
+                if (env.ifaces.get(imp.module_name)) |dep_iface| {
+                    try dep_fps.append(alloc, dep_iface.fingerprint);
+                }
+            }
+        }
+
+        // Derive paths and expected fingerprint only when caching is enabled.
+        const rhi_p: ?[]const u8 = if (m.source_path) |sp|
+            mod_iface.rhiPath(alloc, sp) catch null
+        else
+            null;
+        const expected_fp: ?u64 = if (rhi_p != null)
+            mod_iface.computeFingerprint(m.source, dep_fps.items)
+        else
+            null;
+
+        // Attempt cache lookup.
+        const cache_hit: bool = blk: {
+            const rp = rhi_p orelse break :blk false;
+            const fp = expected_fp.?;
+            const cached = try mod_iface.tryLoadCachedIface(alloc, io, rp, fp);
+            if (cached == null) break :blk false;
+            // Cache hit: register the loaded interface and an empty Core.
+            try env.register(mod_name, cached.?, .{ .data_decls = &.{}, .binds = &.{} });
+            break :blk true;
+        };
+
+        if (!cache_hit) {
+            // Cache miss: compile from source.
+            const parsed = env.parsed_modules.get(mod_name);
+            const core_opt = try env.compileSingle(m.module_name, m.source, m.file_id, parsed);
+
+            // On success, stamp the fingerprint and persist the interface.
+            if (core_opt != null) {
+                if (expected_fp) |fp| {
+                    if (env.ifaces.getPtr(mod_name)) |iface_ptr| {
+                        iface_ptr.fingerprint = fp;
+                    }
+                    if (rhi_p) |rp| {
+                        if (env.ifaces.get(mod_name)) |iface| {
+                            // Write failure is non-fatal: next invocation will be a miss.
+                            mod_iface.writeRhiToDisk(alloc, io, rp, iface) catch {};
+                        }
+                    }
+                }
+            }
+        }
     }
 
     const had_errors = env.diags.hasErrors();
@@ -840,4 +914,176 @@ test "compileSingle: module with NoImplicitPrelude compiles without Prelude inje
     // The compilation may or may not succeed (depends on parser's pragma
     // handling), but it must not crash.
     _ = try env.compileSingle("WithNoPrelude", source, 1, null);
+}
+
+// ── .rhi cache integration tests ─────────────────────────────────────────
+
+test "compileProgram: .rhi cache hit — second invocation loads cached interface" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const io = testing.io;
+
+    const tmp_path = try std.Io.Dir.realPathFileAlloc(tmp.dir, io, ".", alloc);
+    const hs_path = try std.fmt.allocPrint(alloc, "{s}/CacheHit.hs", .{tmp_path});
+    const source =
+        \\module CacheHit where
+        \\answer :: Int
+        \\answer = 42
+        \\
+    ;
+
+    // ── First run: cache miss → compiles and writes .rhi ──────────────────
+    const fp1: u64 = blk: {
+        var r1 = try compileProgram(alloc, io, &.{.{
+            .module_name = "CacheHit",
+            .source = source,
+            .file_id = 1,
+            .source_path = hs_path,
+        }});
+        defer r1.env.deinit();
+        try testing.expect(!r1.result.had_errors);
+        // A real compilation must produce at least one Core bind.
+        try testing.expect(r1.result.core.binds.len > 0);
+        const fp = r1.env.ifaces.get("CacheHit").?.fingerprint;
+        try testing.expect(fp != 0);
+        break :blk fp;
+    };
+
+    // ── Second run: cache hit → loads .rhi, registers empty CoreProgram ───
+    {
+        var r2 = try compileProgram(alloc, io, &.{.{
+            .module_name = "CacheHit",
+            .source = source,
+            .file_id = 2,
+            .source_path = hs_path,
+        }});
+        defer r2.env.deinit();
+        try testing.expect(!r2.result.had_errors);
+
+        // The cached iface carries the same fingerprint as the first run.
+        const fp2 = r2.env.ifaces.get("CacheHit").?.fingerprint;
+        try testing.expectEqual(fp1, fp2);
+
+        // On a cache hit an empty CoreProgram is registered (no recompile).
+        // The merged result therefore has zero binds.
+        try testing.expectEqual(@as(usize, 0), r2.result.core.binds.len);
+    }
+}
+
+test "compileProgram: .rhi cache miss — changed source produces new fingerprint" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const io = testing.io;
+
+    const tmp_path = try std.Io.Dir.realPathFileAlloc(tmp.dir, io, ".", alloc);
+    const hs_path = try std.fmt.allocPrint(alloc, "{s}/CacheChanged.hs", .{tmp_path});
+
+    const source_v1 =
+        \\module CacheChanged where
+        \\answer :: Int
+        \\answer = 1
+        \\
+    ;
+    const source_v2 =
+        \\module CacheChanged where
+        \\answer :: Int
+        \\answer = 2
+        \\
+    ;
+
+    // First run with v1 source.
+    const fp1: u64 = blk: {
+        var r = try compileProgram(alloc, io, &.{.{
+            .module_name = "CacheChanged",
+            .source = source_v1,
+            .file_id = 1,
+            .source_path = hs_path,
+        }});
+        defer r.env.deinit();
+        break :blk r.env.ifaces.get("CacheChanged").?.fingerprint;
+    };
+
+    // Second run with v2 source: different fingerprint → cache miss → recompile.
+    const fp2: u64 = blk: {
+        var r = try compileProgram(alloc, io, &.{.{
+            .module_name = "CacheChanged",
+            .source = source_v2,
+            .file_id = 2,
+            .source_path = hs_path,
+        }});
+        defer r.env.deinit();
+        // Cache miss: a full compile produced real Core binds.
+        try testing.expect(r.result.core.binds.len > 0);
+        break :blk r.env.ifaces.get("CacheChanged").?.fingerprint;
+    };
+
+    try testing.expect(fp1 != 0);
+    try testing.expect(fp2 != 0);
+    // Different source bytes → different fingerprint.
+    try testing.expect(fp1 != fp2);
+}
+
+test "compileProgram: .rhi cache miss — changed dependency propagates new fingerprint" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const io = testing.io;
+
+    const tmp_path = try std.Io.Dir.realPathFileAlloc(tmp.dir, io, ".", alloc);
+    const lib_path = try std.fmt.allocPrint(alloc, "{s}/CacheLib.hs", .{tmp_path});
+    const app_path = try std.fmt.allocPrint(alloc, "{s}/CacheApp.hs", .{tmp_path});
+
+    const lib_v1 =
+        \\module CacheLib where
+        \\libVal :: Int
+        \\libVal = 10
+        \\
+    ;
+    const lib_v2 =
+        \\module CacheLib where
+        \\libVal :: Int
+        \\libVal = 20
+        \\
+    ;
+    const app_src =
+        \\module CacheApp where
+        \\import CacheLib
+        \\appVal :: Int
+        \\appVal = 99
+        \\
+    ;
+
+    // First run: CacheLib_v1 + CacheApp.
+    const app_fp1: u64 = blk: {
+        var r = try compileProgram(alloc, io, &.{
+            .{ .module_name = "CacheLib", .source = lib_v1, .file_id = 1, .source_path = lib_path },
+            .{ .module_name = "CacheApp", .source = app_src, .file_id = 2, .source_path = app_path },
+        });
+        defer r.env.deinit();
+        break :blk r.env.ifaces.get("CacheApp").?.fingerprint;
+    };
+
+    // Second run: CacheLib_v2 (changed) + CacheApp (unchanged source).
+    // CacheLib's fingerprint changes → CacheApp's dep_fps change → CacheApp misses cache.
+    const app_fp2: u64 = blk: {
+        var r = try compileProgram(alloc, io, &.{
+            .{ .module_name = "CacheLib", .source = lib_v2, .file_id = 3, .source_path = lib_path },
+            .{ .module_name = "CacheApp", .source = app_src, .file_id = 4, .source_path = app_path },
+        });
+        defer r.env.deinit();
+        break :blk r.env.ifaces.get("CacheApp").?.fingerprint;
+    };
+
+    try testing.expect(app_fp1 != 0);
+    try testing.expect(app_fp2 != 0);
+    // The dep fingerprint changed → CacheApp's fingerprint must differ.
+    try testing.expect(app_fp1 != app_fp2);
 }
