@@ -513,6 +513,62 @@ pub const GrinTranslator = struct {
             return error.OutOfMemory;
     }
 
+    // ── Multi-module translation ──────────────────────────────────────────
+
+    /// Pre-compute the global tag table from the union of all modules' GRIN
+    /// programs.
+    ///
+    /// Call this ONCE before calling `translateModuleGrin` for each module in
+    /// a multi-module build.  The tag table must cover all constructors from
+    /// all modules because module B may pattern-match on constructors from
+    /// module A.
+    ///
+    /// Any previously held tag table is released.
+    pub fn prepareGlobalTagTable(self: *GrinTranslator, all_prog: grin.Program) TranslationError!void {
+        self.tag_table.deinit(self.allocator);
+        self.tag_table = buildTagTable(self.allocator, all_prog) catch return error.OutOfMemory;
+        // TypeEnv pointer is refreshed inside translateModuleGrin before each
+        // module translation (needed because the tag_table field was reassigned).
+    }
+
+    /// Translate a single module's GRIN program into a fresh LLVM module.
+    ///
+    /// The returned module is owned by this translator's context and will be
+    /// freed when `deinit` is called.  The caller may write it to a bitcode
+    /// file via `llvm.writeBitcodeToFile` and/or merge it into a link-time
+    /// module via `llvm.linkModules`.
+    ///
+    /// `prepareGlobalTagTable` must be called before the first call to this
+    /// function so that the tag table covers all constructors.
+    ///
+    /// Cross-module function calls are handled lazily: if a called function is
+    /// not defined in `prog.defs`, the existing `LLVMGetNamedFunction` +
+    /// `LLVMAddFunction` fallback in `translateApp` creates an external `declare`
+    /// that `llvm.linkModules` resolves at link time.
+    pub fn translateModuleGrin(
+        self: *GrinTranslator,
+        module_name: []const u8,
+        prog: grin.Program,
+    ) TranslationError!llvm.Module {
+        // Refresh the TypeEnv pointer in case prepareGlobalTagTable rebuilt the
+        // tag table (which moves it in memory when the old table is deinited and
+        // a new one is allocated).
+        self.type_env.setTagTable(&self.tag_table);
+
+        const mod = llvm.createModule(module_name, self.ctx);
+
+        // Temporarily point self.module at the new per-module LLVM module so
+        // that translateDef emits all functions into it.  Restored afterwards.
+        const saved_module = self.module;
+        self.module = mod;
+        for (prog.defs) |def| {
+            try self.translateDef(def);
+        }
+        self.module = saved_module;
+
+        return mod;
+    }
+
     fn translateDef(self: *GrinTranslator, def: grin.Def) TranslationError!void {
         // For M1, `main` follows the C ABI (i32 return, no params).
         // All other user-defined functions use an opaque `ptr` representation

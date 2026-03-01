@@ -12,6 +12,7 @@ const llvm_c = @cImport({
     @cInclude("llvm-c/TargetMachine.h");
     @cInclude("llvm-c/IRReader.h");
     @cInclude("llvm-c/Linker.h");
+    @cInclude("llvm-c/BitWriter.h");
 });
 
 // Import C stdio for file I/O
@@ -352,6 +353,40 @@ pub fn emitObjectFile(machine: TargetMachine, module: Module, path: []const u8) 
         &error_msg,
     ) != 0) {
         if (error_msg) |msg| llvm_c.LLVMDisposeMessage(msg);
+        return error.EmitFailed;
+    }
+}
+
+/// Write a module to a file as LLVM bitcode (`.bc`).
+///
+/// The bitcode file is a durable, per-module backend artifact produced
+/// alongside the `.rhi` interface file.  Multiple `.bc` files can later
+/// be merged in-process via `linkModules`.
+pub fn writeBitcodeToFile(module: Module, path: []const u8) TargetError!void {
+    const path_c = tryToNullTerminated(path);
+    defer std.heap.c_allocator.free(path_c);
+
+    if (llvm_c.LLVMWriteBitcodeToFile(module, path_c) != 0) {
+        return error.EmitFailed;
+    }
+}
+
+/// Merge `src` into `dest` using the LLVM in-process linker.
+///
+/// After a successful call `src` is **disposed** by LLVM and must not be
+/// used again.  On failure both modules remain valid (LLVM does not consume
+/// `src` on error).
+///
+/// Use this to combine per-module `.bc` artifacts before object emission:
+///
+///   ```zig
+///   var dest = llvm.createModule("linked", ctx);
+///   for (srcs) |src| try llvm.linkModules(dest, src);
+///   try llvm.emitObjectFile(machine, dest, "program.o");
+///   ```
+pub fn linkModules(dest: Module, src: Module) TargetError!void {
+    // LLVMLinkModules2 returns 1 on failure, 0 on success.
+    if (llvm_c.LLVMLinkModules2(dest, src) != 0) {
         return error.EmitFailed;
     }
 }
