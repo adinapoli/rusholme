@@ -384,6 +384,13 @@ pub const CompileResult = struct {
     core: CoreProgram,
     /// Whether any errors were emitted during compilation.
     had_errors: bool,
+    /// Topological compilation order: module names dependency-first.
+    ///
+    /// The slice and its strings are allocated in the same arena as the
+    /// rest of the compilation result.  Callers can iterate this together
+    /// with `CompileEnv.programs` to process each module independently
+    /// (e.g. per-module GRIN→LLVM translation for bitcode emission).
+    module_order: []const []const u8,
 };
 
 /// Compile a set of pre-read Haskell source modules into a single merged
@@ -442,12 +449,18 @@ pub fn compileProgram(
 
     // ── Topological sort ──────────────────────────────────────────────────
     const topo = try module_graph.topoSort(&graph, alloc, &env.diags);
-    defer alloc.free(topo.order);
+    // Keep topo.order alive — returned in CompileResult.module_order.
+    // The slice is owned by `alloc` (the caller's arena).
 
     if (!topo.is_complete) {
+        alloc.free(topo.order);
         return .{
             .env = env,
-            .result = .{ .core = .{ .data_decls = &.{}, .binds = &.{} }, .had_errors = true },
+            .result = .{
+                .core = .{ .data_decls = &.{}, .binds = &.{} },
+                .had_errors = true,
+                .module_order = &.{},
+            },
         };
     }
 
@@ -470,7 +483,11 @@ pub fn compileProgram(
 
     return .{
         .env = env,
-        .result = .{ .core = merged, .had_errors = had_errors },
+        .result = .{
+            .core = merged,
+            .had_errors = had_errors,
+            .module_order = topo.order,
+        },
     };
 }
 
