@@ -1072,8 +1072,9 @@ pub const GrinTranslator = struct {
             llvm.positionBuilderAtEnd(self.builder, alt_bbs[i]);
 
             // For NodePat alts: load each field via rts_load_field(node, index).
-            // The result is a raw u64; it is stored in the params map as an
-            // i64 value.  Call sites that need a pointer must inttoptr it.
+            // Use TypeEnv to determine the correct LLVM type for each field.
+            // HPT-lite: This ensures type consistency for LLVM codegen.
+            // See: https://github.com/adinapoli/rusholme/issues/449
             if (alt.pat == .NodePat and is_ptr) {
                 const np = alt.pat.NodePat;
                 const rts_load_fn = declareRtsLoadField(self.module);
@@ -1082,7 +1083,7 @@ pub const GrinTranslator = struct {
                         scrut_llvm,
                         c.LLVMConstInt(llvm.i32Type(), fi, 0),
                     };
-                    const loaded = c.LLVMBuildCall2(
+                    const loaded_i64 = c.LLVMBuildCall2(
                         self.builder,
                         llvm.getFunctionType(rts_load_fn),
                         rts_load_fn,
@@ -1090,7 +1091,21 @@ pub const GrinTranslator = struct {
                         2,
                         nullTerminate(field_name.base).ptr,
                     );
-                    try self.params.put(field_name.unique.value, loaded);
+
+                    // Get the expected field type from TypeEnv/TagTable.
+                    const field_type = self.type_env.getFieldTagType(np.tag, @intCast(fi));
+
+                    // Convert the loaded i64 to the appropriate type.
+                    const final_val: llvm.Value = switch (field_type) {
+                        .i64 => loaded_i64,
+                        .f64 => c.LLVMBuildBitCast(self.builder, loaded_i64, c.LLVMDoubleType(), "as_f64"),
+                        .ptr => c.LLVMBuildIntToPtr(self.builder, loaded_i64, ptrType(), "as_ptr"),
+                    };
+
+                    try self.params.put(field_name.unique.value, final_val);
+
+                    // Record the type in TypeEnv for downstream use.
+                    try self.type_env.setVarType(self.allocator, field_name, field_type);
                 }
             }
 
