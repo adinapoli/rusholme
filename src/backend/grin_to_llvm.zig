@@ -546,18 +546,30 @@ pub const GrinTranslator = struct {
             try self.params.put(param_name.unique.value, param_val);
         }
 
-        try self.translateExpr(def.body);
-
-        // Emit the terminator based on return type — only if the current
-        // block does not already have one (a Return expr may have emitted it).
-        const current_bb = c.LLVMGetInsertBlock(self.builder);
-        if (current_bb != null and c.LLVMGetBasicBlockTerminator(current_bb) == null) {
-            if (is_main) {
-                _ = llvm.buildRet(self.builder, c.LLVMConstInt(llvm.i32Type(), 0, 0));
-            } else if (has_params) {
-                _ = llvm.buildRet(self.builder, c.LLVMConstPointerNull(value_type));
-            } else {
-                _ = llvm.buildRetVoid(self.builder);
+        // Translate the body and capture its value if needed.
+        // For non-main functions with parameters, we need to return the body's value.
+        // See: https://github.com/adinapuli/rusholme/issues/449
+        if (!is_main and has_params) {
+            const body_val = try self.translateExprToValue(def.body, "result");
+            const current_bb = c.LLVMGetInsertBlock(self.builder);
+            if (current_bb != null and c.LLVMGetBasicBlockTerminator(current_bb) == null) {
+                if (body_val) |val| {
+                    _ = llvm.buildRet(self.builder, val);
+                } else {
+                    _ = llvm.buildRet(self.builder, c.LLVMConstPointerNull(value_type));
+                }
+            }
+        } else {
+            try self.translateExpr(def.body);
+            // Emit the terminator based on return type — only if the current
+            // block does not already have one (a Return expr may have emitted it).
+            const current_bb = c.LLVMGetInsertBlock(self.builder);
+            if (current_bb != null and c.LLVMGetBasicBlockTerminator(current_bb) == null) {
+                if (is_main) {
+                    _ = llvm.buildRet(self.builder, c.LLVMConstInt(llvm.i32Type(), 0, 0));
+                } else {
+                    _ = llvm.buildRetVoid(self.builder);
+                }
             }
         }
     }
@@ -933,9 +945,32 @@ pub const GrinTranslator = struct {
                 // Pointer values are cast to i64 via ptrtoint; integer values are
                 // already i64.  No boxing via alloca is needed — the RTS field
                 // slots are plain u64.
+                //
+                // For nullary constructors (ValTag), we need to box them first
+                // since fields must be pointers to heap nodes.
+                // See: https://github.com/adinapuli/rusholme/issues/449
                 const rts_store_fn = declareRtsStoreField(self.module);
                 for (ctn.fields, 0..) |field, fi| {
-                    const raw_val = try self.translateValToLlvm(field);
+                    // Check if field is a nullary constructor that needs boxing
+                    const raw_val: llvm.Value = if (field == .ValTag) blk: {
+                        // Box the nullary constructor: allocate a node with tag but 0 fields
+                        const field_tag = field.ValTag;
+                        const field_disc = self.tag_table.discriminant(field_tag) orelse return error.UnsupportedGrinVal;
+                        const field_alloc_fn = declareRtsAlloc(self.module);
+                        var field_alloc_args = [_]llvm.Value{
+                            c.LLVMConstInt(llvm.i64Type(), @bitCast(field_disc), 0),
+                            c.LLVMConstInt(llvm.i32Type(), 0, 0), // n_fields = 0
+                        };
+                        break :blk c.LLVMBuildCall2(
+                            self.builder,
+                            llvm.getFunctionType(field_alloc_fn),
+                            field_alloc_fn,
+                            &field_alloc_args,
+                            2,
+                            "boxed_field",
+                        );
+                    } else try self.translateValToLlvm(field);
+                    
                     const field_ty = c.LLVMTypeOf(raw_val);
                     const kind = c.LLVMGetTypeKind(field_ty);
                     const is_ptr = kind == c.LLVMPointerTypeKind;
@@ -1146,6 +1181,53 @@ pub const GrinTranslator = struct {
 
     fn translateReturn(self: *GrinTranslator, val: grin.Val) TranslationError!void {
         const llvm_val = try self.translateValToLlvm(val);
+
+        // Type correction: if the function returns ptr but we have an i64,
+        // we need to box the value. This happens for nullary constructors
+        // returned from non-main functions.
+        // See: https://github.com/adinapuli/rusholme/issues/449
+        const val_ty = c.LLVMTypeOf(llvm_val);
+        const val_kind = c.LLVMGetTypeKind(val_ty);
+        const is_int = val_kind == c.LLVMIntegerTypeKind;
+
+        // Only convert if we have an integer and the current function is a
+        // non-main function (which return ptr). Main returns i32 so no conversion.
+        if (is_int and self.current_func != null) {
+            // Get the function name to check if it's main
+            const func_name = c.LLVMGetValueName(self.current_func);
+            if (func_name != null) {
+                const name_slice = std.mem.span(func_name);
+                if (!std.mem.eql(u8, name_slice, "main")) {
+                    // Non-main functions return ptr.
+                    // For nullary constructors (ValTag), we need to allocate
+                    // a heap node with just the tag and no fields.
+                    if (val == .ValTag) {
+                        // Allocate a node with tag but 0 fields
+                        const rts_alloc_fn = declareRtsAlloc(self.module);
+                        var alloc_args = [_]llvm.Value{
+                            llvm_val, // tag discriminant as i64
+                            c.LLVMConstInt(llvm.i32Type(), 0, 0), // n_fields = 0
+                        };
+                        const node_ptr = c.LLVMBuildCall2(
+                            self.builder,
+                            llvm.getFunctionType(rts_alloc_fn),
+                            rts_alloc_fn,
+                            &alloc_args,
+                            2,
+                            "boxed_tag",
+                        );
+                        _ = llvm.buildRet(self.builder, node_ptr);
+                        return;
+                    } else {
+                        // For other i64 values, use inttoptr
+                        const converted = c.LLVMBuildIntToPtr(self.builder, llvm_val, ptrType(), "ret_as_ptr");
+                        _ = llvm.buildRet(self.builder, converted);
+                        return;
+                    }
+                }
+            }
+        }
+
         _ = llvm.buildRet(self.builder, llvm_val);
     }
 };
