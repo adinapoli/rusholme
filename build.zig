@@ -95,6 +95,46 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // RTS Static Library
+    // ═══════════════════════════════════════════════════════════════════════
+    // Build the runtime system (src/rts/) as a static library that exports
+    // rts_alloc, rts_store_field, rts_load_field, etc. This library is linked
+    // into executables produced by `rhc build`.
+    //
+    // PIC is required because the static library will be linked into PIE
+    // (Position Independent Executables) on modern Linux systems. Without PIC,
+    // the linker fails with "relocation R_X86_64_32S ... can not be used when
+    // making a PIE object".
+    const rts_lib = b.addLibrary(.{
+        .name = "rts",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/rts/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .pic = true,
+        }),
+    });
+    b.installArtifact(rts_lib);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // CLI Executable with RTS Library Path
+    // ═══════════════════════════════════════════════════════════════════════
+    // Expose the RTS library path as a build option so the CLI can find it at
+    // runtime. The path is baked into the binary at compile time via @embedFile.
+    //
+    // We need the FULL path (including install prefix) because the binary might
+    // be run from a different directory. The RTS static library is installed
+    // alongside the CLI, so we compute its absolute path at build time.
+    const rts_lib_path_option = b.option([]const u8, "rts-lib-path", "Path to RTS library") orelse blk: {
+        // Default: get the absolute install path for librts.a
+        const rts_lib_path = b.getInstallPath(.lib, "librts.a");
+        break :blk rts_lib_path;
+    };
+    const rts_path = b.addNamedWriteFiles("rts_path");
+    const rts_path_file = rts_path.add("path.txt", rts_lib_path_option);
+
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
@@ -135,6 +175,11 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "rusholme", .module = mod },
             },
         }),
+    });
+
+    // Pass the RTS library path as a build option so the CLI can find it.
+    exe.root_module.addAnonymousImport("rts_lib_path", .{
+        .root_source_file = rts_path_file,
     });
 
     // This declares intent for the executable to be installed into the

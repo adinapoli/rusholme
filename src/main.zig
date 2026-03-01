@@ -31,6 +31,12 @@ const htype_mod = rusholme.tc.htype;
 
 const version = "0.1.0";
 
+/// Get the path to the RTS library baked in at compile time.
+/// Returns the path to librts.a that should be linked into executables.
+fn getRtsLibPath() []const u8 {
+    return @embedFile("rts_lib_path");
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -739,10 +745,13 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     };
 
     // ── Link ───────────────────────────────────────────────────────────
+    // Include the RTS library (librts.a) which provides rts_alloc,
+    // rts_store_field, rts_load_field, etc.
+    const rts_lib_path = getRtsLibPath();
     const linker = rusholme.backend.linker.Linker{
         .objects = &.{obj_path},
         .system_libs = &.{"c"},
-        .runtime_objects = &.{},
+        .runtime_objects = &.{rts_lib_path},
         .output_path = output_name,
     };
 

@@ -357,6 +357,7 @@
 | [#392](https://github.com/adinapoli/rusholme/issues/392) | LLVM codegen: translate function parameters in GRIN defs | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
 | [#410](https://github.com/adinapoli/rusholme/issues/410) | backend: nullary constructors not handled in GRIN→LLVM codegen (Val.Var lookup fails) | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
 | [#425](https://github.com/adinapoli/rusholme/issues/425) | Fix GRIN→LLVM codegen for programs with ADTs and higher-order functions | [#410](https://github.com/adinapoli/rusholme/issues/410) | :green_circle: |
+| [#447](https://github.com/adinapoli/rusholme/issues/447) | LLVM backend: undefined reference to RTS functions during linking | [#57](https://github.com/adinapoli/rusholme/issues/57) | :yellow_circle: |
 
 ---
 
