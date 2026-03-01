@@ -378,7 +378,7 @@
 | [#456](https://github.com/adinapoli/rusholme/issues/456) | 371 follow-up: enable full end-to-end caching once per-module .bc artifacts land | [#371](https://github.com/adinapoli/rusholme/issues/371), [#436](https://github.com/adinapoli/rusholme/issues/436) | :white_circle: |
 | [#370](https://github.com/adinapoli/rusholme/issues/370) | Bootstrap Prelude from Haskell source | [#368](https://github.com/adinapoli/rusholme/issues/368), [#58](https://github.com/adinapoli/rusholme/issues/58), [#59](https://github.com/adinapoli/rusholme/issues/59) | :white_circle: |
 | [#436](https://github.com/adinapoli/rusholme/issues/436) | design: use LLVM bitcode (`.bc`) as per-module backend artifact | [#366](https://github.com/adinapoli/rusholme/issues/366), [#368](https://github.com/adinapoli/rusholme/issues/368) | :yellow_circle: |
-| [#433](https://github.com/adinapoli/rusholme/issues/433) | Research: Definition-level inter-module dependency graph (beyond `.hs-boot`) | [#366](https://github.com/adinapoli/rusholme/issues/366), [#367](https://github.com/adinapoli/rusholme/issues/367), [#368](https://github.com/adinapoli/rusholme/issues/368) | :white_circle: |
+| [#433](https://github.com/adinapoli/rusholme/issues/433) | Research: Definition-level inter-module dependency graph (beyond `.hs-boot`) | [#366](https://github.com/adinapoli/rusholme/issues/366), [#367](https://github.com/adinapoli/rusholme/issues/367), [#368](https://github.com/adinapoli/rusholme/issues/368) | :yellow_circle: |
 
 ### Epic [#10](https://github.com/adinapoli/rusholme/issues/10): Minimal Prelude
 
