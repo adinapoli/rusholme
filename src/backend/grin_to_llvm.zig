@@ -42,6 +42,7 @@
 const std = @import("std");
 
 const grin = @import("../grin/ast.zig");
+const FieldType = grin.FieldType;
 
 const llvm = @import("llvm.zig");
 const c = llvm.c;
@@ -182,17 +183,24 @@ const PrimOpResult = union(enum) {
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Maps every constructor `Tag` in the GRIN program to a stable `i64`
-/// discriminant (0, 1, 2, …) and records the number of fields each
-/// constructor carries.
+/// discriminant (0, 1, 2, …), records the number of fields, and tracks
+/// the FieldType of each field for HPT-lite.
 ///
 /// Built once before translation starts by scanning all `ConstTagNode`
 /// values in the program.  The unique value of the tag's name is used as
 /// the map key so that identity is name-based, not string-based.
+///
+/// See: https://github.com/adinapoli/rusholme/issues/449
 const TagTable = struct {
     /// Discriminant assigned to each constructor, keyed by name unique.
     discriminants: std.AutoHashMapUnmanaged(u64, i64),
     /// Number of fields for each constructor, keyed by name unique.
     field_counts: std.AutoHashMapUnmanaged(u64, u32),
+    /// Field types per constructor, keyed by name unique.
+    /// Each slice contains FieldType for each field position.
+    /// This is HPT-lite: a simplified type tracking that will be
+    /// extended when implementing full HPT (M2.4).
+    field_types: std.AutoHashMapUnmanaged(u64, []const FieldType),
     /// Next discriminant to assign.
     next: i64,
 
@@ -200,6 +208,7 @@ const TagTable = struct {
         return .{
             .discriminants = .{},
             .field_counts = .{},
+            .field_types = .{},
             .next = 0,
         };
     }
@@ -207,6 +216,12 @@ const TagTable = struct {
     fn deinit(self: *TagTable, alloc: std.mem.Allocator) void {
         self.discriminants.deinit(alloc);
         self.field_counts.deinit(alloc);
+        // Free each field_types slice
+        var iter = self.field_types.iterator();
+        while (iter.next()) |entry| {
+            alloc.free(entry.value_ptr.*);
+        }
+        self.field_types.deinit(alloc);
     }
 
     /// Register a constructor tag with the given field count.
@@ -216,6 +231,10 @@ const TagTable = struct {
         if (self.discriminants.contains(key)) return;
         try self.discriminants.put(alloc, key, self.next);
         try self.field_counts.put(alloc, key, n_fields);
+        // Default: all fields are ptr (conservative for HPT-lite)
+        const types = try alloc.alloc(FieldType, n_fields);
+        for (types) |*t| t.* = .ptr;
+        try self.field_types.put(alloc, key, types);
         self.next += 1;
     }
 
@@ -227,6 +246,11 @@ const TagTable = struct {
     /// Return the field count for a constructor, or null if unknown.
     fn fieldCount(self: *const TagTable, tag: grin.Tag) ?u32 {
         return self.field_counts.get(tag.name.unique.value);
+    }
+
+    /// Return field types for a constructor, or null if unknown.
+    fn fieldTypes(self: *const TagTable, tag: grin.Tag) ?[]const FieldType {
+        return self.field_types.get(tag.name.unique.value);
     }
 
     /// Return true if the named variable is a known nullary constructor.
