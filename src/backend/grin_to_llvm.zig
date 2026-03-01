@@ -42,6 +42,7 @@
 const std = @import("std");
 
 const grin = @import("../grin/ast.zig");
+const FieldType = grin.FieldType;
 
 const llvm = @import("llvm.zig");
 const c = llvm.c;
@@ -182,17 +183,24 @@ const PrimOpResult = union(enum) {
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Maps every constructor `Tag` in the GRIN program to a stable `i64`
-/// discriminant (0, 1, 2, …) and records the number of fields each
-/// constructor carries.
+/// discriminant (0, 1, 2, …), records the number of fields, and tracks
+/// the FieldType of each field for HPT-lite.
 ///
 /// Built once before translation starts by scanning all `ConstTagNode`
 /// values in the program.  The unique value of the tag's name is used as
 /// the map key so that identity is name-based, not string-based.
+///
+/// See: https://github.com/adinapoli/rusholme/issues/449
 const TagTable = struct {
     /// Discriminant assigned to each constructor, keyed by name unique.
     discriminants: std.AutoHashMapUnmanaged(u64, i64),
     /// Number of fields for each constructor, keyed by name unique.
     field_counts: std.AutoHashMapUnmanaged(u64, u32),
+    /// Field types per constructor, keyed by name unique.
+    /// Each slice contains FieldType for each field position.
+    /// This is HPT-lite: a simplified type tracking that will be
+    /// extended when implementing full HPT (M2.4).
+    field_types: std.AutoHashMapUnmanaged(u64, []const FieldType),
     /// Next discriminant to assign.
     next: i64,
 
@@ -200,6 +208,7 @@ const TagTable = struct {
         return .{
             .discriminants = .{},
             .field_counts = .{},
+            .field_types = .{},
             .next = 0,
         };
     }
@@ -207,6 +216,12 @@ const TagTable = struct {
     fn deinit(self: *TagTable, alloc: std.mem.Allocator) void {
         self.discriminants.deinit(alloc);
         self.field_counts.deinit(alloc);
+        // Free each field_types slice
+        var iter = self.field_types.iterator();
+        while (iter.next()) |entry| {
+            alloc.free(entry.value_ptr.*);
+        }
+        self.field_types.deinit(alloc);
     }
 
     /// Register a constructor tag with the given field count.
@@ -216,6 +231,10 @@ const TagTable = struct {
         if (self.discriminants.contains(key)) return;
         try self.discriminants.put(alloc, key, self.next);
         try self.field_counts.put(alloc, key, n_fields);
+        // Default: all fields are ptr (conservative for HPT-lite)
+        const types = try alloc.alloc(FieldType, n_fields);
+        for (types) |*t| t.* = .ptr;
+        try self.field_types.put(alloc, key, types);
         self.next += 1;
     }
 
@@ -227,6 +246,11 @@ const TagTable = struct {
     /// Return the field count for a constructor, or null if unknown.
     fn fieldCount(self: *const TagTable, tag: grin.Tag) ?u32 {
         return self.field_counts.get(tag.name.unique.value);
+    }
+
+    /// Return field types for a constructor, or null if unknown.
+    fn fieldTypes(self: *const TagTable, tag: grin.Tag) ?[]const FieldType {
+        return self.field_types.get(tag.name.unique.value);
     }
 
     /// Return true if the named variable is a known nullary constructor.
@@ -356,6 +380,74 @@ pub const TranslationError = error{
     UnimplementedPattern,
 };
 
+// ═══════════════════════════════════════════════════════════════════════
+// HPT-Lite Type Environment
+// ═══════════════════════════════════════════════════════════════════════
+
+/// HPT-Lite: Lightweight type propagation environment for LLVM codegen.
+///
+/// This is a simplified version of full Heap Points-to Analysis.
+/// It tracks the FieldType of each GRIN variable so the LLVM backend
+/// can emit correctly-typed IR (ptr vs i64 vs f64).
+///
+/// See: https://github.com/adinapoli/rusholme/issues/449
+/// TODO: Replace with full HPT when implementing M2.4.
+const TypeEnv = struct {
+    /// Maps variable unique IDs to their FieldType.
+    var_types: std.AutoHashMapUnmanaged(u64, FieldType),
+    /// Reference to the tag table for constructor field types.
+    tag_table: *const TagTable,
+
+    fn init() TypeEnv {
+        return .{
+            .var_types = .{},
+            .tag_table = undefined,
+        };
+    }
+
+    fn deinit(self: *TypeEnv, alloc: std.mem.Allocator) void {
+        self.var_types.deinit(alloc);
+    }
+
+    fn setTagTable(self: *TypeEnv, table: *const TagTable) void {
+        self.tag_table = table;
+    }
+
+    fn setVarType(self: *TypeEnv, alloc: std.mem.Allocator, name: grin.Name, ft: FieldType) !void {
+        try self.var_types.put(alloc, name.unique.value, ft);
+    }
+
+    fn getVarType(self: *const TypeEnv, name: grin.Name) ?FieldType {
+        return self.var_types.get(name.unique.value);
+    }
+
+    /// Get the type of a GRIN value for LLVM codegen.
+    /// Falls back to .ptr (conservative) if type is unknown.
+    fn getValType(self: *const TypeEnv, val: grin.Val) FieldType {
+        return switch (val) {
+            .Lit => |lit| switch (lit) {
+                .Int => .i64,
+                .Float => .f64,
+                .Char => .i64,
+                .String => .ptr,
+                .Bool => .i64,
+            },
+            .Unit => .i64, // Unit is unboxed
+            .Var => |name| self.getVarType(name) orelse .ptr,
+            .ConstTagNode => .ptr, // Allocated node is always a pointer
+            .ValTag => .i64, // Bare tags are i64 discriminants
+            .VarTagNode => .ptr, // Variable-tag nodes are pointers
+        };
+    }
+
+    /// Get the type of a field at the given index for a constructor.
+    fn getFieldTagType(self: *const TypeEnv, tag: grin.Tag, index: u32) FieldType {
+        const types = self.tag_table.fieldTypes(tag) orelse return .ptr;
+        if (index >= types.len) return .ptr;
+        return types[index];
+    }
+};
+
 pub const GrinTranslator = struct {
     ctx: llvm.Context,
     module: llvm.Module,
@@ -367,6 +459,9 @@ pub const GrinTranslator = struct {
     params: std.AutoHashMap(u64, llvm.Value),
     /// Constructor tag discriminants, built before translation.
     tag_table: TagTable,
+    /// HPT-lite type environment for type-correct LLVM codegen.
+    /// See: https://github.com/adinapoli/rusholme/issues/449
+    type_env: TypeEnv,
     /// The LLVM function currently being translated (needed for
     /// `LLVMAppendBasicBlock` calls inside Case translation).
     current_func: llvm.Value,
@@ -381,6 +476,7 @@ pub const GrinTranslator = struct {
             .allocator = allocator,
             .params = std.AutoHashMap(u64, llvm.Value).init(allocator),
             .tag_table = TagTable.init(),
+            .type_env = TypeEnv.init(),
             .current_func = null,
         };
     }
@@ -388,6 +484,7 @@ pub const GrinTranslator = struct {
     pub fn deinit(self: *GrinTranslator) void {
         self.params.deinit();
         self.tag_table.deinit(self.allocator);
+        self.type_env.deinit(self.allocator);
         llvm.disposeBuilder(self.builder);
         // Disposing the context also disposes modules created within it.
         llvm.disposeContext(self.ctx);
@@ -400,6 +497,8 @@ pub const GrinTranslator = struct {
     pub fn translateProgramToModule(self: *GrinTranslator, program: grin.Program) TranslationError!llvm.Module {
         // Build the tag table once before any translation.
         self.tag_table = buildTagTable(self.allocator, program) catch return error.OutOfMemory;
+        // Link TypeEnv to the tag table for field type lookups.
+        self.type_env.setTagTable(&self.tag_table);
         for (program.defs) |def| {
             try self.translateDef(def);
         }
@@ -447,18 +546,30 @@ pub const GrinTranslator = struct {
             try self.params.put(param_name.unique.value, param_val);
         }
 
-        try self.translateExpr(def.body);
-
-        // Emit the terminator based on return type — only if the current
-        // block does not already have one (a Return expr may have emitted it).
-        const current_bb = c.LLVMGetInsertBlock(self.builder);
-        if (current_bb != null and c.LLVMGetBasicBlockTerminator(current_bb) == null) {
-            if (is_main) {
-                _ = llvm.buildRet(self.builder, c.LLVMConstInt(llvm.i32Type(), 0, 0));
-            } else if (has_params) {
-                _ = llvm.buildRet(self.builder, c.LLVMConstPointerNull(value_type));
-            } else {
-                _ = llvm.buildRetVoid(self.builder);
+        // Translate the body and capture its value if needed.
+        // For non-main functions with parameters, we need to return the body's value.
+        // See: https://github.com/adinapuli/rusholme/issues/449
+        if (!is_main and has_params) {
+            const body_val = try self.translateExprToValue(def.body, "result");
+            const current_bb = c.LLVMGetInsertBlock(self.builder);
+            if (current_bb != null and c.LLVMGetBasicBlockTerminator(current_bb) == null) {
+                if (body_val) |val| {
+                    _ = llvm.buildRet(self.builder, val);
+                } else {
+                    _ = llvm.buildRet(self.builder, c.LLVMConstPointerNull(value_type));
+                }
+            }
+        } else {
+            try self.translateExpr(def.body);
+            // Emit the terminator based on return type — only if the current
+            // block does not already have one (a Return expr may have emitted it).
+            const current_bb = c.LLVMGetInsertBlock(self.builder);
+            if (current_bb != null and c.LLVMGetBasicBlockTerminator(current_bb) == null) {
+                if (is_main) {
+                    _ = llvm.buildRet(self.builder, c.LLVMConstInt(llvm.i32Type(), 0, 0));
+                } else {
+                    _ = llvm.buildRetVoid(self.builder);
+                }
             }
         }
     }
@@ -834,9 +945,32 @@ pub const GrinTranslator = struct {
                 // Pointer values are cast to i64 via ptrtoint; integer values are
                 // already i64.  No boxing via alloca is needed — the RTS field
                 // slots are plain u64.
+                //
+                // For nullary constructors (ValTag), we need to box them first
+                // since fields must be pointers to heap nodes.
+                // See: https://github.com/adinapuli/rusholme/issues/449
                 const rts_store_fn = declareRtsStoreField(self.module);
                 for (ctn.fields, 0..) |field, fi| {
-                    const raw_val = try self.translateValToLlvm(field);
+                    // Check if field is a nullary constructor that needs boxing
+                    const raw_val: llvm.Value = if (field == .ValTag) blk: {
+                        // Box the nullary constructor: allocate a node with tag but 0 fields
+                        const field_tag = field.ValTag;
+                        const field_disc = self.tag_table.discriminant(field_tag) orelse return error.UnsupportedGrinVal;
+                        const field_alloc_fn = declareRtsAlloc(self.module);
+                        var field_alloc_args = [_]llvm.Value{
+                            c.LLVMConstInt(llvm.i64Type(), @bitCast(field_disc), 0),
+                            c.LLVMConstInt(llvm.i32Type(), 0, 0), // n_fields = 0
+                        };
+                        break :blk c.LLVMBuildCall2(
+                            self.builder,
+                            llvm.getFunctionType(field_alloc_fn),
+                            field_alloc_fn,
+                            &field_alloc_args,
+                            2,
+                            "boxed_field",
+                        );
+                    } else try self.translateValToLlvm(field);
+                    
                     const field_ty = c.LLVMTypeOf(raw_val);
                     const kind = c.LLVMGetTypeKind(field_ty);
                     const is_ptr = kind == c.LLVMPointerTypeKind;
@@ -973,8 +1107,9 @@ pub const GrinTranslator = struct {
             llvm.positionBuilderAtEnd(self.builder, alt_bbs[i]);
 
             // For NodePat alts: load each field via rts_load_field(node, index).
-            // The result is a raw u64; it is stored in the params map as an
-            // i64 value.  Call sites that need a pointer must inttoptr it.
+            // Use TypeEnv to determine the correct LLVM type for each field.
+            // HPT-lite: This ensures type consistency for LLVM codegen.
+            // See: https://github.com/adinapoli/rusholme/issues/449
             if (alt.pat == .NodePat and is_ptr) {
                 const np = alt.pat.NodePat;
                 const rts_load_fn = declareRtsLoadField(self.module);
@@ -983,7 +1118,7 @@ pub const GrinTranslator = struct {
                         scrut_llvm,
                         c.LLVMConstInt(llvm.i32Type(), fi, 0),
                     };
-                    const loaded = c.LLVMBuildCall2(
+                    const loaded_i64 = c.LLVMBuildCall2(
                         self.builder,
                         llvm.getFunctionType(rts_load_fn),
                         rts_load_fn,
@@ -991,7 +1126,21 @@ pub const GrinTranslator = struct {
                         2,
                         nullTerminate(field_name.base).ptr,
                     );
-                    try self.params.put(field_name.unique.value, loaded);
+
+                    // Get the expected field type from TypeEnv/TagTable.
+                    const field_type = self.type_env.getFieldTagType(np.tag, @intCast(fi));
+
+                    // Convert the loaded i64 to the appropriate type.
+                    const final_val: llvm.Value = switch (field_type) {
+                        .i64 => loaded_i64,
+                        .f64 => c.LLVMBuildBitCast(self.builder, loaded_i64, c.LLVMDoubleType(), "as_f64"),
+                        .ptr => c.LLVMBuildIntToPtr(self.builder, loaded_i64, ptrType(), "as_ptr"),
+                    };
+
+                    try self.params.put(field_name.unique.value, final_val);
+
+                    // Record the type in TypeEnv for downstream use.
+                    try self.type_env.setVarType(self.allocator, field_name, field_type);
                 }
             }
 
@@ -1032,6 +1181,53 @@ pub const GrinTranslator = struct {
 
     fn translateReturn(self: *GrinTranslator, val: grin.Val) TranslationError!void {
         const llvm_val = try self.translateValToLlvm(val);
+
+        // Type correction: if the function returns ptr but we have an i64,
+        // we need to box the value. This happens for nullary constructors
+        // returned from non-main functions.
+        // See: https://github.com/adinapuli/rusholme/issues/449
+        const val_ty = c.LLVMTypeOf(llvm_val);
+        const val_kind = c.LLVMGetTypeKind(val_ty);
+        const is_int = val_kind == c.LLVMIntegerTypeKind;
+
+        // Only convert if we have an integer and the current function is a
+        // non-main function (which return ptr). Main returns i32 so no conversion.
+        if (is_int and self.current_func != null) {
+            // Get the function name to check if it's main
+            const func_name = c.LLVMGetValueName(self.current_func);
+            if (func_name != null) {
+                const name_slice = std.mem.span(func_name);
+                if (!std.mem.eql(u8, name_slice, "main")) {
+                    // Non-main functions return ptr.
+                    // For nullary constructors (ValTag), we need to allocate
+                    // a heap node with just the tag and no fields.
+                    if (val == .ValTag) {
+                        // Allocate a node with tag but 0 fields
+                        const rts_alloc_fn = declareRtsAlloc(self.module);
+                        var alloc_args = [_]llvm.Value{
+                            llvm_val, // tag discriminant as i64
+                            c.LLVMConstInt(llvm.i32Type(), 0, 0), // n_fields = 0
+                        };
+                        const node_ptr = c.LLVMBuildCall2(
+                            self.builder,
+                            llvm.getFunctionType(rts_alloc_fn),
+                            rts_alloc_fn,
+                            &alloc_args,
+                            2,
+                            "boxed_tag",
+                        );
+                        _ = llvm.buildRet(self.builder, node_ptr);
+                        return;
+                    } else {
+                        // For other i64 values, use inttoptr
+                        const converted = c.LLVMBuildIntToPtr(self.builder, llvm_val, ptrType(), "ret_as_ptr");
+                        _ = llvm.buildRet(self.builder, converted);
+                        return;
+                    }
+                }
+            }
+        }
+
         _ = llvm.buildRet(self.builder, llvm_val);
     }
 };

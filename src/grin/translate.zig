@@ -19,6 +19,7 @@
 const std = @import("std");
 const core = @import("../core/ast.zig");
 const grin = @import("ast.zig");
+const FieldType = grin.FieldType;
 
 const CoreExpr = core.Expr;
 const CoreBind = core.Bind;
@@ -44,6 +45,48 @@ const GrinDef = grin.Def;
 const GrinCPat = grin.CPat;
 const GrinAlt = grin.Alt;
 const GrinName = grin.Name;
+
+// ── HPT-Lite Type Inference Helpers ─────────────────────────────────────
+
+/// Infer FieldType from a Core literal.
+/// Part of HPT-lite: simple type inference for literal values.
+/// See: https://github.com/adinapoli/rusholme/issues/449
+fn inferFieldTypeFromLiteral(lit: core.Literal) FieldType {
+    return switch (lit) {
+        .Int => .i64,
+        .Float => .f64,
+        .Char => .i64, // chars are stored as i64
+        .String => .ptr, // strings are pointers
+    };
+}
+
+/// Infer FieldType from a Core type.
+/// Returns null for complex types (delegates to ptr conservatively).
+/// Part of HPT-lite: simple type inference from type annotations.
+/// See: https://github.com/adinapoli/rusholme/issues/449
+fn inferFieldTypeFromCoreType(ty: core.CoreType) ?FieldType {
+    return switch (ty) {
+        .TyVar => null, // Type variable - unknown
+        .TyCon => |tc| blk: {
+            // Check for primitive type constructors
+            if (std.mem.eql(u8, tc.name.base, "Int") or
+                std.mem.eql(u8, tc.name.base, "Char") or
+                std.mem.eql(u8, tc.name.base, "Bool"))
+            {
+                break :blk .i64;
+            }
+            if (std.mem.eql(u8, tc.name.base, "Float") or
+                std.mem.eql(u8, tc.name.base, "Double"))
+            {
+                break :blk .f64;
+            }
+            // Other type constructors are heap pointers
+            break :blk .ptr;
+        },
+        .FunTy => .ptr, // Functions are closures (pointers)
+        .ForAllTy => |fa| inferFieldTypeFromCoreType(fa.body.*),
+    };
+}
 
 // ── Translation Context ─────────────────────────────────────────────────
 
