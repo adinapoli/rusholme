@@ -56,3 +56,4 @@ docs/plans
 *.bc
 *.ll
 current-plan.md
+*.wasm

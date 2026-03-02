@@ -955,17 +955,13 @@ pub const GrinTranslator = struct {
                     break :blk c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0);
                 }
                 // 3. Top-level function reference: look up the LLVM function by
-                //    name and return its pointer (for higher-order use).
+                //    full name (base + unique suffix) and return its pointer (for
+                //    higher-order use).
                 //    This handles passing named functions as arguments, e.g.:
-                //      map_it identity xs  =>  identity is a global function ptr.
-                var fn_name_buf: [128]u8 = undefined;
-                if (name.base.len < fn_name_buf.len) {
-                    @memcpy(fn_name_buf[0..name.base.len], name.base);
-                    fn_name_buf[name.base.len] = 0;
-                    const fn_name_z = fn_name_buf[0..name.base.len :0];
-                    if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |fn_val| {
-                        break :blk fn_val;
-                    }
+                //      map_it identity xs  =>  identity becomes a global function ptr.
+                const fn_name_z = self.formatName(name);
+                if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |fn_val| {
+                    break :blk fn_val;
                 }
                 std.debug.print("UnsupportedGrinVal: Var {s}_{d} not found in params, tag table, or module\n", .{ name.base, name.unique.value });
                 return error.UnsupportedGrinVal;

@@ -316,6 +316,40 @@ pub fn createNativeTargetMachine() TargetError!TargetMachine {
     return machine;
 }
 
+/// Create a target machine for WebAssembly (wasm32-wasi).
+/// Used by the WASM backend to compile Haskell to .wasm binaries.
+pub fn createWasmTargetMachine() TargetError!TargetMachine {
+    // Use wasm32-wasi for WASI-compliant WebAssembly
+    const triple = "wasm32-wasi";
+
+    var target: llvm_c.LLVMTargetRef = null;
+    var error_msg: [*c]u8 = null;
+
+    if (llvm_c.LLVMGetTargetFromTriple(triple.ptr, &target, &error_msg) != 0) {
+        if (error_msg) |msg| llvm_c.LLVMDisposeMessage(msg);
+        return error.TargetLookupFailed;
+    }
+
+    const machine = llvm_c.LLVMCreateTargetMachine(
+        target,
+        triple.ptr,
+        "generic", // CPU
+        "", // features (could add "+bulk-memory,+sign-ext" for optimization)
+        llvm_c.LLVMCodeGenLevelDefault,
+        llvm_c.LLVMRelocStatic, // Static relocation for WASM
+        llvm_c.LLVMCodeModelDefault,
+    );
+
+    if (machine == null) return error.TargetMachineCreationFailed;
+
+    return machine;
+}
+
+/// Set a custom target triple on a module (for cross-compilation).
+pub fn setModuleTargetTriple(module: Module, triple: []const u8) void {
+    llvm_c.LLVMSetTarget(module, triple.ptr);
+}
+
 /// Dispose of a target machine.
 pub fn disposeTargetMachine(machine: TargetMachine) void {
     llvm_c.LLVMDisposeTargetMachine(machine);

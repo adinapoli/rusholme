@@ -251,3 +251,7 @@ test "e2e: e2e_006_peano" {
 test "e2e: e2e_007_inductive_list" {
     try testE2e(std.testing.allocator, "e2e_007_inductive_list");
 }
+
+test "e2e: e2e_008_higher_order" {
+    try testE2e(std.testing.allocator, "e2e_008_higher_order");
+}

@@ -633,37 +633,25 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
 }
 
 /// Full pipeline: parse, rename, typecheck, desugar (for each module in
-/// topological order), merge, lambda-lift, translate to GRIN, emit LLVM
-/// object code, and link into a native executable.
+/// topological order), merge, lambda-lift, translate to GRIN, emit to target
+/// backend.
 ///
 /// `file_paths` is a list of `.hs` source files to compile.  When multiple
 /// files are given, the compiler builds a module graph, determines the
 /// topological order, and compiles each module in turn using `CompileEnv`
 /// so that cross-module names and types are available to downstream modules.
 ///
-/// Only the `native` backend is fully implemented. Other backends are stubs
-/// that will be fleshed out in follow-up issues.
+/// Supports the following backends:
+/// - native: compiles to native executable via LLVM
+/// - wasm: compiles to WebAssembly binary (.wasm)
+/// - graalvm, c: not yet implemented
 fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8, output_name: []const u8, backend_kind: rusholme.backend.backend_mod.BackendKind) !void {
-    // Dispatch non-native backends early; only `native` is implemented.
-    switch (backend_kind) {
-        .native => {}, // handled below
-        .graalvm, .wasm, .c => {
-            var stderr_buf: [4096]u8 = undefined;
-            var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
-            const stderr = &stderr_fw.interface;
-            try stderr.print("rhc build: backend '{s}' is not yet implemented\n", .{
-                rusholme.backend.backend_mod.backendName(backend_kind),
-            });
-            try stderr.flush();
-            std.process.exit(1);
-        },
-    }
 
+    // ── Compile program and translate to GRIN ───────────────────────────
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    // ── Read all source files ──────────────────────────────────────────
     const compile_env_mod = rusholme.modules.compile_env;
     var source_modules: std.ArrayListUnmanaged(compile_env_mod.SourceModule) = .{};
     for (file_paths, 0..) |fp, idx| {
@@ -683,11 +671,10 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
         try source_modules.append(arena_alloc, .{
             .module_name = mod_name,
             .source = source,
-            .file_id = @intCast(idx + 1),
+            .file_id = @intCast(idx),
         });
     }
 
-    // ── Compile all modules via CompileEnv ─────────────────────────────
     var session_result = try compile_env_mod.compileProgram(arena_alloc, io, source_modules.items);
     var session = &session_result.env;
     defer session.deinit();
@@ -720,8 +707,39 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     }
     const all_grin = rusholme.grin.ast.Program{ .defs = all_grin_defs.items };
 
-    // ── LLVM translation (per-module) ───────────────────────────────────
+    // ── Dispatch to backend-specific emission ─────────────────────────────
+    switch (backend_kind) {
+        .native => try emitNative(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name),
+        .wasm => try emitWasm(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name),
+        .graalvm, .c => {
+            var stderr_buf: [4096]u8 = undefined;
+            var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+            const stderr = &stderr_fw.interface;
+            try stderr.print("rhc build: backend '{s}' is not yet implemented\n", .{
+                rusholme.backend.backend_mod.backendName(backend_kind),
+            });
+            try stderr.flush();
+            std.process.exit(1);
+        },
+    }
+}
+
+/// Emit native executable (the original cmdBuild logic).
+fn emitNative(
+    allocator: std.mem.Allocator,
+    io: Io,
+    session: *const rusholme.modules.compile_env.CompileEnv,
+    module_order: []const []const u8,
+    per_module_grin: []const rusholme.grin.ast.Program,
+    all_grin: rusholme.grin.ast.Program,
+    output_name: []const u8,
+) !void {
+    _ = session; // Unused for native backend
     const llvm = rusholme.backend.llvm;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
     var translator = rusholme.backend.grin_to_llvm.GrinTranslator.init(arena_alloc);
     defer translator.deinit();
 
@@ -736,10 +754,8 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
 
     // Translate each module to a separate LLVM module and emit its bitcode.
     // Per-module .bc files are durable artifacts (kept after linking).
-    // Cross-module function calls produce `declare` stubs automatically via
-    // the lazy `LLVMGetNamedFunction` pattern in translateApp.
     var llvm_modules = std.ArrayListUnmanaged(llvm.Module){};
-    for (module_order, per_module_grin.items) |mod_name, grin_prog| {
+    for (module_order, per_module_grin) |mod_name, grin_prog| {
         const llvm_mod = translator.translateModuleGrin(mod_name, grin_prog) catch |err| {
             var stderr_buf: [4096]u8 = undefined;
             var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
@@ -830,6 +846,96 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
 
     // Delete the temp .o (the .bc files are kept as durable artifacts).
     Dir.deleteFile(.cwd(), io, obj_path) catch {};
+}
+
+/// Emit WebAssembly binary via the WASM backend.
+fn emitWasm(
+    allocator: std.mem.Allocator,
+    io: Io,
+    session: *const rusholme.modules.compile_env.CompileEnv,
+    module_order: []const []const u8,
+    per_module_grin: []const rusholme.grin.ast.Program,
+    all_grin: rusholme.grin.ast.Program,
+    output_name: []const u8,
+) !void {
+    _ = session; // Unused for WASM backend
+    const llvm = rusholme.backend.llvm;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    var translator = rusholme.backend.grin_to_llvm.GrinTranslator.init(arena_alloc);
+    defer translator.deinit();
+
+    translator.prepareGlobalTagTable(all_grin) catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: LLVM tag table construction failed: {}\n", .{err});
+        try stderr.flush();
+        std.process.exit(1);
+    };
+
+    // ── Per-module LLVM translation ───────────────────────────────────────
+    // For WASM, we translate each module separately (like native) and then
+    // merge the bitcode before emission to WASI binary format.
+    var llvm_modules = std.ArrayListUnmanaged(llvm.Module){};
+    for (module_order, per_module_grin) |mod_name, grin_prog| {
+        const llvm_mod = translator.translateModuleGrin(mod_name, grin_prog) catch |err| {
+            var stderr_buf: [4096]u8 = undefined;
+            var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+            const stderr = &stderr_fw.interface;
+            try stderr.print("rhc: LLVM codegen failed for WASM module '{s}': {}\n", .{ mod_name, err });
+            try stderr.flush();
+            std.process.exit(1);
+        };
+        try llvm_modules.append(arena_alloc, llvm_mod);
+    }
+
+    // ── In-process bitcode linking ──────────────────────────────────────
+    // Merge all per-module LLVM modules into one for WASM emission.
+    const linked_mod: llvm.Module = if (llvm_modules.items.len == 1)
+        llvm_modules.items[0]
+    else blk: {
+        const dest = llvm_modules.items[0];
+        for (llvm_modules.items[1..]) |src| {
+            llvm.linkModules(dest, src) catch |err| {
+                var stderr_buf: [4096]u8 = undefined;
+                var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+                const stderr = &stderr_fw.interface;
+                try stderr.print("rhc: LLVM bitcode linking failed: {}\n", .{err});
+                try stderr.flush();
+                std.process.exit(1);
+            };
+        }
+        break :blk dest;
+    };
+
+    // ── Create target machine for WebAssembly ───────────────────────────
+    const machine = llvm.createWasmTargetMachine() catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: failed to create WebAssembly target machine: {}\n", .{err});
+        try stderr.flush();
+        std.process.exit(1);
+    };
+    defer llvm.disposeTargetMachine(machine);
+
+    // Set module target triple and data layout for WASM
+    llvm.setModuleTargetTriple(linked_mod, "wasm32-wasi");
+    llvm.setModuleDataLayout(linked_mod, machine);
+
+    // ── Emit WebAssembly binary ───────────────────────────────────────────
+    const wasm_path = try std.fmt.allocPrint(arena_alloc, "{s}", .{output_name});
+    llvm.emitObjectFile(machine, linked_mod, wasm_path) catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: failed to emit WebAssembly binary: {}\n", .{err});
+        try stderr.flush();
+        std.process.exit(1);
+    };
 }
 
 /// Render diagnostics from a multi-file compilation (no source text available).
