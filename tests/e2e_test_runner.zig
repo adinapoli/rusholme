@@ -243,3 +243,11 @@ test "e2e: ghc_007_tree" {
 test "e2e: ghc_008_list_comprehension" {
     try testE2e(std.testing.allocator, "ghc_008_list_comprehension");
 }
+
+test "e2e: e2e_006_peano" {
+    try testE2e(std.testing.allocator, "e2e_006_peano");
+}
+
+test "e2e: e2e_007_inductive_list" {
+    try testE2e(std.testing.allocator, "e2e_007_inductive_list");
+}
