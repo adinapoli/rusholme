@@ -599,7 +599,10 @@ pub const GrinTranslator = struct {
 
         const fn_type = llvm.functionType(ret_type, param_types[0..def.params.len], false);
         const fn_name_z = self.formatName(def.name);
-        const func = llvm.addFunction(self.module, fn_name_z, fn_type);
+        // Check if function was already forward-declared; if so, reuse it.
+        // This prevents LLVM from adding .1 suffix due to name collision.
+        const func = c.LLVMGetNamedFunction(self.module, fn_name_z) orelse
+            llvm.addFunction(self.module, fn_name_z, fn_type);
         self.current_func = func;
         const entry_bb = llvm.appendBasicBlock(func, "entry");
         llvm.positionBuilderAtEnd(self.builder, entry_bb);
