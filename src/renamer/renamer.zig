@@ -576,13 +576,26 @@ pub fn rename(module: ast.Module, env: *RenameEnv) !RenamedModule {
             .Data => |dd| {
                 for (dd.constructors) |con| {
                     if (env.scope.boundInCurrentFrame(con.name)) {
-                        const msg = try std.fmt.allocPrint(env.alloc, "duplicate definition: `{s}`", .{con.name});
-                        try env.diags.emit(env.alloc, .{
-                            .severity = .@"error",
-                            .code = .duplicate_definition,
-                            .span = con.span,
-                            .message = msg,
-                        });
+                        const existing = env.scope.lookup(con.name).?;
+                        const is_builtin = existing.unique.value < Known.reserved_range_end;
+                        if (!is_builtin) {
+                            // Genuine duplicate constructor definition.
+                            const msg = try std.fmt.allocPrint(env.alloc, "duplicate definition: `{s}`", .{con.name});
+                            try env.diags.emit(env.alloc, .{
+                                .severity = .@"error",
+                                .code = .duplicate_definition,
+                                .span = con.span,
+                                .message = msg,
+                            });
+                        } else {
+                            // Shadowing a Prelude built-in constructor — rebind to the
+                            // user's definition (same base name, fresh unique). This
+                            // allows data Bool = False | True to shadow the Prelude's
+                            // True/False built-ins without a duplicate error.
+                            const cn = env.freshName(con.name);
+                            try env.scope.bind(con.name, cn);
+                            try top_names.put(env.alloc, con.name, cn);
+                        }
                     } else {
                         const cn = env.freshName(con.name);
                         try env.scope.bind(con.name, cn);

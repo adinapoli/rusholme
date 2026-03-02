@@ -1,12 +1,13 @@
 -- Test 002: Inductive data types with multiple constructors
--- Simple Boolean-like type to test ADT parsing and pattern matching
+-- Uses standard Bool type (True/False) to test that user-defined types
+-- can shadow Prelude built-in constructors without duplicate errors
 -- NOTE: This test exposes a GRIN→LLVM codegen bug where function
 -- names are mismatched between declaration and definition - tracked in #463
 
-data MyBool = MyFalse | MyTrue
+data MyBool = False | True
 
 main = putStrLn "true"
 
 showMyBool :: MyBool -> String
-showMyBool MyFalse = "false"
-showMyBool MyTrue = "true"
+showMyBool False = "false"
+showMyBool True = "true"
