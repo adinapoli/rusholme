@@ -1284,9 +1284,21 @@ pub const GrinTranslator = struct {
     }
 
     /// Format a GRIN Name as a null-terminated C string using the translator's buffer.
-    /// Well-known names (unique.value == 0) use just base, others use "base_unique".
+    ///
+    /// Special cases:
+    ///   - "main" (any unique): use just "main" for C ABI entry point
+    ///   - Everything else: use "base_unique" including unique 0
     fn formatName(self: *GrinTranslator, name: grin.Name) [:0]const u8 {
-        // Always format as base_unique to ensure consistent function names.
+        // Special case: "main" needs to map to C ABI entry point for the linker.
+        // The unique value is ignored for this entry point.
+        if (std.mem.eql(u8, name.base, "main")) {
+            const len = @min(4, self.name_buf.len - 1);
+            @memcpy(self.name_buf[0..len], "main");
+            self.name_buf[len] = 0;
+            return self.name_buf[0..len :0];
+        }
+
+        // For all other names, always include the unique suffix.
         // This is critical for the linker to correctly resolve references.
         // The unique ID is what distinguishes variables with the same base name.
         const written = std.fmt.bufPrint(&self.name_buf, "{s}_{d}", .{ name.base, name.unique.value }) catch "";
