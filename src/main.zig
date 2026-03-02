@@ -697,29 +697,92 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
         std.process.exit(1);
     }
 
-    const core_prog = session_result.result.core;
+    const module_order = session_result.result.module_order;
 
-    // ── Lambda lift ────────────────────────────────────────────────────
-    const core_lifted = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog);
+    // ── Per-module lambda lift + GRIN translation ───────────────────────
+    // Each Haskell module is lambda-lifted and GRIN-translated independently.
+    // The per-module GRIN programs are collected for global tag table
+    // construction and for per-module LLVM emission.
+    var per_module_grin = std.ArrayListUnmanaged(rusholme.grin.ast.Program){};
+    for (module_order) |mod_name| {
+        const core_prog = session.programs.get(mod_name) orelse continue;
+        const core_lifted = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog);
+        const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted);
+        try per_module_grin.append(arena_alloc, grin_prog);
+    }
 
-    // ── Translate to GRIN ───────────────────────────────────────────────
-    const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted);
+    // ── Build merged GRIN for global tag table ──────────────────────────
+    // The tag table must cover constructors from ALL modules because module B
+    // may pattern-match on a constructor introduced in module A.
+    var all_grin_defs = std.ArrayListUnmanaged(rusholme.grin.ast.Def){};
+    for (per_module_grin.items) |prog| {
+        try all_grin_defs.appendSlice(arena_alloc, prog.defs);
+    }
+    const all_grin = rusholme.grin.ast.Program{ .defs = all_grin_defs.items };
 
-    // ── Translate to LLVM ──────────────────────────────────────────────
+    // ── LLVM translation (per-module) ───────────────────────────────────
+    const llvm = rusholme.backend.llvm;
     var translator = rusholme.backend.grin_to_llvm.GrinTranslator.init(arena_alloc);
     defer translator.deinit();
 
-    const llvm_module = translator.translateProgramToModule(grin_prog) catch |err| {
+    translator.prepareGlobalTagTable(all_grin) catch |err| {
         var stderr_buf: [4096]u8 = undefined;
         var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
         const stderr = &stderr_fw.interface;
-        try stderr.print("rhc: LLVM codegen failed: {}\n", .{err});
+        try stderr.print("rhc: LLVM tag table construction failed: {}\n", .{err});
         try stderr.flush();
         std.process.exit(1);
     };
 
+    // Translate each module to a separate LLVM module and emit its bitcode.
+    // Per-module .bc files are durable artifacts (kept after linking).
+    // Cross-module function calls produce `declare` stubs automatically via
+    // the lazy `LLVMGetNamedFunction` pattern in translateApp.
+    var llvm_modules = std.ArrayListUnmanaged(llvm.Module){};
+    for (module_order, per_module_grin.items) |mod_name, grin_prog| {
+        const llvm_mod = translator.translateModuleGrin(mod_name, grin_prog) catch |err| {
+            var stderr_buf: [4096]u8 = undefined;
+            var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+            const stderr = &stderr_fw.interface;
+            try stderr.print("rhc: LLVM codegen failed for module '{s}': {}\n", .{ mod_name, err });
+            try stderr.flush();
+            std.process.exit(1);
+        };
+
+        const bc_path = try std.fmt.allocPrint(arena_alloc, "{s}.bc", .{mod_name});
+        llvm.writeBitcodeToFile(llvm_mod, bc_path) catch |err| {
+            var stderr_buf: [4096]u8 = undefined;
+            var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+            const stderr = &stderr_fw.interface;
+            try stderr.print("rhc: failed to write bitcode for module '{s}': {}\n", .{ mod_name, err });
+            try stderr.flush();
+            std.process.exit(1);
+        };
+
+        try llvm_modules.append(arena_alloc, llvm_mod);
+    }
+
+    // ── In-process bitcode linking ──────────────────────────────────────
+    // Merge all per-module LLVM modules into one for object emission.
+    // LLVMLinkModules2 disposes source modules; only the destination survives.
+    const linked_mod: llvm.Module = if (llvm_modules.items.len == 1)
+        llvm_modules.items[0]
+    else blk: {
+        const dest = llvm_modules.items[0];
+        for (llvm_modules.items[1..]) |src| {
+            llvm.linkModules(dest, src) catch |err| {
+                var stderr_buf: [4096]u8 = undefined;
+                var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+                const stderr = &stderr_fw.interface;
+                try stderr.print("rhc: LLVM bitcode linking failed: {}\n", .{err});
+                try stderr.flush();
+                std.process.exit(1);
+            };
+        }
+        break :blk dest;
+    };
+
     // ── Emit object file ───────────────────────────────────────────────
-    const llvm = rusholme.backend.llvm;
     const machine = llvm.createNativeTargetMachine() catch |err| {
         var stderr_buf: [4096]u8 = undefined;
         var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
@@ -730,12 +793,12 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     };
     defer llvm.disposeTargetMachine(machine);
 
-    llvm.setModuleDataLayout(llvm_module, machine);
-    llvm.setModuleTriple(llvm_module);
+    llvm.setModuleDataLayout(linked_mod, machine);
+    llvm.setModuleTriple(linked_mod);
 
     const obj_path = try std.fmt.allocPrint(arena_alloc, "{s}.o", .{output_name});
 
-    llvm.emitObjectFile(machine, llvm_module, obj_path) catch |err| {
+    llvm.emitObjectFile(machine, linked_mod, obj_path) catch |err| {
         var stderr_buf: [4096]u8 = undefined;
         var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
         const stderr = &stderr_fw.interface;
@@ -765,6 +828,7 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
         std.process.exit(1);
     };
 
+    // Delete the temp .o (the .bc files are kept as durable artifacts).
     Dir.deleteFile(.cwd(), io, obj_path) catch {};
 }
 

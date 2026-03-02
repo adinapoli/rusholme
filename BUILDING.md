@@ -74,6 +74,39 @@ The solution in `build.zig` is a `configureLlvm` helper that shells out to
 construction time, then passes the discovered paths to the Zig module via
 `addSystemIncludePath` / `addLibraryPath` / `linkSystemLibrary`.
 
+## Build Artifacts
+
+`rhc build` produces per-module backend artifacts alongside the `.rhi` interface
+files that the typechecker uses for cross-module type information:
+
+```
+Foo.hs  →  compile  →  Foo.rhi    (typechecker interface — module types and exports)
+                    →  Foo.bc     (LLVM bitcode — durable backend artifact)
+```
+
+The `.bc` files are **kept after linking** and can be inspected or re-used:
+
+```bash
+# Inspect the bitcode for a module
+llvm-dis Foo.bc -o Foo.ll    # convert to human-readable LLVM IR
+opt -O2 Foo.bc -o Foo.opt.bc  # run LLVM optimisation passes
+```
+
+### Multi-module link flow
+
+When compiling multiple Haskell source files, `rhc build` translates each module
+to a separate LLVM module, writes its bitcode, then links the LLVM modules
+in-process before emitting the final object file:
+
+```
+Foo.bc  ─┐
+Bar.bc  ─┤─► LLVMLinkModules2 ─► linked module ─► emitObjectFile ─► cc + rts.a ─► exe
+Baz.bc  ─┘
+```
+
+The RTS (`librts.a`) is compiled separately and linked in at the final `cc` step,
+unchanged from the single-module flow.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
