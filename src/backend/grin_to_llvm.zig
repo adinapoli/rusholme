@@ -465,6 +465,9 @@ pub const GrinTranslator = struct {
     /// The LLVM function currently being translated (needed for
     /// `LLVMAppendBasicBlock` calls inside Case translation).
     current_func: llvm.Value,
+    /// Buffer for formatting GRIN names as null-terminated C strings.
+    /// Used by formatName() to create "base_unique" style names.
+    name_buf: [256]u8 align(16) = undefined,
 
     pub fn init(allocator: std.mem.Allocator) GrinTranslator {
         llvm.initialize();
@@ -586,7 +589,8 @@ pub const GrinTranslator = struct {
         }
 
         const fn_type = llvm.functionType(ret_type, param_types[0..def.params.len], false);
-        const func = llvm.addFunction(self.module, def.name.base, fn_type);
+        const fn_name_z = self.formatName(def.name);
+        const func = llvm.addFunction(self.module, fn_name_z, fn_type);
         self.current_func = func;
         const entry_bb = llvm.appendBasicBlock(func, "entry");
         llvm.positionBuilderAtEnd(self.builder, entry_bb);
@@ -798,13 +802,9 @@ pub const GrinTranslator = struct {
         //   3. Forward-declare and call (for functions not yet translated).
         const func: llvm.Value = blk: {
             if (self.params.get(name.unique.value)) |fn_ptr| break :blk fn_ptr;
-            var fn_name_buf: [128]u8 = undefined;
-            std.debug.assert(name.base.len < fn_name_buf.len);
-            @memcpy(fn_name_buf[0..name.base.len], name.base);
-            fn_name_buf[name.base.len] = 0;
-            const fn_name_z = fn_name_buf[0..name.base.len :0];
+            const fn_name_z = self.formatName(name);
             if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |existing| break :blk existing;
-            break :blk llvm.addFunction(self.module, name.base, fn_type);
+            break :blk llvm.addFunction(self.module, fn_name_z, fn_type);
         };
 
         var name_buf: [64]u8 = undefined;
@@ -848,13 +848,9 @@ pub const GrinTranslator = struct {
 
         const func: llvm.Value = blk: {
             if (self.params.get(name.unique.value)) |fn_ptr| break :blk fn_ptr;
-            var fn_name_buf: [128]u8 = undefined;
-            std.debug.assert(name.base.len < fn_name_buf.len);
-            @memcpy(fn_name_buf[0..name.base.len], name.base);
-            fn_name_buf[name.base.len] = 0;
-            const fn_name_z = fn_name_buf[0..name.base.len :0];
+            const fn_name_z = self.formatName(name);
             if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |existing| break :blk existing;
-            break :blk llvm.addFunction(self.module, name.base, fn_type);
+            break :blk llvm.addFunction(self.module, fn_name_z, fn_type);
         };
         _ = c.LLVMBuildCall2(
             self.builder,
@@ -1285,6 +1281,17 @@ pub const GrinTranslator = struct {
         }
 
         _ = llvm.buildRet(self.builder, llvm_val);
+    }
+
+    /// Format a GRIN Name as a null-terminated C string using the translator's buffer.
+    /// Well-known names (unique.value == 0) use just base, others use "base_unique".
+    fn formatName(self: *GrinTranslator, name: grin.Name) [:0]const u8 {
+        // Always format as base_unique to ensure consistent function names.
+        // This is critical for the linker to correctly resolve references.
+        // The unique ID is what distinguishes variables with the same base name.
+        const written = std.fmt.bufPrint(&self.name_buf, "{s}_{d}", .{ name.base, name.unique.value }) catch "";
+        self.name_buf[written.len] = 0;
+        return self.name_buf[0..written.len :0];
     }
 };
 
