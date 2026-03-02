@@ -131,6 +131,20 @@ Hello
 
 `rhc build` runs the full pipeline, emits a native object file via LLVM, and
 links it into an executable using the system C compiler.
+
+**WebAssembly** — `rhc build --backend wasm -o hello.wasm hello.hs`:
+
+```bash
+$ rhc build --backend wasm -o hello.wasm hello.hs
+$ file hello.wasm
+hello.wasm: WebAssembly (wasm) binary module version 0x1 (MVP)
+```
+
+The WebAssembly backend compiles Haskell to `.wasm` binaries via LLVM's WASM
+target (`wasm32-wasi`). These can be executed in WASI-compliant runtimes like
+wasmtime, wasmer, or browsers with WASI polyfills. Runtime execution integration
+is tracked in issue #471; module linking is tracked in issue #472.
+
 ## Development
 
 Requires [Nix](https://nixlang.org/) with flakes enabled, or
