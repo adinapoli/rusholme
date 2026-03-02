@@ -196,6 +196,22 @@ test "e2e: e2e_001_hello" {
     try testE2e(std.testing.allocator, "e2e_001_hello");
 }
 
+test "e2e: e2e_002_bool" {
+    try testE2e(std.testing.allocator, "e2e_002_bool");
+}
+
+test "e2e: e2e_003_multi_putStrLn" {
+    try testE2e(std.testing.allocator, "e2e_003_multi_putStrLn");
+}
+
+test "e2e: e2e_004_string" {
+    try testE2e(std.testing.allocator, "e2e_004_string");
+}
+
+test "e2e: e2e_005_nested_datatypes" {
+    try testE2e(std.testing.allocator, "e2e_005_nested_datatypes");
+}
+
 test "e2e: ghc_001_negative_literal" {
     try testE2e(std.testing.allocator, "ghc_001_negative_literal");
 }
