@@ -143,9 +143,10 @@
 |---|-------|------|--------|
 | [#62](https://github.com/adinapoli/rusholme/issues/62) | Set up Zig test harness and project test structure | — | :green_circle: |
 | [#63](https://github.com/adinapoli/rusholme/issues/63) | Implement golden/snapshot test runner | [#62](https://github.com/adinapoli/rusholme/issues/62) | :green_circle: |
-| [#64](https://github.com/adinapoli/rusholme/issues/64) | Implement end-to-end test runner (compile + run + check stdout) | [#63](https://github.com/adinapoli/rusholme/issues/63) | :white_circle: |
+| [#64](https://github.com/adinapoli/rusholme/issues/64) | Implement end-to-end test runner (compile + run + check stdout) | [#63](https://github.com/adinapoli/rusholme/issues/63) | :yellow_circle: |
 | [#65](https://github.com/adinapoli/rusholme/issues/65) | Research and import simple test programs from GHC's testsuite | [#63](https://github.com/adinapoli/rusholme/issues/63) | :green_circle: |
 | [#415](https://github.com/adinapoli/rusholme/issues/415) | testing: add parse and GRIN output golden variants to test runner | [#63](https://github.com/adinapoli/rusholme/issues/63) | :white_circle: |
+| [#460](https://github.com/adinapoli/rusholme/issues/460) | e2e runner: capture and assert stderr output | [#64](https://github.com/adinapoli/rusholme/issues/64) | :white_circle: |
 
 ### Epic [#106](https://github.com/adinapoli/rusholme/issues/106): Zero-Leak Compiler
 
@@ -374,11 +375,11 @@
 | [#368](https://github.com/adinapoli/rusholme/issues/368) | Implement compilation session (CompileEnv) | [#366](https://github.com/adinapoli/rusholme/issues/366), [#367](https://github.com/adinapoli/rusholme/issues/367) | :green_circle: |
 | [#369](https://github.com/adinapoli/rusholme/issues/369) | Implement implicit Prelude import | [#368](https://github.com/adinapoli/rusholme/issues/368) | :green_circle: |
 | [#443](https://github.com/adinapoli/rusholme/issues/443) | Introduce LanguageExtension EnumSet and module parse cache | [#368](https://github.com/adinapoli/rusholme/issues/368) | :green_circle: |
-| [#371](https://github.com/adinapoli/rusholme/issues/371) | Implement recompilation avoidance via `.rhi` fingerprinting | [#366](https://github.com/adinapoli/rusholme/issues/366), [#368](https://github.com/adinapoli/rusholme/issues/368) | :yellow_circle: |
+| [#371](https://github.com/adinapoli/rusholme/issues/371) | Implement recompilation avoidance via `.rhi` fingerprinting | [#366](https://github.com/adinapoli/rusholme/issues/366), [#368](https://github.com/adinapoli/rusholme/issues/368) | :green_circle: |
 | [#456](https://github.com/adinapoli/rusholme/issues/456) | 371 follow-up: enable full end-to-end caching once per-module .bc artifacts land | [#371](https://github.com/adinapoli/rusholme/issues/371), [#436](https://github.com/adinapoli/rusholme/issues/436) | :white_circle: |
 | [#370](https://github.com/adinapoli/rusholme/issues/370) | Bootstrap Prelude from Haskell source | [#368](https://github.com/adinapoli/rusholme/issues/368), [#58](https://github.com/adinapoli/rusholme/issues/58), [#59](https://github.com/adinapoli/rusholme/issues/59) | :white_circle: |
-| [#436](https://github.com/adinapoli/rusholme/issues/436) | design: use LLVM bitcode (`.bc`) as per-module backend artifact | [#366](https://github.com/adinapoli/rusholme/issues/366), [#368](https://github.com/adinapoli/rusholme/issues/368) | :yellow_circle: |
-| [#433](https://github.com/adinapoli/rusholme/issues/433) | Research: Definition-level inter-module dependency graph (beyond `.hs-boot`) | [#366](https://github.com/adinapoli/rusholme/issues/366), [#367](https://github.com/adinapoli/rusholme/issues/367), [#368](https://github.com/adinapoli/rusholme/issues/368) | :yellow_circle: |
+| [#436](https://github.com/adinapoli/rusholme/issues/436) | design: use LLVM bitcode (`.bc`) as per-module backend artifact | [#366](https://github.com/adinapoli/rusholme/issues/366), [#368](https://github.com/adinapoli/rusholme/issues/368) | :green_circle: |
+| [#433](https://github.com/adinapoli/rusholme/issues/433) | Research: Definition-level inter-module dependency graph (beyond `.hs-boot`) | [#366](https://github.com/adinapoli/rusholme/issues/366), [#367](https://github.com/adinapoli/rusholme/issues/367), [#368](https://github.com/adinapoli/rusholme/issues/368) | :green_circle: |
 
 ### Epic [#10](https://github.com/adinapoli/rusholme/issues/10): Minimal Prelude
 
