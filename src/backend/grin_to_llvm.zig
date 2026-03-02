@@ -104,6 +104,12 @@ const PrimOpMapping = struct {
         if (std.mem.eql(u8, name.base, "gt_Int")) return .{ .instruction = .{ .sgt = {} } };
         if (std.mem.eql(u8, name.base, "ge_Int")) return .{ .instruction = .{ .sge = {} } };
 
+        // Monad operations for IO (do-notation desugaring, issue #464)
+        // In M1, >> and >>= are no-ops that return unit. The actual sequencing
+        // is handled by the GRIN bind structure which evaluates actions in order.
+        if (std.mem.eql(u8, name.base, ">>")) return .{ .instruction = .{ .seq = {} } };
+        if (std.mem.eql(u8, name.base, ">>=")) return .{ .instruction = .{ .seq = {} } };
+
         return null;
     }
 };
@@ -170,6 +176,9 @@ const LLVMInstruction = union(enum) {
     sle: void,
     sgt: void,
     sge: void,
+    /// Monadic sequencing (>>) and bind (>>=)
+    /// These are no-ops in M1 - the GRIN bind structure handles sequencing
+    seq: void,
 };
 
 /// A translated PrimOp result
@@ -780,7 +789,11 @@ pub const GrinTranslator = struct {
                 .libcall => |libc_fn| try self.emitLibcCall(libc_fn, args),
                 .instruction => |instr| try self.emitInstruction(instr, args),
             }
-            return null;
+            // Return a null pointer for PrimOps so that bindings still work.
+            // The value itself isn't used for IO actions, but the variable
+            // needs to be registered in params so it can be referenced in
+            // subsequent expressions (e.g., passed to >> for sequencing).
+            return c.LLVMConstPointerNull(ptrType());
         }
 
         // User-defined function call.
@@ -886,6 +899,12 @@ pub const GrinTranslator = struct {
     }
 
     fn emitInstruction(self: *GrinTranslator, instr: LLVMInstruction, args: []const grin.Val) TranslationError!void {
+        // seq is a no-op that doesn't need arguments
+        if (instr == .seq) {
+            // Monadic sequencing - nothing to do, the bind structure handles it
+            return;
+        }
+
         if (args.len < 2) return error.UnsupportedGrinVal;
 
         const lhs = try self.translateValToLlvm(args[0]);
@@ -903,6 +922,7 @@ pub const GrinTranslator = struct {
             .sle => c.LLVMBuildICmp(self.builder, @as(c_uint, @bitCast(c.LLVMIntSLE)), lhs, rhs, "sle"),
             .sgt => c.LLVMBuildICmp(self.builder, @as(c_uint, @bitCast(c.LLVMIntSGT)), lhs, rhs, "sgt"),
             .sge => c.LLVMBuildICmp(self.builder, @as(c_uint, @bitCast(c.LLVMIntSGE)), lhs, rhs, "sge"),
+            .seq => unreachable, // handled above
         };
         _ = result;
     }

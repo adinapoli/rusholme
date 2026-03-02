@@ -565,10 +565,10 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
                 // Complex argument expression - bind it to a fresh variable.
                 const fresh_var = try ctx.freshName("arg");
                 grin_args[i] = .{ .Var = fresh_var };
-                // Register the fresh variable in var_map so it can be looked up
-                // by the LLVM backend. The unique value from freshName() is what
-                // backend uses to resolve variable references (issue #466).
-                try ctx.var_map.put(ctx.alloc, fresh_var.unique.value, fresh_var);
+                // Note: We do NOT register fresh_var in var_map here.
+                // The var_map is for Core variable lookups, not GRIN fresh variables.
+                // The LLVM backend tracks fresh variables via translateBind which
+                // adds them to the params map when results are bound.
                 try pending_binds.append(ctx.alloc, .{
                     .fresh_var = fresh_var,
                     .complex_expr = arg_result,
