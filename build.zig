@@ -270,6 +270,25 @@ pub fn build(b: *std.Build) void {
     });
     const run_runtime_tests = b.addRunArtifact(runtime_tests);
 
+    // End-to-end test runner — compiles .hs files with `rhc build`, runs the
+    // resulting binaries, and asserts stdout against .stdout sidecar files.
+    // The rhc binary path is baked in as a compile-time option so the runner
+    // can invoke the compiler without knowing the install prefix at test time.
+    const e2e_opts = b.addOptions();
+    e2e_opts.addOption([]const u8, "rhc_path", b.getInstallPath(.bin, "rhc"));
+    const e2e_test_module = b.createModule(.{
+        .root_source_file = b.path("tests/e2e_test_runner.zig"),
+        .target = target,
+    });
+    e2e_test_module.addOptions("e2e_options", e2e_opts);
+    const e2e_tests = b.addTest(.{
+        .name = "e2e-tests",
+        .root_module = e2e_test_module,
+    });
+    // e2e tests must run after `rhc` is installed so the binary exists.
+    e2e_tests.step.dependOn(b.getInstallStep());
+    const run_e2e_tests = b.addRunArtifact(e2e_tests);
+
     // Diagnostic step — reports per-file parser errors for failing tests.
     // Usage: zig build diag
     const diag_module = b.createModule(.{
@@ -294,6 +313,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_golden_tests.step);
     test_step.dependOn(&run_parser_tests.step);
     test_step.dependOn(&run_runtime_tests.step);
+    test_step.dependOn(&run_e2e_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
