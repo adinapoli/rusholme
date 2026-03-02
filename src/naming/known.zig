@@ -36,6 +36,9 @@ pub const Fn = struct {
     pub const show = name("show", 22);
     pub const read = name("read", 23);
     pub const otherwise = name("otherwise", 24);
+    // Monad operators for do-notation desugaring (issue #464)
+    pub const bind = name(">>=", 25);
+    pub const then = name(">>", 26);
 };
 
 pub const Type = struct {
