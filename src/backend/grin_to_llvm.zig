@@ -104,6 +104,12 @@ const PrimOpMapping = struct {
         if (std.mem.eql(u8, name.base, "gt_Int")) return .{ .instruction = .{ .sgt = {} } };
         if (std.mem.eql(u8, name.base, "ge_Int")) return .{ .instruction = .{ .sge = {} } };
 
+        // Monad operations for IO (do-notation desugaring, issue #464)
+        // In M1, >> and >>= are no-ops that return unit. The actual sequencing
+        // is handled by the GRIN bind structure which evaluates actions in order.
+        if (std.mem.eql(u8, name.base, ">>")) return .{ .instruction = .{ .seq = {} } };
+        if (std.mem.eql(u8, name.base, ">>=")) return .{ .instruction = .{ .seq = {} } };
+
         return null;
     }
 };
@@ -170,6 +176,9 @@ const LLVMInstruction = union(enum) {
     sle: void,
     sgt: void,
     sge: void,
+    /// Monadic sequencing (>>) and bind (>>=)
+    /// These are no-ops in M1 - the GRIN bind structure handles sequencing
+    seq: void,
 };
 
 /// A translated PrimOp result
@@ -465,6 +474,9 @@ pub const GrinTranslator = struct {
     /// The LLVM function currently being translated (needed for
     /// `LLVMAppendBasicBlock` calls inside Case translation).
     current_func: llvm.Value,
+    /// Buffer for formatting GRIN names as null-terminated C strings.
+    /// Used by formatName() to create "base_unique" style names.
+    name_buf: [256]u8 align(16) = undefined,
 
     pub fn init(allocator: std.mem.Allocator) GrinTranslator {
         llvm.initialize();
@@ -586,7 +598,8 @@ pub const GrinTranslator = struct {
         }
 
         const fn_type = llvm.functionType(ret_type, param_types[0..def.params.len], false);
-        const func = llvm.addFunction(self.module, def.name.base, fn_type);
+        const fn_name_z = self.formatName(def.name);
+        const func = llvm.addFunction(self.module, fn_name_z, fn_type);
         self.current_func = func;
         const entry_bb = llvm.appendBasicBlock(func, "entry");
         llvm.positionBuilderAtEnd(self.builder, entry_bb);
@@ -776,7 +789,11 @@ pub const GrinTranslator = struct {
                 .libcall => |libc_fn| try self.emitLibcCall(libc_fn, args),
                 .instruction => |instr| try self.emitInstruction(instr, args),
             }
-            return null;
+            // Return a null pointer for PrimOps so that bindings still work.
+            // The value itself isn't used for IO actions, but the variable
+            // needs to be registered in params so it can be referenced in
+            // subsequent expressions (e.g., passed to >> for sequencing).
+            return c.LLVMConstPointerNull(ptrType());
         }
 
         // User-defined function call.
@@ -798,13 +815,9 @@ pub const GrinTranslator = struct {
         //   3. Forward-declare and call (for functions not yet translated).
         const func: llvm.Value = blk: {
             if (self.params.get(name.unique.value)) |fn_ptr| break :blk fn_ptr;
-            var fn_name_buf: [128]u8 = undefined;
-            std.debug.assert(name.base.len < fn_name_buf.len);
-            @memcpy(fn_name_buf[0..name.base.len], name.base);
-            fn_name_buf[name.base.len] = 0;
-            const fn_name_z = fn_name_buf[0..name.base.len :0];
+            const fn_name_z = self.formatName(name);
             if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |existing| break :blk existing;
-            break :blk llvm.addFunction(self.module, name.base, fn_type);
+            break :blk llvm.addFunction(self.module, fn_name_z, fn_type);
         };
 
         var name_buf: [64]u8 = undefined;
@@ -848,13 +861,9 @@ pub const GrinTranslator = struct {
 
         const func: llvm.Value = blk: {
             if (self.params.get(name.unique.value)) |fn_ptr| break :blk fn_ptr;
-            var fn_name_buf: [128]u8 = undefined;
-            std.debug.assert(name.base.len < fn_name_buf.len);
-            @memcpy(fn_name_buf[0..name.base.len], name.base);
-            fn_name_buf[name.base.len] = 0;
-            const fn_name_z = fn_name_buf[0..name.base.len :0];
+            const fn_name_z = self.formatName(name);
             if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |existing| break :blk existing;
-            break :blk llvm.addFunction(self.module, name.base, fn_type);
+            break :blk llvm.addFunction(self.module, fn_name_z, fn_type);
         };
         _ = c.LLVMBuildCall2(
             self.builder,
@@ -890,6 +899,12 @@ pub const GrinTranslator = struct {
     }
 
     fn emitInstruction(self: *GrinTranslator, instr: LLVMInstruction, args: []const grin.Val) TranslationError!void {
+        // seq is a no-op that doesn't need arguments
+        if (instr == .seq) {
+            // Monadic sequencing - nothing to do, the bind structure handles it
+            return;
+        }
+
         if (args.len < 2) return error.UnsupportedGrinVal;
 
         const lhs = try self.translateValToLlvm(args[0]);
@@ -907,6 +922,7 @@ pub const GrinTranslator = struct {
             .sle => c.LLVMBuildICmp(self.builder, @as(c_uint, @bitCast(c.LLVMIntSLE)), lhs, rhs, "sle"),
             .sgt => c.LLVMBuildICmp(self.builder, @as(c_uint, @bitCast(c.LLVMIntSGT)), lhs, rhs, "sgt"),
             .sge => c.LLVMBuildICmp(self.builder, @as(c_uint, @bitCast(c.LLVMIntSGE)), lhs, rhs, "sge"),
+            .seq => unreachable, // handled above
         };
         _ = result;
     }
@@ -1285,6 +1301,29 @@ pub const GrinTranslator = struct {
         }
 
         _ = llvm.buildRet(self.builder, llvm_val);
+    }
+
+    /// Format a GRIN Name as a null-terminated C string using the translator's buffer.
+    ///
+    /// Special cases:
+    ///   - "main" (any unique): use just "main" for C ABI entry point
+    ///   - Everything else: use "base_unique" including unique 0
+    fn formatName(self: *GrinTranslator, name: grin.Name) [:0]const u8 {
+        // Special case: "main" needs to map to C ABI entry point for the linker.
+        // The unique value is ignored for this entry point.
+        if (std.mem.eql(u8, name.base, "main")) {
+            const len = @min(4, self.name_buf.len - 1);
+            @memcpy(self.name_buf[0..len], "main");
+            self.name_buf[len] = 0;
+            return self.name_buf[0..len :0];
+        }
+
+        // For all other names, always include the unique suffix.
+        // This is critical for the linker to correctly resolve references.
+        // The unique ID is what distinguishes variables with the same base name.
+        const written = std.fmt.bufPrint(&self.name_buf, "{s}_{d}", .{ name.base, name.unique.value }) catch "";
+        self.name_buf[written.len] = 0;
+        return self.name_buf[0..written.len :0];
     }
 };
 

@@ -147,19 +147,29 @@ const TranslateCtx = struct {
         if (self.var_map.get(unique_id)) |name| {
             return name;
         }
-        // Not mapped yet, create a fresh variable with the same base name.
-        const fresh = try self.freshName(core_id.name.base);
+        // Not mapped yet, create a GrinName with the original unique ID
+        // from the Core binder (critical: do NOT use freshName() which
+        // would change the unique ID and break GRIN→LLVM lookup).
+        const fresh = GrinName{
+            .base = core_id.name.base,
+            .unique = core_id.name.unique,
+        };
         try self.var_map.put(self.alloc, unique_id, fresh);
         return fresh;
     }
 
-    /// Get or create a GRIN variable name for a Core ID.
+    /// Get or create a GRIN variable name for a Core name.
+    /// Preserves the original unique ID to maintain GRIN→LLVM mapping.
     fn getCoreVar(self: *TranslateCtx, core_name: grin.Name) !GrinName {
         const unique_id = core_name.unique.value;
         if (self.var_map.get(unique_id)) |name| {
             return name;
         }
-        const fresh = try self.freshName(core_name.base);
+        // Preserve the original unique ID (do NOT use freshName).
+        const fresh = GrinName{
+            .base = core_name.base,
+            .unique = core_name.unique,
+        };
         try self.var_map.put(self.alloc, unique_id, fresh);
         return fresh;
     }
@@ -555,6 +565,10 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
                 // Complex argument expression - bind it to a fresh variable.
                 const fresh_var = try ctx.freshName("arg");
                 grin_args[i] = .{ .Var = fresh_var };
+                // Note: We do NOT register fresh_var in var_map here.
+                // The var_map is for Core variable lookups, not GRIN fresh variables.
+                // The LLVM backend tracks fresh variables via translateBind which
+                // adds them to the params map when results are bound.
                 try pending_binds.append(ctx.alloc, .{
                     .fresh_var = fresh_var,
                     .complex_expr = arg_result,
