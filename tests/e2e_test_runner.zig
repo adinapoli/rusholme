@@ -38,8 +38,6 @@ const Properties = struct {
     skip: bool = false,
     xfail: bool = false,
     /// Expected exit code of the compiled binary (default 0).
-    /// NOTE: Parsing is implemented; wiring into runTest is deferred.
-    /// tracked in: https://github.com/adinapoli/rusholme/issues/459
     exit_code: u8 = 0,
 };
 
