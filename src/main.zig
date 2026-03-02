@@ -688,7 +688,7 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     }
 
     // ── Compile all modules via CompileEnv ─────────────────────────────
-    var session_result = try compile_env_mod.compileProgram(arena_alloc, source_modules.items);
+    var session_result = try compile_env_mod.compileProgram(arena_alloc, io, source_modules.items);
     var session = &session_result.env;
     defer session.deinit();
 

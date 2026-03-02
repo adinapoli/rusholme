@@ -261,6 +261,14 @@ pub const ModIface = struct {
     values: []const ExportedValue,
     /// Exported data type declarations.
     data_decls: []const ExportedDataDecl,
+    /// Recompilation fingerprint: `Wyhash(source_bytes ++ dep_fingerprints)`.
+    ///
+    /// Computed by `computeFingerprint` and stored in the `.rhi` file.
+    /// A value of `0` means "not computed / caching disabled".
+    ///
+    /// Used by `compileProgram` to decide whether a cached `.rhi` is still
+    /// valid (#371).
+    fingerprint: u64 = 0,
     // ── Not yet implemented ─────────────────────────────────────────────
     //
     // Exported type class instances are not yet included.
@@ -534,6 +542,7 @@ fn deepCopyModIface(alloc: std.mem.Allocator, src: ModIface) std.mem.Allocator.E
         .module_name = module_name,
         .values = values,
         .data_decls = data_decls,
+        .fingerprint = src.fingerprint,
     };
 }
 
@@ -614,6 +623,97 @@ fn deepCopySerialisedCoreType(alloc: std.mem.Allocator, src: SerialisedCoreType)
     }
 
     return result;
+}
+
+// ── Fingerprinting ────────────────────────────────────────────────────────
+
+/// Compute the recompilation fingerprint for a module.
+///
+/// The fingerprint is `Wyhash(source_bytes ++ dep_fp[0] ++ dep_fp[1] ++ …)`
+/// where each `dep_fp[i]` is fed as its little-endian byte representation.
+///
+/// `dep_fingerprints` must be the fingerprints of all directly imported
+/// modules in import-declaration order.  Modules that were not compiled in
+/// the current session (e.g. Prelude, external packages) have no entry and
+/// are simply omitted, which is safe for M2 scope.
+///
+/// Uses `std.hash.Wyhash` — fast and non-cryptographic.
+pub fn computeFingerprint(source: []const u8, dep_fingerprints: []const u64) u64 {
+    var h = std.hash.Wyhash.init(0);
+    h.update(source);
+    for (dep_fingerprints) |fp| {
+        h.update(std.mem.asBytes(&fp));
+    }
+    return h.final();
+}
+
+/// Derive the `.rhi` path from a source file path by replacing the extension.
+///
+/// Example: `/path/to/Foo.hs` → `/path/to/Foo.rhi`
+pub fn rhiPath(alloc: std.mem.Allocator, source_path: []const u8) std.mem.Allocator.Error![]u8 {
+    const ext = std.fs.path.extension(source_path);
+    const stem = source_path[0 .. source_path.len - ext.len];
+    return std.fmt.allocPrint(alloc, "{s}.rhi", .{stem});
+}
+
+/// Try to load a cached `ModIface` from `rhi_path`.
+///
+/// Returns:
+/// - `null` if the file does not exist, cannot be read, cannot be parsed,
+///   or its stored fingerprint does not match `expected_fp`.
+/// - The deserialized `ModIface` on a valid cache hit.
+///
+/// All memory for the returned iface is allocated in `alloc`.
+/// Non-OOM errors are swallowed and treated as cache misses so that a
+/// corrupted or stale `.rhi` never blocks compilation.
+pub fn tryLoadCachedIface(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    rhi_path_str: []const u8,
+    expected_fp: u64,
+) std.mem.Allocator.Error!?ModIface {
+    // Read the file; treat any I/O failure as a cache miss.
+    const data = std.Io.Dir.readFileAlloc(
+        .cwd(),
+        io,
+        rhi_path_str,
+        alloc,
+        .limited(16 * 1024 * 1024),
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    defer alloc.free(data);
+
+    // Parse the JSON; treat malformed data as a cache miss.
+    const iface = readRhi(alloc, data) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+
+    // Fingerprint mismatch → stale cache.
+    if (iface.fingerprint != expected_fp) return null;
+
+    return iface;
+}
+
+/// Serialise `iface` and write it to `rhi_path_str`, creating or truncating
+/// the file.
+///
+/// A write failure is not propagated; the call site should treat it as a
+/// non-fatal cache-population failure (the next invocation will simply be a
+/// cache miss).
+pub fn writeRhiToDisk(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    rhi_path_str: []const u8,
+    iface: ModIface,
+) (std.mem.Allocator.Error || std.Io.File.OpenError || std.Io.File.Writer.Error)!void {
+    const json = try writeRhi(alloc, iface);
+    defer alloc.free(json);
+    const file = try std.Io.Dir.createFile(.cwd(), io, rhi_path_str, .{ .truncate = true });
+    defer file.close(io);
+    try file.writeStreamingAll(io, json);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -843,4 +943,65 @@ test "ModIface: writeRhi / readRhi round-trip (data declaration)" {
     try testing.expectEqual(@as(usize, 2), dd.constructors.len);
     try testing.expectEqualStrings("Nothing", dd.constructors[0].name);
     try testing.expectEqualStrings("Just", dd.constructors[1].name);
+}
+
+// ── Fingerprinting tests ───────────────────────────────────────────────────
+
+test "computeFingerprint: same source + same deps → same fingerprint" {
+    const fp1 = computeFingerprint("module Foo where", &.{});
+    const fp2 = computeFingerprint("module Foo where", &.{});
+    try testing.expectEqual(fp1, fp2);
+}
+
+test "computeFingerprint: different source → different fingerprint" {
+    const fp1 = computeFingerprint("module Foo where\nfoo = 1", &.{});
+    const fp2 = computeFingerprint("module Foo where\nfoo = 2", &.{});
+    try testing.expect(fp1 != fp2);
+}
+
+test "computeFingerprint: different dep fingerprint → different result" {
+    const fp1 = computeFingerprint("module Bar where", &.{100});
+    const fp2 = computeFingerprint("module Bar where", &.{200});
+    try testing.expect(fp1 != fp2);
+}
+
+test "computeFingerprint: non-zero result for non-empty source" {
+    const fp = computeFingerprint("module Main where\nmain = pure ()", &.{});
+    try testing.expect(fp != 0);
+}
+
+test "rhiPath: replaces .hs extension with .rhi" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const path = try rhiPath(alloc, "/src/Foo.hs");
+    try testing.expectEqualStrings("/src/Foo.rhi", path);
+}
+
+test "rhiPath: handles file with no directory component" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const path = try rhiPath(alloc, "Main.hs");
+    try testing.expectEqualStrings("Main.rhi", path);
+}
+
+test "ModIface: fingerprint survives writeRhi / readRhi round-trip" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const iface = ModIface{
+        .module_name = "FingerprintTest",
+        .values = &.{},
+        .data_decls = &.{},
+        .fingerprint = 0xDEAD_BEEF_CAFE_1234,
+    };
+    const json = try writeRhi(alloc, iface);
+    const recovered = try readRhi(alloc, json);
+
+    try testing.expectEqual(@as(u64, 0xDEAD_BEEF_CAFE_1234), recovered.fingerprint);
+    try testing.expectEqualStrings("FingerprintTest", recovered.module_name);
 }
