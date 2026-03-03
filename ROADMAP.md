@@ -441,9 +441,10 @@
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#77](https://github.com/adinapoli/rusholme/issues/77) | Configure LLVM backend to emit WebAssembly | [#57](https://github.com/adinapoli/rusholme/issues/57), [#395](https://github.com/adinapoli/rusholme/issues/395) | :green_circle: |
+| [#474](https://github.com/adinapoli/rusholme/issues/474) | WASM backend emits non-standard env imports preventing WASI runtime execution | [#77](https://github.com/adinapoli/rusholme/issues/77) | :yellow_circle: |
+| [#477](https://github.com/adinapoli/rusholme/issues/477) | WASM backend has unresolved external imports (env::puts, env::rts_alloc) | [#474](https://github.com/adinapoli/rusholme/issues/474) | :white_circle: |
 | [#471](https://github.com/adinapoli/rusholme/issues/471) | Implement WASM runtime execution | [#77](https://github.com/adinapoli/rusholme/issues/77) | :white_circle: |
 | [#472](https://github.com/adinapoli/rusholme/issues/472) | Implement WASM module linking | [#77](https://github.com/adinapoli/rusholme/issues/77) | :white_circle: |
-| [#474](https://github.com/adinapoli/rusholme/issues/474) | WASM backend emits non-standard env imports preventing WASI runtime execution | [#77](https://github.com/adinapoli/rusholme/issues/77) | :yellow_circle: |
 | [#78](https://github.com/adinapoli/rusholme/issues/78) | Port Zig runtime to WebAssembly (WASI) | [#77](https://github.com/adinapoli/rusholme/issues/77), [#56](https://github.com/adinapoli/rusholme/issues/56) | :white_circle: |
 | [#79](https://github.com/adinapoli/rusholme/issues/79) | Run compiled Haskell in the browser via Wasm | [#78](https://github.com/adinapoli/rusholme/issues/78) | :white_circle: |
 
