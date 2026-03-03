@@ -32,14 +32,14 @@ jobs:
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build Rusholme REPL
+      - name: Build Rusholme and REPL using Nix
         run: |
-          nix --experimental-features "nix-command flakes" build \
-            --print-build-logs \
+          nix --experimental-features "nix-command flakes" develop \
             --accept-flake-config \
-            .#default
-        # Copy repl.wasm to location expected by website
-        cp result-bin/repl repl.wasm
+            --command zig build
+
+      - name: Copy repl.wasm to website
+        run: cp zig-out/bin/repl.wasm website/
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
