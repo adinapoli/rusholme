@@ -6,20 +6,23 @@ const std = @import("std");
 
 pub const state = @import("state.zig");
 pub const buffer = @import("buffer.zig");
+pub const eval = @import("eval.zig");
+pub const evaluator = @import("evaluator.zig");
 
 // Module-level state for REPL
 var state_instance: state.ReplState = undefined;
-var success_callback: *const fn ([]const u8) void = undefined;
-var error_callback: *const fn ([]const u8) void = undefined;
+var initialized = false;
 
-/// Initialize the REPL with success and error callbacks
-pub export fn repl_init(
-    success_cb: *const fn ([]const u8) void,
-    error_cb: *const fn ([]const u8) void
-) void {
-    state_instance = state.ReplState.init(std.heap.page_allocator) catch unreachable;
-    success_callback = success_cb;
-    error_callback = error_cb;
+pub fn main() void {
+    // No-op main for WASM entry point requirement
+}
+
+/// Initialize the REPL
+pub export fn repl_init() void {
+    if (!initialized) {
+        state_instance = state.ReplState.init(std.heap.page_allocator);
+        initialized = true;
+    }
 }
 
 /// Get the input buffer pointer for JavaScript to write into
@@ -32,23 +35,15 @@ pub export fn repl_get_output_buffer() [*]u8 {
     return buffer.getOutputBuffer();
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────
+/// Evaluate a Haskell expression
+///
+/// Parameters:
+///   length - the length of the expression in the input buffer
+/// Returns:
+///   length - length of JSON result written to output buffer (starts at offset 0)
+pub export fn repl_evaluate(length: usize) usize {
+    const input = buffer.getInputBuffer()[0..length];
 
-const testing = std.testing;
-
-test "exports function" {
-    const success_cb = fn ([]const u8) void;
-    const error_cb = fn ([]const u8) void;
-    var success_called = false;
-    var error_called = false;
-    
-    const success_wrapper = fn ([]const u8) void {
-        success_called = true;
-    };
-    
-    const error_wrapper = fn ([]const u8) void {
-        error_called = true;
-    };
-    
-    repl_init(success_wrapper, error_wrapper);
+    // Use evaluator module for actual evaluation
+    return evaluator.evaluate(input);
 }

@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rusholme WASM REPL</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #0a0a0f;
+            color: #f0f0f0;
+            font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+        }
+        #terminal {
+            height: 80vh;
+            width: 100%;
+            background: #0a0a0f;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+        #status {
+            padding: 10px;
+            color: #666;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div id="status">Initializing Rusholme REPL...</div>
+    <div id="terminal"></div>
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+    <script src="terminal.js"></script>
+    <script src="input-handler.js"></script>
+    <script src="bridge.js"></script>
+</body>
+</html>

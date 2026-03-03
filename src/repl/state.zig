@@ -14,6 +14,7 @@ pub const CompileUnit = struct {
 pub const RuntimeState = struct {
     // Will hold heap and evaluation state in future iterations
     pub fn init(allocator: std.mem.Allocator) RuntimeState {
+        _ = allocator;
         return .{};
     }
 
