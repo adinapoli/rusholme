@@ -206,6 +206,7 @@
                     <a href="#roadmap" class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">Roadmap</a>
                     <a href="#grin" class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">GRIN</a>
                     <a href="#design" class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">Design</a>
+                    <a href="#try-in-browser" class="nav-link text-sm font-medium text-zig hover:text-white transition-colors">Try in Browser</a>
                 </div>
 
                 <div class="flex items-center gap-4">
@@ -228,6 +229,7 @@
                 <a href="#roadmap" class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">Roadmap</a>
                 <a href="#grin" class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">GRIN</a>
                 <a href="#design" class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">Design</a>
+                <a href="#try-in-browser" class="block px-3 py-2 rounded-lg text-base font-medium text-zig hover:text-white hover:bg-gray-800 transition-colors">Try in Browser</a>
             </div>
         </div>
     </nav>
@@ -1148,7 +1150,7 @@
             });
 
             const fitAddon = new FitAddon.FitAddon();
-            if (Term && fitAddon) {
+            if (window.Terminal && window.FitAddon) {
                 term.loadAddon(fitAddon);
                 term.open(terminalContainer);
                 fitAddon.fit();
