@@ -19,6 +19,8 @@ comptime {
     _ = &node.rts_store_field;
     _ = &node.rts_load_field;
     _ = &node.rts_store;
+    _ = &io_module.rts_putStrLn;
+    _ = &io_module.rts_putStr;
     _ = &heap.init;
     _ = &heap.deinit;
     _ = &heap.allocator;

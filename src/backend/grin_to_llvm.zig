@@ -55,21 +55,17 @@ const c = llvm.c;
 /// their LLVM equivalents.
 const PrimOpMapping = struct {
     fn lookup(name: grin.Name) ?PrimOpResult {
-        // Libc function mappings
+        // RTS IO function mappings.
+        //
+        // These call into the compiled Rusholme RTS (`src/rts/io.zig`) rather
+        // than libc directly.  `rts_putStrLn` / `rts_putStr` are implemented
+        // with `std.io`, so the same source compiles to `write()` for native
+        // targets and `wasi_snapshot_preview1::fd_write` for wasm32-wasi —
+        // no backend-specific adaptations required.
         if (std.mem.eql(u8, name.base, "putStrLn")) {
             return .{
                 .libcall = .{
-                    .name = "puts",
-                    .return_kind = .i32,
-                    .param_kinds = &.{.ptr},
-                    .arg_strategy = .string_to_global_ptr,
-                },
-            };
-        }
-        if (std.mem.eql(u8, name.base, "print")) {
-            return .{
-                .libcall = .{
-                    .name = "printf",
+                    .name = "rts_putStrLn",
                     .return_kind = .i32,
                     .param_kinds = &.{.ptr},
                     .arg_strategy = .string_to_global_ptr,
@@ -79,9 +75,22 @@ const PrimOpMapping = struct {
         if (std.mem.eql(u8, name.base, "putStr")) {
             return .{
                 .libcall = .{
-                    .name = "fputs",
+                    .name = "rts_putStr",
                     .return_kind = .i32,
-                    .param_kinds = &.{.ptr, .ptr}, // string, FILE* (stdout)
+                    .param_kinds = &.{.ptr},
+                    .arg_strategy = .string_to_global_ptr,
+                },
+            };
+        }
+        if (std.mem.eql(u8, name.base, "print")) {
+            return .{
+                .libcall = .{
+                    // tracked in: https://github.com/adinapoli/rusholme/issues/477
+                    // `print` requires Show desugaring; for now, pass the raw
+                    // string representation through rts_putStrLn as a fallback.
+                    .name = "rts_putStrLn",
+                    .return_kind = .i32,
+                    .param_kinds = &.{.ptr},
                     .arg_strategy = .string_to_global_ptr,
                 },
             };
@@ -1346,13 +1355,13 @@ fn nullTerminate(s: []const u8) [:0]const u8 {
 // Tests
 // ═══════════════════════════════════════════════════════════════════════
 
-test "PrimOpMapping: putStrLn maps to puts" {
+test "PrimOpMapping: putStrLn maps to rts_putStrLn" {
     const result = PrimOpMapping.lookup(.{
         .base = "putStrLn",
         .unique = .{ .value = 42 },
     });
     try std.testing.expect(result != null);
-    try std.testing.expectEqualStrings("puts", std.mem.span(result.?.libcall.name));
+    try std.testing.expectEqualStrings("rts_putStrLn", std.mem.span(result.?.libcall.name));
 }
 
 test "PrimOpMapping: unknown function returns null" {

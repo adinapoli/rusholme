@@ -119,10 +119,58 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(rts_lib);
 
     // ═══════════════════════════════════════════════════════════════════════
-    // CLI Executable with RTS Library Path
+    // WASM RTS Static Library (wasm32-wasi cross-compilation)
     // ═══════════════════════════════════════════════════════════════════════
-    // Expose the RTS library path as a build option so the CLI can find it at
-    // runtime. The path is baked into the binary at compile time via @embedFile.
+    // The same src/rts/ source is cross-compiled for wasm32-wasi so that
+    // rts_alloc, rts_putStrLn, etc. are compiled into WASM binaries produced
+    // by `rhc build --backend wasm`.
+    //
+    // std.io in wasm32-wasi emits wasi_snapshot_preview1::fd_write imports
+    // rather than native write() syscalls — no backend-specific IO code needed.
+    // (See issue #477.)
+    const wasm_rts_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .wasi,
+    });
+    const wasm_rts_lib = b.addLibrary(.{
+        .name = "rts_wasm",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/rts/root.zig"),
+            .target = wasm_rts_target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(wasm_rts_lib);
+
+    // compiler-rt for wasm32-wasi.
+    //
+    // When a Zig static library is compiled for wasm32-wasi, the resulting
+    // object may reference compiler-rt builtins (__divti3, __modti3, etc.)
+    // for 128-bit integer operations used internally by the standard library
+    // allocator.  These must be provided at wasm-ld link time.
+    //
+    // We build compiler_rt.zig from the Zig standard library for the same
+    // wasm32-wasi target and expose its path alongside the WASM RTS.
+    const zig_lib_path = b.graph.zig_lib_directory.path orelse
+        @panic("cannot determine Zig lib directory");
+    const compiler_rt_zig_path = b.pathJoin(&.{ zig_lib_path, "compiler_rt.zig" });
+    const wasm_compiler_rt_lib = b.addLibrary(.{
+        .name = "compiler_rt_wasm",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = .{ .cwd_relative = compiler_rt_zig_path },
+            .target = wasm_rts_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    b.installArtifact(wasm_compiler_rt_lib);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // CLI Executable with RTS Library Paths
+    // ═══════════════════════════════════════════════════════════════════════
+    // Expose both RTS library paths as build options so the CLI can find them
+    // at runtime. Paths are baked in at compile time via @embedFile.
     //
     // We need the FULL path (including install prefix) because the binary might
     // be run from a different directory. The RTS static library is installed
@@ -134,6 +182,25 @@ pub fn build(b: *std.Build) void {
     };
     const rts_path = b.addNamedWriteFiles("rts_path");
     const rts_path_file = rts_path.add("path.txt", rts_lib_path_option);
+
+    const wasm_rts_lib_path_option = b.option(
+        []const u8,
+        "wasm-rts-lib-path",
+        "Path to WASM RTS library",
+    ) orelse b.getInstallPath(.lib, "librts_wasm.a");
+    const wasm_rts_path = b.addNamedWriteFiles("wasm_rts_path");
+    const wasm_rts_path_file = wasm_rts_path.add("path.txt", wasm_rts_lib_path_option);
+
+    const wasm_compiler_rt_lib_path_option = b.option(
+        []const u8,
+        "wasm-compiler-rt-lib-path",
+        "Path to WASM compiler-rt library",
+    ) orelse b.getInstallPath(.lib, "libcompiler_rt_wasm.a");
+    const wasm_compiler_rt_path = b.addNamedWriteFiles("wasm_compiler_rt_path");
+    const wasm_compiler_rt_path_file = wasm_compiler_rt_path.add(
+        "path.txt",
+        wasm_compiler_rt_lib_path_option,
+    );
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
@@ -177,9 +244,15 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // Pass the RTS library path as a build option so the CLI can find it.
+    // Pass both RTS library paths as build options so the CLI can find them.
     exe.root_module.addAnonymousImport("rts_lib_path", .{
         .root_source_file = rts_path_file,
+    });
+    exe.root_module.addAnonymousImport("wasm_rts_lib_path", .{
+        .root_source_file = wasm_rts_path_file,
+    });
+    exe.root_module.addAnonymousImport("wasm_compiler_rt_lib_path", .{
+        .root_source_file = wasm_compiler_rt_path_file,
     });
 
     // This declares intent for the executable to be installed into the

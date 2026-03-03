@@ -143,7 +143,7 @@
 |---|-------|------|--------|
 | [#62](https://github.com/adinapoli/rusholme/issues/62) | Set up Zig test harness and project test structure | — | :green_circle: |
 | [#63](https://github.com/adinapoli/rusholme/issues/63) | Implement golden/snapshot test runner | [#62](https://github.com/adinapoli/rusholme/issues/62) | :green_circle: |
-| [#64](https://github.com/adinapoli/rusholme/issues/64) | Implement end-to-end test runner (compile + run + check stdout) | [#63](https://github.com/adinapoli/rusholme/issues/63) | :green_circle: |
+| [#64](https://github.com/adinapoli/rusholme/issues/64) | Implement end-to-end test runner (compile + run + check stdout) | [#63](https://github.com/adinapoli/rusholme/issues/63) | :yellow_circle: |
 | [#65](https://github.com/adinapoli/rusholme/issues/65) | Research and import simple test programs from GHC's testsuite | [#63](https://github.com/adinapoli/rusholme/issues/63) | :green_circle: |
 | [#415](https://github.com/adinapoli/rusholme/issues/415) | testing: add parse and GRIN output golden variants to test runner | [#63](https://github.com/adinapoli/rusholme/issues/63) | :white_circle: |
 | [#460](https://github.com/adinapoli/rusholme/issues/460) | e2e runner: capture and assert stderr output | [#64](https://github.com/adinapoli/rusholme/issues/64) | :white_circle: |
@@ -442,7 +442,9 @@
 |---|-------|------|--------|
 | [#77](https://github.com/adinapoli/rusholme/issues/77) | Configure LLVM backend to emit WebAssembly | [#57](https://github.com/adinapoli/rusholme/issues/57), [#395](https://github.com/adinapoli/rusholme/issues/395) | :green_circle: |
 | [#474](https://github.com/adinapoli/rusholme/issues/474) | WASM backend emits non-standard env imports preventing WASI runtime execution | [#77](https://github.com/adinapoli/rusholme/issues/77) | :green_circle: |
-| [#477](https://github.com/adinapoli/rusholme/issues/477) | WASM backend has unresolved external imports (env::puts, env::rts_alloc) | [#474](https://github.com/adinapoli/rusholme/issues/474) | :white_circle: |
+| [#477](https://github.com/adinapoli/rusholme/issues/477) | WASM backend has unresolved external imports (env::puts, env::rts_alloc) | [#474](https://github.com/adinapoli/rusholme/issues/474) | :yellow_circle: |
+| [#479](https://github.com/adinapoli/rusholme/issues/479) | Implement Show typeclass and fix print PrimOp desugaring | [#477](https://github.com/adinapoli/rusholme/issues/477) | :white_circle: |
+| [#480](https://github.com/adinapoli/rusholme/issues/480) | Reduce WASM binary WASI import footprint to minimum required set | [#477](https://github.com/adinapoli/rusholme/issues/477) | :white_circle: |
 | [#471](https://github.com/adinapoli/rusholme/issues/471) | Implement WASM runtime execution | [#77](https://github.com/adinapoli/rusholme/issues/77) | :white_circle: |
 | [#472](https://github.com/adinapoli/rusholme/issues/472) | Implement WASM module linking | [#77](https://github.com/adinapoli/rusholme/issues/77) | :white_circle: |
 | [#78](https://github.com/adinapoli/rusholme/issues/78) | Port Zig runtime to WebAssembly (WASI) | [#77](https://github.com/adinapoli/rusholme/issues/77), [#56](https://github.com/adinapoli/rusholme/issues/56) | :white_circle: |
