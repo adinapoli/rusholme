@@ -926,16 +926,75 @@ fn emitWasm(
     llvm.setModuleTargetTriple(linked_mod, "wasm32-wasi");
     llvm.setModuleDataLayout(linked_mod, machine);
 
-    // ── Emit WebAssembly binary ───────────────────────────────────────────
-    const wasm_path = try std.fmt.allocPrint(arena_alloc, "{s}", .{output_name});
-    llvm.emitObjectFile(machine, linked_mod, wasm_path) catch |err| {
+    // ── Emit bitcode and link with wasm-ld ─────────────────────────────────
+    // We use wasm-ld instead of direct emission to get proper WASI-compliant
+    // memory exports. Direct LLVM emission creates `env::__linear_memory`
+    // imports which WASI runtimes don't provide.
+    // tracked in: https://github.com/adinapoli/rusholme/issues/474
+    const bc_path = try std.fmt.allocPrint(arena_alloc, "{s}.bc", .{output_name});
+    llvm.writeBitcodeToFile(linked_mod, bc_path) catch |err| {
         var stderr_buf: [4096]u8 = undefined;
         var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
         const stderr = &stderr_fw.interface;
-        try stderr.print("rhc: failed to emit WebAssembly binary: {}\n", .{err});
+        try stderr.print("rhc: failed to emit LLVM bitcode: {}\n", .{err});
         try stderr.flush();
         std.process.exit(1);
     };
+
+    // ── Link with wasm-ld for WASI-compliant output ───────────────────────
+    // Key flags:
+    //   --export-memory: Export linear memory instead of importing it
+    //   --no-entry: No _start entry point required (we have main)
+    //   --allow-undefined: Allow unresolved external symbols (RTS functions)
+    //   --export-all: Export all symbols for runtime access
+    const wasm_ld_args = [_][]const u8{
+        "wasm-ld",
+        "--export-memory",
+        "--no-entry",
+        "--allow-undefined",
+        "--export-all",
+        "-o",
+        output_name,
+        bc_path,
+    };
+
+    // Use std.process.run to execute wasm-ld
+    const result = std.process.run(arena_alloc, io, .{
+        .argv = &wasm_ld_args,
+    }) catch |err| {
+        Dir.deleteFile(.cwd(), io, bc_path) catch {};
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: failed to run wasm-ld: {}\n", .{err});
+        try stderr.flush();
+        std.process.exit(1);
+    };
+
+    // Clean up temp bitcode file
+    Dir.deleteFile(.cwd(), io, bc_path) catch {};
+
+    switch (result.term) {
+        .exited => |code| if (code != 0) {
+            var stderr_buf: [4096]u8 = undefined;
+            var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+            const stderr = &stderr_fw.interface;
+            try stderr.print("rhc: wasm-ld failed with exit code {d}\n", .{code});
+            if (result.stderr.len > 0) {
+                try stderr.writeAll(result.stderr);
+            }
+            try stderr.flush();
+            std.process.exit(1);
+        },
+        else => {
+            var stderr_buf: [4096]u8 = undefined;
+            var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+            const stderr = &stderr_fw.interface;
+            try stderr.print("rhc: wasm-ld terminated unexpectedly\n", .{});
+            try stderr.flush();
+            std.process.exit(1);
+        },
+    }
 }
 
 /// Render diagnostics from a multi-file compilation (no source text available).
