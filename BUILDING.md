@@ -55,6 +55,50 @@ zig build run -- ll     FILE.hs   # emit LLVM IR
 zig build run -- build  FILE.hs   # compile to native executable
 ```
 
+## WASM REPL (Browser-based Demo)
+
+Rusholme includes a browser-based REPL built with WebAssembly for live Haskell
+evaluation demos.
+
+### Building the REPL
+
+```bash
+nix develop --command zig build    # builds repl.wasm
+```
+
+The REPL binary is produced at `zig-out/bin/repl.wasm`. The website files are
+located in `website/repl/`:
+
+```
+website/repl/
+├── index.html      # HTML shell with xterm.js terminal
+├── terminal.js     # xterm.js setup
+├── input-handler.js  # Enter key handling
+├── bridge.js       # WASM→JavaScript bridge
+└── repl.wasm       # Compiled WebAssembly module
+```
+
+### Running the REPL
+
+To test locally, serve the `website/repl/` directory with an HTTP server:
+
+```bash
+python -m http.server 8000 --directory website/repl
+# Then open http://localhost:8000 in a browser
+```
+
+The REPL terminal supports:
+- **Expression typing** - Type expressions and press Enter to evaluate
+- **Multi-line blocks** - Surround with `:{` and `:}` for multi-line definitions
+- **Ctrl+C** - Clear the current line
+
+### MVP Limitiations
+
+The current MVP echoes input with type information (identifier, literal, or
+expression). Full Haskell compilation, type-checking, and evaluation will be
+added in future iterations by integrating the Rusholme parser, typechecker,
+Core desugaring, GRIN translation, and LLVM backend.
+
 ## Why `llvm-config` Matters
 
 Rusholme's LLVM backend (`src/backend/llvm.zig`) uses Zig's `@cImport` to

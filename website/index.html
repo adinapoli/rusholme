@@ -45,6 +45,11 @@
     <!-- Lucide icons -->
     <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
 
+    <!-- xterm.js for REPL terminal -->
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+
     <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -201,6 +206,7 @@
                     <a href="#roadmap" class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">Roadmap</a>
                     <a href="#grin" class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">GRIN</a>
                     <a href="#design" class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">Design</a>
+                    <a href="#try-in-browser" class="nav-link text-sm font-medium text-zig hover:text-white transition-colors">Try in Browser</a>
                 </div>
 
                 <div class="flex items-center gap-4">
@@ -223,6 +229,7 @@
                 <a href="#roadmap" class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">Roadmap</a>
                 <a href="#grin" class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">GRIN</a>
                 <a href="#design" class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">Design</a>
+                <a href="#try-in-browser" class="block px-3 py-2 rounded-lg text-base font-medium text-zig hover:text-white hover:bg-gray-800 transition-colors">Try in Browser</a>
             </div>
         </div>
     </nav>
@@ -559,10 +566,10 @@
                     <p class="text-sm text-gray-500 mb-4">Infrastructure</p>
                     <div class="flex items-center gap-2 text-sm text-blue-500 font-semibold">
                         <i data-lucide="clock" class="w-4 h-4"></i>
-                        ~79% complete
+                        ~76% complete
                     </div>
                     <div class="mt-4 h-2 bg-gray-800 rounded-full overflow-hidden">
-                        <div class="h-full bg-gradient-to-r from-blue-500 to-indigo-500 progress-bar" style="width: 79%"></div>
+                        <div class="h-full bg-gradient-to-r from-blue-500 to-indigo-500 progress-bar" style="width: 76%"></div>
                     </div>
                 </div>
 
@@ -572,23 +579,23 @@
                     <p class="text-sm text-gray-500 mb-4">Hello World</p>
                     <div class="flex items-center gap-2 text-sm text-blue-500 font-semibold">
                         <i data-lucide="clock" class="w-4 h-4"></i>
-                        ~85% complete
+                        ~88% complete
                     </div>
                     <div class="mt-4 h-2 bg-gray-800 rounded-full overflow-hidden">
-                        <div class="h-full bg-gradient-to-r from-blue-500 to-indigo-500 progress-bar" style="width: 85%"></div>
+                        <div class="h-full bg-gradient-to-r from-blue-500 to-indigo-500 progress-bar" style="width: 88%"></div>
                     </div>
                 </div>
 
-                <div class="card-hover p-6 bg-gray-900 rounded-2xl border border-gray-800 opacity-60">
+                <div class="card-hover p-6 bg-gray-900 rounded-2xl border border-gray-800">
                     <div class="text-4xl mb-4">📋</div>
                     <h3 class="font-bold text-lg text-white mb-1">M2</h3>
                     <p class="text-sm text-gray-500 mb-4">Basic Programs</p>
-                    <div class="flex items-center gap-2 text-sm text-gray-500 font-semibold">
-                        <i data-lucide="circle" class="w-4 h-4"></i>
-                        Not started
+                    <div class="flex items-center gap-2 text-sm text-blue-500 font-semibold">
+                        <i data-lucide="clock" class="w-4 h-4"></i>
+                        ~42% complete
                     </div>
                     <div class="mt-4 h-2 bg-gray-800 rounded-full overflow-hidden">
-                        <div class="h-full bg-gray-700 progress-bar" style="width: 0%"></div>
+                        <div class="h-full bg-gradient-to-r from-blue-500 to-indigo-500 progress-bar" style="width: 42%"></div>
                     </div>
                 </div>
 
@@ -605,16 +612,16 @@
                     </div>
                 </div>
 
-                <div class="card-hover p-6 bg-gray-900 rounded-2xl border border-gray-800 opacity-60">
+                <div class="card-hover p-6 bg-gray-900 rounded-2xl border border-gray-800">
                     <div class="text-4xl mb-4">✨</div>
                     <h3 class="font-bold text-lg text-white mb-1">M4</h3>
                     <p class="text-sm text-gray-500 mb-4">Polish</p>
-                    <div class="flex items-center gap-2 text-sm text-gray-500 font-semibold">
-                        <i data-lucide="circle" class="w-4 h-4"></i>
-                        Not started
+                    <div class="flex items-center gap-2 text-sm text-blue-500 font-semibold">
+                        <i data-lucide="clock" class="w-4 h-4"></i>
+                        ~25% complete
                     </div>
                     <div class="mt-4 h-2 bg-gray-800 rounded-full overflow-hidden">
-                        <div class="h-full bg-gray-700 progress-bar" style="width: 0%"></div>
+                        <div class="h-full bg-gradient-to-r from-blue-500 to-indigo-500 progress-bar" style="width: 25%"></div>
                     </div>
                 </div>
             </div>
@@ -633,10 +640,10 @@
         </svg>
       </div>
       <div class="flex-1">
-        <a href="https://github.com/adinapoli/rusholme/issues/425" target="_blank" class="text-white hover:text-[#f7a41d] font-medium">
-          #425: Fix GRIN→LLVM codegen for programs with ADTs and higher-order functions
+        <a href="https://github.com/adinapoli/rusholme/issues/474" target="_blank" class="text-white hover:text-[#f7a41d] font-medium">
+          #474: WASM backend emits non-standard env imports preventing WASI runtime execution
         </a>
-        <p class="text-xs text-gray-500 mt-1">Closed 3 hours ago</p>
+        <p class="text-xs text-gray-500 mt-1">Closed 7 hours ago</p>
       </div>
     </div><div class="flex items-start gap-3">
       <div class="w-6 h-6 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
@@ -645,10 +652,10 @@
         </svg>
       </div>
       <div class="flex-1">
-        <a href="https://github.com/adinapoli/rusholme/issues/421" target="_blank" class="text-white hover:text-[#f7a41d] font-medium">
-          #421: rts: fix ThunkFn calling convention and rts_make_thunk ABI
+        <a href="https://github.com/adinapoli/rusholme/issues/466" target="_blank" class="text-white hover:text-[#f7a41d] font-medium">
+          #466: GRIN→LLVM var_map doesn't track lambda binders
         </a>
-        <p class="text-xs text-gray-500 mt-1">Closed 5 hours ago</p>
+        <p class="text-xs text-gray-500 mt-1">Closed 22 hours ago</p>
       </div>
     </div><div class="flex items-start gap-3">
       <div class="w-6 h-6 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
@@ -657,10 +664,10 @@
         </svg>
       </div>
       <div class="flex-1">
-        <a href="https://github.com/adinapoli/rusholme/issues/418" target="_blank" class="text-white hover:text-[#f7a41d] font-medium">
-          #418: Desugar list patterns in match compiler
+        <a href="https://github.com/adinapoli/rusholme/issues/465" target="_blank" class="text-white hover:text-[#f7a41d] font-medium">
+          #465: Reserved constructor names cause duplicate definition errors
         </a>
-        <p class="text-xs text-gray-500 mt-1">Closed 27 minutes ago</p>
+        <p class="text-xs text-gray-500 mt-1">Closed 22 hours ago</p>
       </div>
     </div><div class="flex items-start gap-3">
       <div class="w-6 h-6 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
@@ -669,10 +676,10 @@
         </svg>
       </div>
       <div class="flex-1">
-        <a href="https://github.com/adinapoli/rusholme/issues/417" target="_blank" class="text-white hover:text-[#f7a41d] font-medium">
-          #417: Desugar guarded equations in pattern match compiler
+        <a href="https://github.com/adinapoli/rusholme/issues/464" target="_blank" class="text-white hover:text-[#f7a41d] font-medium">
+          #464: Do notation desugaring: UnsupportedGrinVal compilation error
         </a>
-        <p class="text-xs text-gray-500 mt-1">Closed 27 minutes ago</p>
+        <p class="text-xs text-gray-500 mt-1">Closed 1 day ago</p>
       </div>
     </div><div class="flex items-start gap-3">
       <div class="w-6 h-6 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
@@ -681,8 +688,20 @@
         </svg>
       </div>
       <div class="flex-1">
-        <a href="https://github.com/adinapoli/rusholme/issues/410" target="_blank" class="text-white hover:text-[#f7a41d] font-medium">
-          #410: backend: nullary constructors not handled in GRIN→LLVM codegen (Val.Var lookup fails)
+        <a href="https://github.com/adinapoli/rusholme/issues/463" target="_blank" class="text-white hover:text-[#f7a41d] font-medium">
+          #463: GRIN→LLVM codegen: function name mismatch causes linker errors
+        </a>
+        <p class="text-xs text-gray-500 mt-1">Closed 22 hours ago</p>
+      </div>
+    </div><div class="flex items-start gap-3">
+      <div class="w-6 h-6 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+          <polyline points="20 6 9 17 4 12"></polyline>
+        </svg>
+      </div>
+      <div class="flex-1">
+        <a href="https://github.com/adinapoli/rusholme/issues/459" target="_blank" class="text-white hover:text-[#f7a41d] font-medium">
+          #459: e2e runner: exit_code: property has no effect (parsing without wiring)
         </a>
         <p class="text-xs text-gray-500 mt-1">Closed 1 day ago</p>
       </div>
@@ -968,6 +987,46 @@
         </div>
     </section>
 
+    <!-- Try in Browser Section with REPL -->
+    <section id="try-in-browser" class="py-24 px-4 sm:px-6 lg:px-8 bg-gray-950 relative">
+        <div class="max-w-7xl mx-auto">
+            <div class="text-center mb-16">
+                <span class="text-purple-400 font-semibold text-sm uppercase tracking-wider">Live Demo</span>
+                <h2 class="text-4xl md:text-5xl font-bold text-white mt-4 mb-6">
+                    Try <span class="gradient-text">Rusholme</span> in Your Browser
+                </h2>
+                <p class="text-gray-400 max-w-3xl mx-auto text-lg mb-4">
+                    Rusholme targets <em class="text-white">WebAssembly</em> via its WASM backend, enabling browser-based
+                    Haskell evaluation without installing the compiler.
+                </p>
+                <p class="text-sm text-gray-500">
+                    The REPL below compiles Haskell expressions to WebAssembly binaries (.wasm) right in your browser.
+                    Type expressions and press Enter to evaluate — multi-line blocks supported with <code class="text-zig">:{ ... :}</code>.
+                </p>
+            </div>
+
+            <!-- Mac-style Terminal Window with REPL -->
+            <div class="max-w-5xl mx-auto">
+                <div class="bg-gradient-to-b from-gray-800 to-gray-900 rounded-2xl shadow-2xl overflow-hidden border border-gray-700">
+                    <!-- Traffic light window controls -->
+                    <div class="px-4 py-3 bg-gray-800/50 border-b border-gray-700 flex items-center gap-2">
+                        <div class="w-3 h-3 rounded-full bg-red-500/80"></div>
+                        <div class="w-3 h-3 rounded-full bg-yellow-500/80"></div>
+                        <div class="w-3 h-3 rounded-full bg-green-500/80"></div>
+                        <div class="flex-1"></div>
+                        <span class="text-gray-500 text-xs font-mono">Rusholme REPL — WASM Backend</span>
+                    </div>
+                    <!-- Terminal area -->
+                    <div id="repl-terminal" class="h-[400px] bg-black/95 p-4 font-mono text-sm"></div>
+                </div>
+
+                <p class="text-center text-gray-500 text-sm mt-4">
+                    Press Enter to evaluate • Ctrl+C to clear • <code class="text-gray-400">{:{</code> and <code class="text-gray-400">:}</code> for multi-line blocks
+                </p>
+            </div>
+        </div>
+    </section>
+
     <!-- Get Involved Section -->
     <section class="py-24 px-4 sm:px-6 lg:px-8 relative overflow-hidden">
         <div class="absolute inset-0 bg-gradient-to-br from-zig via-haskell to-purple-900 opacity-10"></div>
@@ -1202,6 +1261,164 @@
                 nav.classList.remove('bg-gray-950/95');
             }
         });
+    </script>
+
+    <!-- REPL Integration Script -->
+    <script>
+        // REPL terminal for xterm.js + WASM integration
+        (function() {
+            const terminalContainer = document.getElementById('repl-terminal');
+            if (!terminalContainer) return;
+
+            // Create xterm.js terminal
+            const Terminal = window.Terminal || {};
+            const FitAddon = window.FitAddon || {};
+            const term = new Terminal({
+                fontSize: 14,
+                fontFamily: 'JetBrains Mono, Menlo, Monaco, monospace',
+                theme: {
+                    background: '#000000',
+                    foreground: '#00ff00',
+                    cursor: '#00ff00',
+                    selection: 'rgba(255, 255, 255, 0.3)',
+                },
+            });
+
+            const fitAddon = new FitAddon.FitAddon();
+            if (window.Terminal && window.FitAddon) {
+                term.loadAddon(fitAddon);
+                term.open(terminalContainer);
+                fitAddon.fit();
+            } else {
+                console.warn('xterm.js or fit addon not loaded');
+                return;
+            }
+
+            // Welcome message
+            term.writeln('\x1b[32mRusholme REPL — WebAssembly Backend\x1b[0m');
+            term.writeln('');
+            term.writeln('Type Haskell expressions and definitions, then press Enter to evaluate.');
+            term.writeln('For multi-line blocks, surround with \x1b[33m:{\x1b[0m and \x1b[33m:}\x1b[0m');
+            term.writeln('');
+            term.write('\x1b[32m> \x1b[0m');
+
+            let currentLine = '';
+
+            // REPL Bridge
+            window.replBridge = {
+                wasmInstance: null,
+
+                // Initialize WASM module
+                init: async function() {
+                    try {
+                        const response = await fetch('repl.wasm');
+                        if (!response.ok) {
+                            throw new Error(`Failed to load REPL: ${response.status}`);
+                        }
+                        const bytes = await response.arrayBuffer();
+                        const module = await WebAssembly.compile(bytes);
+                        this.wasmInstance = await WebAssembly.instantiate(module, {});
+
+                        // Show terminal ready indicator
+                        term.writeln('\x1b[32m ✓ REPL WASM module loaded\x1b[0m');
+                        term.write('\x1b[32m> \x1b[0m');
+                    } catch (error) {
+                        console.error('Failed to load WASM module:', error);
+                        term.writeln('\x1b[31mError: ' + error.message + '\x1b[0m');
+                        term.writeln('  The REPL requires repl.wasm to be built via:');
+                        term.writeln('    nix develop --command zig build');
+                        term.write('\x1b[32m> \x1b[0m');
+                    }
+                },
+
+                // Evaluate expression via WASM REPL
+                evaluate: function(expr) {
+                    if (!this.wasmInstance) {
+                        term.writeln('\x1b[31mError: REPL not initialized\x1b[0m');
+                        term.write('\x1b[32m> \x1b[0m');
+                        return;
+                    }
+
+                    try {
+                        // Get input/output buffers
+                        const inputPtr = this.wasmInstance.exports.repl_get_input_buffer();
+                        const outputPtr = this.wasmInstance.exports.repl_get_output_buffer();
+
+                        // Write expression to input buffer
+                        const encoder = new TextEncoder();
+                        const exprBytes = encoder.encode(expr);
+                        const inputView = new Uint8Array(this.wasmInstance.exports.memory.buffer, inputPtr);
+
+                        for (let i = 0; i < exprBytes.length && i < inputView.length; i++) {
+                            inputView[i] = exprBytes[i];
+                        }
+
+                        // Evaluate and get result
+                        const resultLen = this.wasmInstance.exports.repl_evaluate(exprBytes.length);
+
+                        // Read JSON response from output buffer
+                        const decoder = new TextDecoder();
+                        const jsonString = decoder.decode(new Uint8Array(
+                            this.wasmInstance.exports.memory.buffer,
+                            outputPtr,
+                            resultLen
+                        ));
+                        const result = JSON.parse(jsonString);
+
+                        // Display result
+                        if (result.status === 'error') {
+                            term.writeln('\x1b[31m' + result.type + ': ' + result.message + '\x1b[0m');
+                        } else {
+                            term.writeln('\x1b[32m' + result.value + '\x1b[0m');
+                        }
+                    } catch (error) {
+                        term.writeln('\x1b[31mError: ' + error.message + '\x1b[0m');
+                    }
+                },
+            };
+
+            // Initialize REPL when page loads
+            window.addEventListener('DOMContentLoaded', () => {
+                replBridge.init().catch(error => {
+                    console.error('Failed to initialize REPL:', error);
+                    term.writeln('\x1b[31mError: Failed to initialize REPL\x1b[0m');
+                    term.write('\x1b[32m> \x1b[0m');
+                });
+            });
+
+            // Handle terminal input
+            term.onData((data) => {
+                const code = data.charCodeAt(0);
+
+                if (code === 13) { // Enter key
+                    term.writeln('');
+
+                    if (currentLine.trim()) {
+                        replBridge.evaluate(currentLine);
+                    }
+
+                    currentLine = '';
+                    term.write('\x1b[32m> \x1b[0m');
+                } else if (code === 3) { // Ctrl+C
+                    term.writeln('\x1b[33m^C\x1b[0m');
+                    currentLine = '';
+                    term.write('\x1b[32m> \x1b[0m');
+                } else if (code >= 32 && code <= 126) { // Printable characters
+                    currentLine += data;
+                    term.write(data);
+                } else if (code === 127) { // Backspace
+                    if (currentLine.length > 0) {
+                        currentLine = currentLine.slice(0, -1);
+                        term.write('\x1b[D \x1b[D');
+                    }
+                }
+            });
+
+            // Handle window resize
+            window.addEventListener('resize', () => {
+                if (fitAddon) fitAddon.fit();
+            });
+        })();
     </script>
 </body>
 </html>

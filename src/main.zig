@@ -145,10 +145,11 @@ pub fn main(init: std.process.Init) !void {
             try writeStderr(io, "Usage: rhc build [--backend <kind>] [-o <output>] <file.hs> [<file2.hs> ...]\n");
             std.process.exit(1);
         }
-        // Parse optional flags: -o <output>, --backend <kind>; collect file paths.
+        // Parse optional flags: -o <output>, --backend <kind>, --repl; collect file paths.
         var output_name: ?[]const u8 = null;
         var file_paths: std.ArrayListUnmanaged([]const u8) = .{};
         var backend_kind = rusholme.backend.backend_mod.BackendKind.native;
+        var is_repl = false;
         var i: usize = 0;
         while (i < cmd_args.len) : (i += 1) {
             if (std.mem.eql(u8, cmd_args[i], "-o")) {
@@ -175,6 +176,8 @@ pub fn main(init: std.process.Init) !void {
                     try stderr.flush();
                     std.process.exit(1);
                 };
+            } else if (std.mem.eql(u8, cmd_args[i], "--repl")) {
+                is_repl = true;
             } else {
                 try file_paths.append(arena_alloc, cmd_args[i]);
             }
@@ -186,7 +189,7 @@ pub fn main(init: std.process.Init) !void {
         }
         // Derive output name from the first file when -o is not given.
         const out = output_name orelse std.fs.path.stem(std.fs.path.basename(file_paths.items[0]));
-        try cmdBuild(allocator, io, file_paths.items, out, backend_kind);
+        try cmdBuild(allocator, io, file_paths.items, out, backend_kind, is_repl);
         return;
     }
 
@@ -658,7 +661,9 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
 /// - native: compiles to native executable via LLVM
 /// - wasm: compiles to WebAssembly binary (.wasm)
 /// - graalvm, c: not yet implemented
-fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8, output_name: []const u8, backend_kind: rusholme.backend.backend_mod.BackendKind) !void {
+fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8, output_name: []const u8, backend_kind: rusholme.backend.backend_mod.BackendKind, is_repl: bool) !void {
+    // REPL mode placeholder - for WASM backend compiles stateful REPL
+    _ = is_repl;
 
     // ── Compile program and translate to GRIN ───────────────────────────
     var arena = std.heap.ArenaAllocator.init(allocator);
