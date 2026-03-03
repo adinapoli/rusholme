@@ -11,17 +11,18 @@ const node = @import("node.zig");
 
 /// External Haskell main function.
 /// This will be provided by the LLVM-generated code.
-extern fn haskell_main() i32;
+extern fn main() i32;
 
-// ── Entry Point ───────────────────────────────────────────────────────────
+// ── Entry Point (WASM-only) ─────────────────────────────────────────────────
 
-/// Program entry point.
-/// Initializes the runtime and calls the Haskell `main` function.
-export fn _start() callconv(.C) noreturn {
-    // Initialize heap
+// For WASM/WASI targets, _start gets called when the module is instantiated.
+// For native targets, the system provides _start from crt1.o.
+//
+// NOTE: This function is only included for WASM builds (via the root.zig
+// conditional import).
+
+pub export fn _start() noreturn {
     heap.init();
-    // Call the Haskell main function
-    const result = haskell_main();
-    // Exit with the result
-    std.posix.exit(@intCast(result));
+    const result = main();
+    std.process.exit(@intCast(result));
 }

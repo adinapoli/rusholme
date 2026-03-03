@@ -957,7 +957,7 @@ fn emitWasm(
     // ── Link with wasm-ld for WASI-compliant output ───────────────────────
     // Key flags:
     //   --export-memory: Export linear memory instead of importing it (issue #474)
-    //   --no-entry: No _start entry point (standalone execution tracked in #471)
+    //   --no-entry: The RTS provides _start() which serves as the WASM start function
     //   --export-all: Export all symbols for runtime access
     //
     // The WASM RTS (librts_wasm.a) is linked explicitly so that rts_alloc,

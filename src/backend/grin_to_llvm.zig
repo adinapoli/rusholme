@@ -85,10 +85,20 @@ const PrimOpMapping = struct {
         if (std.mem.eql(u8, name.base, "print")) {
             return .{
                 .libcall = .{
-                    // tracked in: https://github.com/adinapoli/rusholme/issues/477
+                    // tracked in: https://github.com/adinapoli/rusholme/issues/479
                     // `print` requires Show desugaring; for now, pass the raw
                     // string representation through rts_putStrLn as a fallback.
                     .name = "rts_putStrLn",
+                    .return_kind = .i32,
+                    .param_kinds = &.{.ptr},
+                    .arg_strategy = .string_to_global_ptr,
+                },
+            };
+        }
+        if (std.mem.eql(u8, name.base, "error")) {
+            return .{
+                .libcall = .{
+                    .name = "rts_error",
                     .return_kind = .i32,
                     .param_kinds = &.{.ptr},
                     .arg_strategy = .string_to_global_ptr,
@@ -1362,6 +1372,15 @@ test "PrimOpMapping: putStrLn maps to rts_putStrLn" {
     });
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("rts_putStrLn", std.mem.span(result.?.libcall.name));
+}
+
+test "PrimOpMapping: error maps to rts_error" {
+    const result = PrimOpMapping.lookup(.{
+        .base = "error",
+        .unique = .{ .value = 5 },
+    });
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("rts_error", std.mem.span(result.?.libcall.name));
 }
 
 test "PrimOpMapping: unknown function returns null" {

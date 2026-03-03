@@ -15,23 +15,31 @@ const builtin = @import("builtin");
 // Internal helpers
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Write `bytes` to file descriptor 1 (stdout).
+/// Write `bytes` to the given file descriptor.
 ///
 /// Branches at comptime on the OS so only the relevant syscall path is
 /// emitted for each target.
-fn writeBytes(bytes: []const u8) void {
+fn writeBytesToFd(fd: u32, bytes: []const u8) void {
     switch (builtin.target.os.tag) {
         .wasi => {
             const iov = [1]std.os.wasi.ciovec_t{
                 .{ .base = bytes.ptr, .len = bytes.len },
             };
             var nwritten: usize = 0;
-            _ = std.os.wasi.fd_write(1, &iov, 1, &nwritten);
+            _ = std.os.wasi.fd_write(@intCast(fd), &iov, 1, &nwritten);
         },
         else => {
-            _ = std.posix.system.write(1, bytes.ptr, bytes.len);
+            _ = std.posix.system.write(@intCast(fd), bytes.ptr, bytes.len);
         },
     }
+}
+
+fn writeBytes(bytes: []const u8) void {
+    writeBytesToFd(1, bytes);
+}
+
+fn writeBytesErr(bytes: []const u8) void {
+    writeBytesToFd(2, bytes);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -58,6 +66,19 @@ pub export fn rts_putStr(str: [*:0]const u8) i32 {
     return 0;
 }
 
+/// Print an error message to stderr and terminate the program with exit code 1.
+///
+/// Implements the `error :: String -> a` Haskell primitive.  Called
+/// `rts_error` from LLVM-generated code (PrimOp for `error`).
+/// Never returns — `std.process.exit` calls `proc_exit` on WASI and the
+/// `exit` syscall on native targets.
+pub export fn rts_error(str: [*:0]const u8) i32 {
+    writeBytesErr("error: ");
+    writeBytesErr(std.mem.span(str));
+    writeBytesErr("\n");
+    std.process.exit(1);
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════
@@ -69,4 +90,8 @@ test "rts_putStrLn is callable" {
 
 test "rts_putStr is callable" {
     _ = &rts_putStr;
+}
+
+test "rts_error is callable" {
+    _ = &rts_error;
 }

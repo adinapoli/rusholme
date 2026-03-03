@@ -132,18 +132,55 @@ Hello
 `rhc build` runs the full pipeline, emits a native object file via LLVM, and
 links it into an executable using the system C compiler.
 
-**WebAssembly** — `rhc build --backend wasm -o hello.wasm hello.hs`:
+**WebAssembly** — `rhc build --backend wasm hello.hs`
 
 ```bash
-$ rhc build --backend wasm -o hello.wasm hello.hs
-$ file hello.wasm
-hello.wasm: WebAssembly (wasm) binary module version 0x1 (MVP)
+# Clone and build on Linux
+git clone https://github.com/adinapoli/rusholme.git
+cd rusholme
+nix develop
+
+# Compile Haskell to WebAssembly
+zig build run -- build --backend wasm hello.hs
+
+# The .wasm binary is now ready
+$ ls -la hello.wasm
+-rwxr-xr-x 1 alfredo alfredo 556K Mar  3 09:40 hello.wasm
+
+# Run directly with wasmtime (WASI runtime)
+$ wasmtime hello.wasm
+Hello from Rusholme!
+
+# Run directly with wasmer
+$ wasmer run hello.wasm
+Hello from Rusholme!
 ```
 
 The WebAssembly backend compiles Haskell to `.wasm` binaries via LLVM's WASM
-target (`wasm32-wasi`). These can be executed in WASI-compliant runtimes like
-wasmtime, wasmer, or browsers with WASI polyfills. Runtime execution integration
-is tracked in issue #471; module linking is tracked in issue #472.
+target (`wasm32-wasi`). The generated binaries export a `_start` entrypoint that
+executes automatically, so you can run them with just `wasmtime hello.wasm` — no
+need for `--invoke`.
+
+**Running in a browser** — WASI-compliant WASM runtimes like wasmtime compile
+to native code, but for browser execution you need a WASI polyfill. The
+recommended approach is to use `wasmtime serve` or `wasm-tools` to inject a
+WASI implementation:
+
+```bash
+# Install wasmtime and wasm-tools
+cargo install wasmtime wasm-tools-cli
+
+# Serve the WASM file with a basic HTTP server
+wasmtime serve -S http hello.wasm
+
+# Or preview directly in your browser at http://localhost:8080
+```
+
+For a more sophisticated browser setup, consider using the [WASI polyfill](
+https://github.com/WebAssembly/wasi-sdk) or [wasm-component-tools](
+https://github.com/WebAssembly/component-tools) to integrate with your
+front-end build system. Runtime execution integration is tracked in issue #471;
+module linking is tracked in issue #472.
 
 ## Development
 
