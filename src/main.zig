@@ -31,10 +31,23 @@ const htype_mod = rusholme.tc.htype;
 
 const version = "0.1.0";
 
-/// Get the path to the RTS library baked in at compile time.
-/// Returns the path to librts.a that should be linked into executables.
+/// Get the path to the native RTS library baked in at compile time.
+/// Returns the path to librts.a that should be linked into native executables.
 fn getRtsLibPath() []const u8 {
     return @embedFile("rts_lib_path");
+}
+
+/// Get the path to the WASM RTS library baked in at compile time.
+/// Returns the path to librts_wasm.a that is linked into WASM binaries.
+fn getWasmRtsLibPath() []const u8 {
+    return @embedFile("wasm_rts_lib_path");
+}
+
+/// Get the path to the WASM compiler-rt library baked in at compile time.
+/// Returns the path to libcompiler_rt_wasm.a that provides 128-bit arithmetic
+/// builtins (__divti3, __modti3, etc.) required by the WASM RTS.
+fn getWasmCompilerRtLibPath() []const u8 {
+    return @embedFile("wasm_compiler_rt_lib_path");
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -943,19 +956,26 @@ fn emitWasm(
 
     // ── Link with wasm-ld for WASI-compliant output ───────────────────────
     // Key flags:
-    //   --export-memory: Export linear memory instead of importing it
-    //   --no-entry: No _start entry point required (we have main)
-    //   --allow-undefined: Allow unresolved external symbols (RTS functions)
+    //   --export-memory: Export linear memory instead of importing it (issue #474)
+    //   --no-entry: The RTS provides _start() which serves as the WASM start function
     //   --export-all: Export all symbols for runtime access
+    //
+    // The WASM RTS (librts_wasm.a) is linked explicitly so that rts_alloc,
+    // rts_putStrLn, etc. are compiled into the module rather than imported
+    // from an external host.  This removes the env::* undefined imports that
+    // prevented WASI runtimes from instantiating the module.  (Issue #477.)
+    const wasm_rts_lib_path = getWasmRtsLibPath();
+    const wasm_compiler_rt_lib_path = getWasmCompilerRtLibPath();
     const wasm_ld_args = [_][]const u8{
         "wasm-ld",
         "--export-memory",
         "--no-entry",
-        "--allow-undefined",
         "--export-all",
         "-o",
         output_name,
         bc_path,
+        wasm_rts_lib_path,
+        wasm_compiler_rt_lib_path,
     };
 
     // Use std.process.run to execute wasm-ld
