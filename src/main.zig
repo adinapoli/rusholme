@@ -926,17 +926,17 @@ fn emitWasm(
     llvm.setModuleTargetTriple(linked_mod, "wasm32-wasi");
     llvm.setModuleDataLayout(linked_mod, machine);
 
-    // ── Emit object file and link with wasm-ld ─────────────────────────────
+    // ── Emit bitcode and link with wasm-ld ─────────────────────────────────
     // We use wasm-ld instead of direct emission to get proper WASI-compliant
     // memory exports. Direct LLVM emission creates `env::__linear_memory`
     // imports which WASI runtimes don't provide.
     // tracked in: https://github.com/adinapoli/rusholme/issues/474
-    const obj_path = try std.fmt.allocPrint(arena_alloc, "{s}.o", .{output_name});
-    llvm.emitObjectFile(machine, linked_mod, obj_path) catch |err| {
+    const bc_path = try std.fmt.allocPrint(arena_alloc, "{s}.bc", .{output_name});
+    llvm.writeBitcodeToFile(linked_mod, bc_path) catch |err| {
         var stderr_buf: [4096]u8 = undefined;
         var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
         const stderr = &stderr_fw.interface;
-        try stderr.print("rhc: failed to emit WebAssembly object file: {}\n", .{err});
+        try stderr.print("rhc: failed to emit LLVM bitcode: {}\n", .{err});
         try stderr.flush();
         std.process.exit(1);
     };
@@ -955,14 +955,14 @@ fn emitWasm(
         "--export-all",
         "-o",
         output_name,
-        obj_path,
+        bc_path,
     };
 
     // Use std.process.run to execute wasm-ld
     const result = std.process.run(arena_alloc, io, .{
         .argv = &wasm_ld_args,
     }) catch |err| {
-        Dir.deleteFile(.cwd(), io, obj_path) catch {};
+        Dir.deleteFile(.cwd(), io, bc_path) catch {};
         var stderr_buf: [4096]u8 = undefined;
         var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
         const stderr = &stderr_fw.interface;
@@ -971,8 +971,8 @@ fn emitWasm(
         std.process.exit(1);
     };
 
-    // Clean up temp object file
-    Dir.deleteFile(.cwd(), io, obj_path) catch {};
+    // Clean up temp bitcode file
+    Dir.deleteFile(.cwd(), io, bc_path) catch {};
 
     switch (result.term) {
         .exited => |code| if (code != 0) {
