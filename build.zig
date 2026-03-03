@@ -401,25 +401,21 @@ pub fn build(b: *std.Build) void {
     // and reading its source code will allow you to master it.
 
     // ═══════════════════════════════════════════════════════════════════════
-    // WASM REPL Executable
+    // WASM REPL Executable - freestanding target for browser
     // ═══════════════════════════════════════════════════════════════════════
     // Build the REPL WebAssembly module for browser-based evaluation.
+    // Uses wasm32-freestanding for browser compatibility (no WASI imports).
     // This creates a WASM binary that exposes exports for JavaScript interaction.
     const repl_wasm = b.addExecutable(.{
         .name = "repl",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/repl/exports.zig"),
-            .target = wasm_rts_target,
+            .target = b.resolveTargetQuery(.{
+                .cpu_arch = .wasm32,
+                .os_tag = .freestanding,
+            }),
             .optimize = .ReleaseSmall,
         }),
-    });
-
-    // Link WASM RTS and compiler-rt
-    repl_wasm.root_module.addAnonymousImport("wasm_rts_lib_path", .{
-        .root_source_file = wasm_rts_path_file,
-    });
-    repl_wasm.root_module.addAnonymousImport("wasm_compiler_rt_lib_path", .{
-        .root_source_file = wasm_compiler_rt_path_file,
     });
 
     b.installArtifact(repl_wasm);
