@@ -27,19 +27,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Nix
-        uses: cachix/install-nix-action@v26
+      - name: Setup Zig
+        uses: goto-bus/setup-zig@v2
         with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          version: 0.16.0
 
       - name: Build Rusholme REPL
-        run: |
-          nix --experimental-features "nix-command flakes" build \
-            --print-build-logs \
-            --accept-flake-config \
-            .#default
-        # Copy repl.wasm to location expected by website
-        cp result-bin/repl repl.wasm
+        run: zig build
+
+      - name: Copy repl.wasm to website
+        run: cp zig-out/bin/repl.wasm website/
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -62,7 +59,7 @@ jobs:
           mkdir -p _site
           cp website/index.html _site/
           cp website/logo.png _site/
-          cp repl.wasm _site/
+          cp website/repl.wasm _site/
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
