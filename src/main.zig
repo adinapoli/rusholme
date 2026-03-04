@@ -9,6 +9,7 @@
 //!   rhc build [--backend <kind>] [-o <out>] <file.hs>
 //!                          Full pipeline; compile to native executable
 //!                          Backends: native (default), graalvm, wasm, c
+//!   rhc repl               Interactive REPL (read-eval-print loop)
 //!   rhc --help             Show this help message
 //!   rhc --version          Show version information
 
@@ -135,6 +136,11 @@ pub fn main(init: std.process.Init) !void {
         }
         const file_path = cmd_args[0];
         try cmdLl(allocator, io, file_path);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "repl")) {
+        try cmdRepl(allocator, io);
         return;
     }
 
@@ -657,6 +663,11 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
 /// topological order, and compiles each module in turn using `CompileEnv`
 /// so that cross-module names and types are available to downstream modules.
 ///
+/// Launch the interactive REPL.
+fn cmdRepl(allocator: std.mem.Allocator, io: Io) !void {
+    try rusholme.repl.cli.run(allocator, io);
+}
+
 /// Supports the following backends:
 /// - native: compiles to native executable via LLVM
 /// - wasm: compiles to WebAssembly binary (.wasm)
@@ -1128,6 +1139,7 @@ fn printUsage(io: Io) !void {
         \\  rhc build [--backend <kind>] [-o <out>] <file.hs>
         \\                         Full pipeline; compile to an executable
         \\                         Backends: native (default), graalvm, wasm, c
+        \\  rhc repl               Interactive REPL (read-eval-print loop)
         \\  rhc --help             Show this help message
         \\  rhc --version          Show version information
         \\

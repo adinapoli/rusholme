@@ -75,6 +75,7 @@ pub const repl = struct {
     pub const session = @import("repl/session.zig");
     pub const engine = @import("repl/engine.zig");
     pub const jit_engine = @import("repl/jit_engine.zig");
+    pub const cli = @import("repl/cli.zig");
 };
 
 // Runtime

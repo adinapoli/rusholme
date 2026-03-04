@@ -116,6 +116,11 @@ pub const Pipeline = struct {
     ) CompileError!grin_ast.Program {
         const alloc = self.allocator;
 
+        // The RenameEnv holds a pointer to its DiagnosticCollector from
+        // init time. Each compileModule call creates a fresh collector,
+        // so we must update the pointer before renaming.
+        rename_env.diags = diags;
+
         // ── Parse ──────────────────────────────────────────────────
         var lexer = Lexer.init(alloc, source, file_id);
         var layout = LayoutProcessor.init(alloc, &lexer);
