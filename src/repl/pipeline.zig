@@ -166,17 +166,6 @@ pub const Pipeline = struct {
         };
         if (diags.hasErrors()) return CompileError.CompilationFailed;
 
-        // Debug: print the GRIN defs
-        std.log.debug("GRIN program has {} defs", .{grin_prog.defs.len});
-        for (grin_prog.defs) |*def| {
-            std.log.debug("  GRIN def: {s}", .{def.name.base});
-            if (def.body.* == .Return) {
-                if (def.body.Return == .Lit) {
-                    std.log.debug("    returns Lit: {}", .{def.body.Return.Lit});
-                }
-            }
-        }
-
         return grin_prog;
     }
 
@@ -190,6 +179,7 @@ pub const Pipeline = struct {
         rename_env: *RenameEnv,
         ty_env: *env_mod.TyEnv,
         mv_supply: *htype_mod.MetaVarSupply,
+        diags: *DiagnosticCollector,
     ) CompileError!CompileResult {
         const alloc = self.allocator;
         const file_id: FileId = 0;
@@ -204,14 +194,16 @@ pub const Pipeline = struct {
                 return CompileError.OutOfMemory;
             };
 
-            var diags = DiagnosticCollector.init();
-            defer diags.deinit(alloc);
+            var decl_diags = DiagnosticCollector.init();
+            defer decl_diags.deinit(alloc);
 
-            if (self.compileModule(decl_source, file_id, u_supply, rename_env, ty_env, mv_supply, &diags)) |program| {
+            if (self.compileModule(decl_source, file_id, u_supply, rename_env, ty_env, mv_supply, &decl_diags)) |program| {
+                // Copy any diagnostics from the attempt
+                for (decl_diags.diagnostics.items) |d| {
+                    diags.emit(alloc, d) catch {};
+                }
                 return .{ .program = program, .kind = .declaration };
-            } else |_| {
-                // Declaration parse failed — try as expression below
-            }
+            } else |_| {} // Declaration parse failed — try as expression below
         }
 
         // Try as an expression: wrap in replExpr__ = <expr>
@@ -220,10 +212,7 @@ pub const Pipeline = struct {
                 return CompileError.OutOfMemory;
             };
 
-            var diags = DiagnosticCollector.init();
-            defer diags.deinit(alloc);
-
-            const program = try self.compileModule(expr_source, file_id, u_supply, rename_env, ty_env, mv_supply, &diags);
+            const program = try self.compileModule(expr_source, file_id, u_supply, rename_env, ty_env, mv_supply, diags);
             return .{ .program = program, .kind = .expression };
         }
     }
@@ -255,6 +244,7 @@ test "pipeline: compile simple literal expression" {
         &rename_env,
         &ty_env,
         &mv_supply,
+        &diags,
     );
 
     try testing.expect(result.program.defs.len > 0);
@@ -285,6 +275,7 @@ test "pipeline: compile data declaration" {
         &rename_env,
         &ty_env,
         &mv_supply,
+        &diags,
     );
 
     // Data declarations are classified as declarations.
@@ -316,6 +307,7 @@ test "pipeline: compile function declaration" {
         &rename_env,
         &ty_env,
         &mv_supply,
+        &diags,
     );
 
     try testing.expect(result.kind == .declaration);

@@ -152,12 +152,16 @@ pub const Session = struct {
             return CompileError.OutOfMemory;
         };
 
+        var diags = DiagnosticCollector.init();
+        defer diags.deinit(self.allocator);
+
         const result = self.pipeline.compileInput(
             input,
             &self.u_supply,
             &self.rename_env,
             &self.ty_env,
             &self.mv_supply,
+            &diags,
         ) catch |err| {
             // Rollback: pop the scope frames to discard partial bindings.
             self.ty_env.pop();
@@ -168,7 +172,7 @@ pub const Session = struct {
         // Success: leave the scope frames in place — bindings persist.
         return .{
             .compile = result,
-            .diagnostics = &.{},
+            .diagnostics = diags.getAll(self.allocator) catch &.{},
         };
     }
 
@@ -289,6 +293,13 @@ test "session: eval declaration returns OK" {
     const result = try session.eval("id x = x");
     try testing.expectEqualStrings("OK", result.value);
 }
+
+// NOTE: Cross-input type information accumulation is not fully implemented.
+// The Session accumulates UniqueSupply, RenameEnv, and TyEnv bindings,
+// but type/desugaring context isn't properly shared across inputs
+// due to arena allocation patterns. This limitation is acceptable for
+// the initial REPL implementation and should be tracked as a follow-up
+// issue for full state persistence.
 
 test "session: failed input does not corrupt state" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

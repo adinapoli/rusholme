@@ -15,7 +15,6 @@ const Io = std.Io;
 const File = Io.File;
 
 const Session = @import("session.zig").Session;
-const JitEngine = @import("jit_engine.zig").JitEngine;
 
 // ── REPL loop ─────────────────────────────────────────────────────────
 
@@ -64,12 +63,6 @@ pub fn run(allocator: Allocator, io: Io) !void {
             try printError(io, err);
             continue;
         };
-
-        // Debug: print pointer and length
-        var debug_buf: [128]u8 = undefined;
-        const debug_msg = std.fmt.bufPrint(&debug_buf, "[debug: ptr={}, len={}]", .{ @intFromPtr(result.value.ptr), result.value.len }) catch "debug failed";
-        try writeStderr(io, debug_msg);
-        try writeStderr(io, "\n");
 
         try writeStdout(io, result.value);
         try writeStdout(io, "\n");
