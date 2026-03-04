@@ -166,6 +166,17 @@ pub const Pipeline = struct {
         };
         if (diags.hasErrors()) return CompileError.CompilationFailed;
 
+        // Debug: print the GRIN defs
+        std.log.debug("GRIN program has {} defs", .{grin_prog.defs.len});
+        for (grin_prog.defs) |*def| {
+            std.log.debug("  GRIN def: {s}", .{def.name.base});
+            if (def.body.* == .Return) {
+                if (def.body.Return == .Lit) {
+                    std.log.debug("    returns Lit: {}", .{def.body.Return.Lit});
+                }
+            }
+        }
+
         return grin_prog;
     }
 

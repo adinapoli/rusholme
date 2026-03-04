@@ -67,6 +67,7 @@ pub const GrinEngine = struct {
             return ExecError.EntryPointNotFound;
 
         const val = try grin_eval.eval(entry.body);
+        
         const formatted = formatVal(self.allocator, val) catch {
             return ExecError.FormatError;
         };

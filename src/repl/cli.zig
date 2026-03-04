@@ -65,6 +65,12 @@ pub fn run(allocator: Allocator, io: Io) !void {
             continue;
         };
 
+        // Debug: print pointer and length
+        var debug_buf: [128]u8 = undefined;
+        const debug_msg = std.fmt.bufPrint(&debug_buf, "[debug: ptr={}, len={}]", .{ @intFromPtr(result.value.ptr), result.value.len }) catch "debug failed";
+        try writeStderr(io, debug_msg);
+        try writeStderr(io, "\n");
+
         try writeStdout(io, result.value);
         try writeStdout(io, "\n");
     }
@@ -76,11 +82,11 @@ pub fn run(allocator: Allocator, io: Io) !void {
 /// Returns the line contents without the trailing newline.
 /// Returns error on EOF or read failure.
 fn readLine(io: Io, buf: []u8) ![]const u8 {
+    var pos: usize = 0;
     var stdin_buf: [1]u8 = undefined;
     var stdin_rdr = File.stdin().reader(io, &stdin_buf);
     const rdr = &stdin_rdr.interface;
 
-    var pos: usize = 0;
     while (pos < buf.len) {
         var byte_buf: [1]u8 = undefined;
         rdr.readSliceAll(&byte_buf) catch |err| {
