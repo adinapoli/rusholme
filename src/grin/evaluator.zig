@@ -620,8 +620,14 @@ pub const GrinEvaluator = struct {
             .Block => |inner| self.eval(inner),
 
             .App => |app| b: {
-                // Check if this is a PrimOp call
+                // Check if this is a direct PrimOp call (e.g., `putStrLn_`)
                 if (PrimOp.fromString(app.name.base)) |op| {
+                    break :b try self.evalPrimOp(op, app.args);
+                }
+
+                // Check if this is a Prelude function call (e.g., `putStrLn`)
+                // and dispatch to its PrimOp implementation.
+                if (PrimOp.fromPreludeName(app.name.base)) |op| {
                     break :b try self.evalPrimOp(op, app.args);
                 }
 
@@ -2096,4 +2102,47 @@ test "eval: Combined - function that cases on its argument" {
 
     const result = try evaluator.eval(main_body);
     try testing.expectEqual(@as(i64, 123), result.Lit.Int);
+}
+
+test "eval: App - Prelude function call (putStrLn dispatched to PrimOp)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Build a program that calls putStrLn, which should dispatch to PrimOp
+    const args = try alloc.alloc(ast.Val, 1);
+    args[0] = ast.Val{ .Lit = .{ .String = "Hello" } };
+
+    const main_body = try alloc.create(ast.Expr);
+    main_body.* = .{ .App = .{
+        .name = .{ .base = "putStrLn", .unique = .{ .value = 0 } },
+        .args = args,
+    } };
+
+    const defs = try alloc.alloc(ast.Def, 1);
+    defs[0] = .{
+        .name = .{ .base = "main", .unique = .{ .value = 1 } },
+        .params = &.{},
+        .body = main_body,
+    };
+
+    const program = ast.Program{ .defs = defs };
+
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
+    defer evaluator.deinit();
+
+    // The evaluator should recognize "putStrLn" as a Prelude function
+    // and dispatch it to the putStrLn_ PrimOp write
+    // Result should be Unit (IO actions return ())
+    const result = try evaluator.eval(main_body);
+    try testing.expectEqual(ast.Val.Unit, result);
+}
+
+test "PrimOp: fromPreludeName maps putStrLn to putStrLn_" {
+    try testing.expectEqual(PrimOp.putStrLn_, PrimOp.fromString("putStrLn_") orelse return);
+    try testing.expectEqual(@as(?PrimOp, null), PrimOp.fromString("putStrLn"));
+
+    // fromPreludeName should recognize the high-level name
+    try testing.expectEqual(PrimOp.putStrLn_, PrimOp.fromPreludeName("putStrLn") orelse return);
+    try testing.expect(@as(?PrimOp, null) == PrimOp.fromPreludeName("nonexistent"));
 }

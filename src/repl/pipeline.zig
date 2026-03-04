@@ -29,6 +29,7 @@ const RenameEnv = renamer_mod.RenameEnv;
 const diag_mod = @import("../diagnostics/diagnostic.zig");
 const DiagnosticCollector = diag_mod.DiagnosticCollector;
 const Diagnostic = diag_mod.Diagnostic;
+const Note = diag_mod.Note;
 
 const span_mod = @import("../diagnostics/span.zig");
 const FileId = span_mod.FileId;
@@ -94,6 +95,45 @@ pub const Pipeline = struct {
             .allocator = allocator,
             .io = io,
         };
+    }
+
+    /// Copy a diagnostic's message allocation into a new diagnostics list.
+    ///
+    /// This is needed when transferring diagnostics between
+    /// DiagnosticCollectors, as each collector owns its diagnostic
+    /// message allocations.
+    fn copyDiagnostic(
+        alloc: Allocator,
+        src: Diagnostic,
+        dest_diagnostics: *std.ArrayListUnmanaged(Diagnostic),
+    ) !void {
+        const owned_msg = try alloc.dupe(u8, src.message);
+        errdefer alloc.free(owned_msg);
+        const owned_notes = if (src.notes.len > 0)
+            try alloc.dupe(Note, src.notes)
+        else
+            &.{};
+        errdefer if (src.notes.len > 0) alloc.free(owned_notes);
+
+        try dest_diagnostics.append(alloc, .{
+            .severity = src.severity,
+            .code = src.code,
+            .span = src.span,
+            .message = owned_msg,
+            .notes = owned_notes,
+        });
+    }
+
+    /// Copy all diagnostics from one collector to another with proper
+    /// memory ownership. Both collectors' message allocations are preserved.
+    fn copyDiagnostics(
+        alloc: Allocator,
+        src: *const DiagnosticCollector,
+        dest: *DiagnosticCollector,
+    ) !void {
+        for (src.diagnostics.items) |d| {
+            try copyDiagnostic(alloc, d, &dest.diagnostics);
+        }
     }
 
     /// Compile a Haskell source string through the full pipeline.
@@ -185,12 +225,19 @@ pub const Pipeline = struct {
         const file_id: FileId = 0;
 
         // Try as a declaration first: wrap as a module body.
+        // Strip leading "let" keyword if present, as top-level module
+        // declarations don't use "let" (that's GHCi-specific syntax).
         // NOTE: the wrapper source strings must NOT be freed here — the
         // GRIN program's Name.base fields are pointers into the source
         // buffer. They must live as long as the GRIN program (i.e. until
         // the caller's arena is destroyed).
         {
-            const decl_source = std.fmt.allocPrint(alloc, "module ReplInput where\n{s}\n", .{input}) catch {
+            var decl_input = input;
+            if (std.mem.startsWith(u8, input, "let ")) {
+                decl_input = input[4..]; // Skip past "let "
+            }
+
+            const decl_source = std.fmt.allocPrint(alloc, "module ReplInput where\n{s}\n", .{decl_input}) catch {
                 return CompileError.OutOfMemory;
             };
 
@@ -199,15 +246,27 @@ pub const Pipeline = struct {
 
             if (self.compileModule(decl_source, file_id, u_supply, rename_env, ty_env, mv_supply, &decl_diags)) |program| {
                 // Copy any diagnostics from the attempt
-                for (decl_diags.diagnostics.items) |d| {
-                    diags.emit(alloc, d) catch {};
-                }
+                try copyDiagnostics(alloc, &decl_diags, diags);
                 return .{ .program = program, .kind = .declaration };
-            } else |_| {} // Declaration parse failed — try as expression below
+            } else |_| {
+                // Declaration attempt failed — preserve its diagnostics
+                // before trying as expression
+                copyDiagnostics(alloc, &decl_diags, diags) catch {};
+                // Continue to expression attempt below
+            }
         }
 
         // Try as an expression: wrap in replExpr__ = <expr>
         {
+            // Clear diagnostics from the failed declaration attempt before
+            // trying the expression compilation (don't report declaration
+            // parse errors when expression succeeds)
+            while (diags.diagnostics.items.len > 0) {
+                const diag = diags.diagnostics.orderedRemove(0);
+                alloc.free(diag.message);
+                if (diag.notes.len > 0) alloc.free(diag.notes);
+            }
+
             const expr_source = std.fmt.allocPrint(alloc, "module ReplInput where\nreplExpr__ = {s}\n", .{input}) catch {
                 return CompileError.OutOfMemory;
             };
@@ -303,6 +362,36 @@ test "pipeline: compile function declaration" {
     // Use a simple function that doesn't require typeclasses
     const result = try pipeline.compileInput(
         "id x = x",
+        &u_supply,
+        &rename_env,
+        &ty_env,
+        &mv_supply,
+        &diags,
+    );
+
+    try testing.expect(result.kind == .declaration);
+    try testing.expect(result.program.defs.len > 0);
+}
+
+test "pipeline: handle let prefix in declarations" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var pipeline = Pipeline.init(alloc, testing.io);
+
+    var u_supply = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+    var rename_env = try RenameEnv.init(alloc, &u_supply, &diags);
+    defer rename_env.deinit();
+    var ty_env = try env_mod.TyEnv.init(alloc);
+    try env_mod.initBuiltins(&ty_env, alloc, &u_supply);
+    var mv_supply = htype_mod.MetaVarSupply{};
+
+    // The "let " prefix should be stripped for module-level declarations
+    const result = try pipeline.compileInput(
+        "let id x = x",
         &u_supply,
         &rename_env,
         &ty_env,

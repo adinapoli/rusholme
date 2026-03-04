@@ -13,8 +13,10 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const File = Io.File;
+const FileId = @import("../diagnostics/span.zig").FileId;
 
 const Session = @import("session.zig").Session;
+const Diagnostic = @import("../diagnostics/diagnostic.zig").Diagnostic;
 
 // ── REPL loop ─────────────────────────────────────────────────────────
 
@@ -60,12 +62,28 @@ pub fn run(allocator: Allocator, io: Io) !void {
 
         // Evaluate the input.
         const result = session.eval(line) catch |err| {
-            try printError(io, err);
+            // Get diagnostics and render them to stderr
+            const diags = session.getDiagnosticsForInput(alloc, line) catch &.{};
+
+            // Render diagnostics directly
+            for (diags) |diag| {
+                try writeStderr(io, "Error: ");
+                try writeStderr(io, diag.message);
+                try writeStderr(io, "\n");
+            }
+
+            // Only print raw error type if no diagnostics were available
+            if (diags.len == 0) {
+                try printError(io, err);
+            }
             continue;
         };
 
-        try writeStdout(io, result.value);
-        try writeStdout(io, "\n");
+        // Only print the result if it's a value (expression)
+        if (result.value.len > 0) {
+            try writeStdout(io, result.value);
+            try writeStdout(io, "\n");
+        }
     }
 }
 
@@ -147,6 +165,7 @@ fn printError(io: Io, err: anytype) !void {
     try writeStderr(io, msg);
 }
 
+/// Write to stdout.
 fn writeStdout(io: Io, msg: []const u8) !void {
     var buf: [4096]u8 = undefined;
     var fw: File.Writer = .init(.stdout(), io, &buf);
@@ -154,6 +173,7 @@ fn writeStdout(io: Io, msg: []const u8) !void {
     try fw.interface.flush();
 }
 
+/// Write to stderr.
 fn writeStderr(io: Io, msg: []const u8) !void {
     var buf: [4096]u8 = undefined;
     var fw: File.Writer = .init(.stderr(), io, &buf);

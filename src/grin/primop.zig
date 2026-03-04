@@ -332,6 +332,18 @@ pub const PrimOp = enum(u16) {
     pub fn fromString(str: []const u8) ?PrimOp {
         return std.meta.stringToEnum(PrimOp, str);
     }
+
+    /// Try to lookup a PrimOp from a Prelude function name.
+    /// Maps high-level Prelude functions (e.g., `putStrLn`) to their PrimOp
+    /// implementations (e.g., `putStrLn_`). Returns null if the name is not
+    /// a Prelude function backed by a PrimOp.
+    pub fn fromPreludeName(str: []const u8) ?PrimOp {
+        if (std.mem.eql(u8, str, "putStrLn")) return .putStrLn_;
+        if (std.mem.eql(u8, str, "putStr")) return .write_stdout;
+        if (std.mem.eql(u8, str, "print")) return .write_stdout;
+        // Add more Prelude function mappings here as needed
+        return null;
+    }
 };
 
 /// Categories of PrimOps for documentation and organization.

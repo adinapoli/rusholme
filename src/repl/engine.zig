@@ -100,7 +100,7 @@ pub const GrinEngine = struct {
 fn formatVal(allocator: Allocator, val: grin_ast.Val) Allocator.Error![]const u8 {
     return switch (val) {
         .Lit => |lit| formatLit(allocator, lit),
-        .Unit => try allocator.dupe(u8, "()"),
+        .Unit => try allocator.dupe(u8, ""),
         .ValTag => |tag| try allocator.dupe(u8, tag.name.base),
         .ConstTagNode => |ctn| formatConstTagNode(allocator, ctn),
         .Var => |name| try allocator.dupe(u8, name.base),

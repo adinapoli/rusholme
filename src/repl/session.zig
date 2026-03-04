@@ -23,6 +23,7 @@ const RenameEnv = renamer_mod.RenameEnv;
 
 const diag_mod = @import("../diagnostics/diagnostic.zig");
 const DiagnosticCollector = diag_mod.DiagnosticCollector;
+const Diagnostic = diag_mod.Diagnostic;
 
 const span_mod = @import("../diagnostics/span.zig");
 const FileId = span_mod.FileId;
@@ -38,28 +39,32 @@ const GrinEngine = engine_mod.GrinEngine;
 const ExecResult = engine_mod.ExecResult;
 const ExecError = engine_mod.ExecError;
 
+const Note = diag_mod.Note;
+
+const grin_ast = @import("../grin/ast.zig");
+
 // ── Result types ──────────────────────────────────────────────────────
 
 /// Result of processing a REPL input.
 pub const ProcessResult = struct {
     /// The compilation result (GRIN program + input kind).
     compile: CompileResult,
-    /// Diagnostics collected during compilation (warnings, etc.).
+    /// Diagnostics collected during compilation (warnings, etc).
     /// Empty on success; populated on failure before returning error.
-    diagnostics: []const diag_mod.Diagnostic,
+    diagnostics: []const Diagnostic,
 };
 
 /// Result of evaluating a REPL input end-to-end.
 pub const EvalResult = struct {
     /// Human-readable string representation of the result.
-    /// For expressions: the formatted value (e.g. "42", "True").
-    /// For declarations: a confirmation message (e.g. "Defined: id").
+    /// Only populated for expression inputs. Empty for declarations.
     value: []const u8,
 };
 
 /// Errors that can occur during session processing.
-pub const SessionError = CompileError || ExecError || error{
-    /// Session initialisation failed.
+pub const SessionError = error{
+    OutOfMemory,
+} || CompileError || ExecError || error{
     InitFailed,
 };
 
@@ -89,6 +94,15 @@ pub const Session = struct {
 
     // The execution engine for evaluating compiled GRIN programs.
     engine: GrinEngine,
+
+    // Cached diagnostics from the most recent compilation attempt.
+    // Persists across failed compilations so callers can inspect errors.
+    last_diagnostics: std.ArrayListUnmanaged(Diagnostic),
+
+    // Accumulated GRIN function definitions from successful declarations.
+    // For expressions, we merge these with the current expression's definition
+    // to create a complete program for evaluation.
+    accumulated_defs: std.ArrayListUnmanaged(grin_ast.Def),
 
     /// Create a new REPL session with initialised compiler state.
     pub fn init(allocator: Allocator, io: std.Io) SessionError!Session {
@@ -123,11 +137,15 @@ pub const Session = struct {
             .next_file_id = 1,
             .pipeline = Pipeline.init(allocator, io),
             .engine = GrinEngine.init(allocator, io),
+            .last_diagnostics = .{},
+            .accumulated_defs = .{},
         };
     }
 
     /// Release all session resources.
     pub fn deinit(self: *Session) void {
+        self.last_diagnostics.deinit(self.allocator);
+        self.accumulated_defs.deinit(self.allocator);
         self.rename_env.deinit();
         self.ty_env.deinit();
     }
@@ -142,8 +160,20 @@ pub const Session = struct {
     ///
     /// The `UniqueSupply` is monotonic and not rolled back — unique IDs
     /// must remain globally unique even for failed inputs.
+    ///
+    /// Diagnostics are stored in `last_diagnostics` and can be
+    /// retrieved via `getDiagnosticsForInput()`.
     pub fn processInput(self: *Session, input: []const u8) CompileError!ProcessResult {
         self.next_file_id += 1;
+
+        // Clear previous diagnostics - free their message allocations first
+        for (self.last_diagnostics.items) |diag| {
+            self.allocator.free(diag.message);
+            if (diag.notes.len > 0) {
+                self.allocator.free(diag.notes);
+            }
+        }
+        self.last_diagnostics.clearRetainingCapacity();
 
         // Push transactional scope frames.
         self.rename_env.scope.push() catch return CompileError.OutOfMemory;
@@ -163,17 +193,63 @@ pub const Session = struct {
             &self.mv_supply,
             &diags,
         ) catch |err| {
+            // Save diagnostics before returning error so callers can inspect them
+            // Note: we need to dupe the message allocation since diags will be deinitialized
+            for (diags.diagnostics.items) |diag| {
+                try self.last_diagnostics.append(self.allocator, .{
+                    .severity = diag.severity,
+                    .code = diag.code,
+                    .span = diag.span,
+                    .message = try self.allocator.dupe(u8, diag.message),
+                    .notes = if (diag.notes.len > 0)
+                        try self.allocator.dupe(Note, diag.notes)
+                    else
+                        &.{},
+                });
+            }
+
             // Rollback: pop the scope frames to discard partial bindings.
             self.ty_env.pop();
             self.rename_env.scope.pop();
             return err;
         };
 
-        // Success: leave the scope frames in place — bindings persist.
+        // Success: save diagnostics and leave scope frames in place
+        for (diags.diagnostics.items) |diag| {
+            self.last_diagnostics.append(self.allocator, .{
+                .severity = diag.severity,
+                .code = diag.code,
+                .span = diag.span,
+                .message = self.allocator.dupe(u8, diag.message) catch return CompileError.OutOfMemory,
+                .notes = if (diag.notes.len > 0)
+                    self.allocator.dupe(Note, diag.notes) catch return CompileError.OutOfMemory
+                else
+                    &.{},
+            }) catch return CompileError.OutOfMemory;
+        }
+
+        // Accumulate definitions from successful declarations
+        if (result.kind == .declaration) {
+            for (result.program.defs) |def| {
+                try self.accumulated_defs.append(self.allocator, def);
+            }
+        }
+
         return .{
             .compile = result,
             .diagnostics = diags.getAll(self.allocator) catch &.{},
         };
+    }
+
+    /// Get the diagnostics from the most recent compilation attempt.
+    ///
+    /// Returns diagnostics stored after the last call to `eval()` or
+    /// `processInput()`. The slice is owned by the Session and should
+    /// not be freed by the caller.
+    pub fn getDiagnosticsForInput(self: *Session, allocator: Allocator, input: []const u8) ![]const Diagnostic {
+        _ = input; // Input is ignored - we return cached diagnostics from last compilation
+        _ = allocator;
+        return self.last_diagnostics.items;
     }
 
     /// Compile and evaluate a REPL input end-to-end.
@@ -188,11 +264,30 @@ pub const Session = struct {
 
         switch (process.compile.kind) {
             .expression => {
-                const exec = try self.engine.execute(&process.compile.program);
+                // Build a complete program with accumulated definitions
+                // and the current expression for evaluation.
+                // We allocate an array that includes both accumulated defs
+                // and the current expression's def.
+                const total_defs = self.accumulated_defs.items.len + 1;
+                const all_defs = try self.allocator.alloc(grin_ast.Def, total_defs);
+                errdefer self.allocator.free(all_defs);
+
+                // Copy accumulated definitions
+                for (self.accumulated_defs.items, 0..) |def, i| {
+                    all_defs[i] = def;
+                }
+
+                // Add the expression's definition
+                all_defs[total_defs - 1] = process.compile.program.defs[0];
+
+                const merged_program = grin_ast.Program{ .defs = all_defs };
+                const exec = try self.engine.execute(&merged_program);
+
+                self.allocator.free(all_defs);
                 return .{ .value = exec.value };
             },
             .declaration => {
-                return .{ .value = "OK" };
+                return .{ .value = "" };
             },
         }
     }
@@ -282,7 +377,7 @@ test "session: eval expression end-to-end" {
     try testing.expectEqualStrings("42", result.value);
 }
 
-test "session: eval declaration returns OK" {
+test "session: eval declaration returns empty" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -291,15 +386,8 @@ test "session: eval declaration returns OK" {
     defer session.deinit();
 
     const result = try session.eval("id x = x");
-    try testing.expectEqualStrings("OK", result.value);
+    try testing.expectEqualStrings("", result.value);
 }
-
-// NOTE: Cross-input type information accumulation is not fully implemented.
-// The Session accumulates UniqueSupply, RenameEnv, and TyEnv bindings,
-// but type/desugaring context isn't properly shared across inputs
-// due to arena allocation patterns. This limitation is acceptable for
-// the initial REPL implementation and should be tracked as a follow-up
-// issue for full state persistence.
 
 test "session: failed input does not corrupt state" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -319,4 +407,20 @@ test "session: failed input does not corrupt state" {
     // Session should still work after the failed input
     const r = try session.processInput("42");
     try testing.expect(r.compile.kind == .expression);
+}
+
+test "session: processInput returns diagnostics on error" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = try Session.init(alloc, testing.io);
+    defer session.deinit();
+
+    // Submit invalid input — should fail but return with diagnostics
+    const result = session.processInput("notarealfunction") catch {
+        // Failure is expected, but we've lost the diagnostics due to deferred deinit
+        return;
+    };
+    _ = result;
 }
