@@ -6,7 +6,10 @@
 **Architecture Decisions:**
 - **#0001**: PrimOps and RTS Architecture — defines the contract between compiler and runtime via ~15-30 primitive operations. See `docs/decisions/0001-primops-and-rts-architecture.md`.
 
-**Recent Progress (2026-02-25):**
+**Recent Progress (2026-03-04):**
+- ✓ #477: Implement cross-platform IO for WASM target (LLVM runtime)
+- ✓ #481: Implement cross-platform IO for WASM target (PR #481 merged)
+- ✓ #75: Implement basic REPL loop (PR #485 opened for review)
 - ✓ #55: Implement LLVM codegen for GRIN expressions (M1 scope: App with PrimOpMapping, BUILDING.md)
 - ✓ #321: End-to-end integration test: main = putStrLn "Hello" through GRIN evaluator
 
