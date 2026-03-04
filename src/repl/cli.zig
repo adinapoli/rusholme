@@ -17,6 +17,9 @@ const FileId = @import("../diagnostics/span.zig").FileId;
 
 const Session = @import("session.zig").Session;
 const Diagnostic = @import("../diagnostics/diagnostic.zig").Diagnostic;
+const protocol_mod = @import("protocol.zig");
+const Status = protocol_mod.Status;
+const evaluate = protocol_mod.evaluate;
 
 // ── REPL loop ─────────────────────────────────────────────────────────
 
@@ -60,30 +63,26 @@ pub fn run(allocator: Allocator, io: Io) !void {
             continue;
         }
 
-        // Evaluate the input.
-        const result = session.eval(line) catch |err| {
-            // Get diagnostics and render them to stderr
-            const diags = session.getDiagnosticsForInput(alloc, line) catch &.{};
+        // Evaluate the input using Protocol.
+        const result = evaluate(alloc, &session, line) catch |err| {
+            // Fallback error handling (shouldn't be reached if Protocol returns errors)
+            try printError(io, err);
+            continue;
+        };
 
-            // Render diagnostics directly
-            for (diags) |diag| {
+        // Handle status
+        if (result.status == .success) {
+            try writeStdout(io, result.value);
+            try writeStdout(io, "\n");
+        } else if (result.status == .failed) {
+            // Render diagnostics to stderr
+            for (result.diagnostics) |diag| {
                 try writeStderr(io, "Error: ");
                 try writeStderr(io, diag.message);
                 try writeStderr(io, "\n");
             }
-
-            // Only print raw error type if no diagnostics were available
-            if (diags.len == 0) {
-                try printError(io, err);
-            }
-            continue;
-        };
-
-        // Only print the result if it's a value (expression)
-        if (result.value.len > 0) {
-            try writeStdout(io, result.value);
-            try writeStdout(io, "\n");
         }
+        // .silent: no output for declarations
     }
 }
 
