@@ -620,8 +620,14 @@ pub const GrinEvaluator = struct {
             .Block => |inner| self.eval(inner),
 
             .App => |app| b: {
-                // Check if this is a PrimOp call
+                // Check if this is a direct PrimOp call (e.g., `putStrLn_`)
                 if (PrimOp.fromString(app.name.base)) |op| {
+                    break :b try self.evalPrimOp(op, app.args);
+                }
+
+                // Check if this is a Prelude function call (e.g., `putStrLn`)
+                // and dispatch to its PrimOp implementation.
+                if (PrimOp.fromPreludeName(app.name.base)) |op| {
                     break :b try self.evalPrimOp(op, app.args);
                 }
 
@@ -2096,4 +2102,13 @@ test "eval: Combined - function that cases on its argument" {
 
     const result = try evaluator.eval(main_body);
     try testing.expectEqual(@as(i64, 123), result.Lit.Int);
+}
+
+test "PrimOp: fromPreludeName maps Prelude functions to PrimOps" {
+    try testing.expectEqual(PrimOp.putStrLn_, PrimOp.fromString("putStrLn_") orelse return);
+    try testing.expectEqual(@as(?PrimOp, null), PrimOp.fromString("putStrLn"));
+
+    // fromPreludeName should recognize the high-level name
+    try testing.expectEqual(PrimOp.putStrLn_, PrimOp.fromPreludeName("putStrLn") orelse return);
+    try testing.expect(@as(?PrimOp, null) == PrimOp.fromPreludeName("nonexistent"));
 }

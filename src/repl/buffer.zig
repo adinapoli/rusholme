@@ -5,9 +5,14 @@
 
 const std = @import("std");
 
+/// Size of the input buffer in bytes.
+pub const INPUT_BUFFER_SIZE = 4096;
+/// Size of the output buffer in bytes.
+pub const OUTPUT_BUFFER_SIZE = 16384;
+
 // Shared buffers for input/output
-var input_buffer: [4096]u8 = undefined;
-var output_buffer: [16384]u8 = undefined;
+var input_buffer: [INPUT_BUFFER_SIZE]u8 = undefined;
+var output_buffer: [OUTPUT_BUFFER_SIZE]u8 = undefined;
 
 pub fn writeToBuffer(buffer: []u8, data: []const u8) !void {
     if (data.len > buffer.len) return error.BufferOverflow;

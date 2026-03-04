@@ -401,18 +401,24 @@ pub fn build(b: *std.Build) void {
     // and reading its source code will allow you to master it.
 
     // ═══════════════════════════════════════════════════════════════════════
-    // WASM REPL Executable - freestanding target for browser
+    // WASM REPL Executable - wasm32-wasi target for browser
     // ═══════════════════════════════════════════════════════════════════════
     // Build the REPL WebAssembly module for browser-based evaluation.
-    // Uses wasm32-freestanding for browser compatibility (no WASI imports).
-    // This creates a WASM binary that exposes exports for JavaScript interaction.
+    // Uses wasm32-wasi so that IO operations (fd_write) are standardised
+    // and can be polyfilled in the browser via browser_wasi_shim.
+    // See docs/decisions/0006-repl-architecture.md.
+    //
+    // The REPL pipeline files use `../frontend/`, `../grin/`, etc. relative
+    // imports, so the module root must be at `src/` level. We use a thin
+    // entry-point file (`src/repl_wasm_main.zig`) that re-exports from
+    // `repl/exports.zig`.
     const repl_wasm = b.addExecutable(.{
         .name = "repl",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/repl/exports.zig"),
+            .root_source_file = b.path("src/repl_wasm_main.zig"),
             .target = b.resolveTargetQuery(.{
                 .cpu_arch = .wasm32,
-                .os_tag = .freestanding,
+                .os_tag = .wasi,
             }),
             .optimize = .ReleaseSmall,
         }),
