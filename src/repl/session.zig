@@ -33,6 +33,11 @@ const UniqueSupply = unique_mod.UniqueSupply;
 const htype_mod = @import("../typechecker/htype.zig");
 const env_mod = @import("../typechecker/env.zig");
 
+const engine_mod = @import("engine.zig");
+const GrinEngine = engine_mod.GrinEngine;
+const ExecResult = engine_mod.ExecResult;
+const ExecError = engine_mod.ExecError;
+
 // ── Result types ──────────────────────────────────────────────────────
 
 /// Result of processing a REPL input.
@@ -44,8 +49,16 @@ pub const ProcessResult = struct {
     diagnostics: []const diag_mod.Diagnostic,
 };
 
+/// Result of evaluating a REPL input end-to-end.
+pub const EvalResult = struct {
+    /// Human-readable string representation of the result.
+    /// For expressions: the formatted value (e.g. "42", "True").
+    /// For declarations: a confirmation message (e.g. "Defined: id").
+    value: []const u8,
+};
+
 /// Errors that can occur during session processing.
-pub const SessionError = CompileError || error{
+pub const SessionError = CompileError || ExecError || error{
     /// Session initialisation failed.
     InitFailed,
 };
@@ -73,6 +86,9 @@ pub const Session = struct {
 
     // The pipeline instance (stateless — just holds allocator + io).
     pipeline: Pipeline,
+
+    // The execution engine for evaluating compiled GRIN programs.
+    engine: GrinEngine,
 
     /// Create a new REPL session with initialised compiler state.
     pub fn init(allocator: Allocator, io: std.Io) SessionError!Session {
@@ -106,6 +122,7 @@ pub const Session = struct {
             .mv_supply = .{},
             .next_file_id = 1,
             .pipeline = Pipeline.init(allocator, io),
+            .engine = GrinEngine.init(allocator, io),
         };
     }
 
@@ -153,6 +170,27 @@ pub const Session = struct {
             .compile = result,
             .diagnostics = &.{},
         };
+    }
+
+    /// Compile and evaluate a REPL input end-to-end.
+    ///
+    /// For expressions: compiles through the pipeline, then executes
+    /// the GRIN program and returns the formatted result value.
+    ///
+    /// For declarations: compiles through the pipeline (accumulating
+    /// bindings in the session state) and returns a confirmation.
+    pub fn eval(self: *Session, input: []const u8) SessionError!EvalResult {
+        const process = try self.processInput(input);
+
+        switch (process.compile.kind) {
+            .expression => {
+                const exec = try self.engine.execute(&process.compile.program);
+                return .{ .value = exec.value };
+            },
+            .declaration => {
+                return .{ .value = "OK" };
+            },
+        }
     }
 };
 
@@ -213,6 +251,43 @@ test "session: multiple inputs accumulate" {
     // Second: compile another expression
     const r2 = try session.processInput("42");
     try testing.expect(r2.compile.kind == .expression);
+}
+
+test "session: pipeline produces named def for expression" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = try Session.init(alloc, testing.io);
+    defer session.deinit();
+
+    const process = try session.processInput("42");
+    try testing.expectEqual(@as(usize, 1), process.compile.program.defs.len);
+    try testing.expectEqualStrings("replExpr__", process.compile.program.defs[0].name.base);
+}
+
+test "session: eval expression end-to-end" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = try Session.init(alloc, testing.io);
+    defer session.deinit();
+
+    const result = try session.eval("42");
+    try testing.expectEqualStrings("42", result.value);
+}
+
+test "session: eval declaration returns OK" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = try Session.init(alloc, testing.io);
+    defer session.deinit();
+
+    const result = try session.eval("id x = x");
+    try testing.expectEqualStrings("OK", result.value);
 }
 
 test "session: failed input does not corrupt state" {

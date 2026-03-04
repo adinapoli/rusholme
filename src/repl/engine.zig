@@ -59,9 +59,11 @@ pub const GrinEngine = struct {
         };
         defer grin_eval.deinit();
 
-        // Try replExpr__ first (REPL expression wrapper), then main.
-        const entry = grin_eval.lookupFunc(.{ .base = "replExpr__", .unique = .{ .value = 0 } }) orelse
-            grin_eval.lookupFunc(.{ .base = "main", .unique = .{ .value = 0 } }) orelse
+        // Find the entry point by scanning defs for matching base name.
+        // The renamer assigns unique IDs, so we match by base name rather
+        // than exact Name (which includes the unique suffix).
+        const entry = findDefByBaseName(program, "replExpr__") orelse
+            findDefByBaseName(program, "main") orelse
             return ExecError.EntryPointNotFound;
 
         const val = try grin_eval.eval(entry.body);
@@ -70,6 +72,14 @@ pub const GrinEngine = struct {
         };
 
         return .{ .value = formatted };
+    }
+
+    /// Find a GRIN definition by its base name (ignoring the unique suffix).
+    fn findDefByBaseName(program: *const grin_ast.Program, base: []const u8) ?*const grin_ast.Def {
+        for (program.defs) |*def| {
+            if (std.mem.eql(u8, def.name.base, base)) return def;
+        }
+        return null;
     }
 };
 

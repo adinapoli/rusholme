@@ -178,12 +178,15 @@ pub const Pipeline = struct {
         const alloc = self.allocator;
         const file_id: FileId = 0;
 
-        // Try as a declaration first: wrap as a module body
+        // Try as a declaration first: wrap as a module body.
+        // NOTE: the wrapper source strings must NOT be freed here — the
+        // GRIN program's Name.base fields are pointers into the source
+        // buffer. They must live as long as the GRIN program (i.e. until
+        // the caller's arena is destroyed).
         {
             const decl_source = std.fmt.allocPrint(alloc, "module ReplInput where\n{s}\n", .{input}) catch {
                 return CompileError.OutOfMemory;
             };
-            defer alloc.free(decl_source);
 
             var diags = DiagnosticCollector.init();
             defer diags.deinit(alloc);
@@ -195,12 +198,11 @@ pub const Pipeline = struct {
             }
         }
 
-        // Try as an expression: wrap in main = <expr>
+        // Try as an expression: wrap in replExpr__ = <expr>
         {
             const expr_source = std.fmt.allocPrint(alloc, "module ReplInput where\nreplExpr__ = {s}\n", .{input}) catch {
                 return CompileError.OutOfMemory;
             };
-            defer alloc.free(expr_source);
 
             var diags = DiagnosticCollector.init();
             defer diags.deinit(alloc);
@@ -241,6 +243,8 @@ test "pipeline: compile simple literal expression" {
 
     try testing.expect(result.program.defs.len > 0);
     try testing.expect(result.kind == .expression);
+    // Check that the def's base name is replExpr__
+    try testing.expectEqualStrings("replExpr__", result.program.defs[0].name.base);
 }
 
 test "pipeline: compile data declaration" {
