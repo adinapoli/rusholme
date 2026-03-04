@@ -73,6 +73,7 @@ pub const backend = @import("backend.zig");
 pub const repl = struct {
     pub const pipeline = @import("repl/pipeline.zig");
     pub const session = @import("repl/session.zig");
+    pub const engine = @import("repl/engine.zig");
 };
 
 // Runtime
