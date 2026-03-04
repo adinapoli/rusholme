@@ -117,24 +117,38 @@ pub const Session = struct {
 
     /// Compile a REPL input through the full pipeline.
     ///
-    /// On success, the session's compiler state is updated with any
-    /// new bindings introduced by the input (types, functions, etc.).
+    /// Uses transactional semantics: a scope frame is pushed onto the
+    /// rename and type environments before compilation. On failure, the
+    /// frame is popped (rolling back any bindings introduced by the
+    /// failed input). On success, the frame stays in place and its
+    /// bindings become part of the session state.
     ///
-    /// On failure, a `CompileError` is returned and the session state
-    /// is unchanged.
+    /// The `UniqueSupply` is monotonic and not rolled back — unique IDs
+    /// must remain globally unique even for failed inputs.
     pub fn processInput(self: *Session, input: []const u8) CompileError!ProcessResult {
-        const file_id = self.next_file_id;
         self.next_file_id += 1;
-        _ = file_id;
 
-        const result = try self.pipeline.compileInput(
+        // Push transactional scope frames.
+        self.rename_env.scope.push() catch return CompileError.OutOfMemory;
+        self.ty_env.push() catch {
+            self.rename_env.scope.pop();
+            return CompileError.OutOfMemory;
+        };
+
+        const result = self.pipeline.compileInput(
             input,
             &self.u_supply,
             &self.rename_env,
             &self.ty_env,
             &self.mv_supply,
-        );
+        ) catch |err| {
+            // Rollback: pop the scope frames to discard partial bindings.
+            self.ty_env.pop();
+            self.rename_env.scope.pop();
+            return err;
+        };
 
+        // Success: leave the scope frames in place — bindings persist.
         return .{
             .compile = result,
             .diagnostics = &.{},
@@ -199,4 +213,24 @@ test "session: multiple inputs accumulate" {
     // Second: compile another expression
     const r2 = try session.processInput("42");
     try testing.expect(r2.compile.kind == .expression);
+}
+
+test "session: failed input does not corrupt state" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = try Session.init(alloc, testing.io);
+    defer session.deinit();
+
+    // Define a valid function
+    _ = try session.processInput("f x = x");
+
+    // Submit invalid input — should fail but not corrupt state
+    const bad = session.processInput("let = = =");
+    try testing.expectError(CompileError.CompilationFailed, bad);
+
+    // Session should still work after the failed input
+    const r = try session.processInput("42");
+    try testing.expect(r.compile.kind == .expression);
 }
