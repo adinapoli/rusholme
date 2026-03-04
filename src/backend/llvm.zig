@@ -13,6 +13,9 @@ const llvm_c = @cImport({
     @cInclude("llvm-c/IRReader.h");
     @cInclude("llvm-c/Linker.h");
     @cInclude("llvm-c/BitWriter.h");
+    @cInclude("llvm-c/Orc.h");
+    @cInclude("llvm-c/LLJIT.h");
+    @cInclude("llvm-c/OrcEE.h");
 });
 
 // Import C stdio for file I/O
@@ -49,6 +52,37 @@ pub const Target = c.LLVMTargetRef;
 
 /// TargetMachine represents a specific target configuration.
 pub const TargetMachine = c.LLVMTargetMachineRef;
+
+// ═══════════════════════════════════════════════════════════════════════
+// ORC JIT Types
+// ═══════════════════════════════════════════════════════════════════════
+
+/// LLJIT is an ORC-based JIT engine that provides MCJIT-like functionality.
+pub const OrcLLJITRef = c.LLVMOrcLLJITRef;
+
+/// Builder for configuring an LLJIT instance before creation.
+pub const OrcLLJITBuilderRef = c.LLVMOrcLLJITBuilderRef;
+
+/// A JIT dynamic library — the primary symbol namespace in ORC.
+pub const OrcJITDylibRef = c.LLVMOrcJITDylibRef;
+
+/// A thread-safe wrapper around an LLVMContext.
+pub const OrcThreadSafeContextRef = c.LLVMOrcThreadSafeContextRef;
+
+/// A thread-safe wrapper around an LLVMModule.
+pub const OrcThreadSafeModuleRef = c.LLVMOrcThreadSafeModuleRef;
+
+/// An execution session manages the JIT'd program's state.
+pub const OrcExecutionSessionRef = c.LLVMOrcExecutionSessionRef;
+
+/// An executor address (function pointer in JIT'd code).
+pub const OrcExecutorAddress = c.LLVMOrcExecutorAddress;
+
+/// A symbol string pool entry reference.
+pub const OrcSymbolStringPoolEntryRef = c.LLVMOrcSymbolStringPoolEntryRef;
+
+/// A materialization unit (for defining absolute symbols).
+pub const OrcMaterializationUnitRef = c.LLVMOrcMaterializationUnitRef;
 
 /// Initialize LLVM.
 /// Must be called before using any LLVM functions.
