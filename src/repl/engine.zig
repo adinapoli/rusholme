@@ -162,7 +162,8 @@ test "engine: format unit" {
     const val = grin_ast.Val{ .Unit = {} };
     const result = try formatVal(testing.allocator, val);
     defer testing.allocator.free(result);
-    try testing.expectEqualStrings("()", result);
+    // Unit formats to empty string for REPL - IO actions only show side effects
+    try testing.expectEqualStrings("", result);
 }
 
 test "engine: format bare tag" {
