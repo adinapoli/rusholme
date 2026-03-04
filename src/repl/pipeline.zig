@@ -242,3 +242,62 @@ test "pipeline: compile simple literal expression" {
     try testing.expect(result.program.defs.len > 0);
     try testing.expect(result.kind == .expression);
 }
+
+test "pipeline: compile data declaration" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var pipeline = Pipeline.init(alloc, testing.io);
+
+    var u_supply = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+    var rename_env = try RenameEnv.init(alloc, &u_supply, &diags);
+    defer rename_env.deinit();
+    var ty_env = try env_mod.TyEnv.init(alloc);
+    try env_mod.initBuiltins(&ty_env, alloc, &u_supply);
+    var mv_supply = htype_mod.MetaVarSupply{};
+
+    const result = try pipeline.compileInput(
+        "data Color = Red | Green | Blue",
+        &u_supply,
+        &rename_env,
+        &ty_env,
+        &mv_supply,
+    );
+
+    // Data declarations are classified as declarations.
+    // They may produce zero GRIN defs (constructors are GRIN tags,
+    // not function definitions), so we only check the kind.
+    try testing.expect(result.kind == .declaration);
+}
+
+test "pipeline: compile function declaration" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var pipeline = Pipeline.init(alloc, testing.io);
+
+    var u_supply = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+    var rename_env = try RenameEnv.init(alloc, &u_supply, &diags);
+    defer rename_env.deinit();
+    var ty_env = try env_mod.TyEnv.init(alloc);
+    try env_mod.initBuiltins(&ty_env, alloc, &u_supply);
+    var mv_supply = htype_mod.MetaVarSupply{};
+
+    // Use a simple function that doesn't require typeclasses
+    const result = try pipeline.compileInput(
+        "id x = x",
+        &u_supply,
+        &rename_env,
+        &ty_env,
+        &mv_supply,
+    );
+
+    try testing.expect(result.kind == .declaration);
+    try testing.expect(result.program.defs.len > 0);
+}
