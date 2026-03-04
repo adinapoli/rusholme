@@ -39,7 +39,9 @@ jobs:
             --command zig build
 
       - name: Copy repl.wasm to website
-        run: cp zig-out/bin/repl.wasm website/
+        run: |
+          cp zig-out/bin/repl.wasm website/
+          cp zig-out/bin/repl.wasm website/repl/
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -62,7 +64,8 @@ jobs:
           mkdir -p _site
           cp website/index.html _site/
           cp website/logo.png _site/
-          cp repl.wasm _site/
+          cp website/repl.wasm _site/
+          cp -r website/repl _site/repl
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
