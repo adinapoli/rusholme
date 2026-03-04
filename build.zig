@@ -417,6 +417,8 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSmall,
         }),
     });
+    // Export all `pub export` symbols so JavaScript can call them.
+    repl_wasm.rdynamic = true;
 
     b.installArtifact(repl_wasm);
 }

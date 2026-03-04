@@ -35,6 +35,25 @@ function copyLogo() {
   }
 }
 
+// Copy repl.wasm from zig build output to website directories
+function copyReplWasm() {
+  const wasmSource = path.join(__dirname, '../zig-out/bin/repl.wasm');
+  const targets = [
+    path.join(__dirname, 'repl.wasm'),
+    path.join(__dirname, 'repl', 'repl.wasm'),
+  ];
+
+  if (!fs.existsSync(wasmSource)) {
+    console.warn('   ⚠️  zig-out/bin/repl.wasm not found — run "zig build" first');
+    return;
+  }
+
+  for (const target of targets) {
+    fs.copyFileSync(wasmSource, target);
+  }
+  console.log('   ✓ Copied repl.wasm from zig-out/bin/');
+}
+
 // Fetch JSON from URL
 function fetchJSON(url) {
   return new Promise((resolve, reject) => {
@@ -240,6 +259,9 @@ async function build() {
   
   // Copy logo from assets
   copyLogo();
+
+  // Copy WASM REPL binary from zig build output
+  copyReplWasm();
   
   const templatePath = path.join(__dirname, 'template.html');
   if (!fs.existsSync(templatePath)) {
