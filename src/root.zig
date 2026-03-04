@@ -69,6 +69,11 @@ pub const modules = struct {
 // Backend
 pub const backend = @import("backend.zig");
 
+// REPL
+pub const repl = struct {
+    pub const pipeline = @import("repl/pipeline.zig");
+};
+
 // Runtime
 pub const runtime = @import("runtime/mod.zig");
 
@@ -102,4 +107,5 @@ test {
     testing.refAllDecls(tc);
     testing.refAllDecls(runtime);
     testing.refAllDecls(modules);
+    testing.refAllDecls(repl);
 }
