@@ -11,6 +11,8 @@ const std = @import("std");
 pub const buffer = @import("buffer.zig");
 pub const eval_mod = @import("eval.zig");
 const Session = @import("session.zig").Session;
+const protocol = @import("protocol.zig");
+const Status = protocol.Status;
 
 // ── Global state ──────────────────────────────────────────────────────
 
@@ -65,8 +67,9 @@ pub export fn repl_get_output_buffer() [*]u8 {
 /// output buffer and the result length is returned.
 ///
 /// JSON format:
-///   Success: {"status":"success","value":"<result>"}
-///   Error:   {"status":"error","message":"<description>"}
+///   Success:     {"status":"success","value":"<result>"}
+///   Declaration: {"status":"success","value":""}
+///   Error:       {"status":"error","message":"<description>"}
 pub export fn repl_evaluate(length: usize) usize {
     const input_buf = buffer.getInputBuffer();
     if (length > buffer.INPUT_BUFFER_SIZE) return writeError("Input too long");
@@ -78,11 +81,16 @@ pub export fn repl_evaluate(length: usize) usize {
 
     const s = &(session orelse return writeError("Session not initialised — call repl_init() first"));
 
-    const result = s.eval(input) catch {
-        return writeError("Compilation failed");
+    const alloc = session_arena.?.allocator();
+    const result = protocol.evaluate(alloc, s, input) catch {
+        return writeError("Internal error during evaluation");
     };
 
-    return writeSuccess(result.value);
+    return switch (result.status) {
+        .success => writeSuccess(result.value),
+        .silent => writeSuccess(""),
+        .failed => writeError(result.value),
+    };
 }
 
 // ── Output formatting ─────────────────────────────────────────────────

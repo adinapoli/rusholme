@@ -1130,6 +1130,95 @@
 
     <!-- REPL Integration Script -->
     <script>
+        // Minimal WASI shim for wasm32-wasi REPL module.
+        //
+        // The WASM binary imports wasi_snapshot_preview1 functions. We provide
+        // stub implementations for the ones Zig's standard library emits. Only
+        // fd_write (for stdout/stderr) does real work — everything else is a
+        // no-op or returns ENOSYS (52).
+        //
+        // See docs/decisions/0006-repl-architecture.md for the full design.
+        function createWasiShim(wasmInstance, term) {
+            return {
+                fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) {
+                    const mem = new DataView(wasmInstance.exports.memory.buffer);
+                    let totalWritten = 0;
+                    for (let i = 0; i < iovs_len; i++) {
+                        const bufPtr = mem.getUint32(iovs_ptr + i * 8, true);
+                        const bufLen = mem.getUint32(iovs_ptr + i * 8 + 4, true);
+                        const bytes = new Uint8Array(wasmInstance.exports.memory.buffer, bufPtr, bufLen);
+                        const text = new TextDecoder().decode(bytes);
+                        if (fd === 1 || fd === 2) {
+                            term.writeln(text);
+                        }
+                        totalWritten += bufLen;
+                    }
+                    mem.setUint32(nwritten_ptr, totalWritten, true);
+                    return 0;
+                },
+                fd_read() { return 52; },
+                fd_close() { return 0; },
+                fd_seek() { return 52; },
+                fd_fdstat_get(fd, buf) {
+                    const mem = new DataView(wasmInstance.exports.memory.buffer);
+                    mem.setUint8(buf, 4);
+                    mem.setUint16(buf + 2, 0, true);
+                    mem.setBigUint64(buf + 8, 0n, true);
+                    mem.setBigUint64(buf + 16, 0n, true);
+                    return 0;
+                },
+                fd_prestat_get() { return 8; },
+                fd_prestat_dir_name() { return 8; },
+                fd_pwrite() { return 52; },
+                fd_pread() { return 52; },
+                fd_sync() { return 52; },
+                fd_filestat_get() { return 8; },
+                fd_filestat_set_size() { return 52; },
+                fd_filestat_set_times() { return 52; },
+                fd_readdir() { return 52; },
+                path_open() { return 52; },
+                path_link() { return 52; },
+                path_create_directory() { return 52; },
+                path_filestat_get() { return 52; },
+                path_unlink_file() { return 52; },
+                path_remove_directory() { return 52; },
+                path_rename() { return 52; },
+                path_symlink() { return 52; },
+                path_readlink() { return 52; },
+                proc_exit(code) { console.log('WASM proc_exit(' + code + ')'); },
+                environ_sizes_get(count_ptr, buf_size_ptr) {
+                    const mem = new DataView(wasmInstance.exports.memory.buffer);
+                    mem.setUint32(count_ptr, 0, true);
+                    mem.setUint32(buf_size_ptr, 0, true);
+                    return 0;
+                },
+                environ_get() { return 0; },
+                clock_time_get(clock_id, precision, time_ptr) {
+                    const mem = new DataView(wasmInstance.exports.memory.buffer);
+                    mem.setBigUint64(time_ptr, BigInt(Date.now()) * 1000000n, true);
+                    return 0;
+                },
+                clock_res_get(clock_id, resolution_ptr) {
+                    const mem = new DataView(wasmInstance.exports.memory.buffer);
+                    mem.setBigUint64(resolution_ptr, 1000000n, true);
+                    return 0;
+                },
+                poll_oneoff() { return 52; },
+                args_sizes_get(argc_ptr, argv_buf_size_ptr) {
+                    const mem = new DataView(wasmInstance.exports.memory.buffer);
+                    mem.setUint32(argc_ptr, 0, true);
+                    mem.setUint32(argv_buf_size_ptr, 0, true);
+                    return 0;
+                },
+                args_get() { return 0; },
+                random_get(buf, buf_len) {
+                    const bytes = new Uint8Array(wasmInstance.exports.memory.buffer, buf, buf_len);
+                    crypto.getRandomValues(bytes);
+                    return 0;
+                },
+            };
+        }
+
         // REPL terminal for xterm.js + WASM integration
         (function() {
             const terminalContainer = document.getElementById('repl-terminal');
@@ -1160,12 +1249,11 @@
             }
 
             // Welcome message
-            term.writeln('\x1b[32mRusholme REPL — WebAssembly Backend\x1b[0m');
+            term.writeln('\x1b[32mRusholme REPL \u2014 WebAssembly Backend\x1b[0m');
             term.writeln('');
             term.writeln('Type Haskell expressions and definitions, then press Enter to evaluate.');
             term.writeln('For multi-line blocks, surround with \x1b[33m:{\x1b[0m and \x1b[33m:}\x1b[0m');
             term.writeln('');
-            term.write('\x1b[32m> \x1b[0m');
 
             let currentLine = '';
 
@@ -1173,19 +1261,48 @@
             window.replBridge = {
                 wasmInstance: null,
 
-                // Initialize WASM module
+                // Initialize WASM module with WASI shim.
+                //
+                // Uses two-phase instantiation: a Proxy shim handles WASI
+                // calls during instantiation (before we have a memory
+                // reference), then the real shim is wired in afterwards.
                 init: async function() {
                     try {
                         const response = await fetch('repl.wasm');
                         if (!response.ok) {
-                            throw new Error(`Failed to load REPL: ${response.status}`);
+                            throw new Error('Failed to load REPL: ' + response.status);
                         }
                         const bytes = await response.arrayBuffer();
                         const module = await WebAssembly.compile(bytes);
-                        this.wasmInstance = await WebAssembly.instantiate(module, {});
 
-                        // Show terminal ready indicator
-                        term.writeln('\x1b[32m ✓ REPL WASM module loaded\x1b[0m');
+                        // Phase 1: Proxy shim — forwards calls to the real
+                        // shim once it is available, returns ENOSYS until then.
+                        const wasiStub = {};
+                        const wasiProxy = new Proxy(wasiStub, {
+                            get(_target, prop) {
+                                return (...args) => {
+                                    if (wasiStub.impl && wasiStub.impl[prop]) {
+                                        return wasiStub.impl[prop](...args);
+                                    }
+                                    return 52; // ENOSYS
+                                };
+                            },
+                        });
+
+                        this.wasmInstance = await WebAssembly.instantiate(module, {
+                            wasi_snapshot_preview1: wasiProxy,
+                        });
+
+                        // Phase 2: wire the real shim now that memory is accessible.
+                        wasiStub.impl = createWasiShim(this.wasmInstance, term);
+
+                        // WASI convention: call _start if present, then init the REPL.
+                        if (this.wasmInstance.exports._start) {
+                            this.wasmInstance.exports._start();
+                        }
+                        this.wasmInstance.exports.repl_init();
+
+                        term.writeln('\x1b[32m \u2713 REPL ready\x1b[0m');
                         term.write('\x1b[32m> \x1b[0m');
                     } catch (error) {
                         console.error('Failed to load WASM module:', error);
@@ -1205,50 +1322,42 @@
                     }
 
                     try {
-                        // Get input/output buffers
                         const inputPtr = this.wasmInstance.exports.repl_get_input_buffer();
                         const outputPtr = this.wasmInstance.exports.repl_get_output_buffer();
 
-                        // Write expression to input buffer
                         const encoder = new TextEncoder();
                         const exprBytes = encoder.encode(expr);
-                        const inputView = new Uint8Array(this.wasmInstance.exports.memory.buffer, inputPtr);
-
+                        const inputView = new Uint8Array(
+                            this.wasmInstance.exports.memory.buffer, inputPtr
+                        );
                         for (let i = 0; i < exprBytes.length && i < inputView.length; i++) {
                             inputView[i] = exprBytes[i];
                         }
 
-                        // Evaluate and get result
                         const resultLen = this.wasmInstance.exports.repl_evaluate(exprBytes.length);
 
-                        // Read JSON response from output buffer
-                        const decoder = new TextDecoder();
-                        const jsonString = decoder.decode(new Uint8Array(
-                            this.wasmInstance.exports.memory.buffer,
-                            outputPtr,
-                            resultLen
+                        const jsonString = new TextDecoder().decode(new Uint8Array(
+                            this.wasmInstance.exports.memory.buffer, outputPtr, resultLen
                         ));
                         const result = JSON.parse(jsonString);
 
-                        // Display result
                         if (result.status === 'error') {
-                            term.writeln('\x1b[31m' + result.type + ': ' + result.message + '\x1b[0m');
-                        } else {
-                            term.writeln('\x1b[32m' + result.value + '\x1b[0m');
+                            term.writeln('\x1b[31mError: ' + result.message + '\x1b[0m');
+                        } else if (result.value) {
+                            term.writeln(result.value);
                         }
                     } catch (error) {
                         term.writeln('\x1b[31mError: ' + error.message + '\x1b[0m');
                     }
+                    term.write('\x1b[32m> \x1b[0m');
                 },
             };
 
-            // Initialize REPL when page loads
-            window.addEventListener('DOMContentLoaded', () => {
-                replBridge.init().catch(error => {
-                    console.error('Failed to initialize REPL:', error);
-                    term.writeln('\x1b[31mError: Failed to initialize REPL\x1b[0m');
-                    term.write('\x1b[32m> \x1b[0m');
-                });
+            // Initialize REPL immediately (we're already in a deferred script)
+            replBridge.init().catch(error => {
+                console.error('Failed to initialize REPL:', error);
+                term.writeln('\x1b[31mError: Failed to initialize REPL\x1b[0m');
+                term.write('\x1b[32m> \x1b[0m');
             });
 
             // Handle terminal input
@@ -1257,13 +1366,12 @@
 
                 if (code === 13) { // Enter key
                     term.writeln('');
-
                     if (currentLine.trim()) {
                         replBridge.evaluate(currentLine);
+                    } else {
+                        term.write('\x1b[32m> \x1b[0m');
                     }
-
                     currentLine = '';
-                    term.write('\x1b[32m> \x1b[0m');
                 } else if (code === 3) { // Ctrl+C
                     term.writeln('\x1b[33m^C\x1b[0m');
                     currentLine = '';

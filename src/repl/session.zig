@@ -12,6 +12,7 @@
 //! See docs/decisions/0006-repl-architecture.md for the full design.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 const Pipeline = @import("pipeline.zig").Pipeline;
@@ -36,8 +37,18 @@ const env_mod = @import("../typechecker/env.zig");
 
 const engine_mod = @import("engine.zig");
 const GrinEngine = engine_mod.GrinEngine;
-const ExecResult = engine_mod.ExecResult;
 const ExecError = engine_mod.ExecError;
+
+// On native targets, use the LLVM ORC JIT engine for execution.
+// On WASM, LLVM is unavailable — use the GRIN tree-walking evaluator.
+const is_wasi = builtin.target.os.tag == .wasi;
+const jit_engine_mod = if (!is_wasi) @import("jit_engine.zig") else struct {};
+const JitEngine = if (!is_wasi) jit_engine_mod.JitEngine else void;
+const JitError = if (!is_wasi) jit_engine_mod.JitError else error{};
+
+/// The execution engine type, selected at comptime based on the build target.
+/// Native builds use the LLVM ORC JIT; WASM builds use the GRIN tree-walker.
+const Engine = if (is_wasi) GrinEngine else JitEngine;
 
 const Note = diag_mod.Note;
 
@@ -64,7 +75,7 @@ pub const EvalResult = struct {
 /// Errors that can occur during session processing.
 pub const SessionError = error{
     OutOfMemory,
-} || CompileError || ExecError || error{
+} || CompileError || ExecError || (if (!is_wasi) JitError else error{}) || error{
     InitFailed,
 };
 
@@ -93,7 +104,8 @@ pub const Session = struct {
     pipeline: Pipeline,
 
     // The execution engine for evaluating compiled GRIN programs.
-    engine: GrinEngine,
+    // On native: LLVM ORC JIT. On WASM: GRIN tree-walking evaluator.
+    engine: Engine,
 
     // Cached diagnostics from the most recent compilation attempt.
     // Persists across failed compilations so callers can inspect errors.
@@ -127,6 +139,13 @@ pub const Session = struct {
             return SessionError.OutOfMemory;
         };
 
+        const engine: Engine = if (is_wasi)
+            GrinEngine.init(allocator, io)
+        else
+            JitEngine.init(allocator) catch {
+                return SessionError.InitFailed;
+            };
+
         return .{
             .allocator = allocator,
             .io = io,
@@ -136,7 +155,7 @@ pub const Session = struct {
             .mv_supply = .{},
             .next_file_id = 1,
             .pipeline = Pipeline.init(allocator, io),
-            .engine = GrinEngine.init(allocator, io),
+            .engine = engine,
             .last_diagnostics = .{},
             .accumulated_defs = .{},
         };
@@ -144,6 +163,7 @@ pub const Session = struct {
 
     /// Release all session resources.
     pub fn deinit(self: *Session) void {
+        if (!is_wasi) self.engine.deinit();
         self.last_diagnostics.deinit(self.allocator);
         self.accumulated_defs.deinit(self.allocator);
         self.rename_env.deinit();
