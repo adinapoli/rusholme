@@ -423,6 +423,11 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSmall,
         }),
     });
+    // Reactor mode: the REPL is a long-lived module with exported functions,
+    // not a command that runs once and exits. In reactor mode the entry point
+    // is `_initialize` (no `proc_exit`), which avoids the noreturn trap that
+    // occurs when the JS WASI shim returns from `proc_exit` in command mode.
+    repl_wasm.wasi_exec_model = .reactor;
     // Export all `pub export` symbols so JavaScript can call them.
     repl_wasm.rdynamic = true;
 

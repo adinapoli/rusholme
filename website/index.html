@@ -703,7 +703,7 @@
         <a href="https://github.com/adinapoli/rusholme/issues/459" target="_blank" class="text-white hover:text-[#f7a41d] font-medium">
           #459: e2e runner: exit_code: property has no effect (parsing without wiring)
         </a>
-        <p class="text-xs text-gray-500 mt-1">Closed 2 days ago</p>
+        <p class="text-xs text-gray-500 mt-1">Closed 3 days ago</p>
       </div>
     </div>
                 </div>
@@ -1431,9 +1431,10 @@
                         // Phase 2: wire the real shim now that memory is accessible.
                         wasiStub.impl = createWasiShim(this.wasmInstance, term);
 
-                        // WASI convention: call _start if present, then init the REPL.
-                        if (this.wasmInstance.exports._start) {
-                            this.wasmInstance.exports._start();
+                        // WASI reactor convention: call _initialize if present,
+                        // then init the REPL session.
+                        if (this.wasmInstance.exports._initialize) {
+                            this.wasmInstance.exports._initialize();
                         }
                         this.wasmInstance.exports.repl_init();
 

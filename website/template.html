@@ -1296,9 +1296,10 @@
                         // Phase 2: wire the real shim now that memory is accessible.
                         wasiStub.impl = createWasiShim(this.wasmInstance, term);
 
-                        // WASI convention: call _start if present, then init the REPL.
-                        if (this.wasmInstance.exports._start) {
-                            this.wasmInstance.exports._start();
+                        // WASI reactor convention: call _initialize if present,
+                        // then init the REPL session.
+                        if (this.wasmInstance.exports._initialize) {
+                            this.wasmInstance.exports._initialize();
                         }
                         this.wasmInstance.exports.repl_init();
 
