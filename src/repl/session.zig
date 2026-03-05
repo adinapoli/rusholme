@@ -39,15 +39,10 @@ const engine_mod = @import("engine.zig");
 const GrinEngine = engine_mod.GrinEngine;
 const ExecError = engine_mod.ExecError;
 
-// On native targets, use the LLVM ORC JIT engine for execution.
-// On WASM, LLVM is unavailable — use the GRIN tree-walking evaluator.
 const is_wasi = builtin.target.os.tag == .wasi;
 const jit_engine_mod = if (!is_wasi) @import("jit_engine.zig") else struct {};
 const JitEngine = if (!is_wasi) jit_engine_mod.JitEngine else void;
 const JitError = if (!is_wasi) jit_engine_mod.JitError else error{};
-
-/// The execution engine type, selected at comptime based on the build target.
-/// Native builds use the LLVM ORC JIT; WASM builds use the GRIN tree-walker.
 const Engine = if (is_wasi) GrinEngine else JitEngine;
 
 const Note = diag_mod.Note;
@@ -104,7 +99,6 @@ pub const Session = struct {
     pipeline: Pipeline,
 
     // The execution engine for evaluating compiled GRIN programs.
-    // On native: LLVM ORC JIT. On WASM: GRIN tree-walking evaluator.
     engine: Engine,
 
     // Cached diagnostics from the most recent compilation attempt.
@@ -139,13 +133,6 @@ pub const Session = struct {
             return SessionError.OutOfMemory;
         };
 
-        const engine: Engine = if (is_wasi)
-            GrinEngine.init(allocator, io)
-        else
-            JitEngine.init(allocator) catch {
-                return SessionError.InitFailed;
-            };
-
         return .{
             .allocator = allocator,
             .io = io,
@@ -155,7 +142,7 @@ pub const Session = struct {
             .mv_supply = .{},
             .next_file_id = 1,
             .pipeline = Pipeline.init(allocator, io),
-            .engine = engine,
+            .engine = if (is_wasi) GrinEngine.init(allocator, io) else JitEngine.init(allocator) catch return SessionError.InitFailed,
             .last_diagnostics = .{},
             .accumulated_defs = .{},
         };
@@ -163,7 +150,7 @@ pub const Session = struct {
 
     /// Release all session resources.
     pub fn deinit(self: *Session) void {
-        if (!is_wasi) self.engine.deinit();
+        // GrinEngine has no deinit; only JitEngine does.
         self.last_diagnostics.deinit(self.allocator);
         self.accumulated_defs.deinit(self.allocator);
         self.rename_env.deinit();
@@ -298,9 +285,13 @@ pub const Session = struct {
                 }
 
                 // Add the expression's definition
+                if (process.compile.program.defs.len != 1) {
+                    std.debug.panic("Expression compilation produced {} definitions, expected 1", .{process.compile.program.defs.len});
+                }
                 all_defs[total_defs - 1] = process.compile.program.defs[0];
 
                 const merged_program = grin_ast.Program{ .defs = all_defs };
+
                 const exec = try self.engine.execute(&merged_program);
 
                 self.allocator.free(all_defs);
@@ -427,6 +418,18 @@ test "session: failed input does not corrupt state" {
     // Session should still work after the failed input
     const r = try session.processInput("42");
     try testing.expect(r.compile.kind == .expression);
+}
+
+test "session: putStrLn compiles as expression" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = try Session.init(alloc, testing.io);
+    defer session.deinit();
+
+    const result = try session.processInput("putStrLn \"hello\"");
+    try testing.expect(result.compile.kind == .expression);
 }
 
 test "session: processInput returns diagnostics on error" {

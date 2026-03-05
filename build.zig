@@ -362,6 +362,18 @@ pub fn build(b: *std.Build) void {
     e2e_tests.step.dependOn(b.getInstallStep());
     const run_e2e_tests = b.addRunArtifact(e2e_tests);
 
+    // REPL test runner - TDD tests for REPL behavior
+    const repl_test_module = b.createModule(.{
+        .root_source_file = b.path("tests/repl/repl_tests.zig"),
+        .target = target,
+        .imports = &.{.{ .name = "rusholme", .module = mod }},
+    });
+    const repl_tests = b.addTest(.{
+        .name = "repl-tests",
+        .root_module = repl_test_module,
+    });
+    const run_repl_tests = b.addRunArtifact(repl_tests);
+
     // Diagnostic step — reports per-file parser errors for failing tests.
     // Usage: zig build diag
     const diag_module = b.createModule(.{
@@ -387,6 +399,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_parser_tests.step);
     test_step.dependOn(&run_runtime_tests.step);
     test_step.dependOn(&run_e2e_tests.step);
+    test_step.dependOn(&run_repl_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

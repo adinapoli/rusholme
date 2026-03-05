@@ -76,6 +76,7 @@ pub const repl = struct {
     pub const pipeline = @import("repl/pipeline.zig");
     pub const session = @import("repl/session.zig");
     pub const engine = @import("repl/engine.zig");
+    pub const protocol = @import("repl/protocol.zig");
     // JIT engine requires LLVM — only available on native targets.
     pub const jit_engine = if (builtin.target.os.tag != .wasi) @import("repl/jit_engine.zig") else struct {};
     pub const cli = @import("repl/cli.zig");

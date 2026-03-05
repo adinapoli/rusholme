@@ -43,9 +43,24 @@ const std = @import("std");
 
 const grin = @import("../grin/ast.zig");
 const FieldType = grin.FieldType;
+const rts_node = @import("../rts/node.zig");
 
 const llvm = @import("llvm.zig");
 const c = llvm.c;
+
+// Known Prelude constants with stable unique IDs
+// These are used when variables reference Prelude literals like True, False, etc.
+const known = struct {
+    pub const true_val = 200;     // True
+    pub const false_val = 201;    // False
+    pub const nothing_val = 202;   // Nothing
+    pub const just_val = 203;     // Just
+    pub const left_val = 204;     // Left
+    pub const right_val = 205;    // Right
+    pub const unit_val = 206;     // ()
+    pub const nil_val = 207;      // []
+    pub const cons_val = 208;     // (:)
+};
 
 // ═══════════════════════════════════════════════════════════════════════
 // PrimOp-to-libc Mapping
@@ -657,7 +672,28 @@ pub const GrinTranslator = struct {
             const current_bb = c.LLVMGetInsertBlock(self.builder);
             if (current_bb != null and c.LLVMGetBasicBlockTerminator(current_bb) == null) {
                 if (is_main) {
-                    _ = llvm.buildRet(self.builder, c.LLVMConstInt(llvm.i32Type(), 0, 0));
+                    // REPL mode: main returns i64 (patched in jit_engine.zig).
+                    // Allocate a unit heap node (RtsTag.Unit = 0) and return its pointer as i64
+                    // so formatJitResult can distinguish unit from boolean False.
+                    const rts_alloc_fn = declareRtsAlloc(self.module);
+                    // Use Tag.Unit value (0) not GRIN-level discriminant
+                    const unit_tag = @intFromEnum(rts_node.Tag.Unit);
+                    const unit_disc = c.LLVMConstInt(llvm.i64Type(), unit_tag, 0);
+                    var alloc_args = [_]llvm.Value{
+                        unit_disc, // RtsTag for unit
+                        c.LLVMConstInt(llvm.i32Type(), 0, 0), // n_fields = 0
+                    };
+                    const node_ptr = c.LLVMBuildCall2(
+                        self.builder,
+                        llvm.getFunctionType(rts_alloc_fn),
+                        rts_alloc_fn,
+                        &alloc_args,
+                        2,
+                        "unit",
+                    );
+                    // Convert node pointer to i64 for return
+                    const as_i64 = c.LLVMBuildPtrToInt(self.builder, node_ptr, llvm.i64Type(), "unit_i64");
+                    _ = llvm.buildRet(self.builder, as_i64);
                 } else {
                     _ = llvm.buildRetVoid(self.builder);
                 }
@@ -970,6 +1006,18 @@ pub const GrinTranslator = struct {
                 if (self.params.get(name.unique.value)) |v| break :blk v;
                 // 2. Nullary constructor: emit its tag discriminant as an i64.
                 //    Tracked in: https://github.com/adinapoli/rusholme/issues/410
+                // 2. Check if variable is a known Prelude constant (True, False, None, etc.)
+                //    These have stable unique IDs and should be emitted as literals.
+                switch (name.unique.value) {
+                    known.true_val, known.false_val => break :blk c.LLVMConstInt(llvm.i64Type(), @bitCast(
+                        @as(i64, if (name.unique.value == known.true_val) 1 else 0)
+                    ), 1),
+                    known.unit_val => break :blk c.LLVMConstInt(llvm.i64Type(), 0, 1),
+                    else => {},
+                }
+                
+                // 2b. If not a known literal, check tag discriminant for nullary constructors.
+                //    Tracked in: https://github.com/adinapoli/rusholme/issues/410
                 if (self.tag_table.discriminantByName(name)) |disc| {
                     break :blk c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0);
                 }
@@ -1279,40 +1327,64 @@ pub const GrinTranslator = struct {
         const val_ty = c.LLVMTypeOf(llvm_val);
         const val_kind = c.LLVMGetTypeKind(val_ty);
         const is_int = val_kind == c.LLVMIntegerTypeKind;
+        const is_ptr = val_kind == c.LLVMPointerTypeKind;
 
-        // Only convert if we have an integer and the current function is a
-        // non-main function (which return ptr). Main returns i32 so no conversion.
-        if (is_int and self.current_func != null) {
+        if (self.current_func != null) {
             // Get the function name to check if it's main
             const func_name = c.LLVMGetValueName(self.current_func);
             if (func_name != null) {
                 const name_slice = std.mem.span(func_name);
-                if (!std.mem.eql(u8, name_slice, "main")) {
-                    // Non-main functions return ptr.
-                    // For nullary constructors (ValTag), we need to allocate
-                    // a heap node with just the tag and no fields.
-                    if (val == .ValTag) {
-                        // Allocate a node with tag but 0 fields
-                        const rts_alloc_fn = declareRtsAlloc(self.module);
-                        var alloc_args = [_]llvm.Value{
-                            llvm_val, // tag discriminant as i64
-                            c.LLVMConstInt(llvm.i32Type(), 0, 0), // n_fields = 0
-                        };
-                        const node_ptr = c.LLVMBuildCall2(
-                            self.builder,
-                            llvm.getFunctionType(rts_alloc_fn),
-                            rts_alloc_fn,
-                            &alloc_args,
-                            2,
-                            "boxed_tag",
-                        );
-                        _ = llvm.buildRet(self.builder, node_ptr);
-                        return;
-                    } else {
-                        // For other i64 values, use inttoptr
-                        const converted = c.LLVMBuildIntToPtr(self.builder, llvm_val, ptrType(), "ret_as_ptr");
+                const is_main = std.mem.eql(u8, name_slice, "main");
+
+                if (is_main) {
+                    // REPL mode: main returns i64 (patched in jit_engine.zig).
+                    // Convert return values to i64.
+                    if (is_ptr) {
+                        // Convert pointer to i64 using ptrtoint
+                        const converted = c.LLVMBuildPtrToInt(self.builder, llvm_val, llvm.i64Type(), "ptr_to_i64");
                         _ = llvm.buildRet(self.builder, converted);
                         return;
+                    } else if (is_int) {
+                        // Check if this is i32 - extend to i64
+                        const val_width = c.LLVMGetIntTypeWidth(val_ty);
+                        if (val_width == 32) {
+                            // Zero-extend i32 to i64
+                            const converted = c.LLVMBuildZExt(self.builder, llvm_val, llvm.i64Type(), "i32_to_i64");
+                            _ = llvm.buildRet(self.builder, converted);
+                            return;
+                        }
+                        // Already i64 or larger, just return
+                        _ = llvm.buildRet(self.builder, llvm_val);
+                        return;
+                    }
+                } else {
+                    // Non-main functions return ptr.
+                    if (is_int) {
+                        // For nullary constructors (ValTag), we need to allocate
+                        // a heap node with just the tag and no fields.
+                        if (val == .ValTag) {
+                            // Allocate a node with tag but 0 fields
+                            const rts_alloc_fn = declareRtsAlloc(self.module);
+                            var alloc_args = [_]llvm.Value{
+                                llvm_val, // tag discriminant as i64
+                                c.LLVMConstInt(llvm.i32Type(), 0, 0), // n_fields = 0
+                            };
+                            const node_ptr = c.LLVMBuildCall2(
+                                self.builder,
+                                llvm.getFunctionType(rts_alloc_fn),
+                                rts_alloc_fn,
+                                &alloc_args,
+                                2,
+                                "boxed_tag",
+                            );
+                            _ = llvm.buildRet(self.builder, node_ptr);
+                            return;
+                        } else {
+                            // For other i64 values, use inttoptr
+                            const converted = c.LLVMBuildIntToPtr(self.builder, llvm_val, ptrType(), "ret_as_ptr");
+                            _ = llvm.buildRet(self.builder, converted);
+                            return;
+                        }
                     }
                 }
             }

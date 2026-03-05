@@ -49,6 +49,8 @@ pub const JitError = error{
     OutOfMemory,
     /// RTS symbol registration failed.
     RtsRegistrationFailed,
+    /// Value is not a valid heap node (raw pointer to non-heap memory).
+    InvalidNode,
 };
 
 // ── JIT Engine ────────────────────────────────────────────────────────
@@ -143,7 +145,11 @@ pub const JitEngine = struct {
 
         var llvm_module: llvm.Module = null;
         if (c.LLVMParseIRInContext(ctx, buf, &llvm_module, &err_msg) != 0) {
-            if (err_msg) |msg| c.LLVMDisposeMessage(msg);
+            // Print the LLVM error message before disposing
+            if (err_msg) |msg| {
+                std.debug.print("LLVM IR Parse Error: {s}\n", .{msg});
+                c.LLVMDisposeMessage(msg);
+            }
             c.LLVMOrcDisposeThreadSafeContext(ts_ctx);
             return JitError.TranslationFailed;
         }
@@ -286,6 +292,12 @@ fn patchEntryPointName(allocator: Allocator, program: *const grin_ast.Program) A
 /// aligned) and try to interpret it as a node. If that fails, we
 /// treat it as a plain integer.
 fn formatJitResult(allocator: Allocator, raw: i64) Allocator.Error![]const u8 {
+    // Check if this is a boolean literal (encoded as 0 or 1 directly, not a heap node)
+    // Booleans in GRIN are unboxed i64 values where 1 = True and 0 = False
+    // (from grin_to_llvm.zig where true_val maps to 1 and false_val maps to 0)
+    if (raw == 1) return allocator.dupe(u8, "True");
+    if (raw == 0) return allocator.dupe(u8, "False");
+
     // Check if the result is a valid-looking pointer to a heap node.
     // Heap nodes are allocated by rts_alloc and have a specific layout
     // with a tag in the first 8 bytes.
@@ -295,23 +307,111 @@ fn formatJitResult(allocator: Allocator, raw: i64) Allocator.Error![]const u8 {
         // Try to interpret as a heap node pointer.
         const node_ptr: *const rts_node.Node = @ptrFromInt(as_usize);
 
-        // Validate: check that tag and n_fields look reasonable.
-        // Heap nodes have tag >= 0 and n_fields < some reasonable bound.
-        if (node_ptr.n_fields < 1024) {
+        // Quick validation: check if tag in reasonable range before formatting
+        const tag_int: u64 = @intFromEnum(node_ptr.tag);
+        if (tag_int <= 0x10000 and node_ptr.n_fields <= 1024) {
+            // Looks like a valid heap node format it
             return formatNode(allocator, node_ptr);
         }
     }
 
-    // Plain integer literal.
+    // If not a heap node, check if it looks like a C string (NUL-terminated)
+    // Global string literals from LLVM GlobalStringPtr return as raw pointers
+    // Only attempt to read if the address is in a reasonable range (not too small like an integer)
+    const MIN_VALID_PTR: usize = 0x1000; // Typical page boundary, integers 0-4095 are likely literal values
+    if (as_usize >= MIN_VALID_PTR) {
+        const str_ptr: [*]const u8 = @ptrFromInt(as_usize);
+        
+        // Check first byte for printable ASCII
+        if (str_ptr[0] >= 32 and str_ptr[0] <= 126) {
+            var len: usize = 0;
+            const max_len: usize = 256; // Reasonable safety limit
+            
+            // Read until NUL or we hit non-printable bytes
+            while (len < max_len) {
+                const byte = str_ptr[len];
+                if (byte == 0) break; // NUL terminator found
+                if (byte < 32 or byte > 126) break; // Non-printable
+                len += 1;
+            }
+            
+            // If we found a reasonable-looking string
+            if (len > 0 and len < max_len and str_ptr[len] == 0) {
+                const str_slice = str_ptr[0..len];
+                return std.fmt.allocPrint(allocator, "\"{s}\"", .{str_slice});
+            }
+        }
+    }
+
+    // Not a valid heap node - treat as plain integer literal.
     return std.fmt.allocPrint(allocator, "{d}", .{raw});
 }
 
+// Known Prelude constant tags for boolean/unit formatting
+// These match the unique IDs from grin_to_llvm.zig's `known` struct
+const KNOWN_TRUE_ID: u64 = 200;
+const KNOWN_FALSE_ID: u64 = 201;
+const KNOWN_UNIT_ID: u64 = 206;
+
 /// Format a heap node as a human-readable string.
-fn formatNode(allocator: Allocator, node: *const rts_node.Node) Allocator.Error![]const u8 {
+/// Assumes the caller has already validated that this is a valid heap node
+/// (tag in reasonable range, n_fields reasonable).
+fn formatNode(allocator: Allocator, node: *const rts_node.Node) ![]const u8 {
+    const tag_int: u64 = @intFromEnum(node.tag);
+
+    // Caller should have validated, but if we somehow got here with invalid data,
+    // conservatively return a generic representation
+    if (tag_int > 0x10000 or node.n_fields > 1024) {
+        return std.fmt.allocPrint(allocator, "<invalid node tag={d}>", .{tag_int});
+    }
+
+    // Handle unit (RtsTag.Unit = 0) - display as empty string
+    // Direct tag value comparison since node.tag was set by LLVM code
+    if (tag_int == @intFromEnum(rts_node.Tag.Unit)) {
+        return allocator.dupe(u8, "");
+    }
+
+    // Check if the RtsTag is the user-defined Data type
+    // For these, the actual constructor discriminant is stored in the first field
+    // (tracked in GRIN tag table as unique IDs like 200=True, 201=False, etc.)
+    if (node.tag == .Data) {
+        // Try to read the actual discriminant from the first field
+        if (node.n_fields >= 1) {
+            const disc = rts_node.rts_load_field(node, 0);
+            // Handle boolean values by their GRIN-level discriminant
+            if (disc == KNOWN_TRUE_ID) return allocator.dupe(u8, "True");
+            if (disc == KNOWN_FALSE_ID) return allocator.dupe(u8, "False");
+            if (disc == KNOWN_UNIT_ID) return allocator.dupe(u8, "");
+        }
+    }
+
+    // Handle String nodes - read the string content from the stored pointer
+    if (node.tag == .String and node.n_fields >= 1) {
+        const str_ptr = rts_node.stringValue(node);
+        // Get C string length
+        var len: usize = 0;
+        while (str_ptr[len] != 0) : (len += 1) {}
+        // Format with quotes and escape
+        const str_slice = str_ptr[0..len];
+        var result = try std.ArrayList(u8).initCapacity(allocator, len + 10);
+        try result.append(allocator, '"');
+        try result.appendSlice(allocator, str_slice);
+        try result.append(allocator, '"');
+        return result.toOwnedSlice(allocator);
+    }
+
+    // Handle boolean values using discriminant from tag table
+    // True has stable ID 200, False has ID 201
+    if (tag_int == KNOWN_TRUE_ID) {
+        return allocator.dupe(u8, "True");
+    }
+    if (tag_int == KNOWN_FALSE_ID) {
+        return allocator.dupe(u8, "False");
+    }
+
     // For nullary constructors, just print the tag number for now.
     // A full implementation would map tag IDs back to constructor names,
     // but that requires threading the tag table from compilation.
-    const tag_int = @intFromEnum(node.tag);
     if (node.n_fields == 0) {
         return std.fmt.allocPrint(allocator, "<constructor tag={d}>", .{tag_int});
     }
