@@ -679,7 +679,7 @@
         <a href="https://github.com/adinapoli/rusholme/issues/464" target="_blank" class="text-white hover:text-[#f7a41d] font-medium">
           #464: Do notation desugaring: UnsupportedGrinVal compilation error
         </a>
-        <p class="text-xs text-gray-500 mt-1">Closed 2 days ago</p>
+        <p class="text-xs text-gray-500 mt-1">Closed 3 days ago</p>
       </div>
     </div><div class="flex items-start gap-3">
       <div class="w-6 h-6 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
@@ -1284,7 +1284,7 @@
                         const bytes = new Uint8Array(wasmInstance.exports.memory.buffer, bufPtr, bufLen);
                         const text = new TextDecoder().decode(bytes);
                         if (fd === 1 || fd === 2) {
-                            term.writeln(text);
+                            term.write(text);
                         }
                         totalWritten += bufLen;
                     }

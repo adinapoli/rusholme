@@ -12,7 +12,6 @@ pub const buffer = @import("buffer.zig");
 pub const eval_mod = @import("eval.zig");
 const Session = @import("session.zig").Session;
 const protocol = @import("protocol.zig");
-const Status = protocol.Status;
 
 // ── Global state ──────────────────────────────────────────────────────
 

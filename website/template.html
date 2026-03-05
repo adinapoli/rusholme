@@ -1149,7 +1149,7 @@
                         const bytes = new Uint8Array(wasmInstance.exports.memory.buffer, bufPtr, bufLen);
                         const text = new TextDecoder().decode(bytes);
                         if (fd === 1 || fd === 2) {
-                            term.writeln(text);
+                            term.write(text);
                         }
                         totalWritten += bufLen;
                     }
