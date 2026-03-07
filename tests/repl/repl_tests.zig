@@ -142,3 +142,86 @@ test "repl: putStrLn \"hello\" returns unit" {
     // Result value should be unit (empty string for display)
     try testing.expectEqualStrings("", result.value);
 }
+
+// ── Integration tests for let-defined functions with IO ───────────────
+
+test "repl: define function then use with putStrLn" {
+    // This tests the issue reported: putStrLn (f "hello") where f was defined earlier
+    // Previously caused ModuleAddFailed error due to premature context disposal
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Define a simple function
+    const decl_result = evaluate(alloc, &session, "id x = x") catch |err| {
+        std.debug.panic("evaluate failed: {}", .{err});
+    };
+    try testing.expectEqual(Status.silent, decl_result.status);
+
+    // Use it with putStrLn
+    const use_result = evaluate(alloc, &session, "putStrLn (id \"hello\")") catch |err| {
+        std.debug.panic("evaluate failed: {}", .{err});
+    };
+    try testing.expectEqual(Status.success, use_result.status);
+    try testing.expectEqualStrings("", use_result.value);
+}
+
+test "repl: multiple function definitions" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Define multiple functions
+    const decl1 = evaluate(alloc, &session, "f x = x") catch |err| {
+        std.debug.panic("evaluate failed: {}", .{err});
+    };
+    try testing.expectEqual(Status.silent, decl1.status);
+
+    const decl2 = evaluate(alloc, &session, "g y = y") catch |err| {
+        std.debug.panic("evaluate failed: {}", .{err});
+    };
+    try testing.expectEqual(Status.silent, decl2.status);
+
+    // Use both
+    const use = evaluate(alloc, &session, "f (g 42)") catch |err| {
+        std.debug.panic("evaluate failed: {}", .{err});
+    };
+    try testing.expectEqual(Status.success, use.status);
+    try testing.expectEqualStrings("42", use.value);
+}
+
+test "repl: function call after declaration accumulates correctly" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Define identity function
+    const decl_result = evaluate(alloc, &session, "id x = x") catch |err| {
+        std.debug.panic("evaluate failed: {}", .{err});
+    };
+    try testing.expectEqual(Status.silent, decl_result.status);
+
+    // Use it multiple times - each should work without failing
+    for ([_]u8{0}**3) |_| {
+        const use_result = evaluate(alloc, &session, "id 99") catch |err| {
+            std.debug.panic("evaluate failed: {}", .{err});
+        };
+        try testing.expectEqual(Status.success, use_result.status);
+        try testing.expectEqualStrings("99", use_result.value);
+    }
+}

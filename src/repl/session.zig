@@ -265,39 +265,48 @@ pub const Session = struct {
     /// the GRIN program and returns the formatted result value.
     ///
     /// For declarations: compiles through the pipeline (accumulating
-    /// bindings in the session state) and returns a confirmation.
+    /// bindings in the session state) and adds the definitions to the
+    /// JIT engine so subsequent expressions can reference them.
     pub fn eval(self: *Session, input: []const u8) SessionError!EvalResult {
         const process = try self.processInput(input);
 
         switch (process.compile.kind) {
             .expression => {
-                // Build a complete program with accumulated definitions
-                // and the current expression for evaluation.
-                // We allocate an array that includes both accumulated defs
-                // and the current expression's def.
-                const total_defs = self.accumulated_defs.items.len + 1;
-                const all_defs = try self.allocator.alloc(grin_ast.Def, total_defs);
-                errdefer self.allocator.free(all_defs);
+                if (is_wasi) {
+                    // WASM path: merge accumulated defs with the expression
+                    // program, since the GRIN tree-walker needs all defs in
+                    // a single program.
+                    const total_defs = self.accumulated_defs.items.len + 1;
+                    const all_defs = try self.allocator.alloc(grin_ast.Def, total_defs);
+                    errdefer self.allocator.free(all_defs);
 
-                // Copy accumulated definitions
-                for (self.accumulated_defs.items, 0..) |def, i| {
-                    all_defs[i] = def;
+                    for (self.accumulated_defs.items, 0..) |def, i| {
+                        all_defs[i] = def;
+                    }
+
+                    if (process.compile.program.defs.len != 1) {
+                        std.debug.panic("Expression compilation produced {} definitions, expected 1", .{process.compile.program.defs.len});
+                    }
+                    all_defs[total_defs - 1] = process.compile.program.defs[0];
+
+                    const merged_program = grin_ast.Program{ .defs = all_defs };
+                    const exec = try self.engine.execute(&merged_program);
+                    self.allocator.free(all_defs);
+                    return .{ .value = exec.value };
+                } else {
+                    // JIT path: pass only the expression's def. Previously-
+                    // declared functions are already in the JIT's main dylib
+                    // and will be resolved automatically by the ORC linker.
+                    const exec = try self.engine.execute(&process.compile.program);
+                    return .{ .value = exec.value };
                 }
-
-                // Add the expression's definition
-                if (process.compile.program.defs.len != 1) {
-                    std.debug.panic("Expression compilation produced {} definitions, expected 1", .{process.compile.program.defs.len});
-                }
-                all_defs[total_defs - 1] = process.compile.program.defs[0];
-
-                const merged_program = grin_ast.Program{ .defs = all_defs };
-
-                const exec = try self.engine.execute(&merged_program);
-
-                self.allocator.free(all_defs);
-                return .{ .value = exec.value };
             },
             .declaration => {
+                if (!is_wasi) {
+                    // JIT path: add declarations to the JIT engine so
+                    // their symbols are available for future expressions.
+                    try self.engine.addDeclarations(&process.compile.program);
+                }
                 return .{ .value = "" };
             },
         }

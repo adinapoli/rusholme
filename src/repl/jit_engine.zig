@@ -57,12 +57,18 @@ pub const JitError = error{
 
 /// Execution engine backed by LLVM ORC LLJIT.
 ///
-/// For each program, translates GRIN → LLVM IR, feeds the IR module
-/// to LLJIT, resolves the entry-point symbol, calls it, and formats
-/// the result.
+/// Manages JIT compilation and execution for the REPL. Declarations are
+/// added permanently to the main JITDylib; expressions use unique entry
+/// point names and resource trackers for per-evaluation cleanup.
 pub const JitEngine = struct {
     allocator: Allocator,
     jit: llvm.OrcLLJITRef,
+    /// Monotonically increasing counter for generating unique entry
+    /// point names ("repl_expr_0", "repl_expr_1", ...).
+    eval_counter: u64 = 0,
+    /// Buffer for formatting the entry point name as a null-terminated
+    /// C string for LLVM symbol lookup.
+    entry_name_buf: [64]u8 = undefined,
 
     /// Create a new JIT engine backed by LLVM ORC LLJIT.
     pub fn init(allocator: Allocator) JitError!JitEngine {
@@ -93,45 +99,123 @@ pub const JitEngine = struct {
         }
     }
 
-    /// Translate a GRIN program to LLVM IR, JIT-compile it, execute the
-    /// entry point, and return the formatted result.
-    pub fn execute(self: *JitEngine, program: *const grin_ast.Program) JitError!ExecResult {
-        // 1. Translate GRIN → LLVM IR string.
-        //    We use a temporary GrinTranslator to produce the IR text,
-        //    then parse it into a fresh module owned by a ThreadSafeContext.
-        //    This avoids a double-free: GrinTranslator.deinit() destroys its
-        //    own LLVM context (and any modules created in it), but LLJIT also
-        //    takes ownership of the module. By going through IR text we
-        //    cleanly decouple the two ownership domains.
-        //
-        //    Before translating, we rename the REPL entry point to "main"
-        //    so the translator emits the correct C-ABI return type (i32).
-        //    The translator special-cases "main" but treats other zero-param
-        //    functions as void-returning, which is incorrect for our use case.
-        //    tracked in: https://github.com/adinapoli/rusholme/issues/484
-        const patched_program = patchEntryPointName(self.allocator, program) catch {
-            return JitError.OutOfMemory;
-        };
+    /// Add declaration definitions permanently to the JIT's main dylib.
+    ///
+    /// These symbols persist across REPL inputs so that subsequent
+    /// expressions can reference user-defined functions and data types.
+    pub fn addDeclarations(self: *JitEngine, program: *const grin_ast.Program) JitError!void {
+        if (program.defs.len == 0) return;
 
         var translator = GrinTranslator.init(self.allocator);
         defer translator.deinit();
 
-        const raw_ir = translator.translateProgram(patched_program) catch {
+        const ir_text = translator.translateProgram(program.*) catch {
             return JitError.TranslationFailed;
-        };
-        defer self.allocator.free(raw_ir);
-
-        // The GRIN-to-LLVM translator declares main as returning i32 but
-        // emits `ret i64 <val>` for integer literals — a type mismatch that
-        // the textual IR parser rejects.  We patch the IR to use i64 return,
-        // matching the actual ret instructions.
-        // tracked in: https://github.com/adinapoli/rusholme/issues/484
-        const ir_text = std.mem.replaceOwned(u8, self.allocator, raw_ir, "define i32 @main()", "define i64 @main()") catch {
-            return JitError.OutOfMemory;
         };
         defer self.allocator.free(ir_text);
 
-        // 2. Create a thread-safe context and parse the IR into it.
+        const ts_mod = try self.parseIrToThreadSafeModule(ir_text);
+
+        const main_dylib = c.LLVMOrcLLJITGetMainJITDylib(self.jit);
+        const add_err = c.LLVMOrcLLJITAddLLVMIRModule(self.jit, main_dylib, ts_mod);
+        if (add_err != null) {
+            c.LLVMConsumeError(add_err);
+            return JitError.ModuleAddFailed;
+        }
+    }
+
+    /// Translate a GRIN expression program to LLVM IR, JIT-compile it,
+    /// execute the entry point, and return the formatted result.
+    ///
+    /// Each call uses a unique entry point name and a resource tracker
+    /// so the expression's symbols are removed after execution. This
+    /// allows multiple expressions to be evaluated without symbol
+    /// collisions.
+    pub fn execute(self: *JitEngine, program: *const grin_ast.Program) JitError!ExecResult {
+        // 1. Generate a unique entry point name for this evaluation.
+        const entry_name = std.fmt.bufPrint(&self.entry_name_buf, "repl_expr_{d}", .{self.eval_counter}) catch {
+            return JitError.OutOfMemory;
+        };
+        self.entry_name_buf[entry_name.len] = 0;
+        const entry_name_z: [:0]const u8 = self.entry_name_buf[0..entry_name.len :0];
+        self.eval_counter += 1;
+
+        // 2. Patch the GRIN program: rename replExpr__ to the unique name.
+        const patched_program = patchEntryPointName(self.allocator, program, entry_name) catch {
+            return JitError.OutOfMemory;
+        };
+
+        // 3. Translate GRIN → LLVM IR text.
+        //    We use a temporary GrinTranslator to produce IR text, then
+        //    parse it into a fresh module owned by a ThreadSafeContext.
+        //    This avoids a double-free: GrinTranslator.deinit() destroys
+        //    its own LLVM context, but LLJIT also takes ownership of the
+        //    module. Going through IR text decouples the two ownership
+        //    domains.
+        var translator = GrinTranslator.init(self.allocator);
+        defer translator.deinit();
+        translator.repl_entry_point = entry_name;
+
+        const ir_text = translator.translateProgram(patched_program) catch {
+            return JitError.TranslationFailed;
+        };
+        defer self.allocator.free(ir_text);
+
+        // 4. Parse IR and add to JIT with a resource tracker.
+        const ts_mod = try self.parseIrToThreadSafeModule(ir_text);
+
+        const main_dylib = c.LLVMOrcLLJITGetMainJITDylib(self.jit);
+        const tracker = c.LLVMOrcJITDylibCreateResourceTracker(main_dylib);
+
+        const add_err = c.LLVMOrcLLJITAddLLVMIRModuleWithRT(self.jit, tracker, ts_mod);
+        if (add_err != null) {
+            c.LLVMConsumeError(add_err);
+            c.LLVMOrcReleaseResourceTracker(tracker);
+            return JitError.ModuleAddFailed;
+        }
+
+        // 5. Look up the unique entry point.
+        var addr: llvm.OrcExecutorAddress = 0;
+        const lookup_err = c.LLVMOrcLLJITLookup(self.jit, &addr, entry_name_z);
+        if (lookup_err != null) {
+            c.LLVMConsumeError(lookup_err);
+            // Clean up before returning.
+            const rm_err = c.LLVMOrcResourceTrackerRemove(tracker);
+            if (rm_err != null) c.LLVMConsumeError(rm_err);
+            c.LLVMOrcReleaseResourceTracker(tracker);
+            return JitError.EntryPointNotFound;
+        }
+
+        // 6. Call the entry point. REPL entry points return i64 (either
+        //    a literal value or a pointer to a heap node cast to i64).
+        const EntryFn = *const fn () callconv(.c) i64;
+        const entry_fn: EntryFn = @ptrFromInt(addr);
+        const raw_result = entry_fn();
+
+        // 7. Format the result before cleaning up.
+        const formatted = formatJitResult(self.allocator, raw_result) catch {
+            const rm_err = c.LLVMOrcResourceTrackerRemove(tracker);
+            if (rm_err != null) c.LLVMConsumeError(rm_err);
+            c.LLVMOrcReleaseResourceTracker(tracker);
+            return JitError.FormatError;
+        };
+
+        // 8. Remove the expression's symbols from the dylib. The result
+        //    has already been captured as a formatted string, so the
+        //    JIT'd code is no longer needed.
+        const rm_err = c.LLVMOrcResourceTrackerRemove(tracker);
+        if (rm_err != null) c.LLVMConsumeError(rm_err);
+        c.LLVMOrcReleaseResourceTracker(tracker);
+
+        return .{ .value = formatted };
+    }
+
+    /// Parse LLVM IR text into a ThreadSafeModule ready for LLJIT.
+    ///
+    /// Sets the data layout and target triple to match the JIT engine.
+    /// The returned ThreadSafeModule takes ownership of the underlying
+    /// LLVM module and context.
+    fn parseIrToThreadSafeModule(self: *JitEngine, ir_text: []const u8) JitError!llvm.OrcThreadSafeModuleRef {
         const ts_ctx = c.LLVMOrcCreateNewThreadSafeContext();
         if (ts_ctx == null) return JitError.ContextCreationFailed;
 
@@ -145,7 +229,6 @@ pub const JitEngine = struct {
 
         var llvm_module: llvm.Module = null;
         if (c.LLVMParseIRInContext(ctx, buf, &llvm_module, &err_msg) != 0) {
-            // Print the LLVM error message before disposing
             if (err_msg) |msg| {
                 std.debug.print("LLVM IR Parse Error: {s}\n", .{msg});
                 c.LLVMDisposeMessage(msg);
@@ -154,47 +237,17 @@ pub const JitEngine = struct {
             return JitError.TranslationFailed;
         }
 
-        // Set the module's data layout and triple to match the JIT.
         const data_layout_str = c.LLVMOrcLLJITGetDataLayoutStr(self.jit);
         c.LLVMSetDataLayout(llvm_module, data_layout_str);
         const triple = c.LLVMGetDefaultTargetTriple();
         defer c.LLVMDisposeMessage(triple);
         c.LLVMSetTarget(llvm_module, triple);
 
-        // 3. Wrap in a thread-safe module and add to JIT.
-        //    LLVMOrcCreateNewThreadSafeModule takes ownership of both the
-        //    module and the context — do not dispose them after this call.
         const ts_mod = c.LLVMOrcCreateNewThreadSafeModule(llvm_module, ts_ctx);
-        c.LLVMOrcDisposeThreadSafeContext(ts_ctx);
-
-        const main_dylib = c.LLVMOrcLLJITGetMainJITDylib(self.jit);
-        const add_err = c.LLVMOrcLLJITAddLLVMIRModule(self.jit, main_dylib, ts_mod);
-        if (add_err != null) {
-            c.LLVMConsumeError(add_err);
-            return JitError.ModuleAddFailed;
-        }
-
-        // 4. Look up the entry point. After patching, the entry point is
-        //    always named "main".
-        var addr: llvm.OrcExecutorAddress = 0;
-        const lookup_err = c.LLVMOrcLLJITLookup(self.jit, &addr, "main");
-        if (lookup_err != null) {
-            c.LLVMConsumeError(lookup_err);
-            return JitError.EntryPointNotFound;
-        }
-
-        // 4. Call the entry point. GRIN functions return i64 (either a
-        //    literal value or a pointer to a heap node cast to i64).
-        const EntryFn = *const fn () callconv(.c) i64;
-        const entry_fn: EntryFn = @ptrFromInt(addr);
-        const raw_result = entry_fn();
-
-        // 5. Format the result.
-        const formatted = formatJitResult(self.allocator, raw_result) catch {
-            return JitError.FormatError;
-        };
-
-        return .{ .value = formatted };
+        // NOTE: Do NOT dispose the ThreadSafeContext here. The ThreadSafeModule
+        // takes ownership and will clean it up when the JIT disposes the module.
+        // Disposing it here causes a use-after-free when the JIT tries to compile.
+        return ts_mod;
     }
 
     /// Register the RTS functions as absolute symbols in the JIT's main
@@ -212,7 +265,6 @@ pub const JitEngine = struct {
             .{ .name = "rts_store", .addr = @intFromPtr(&rts_node.rts_store) },
         };
 
-        // Also register IO functions.
         const rts_io = @import("../rts/io.zig");
         const io_symbols = [_]Symbol{
             .{ .name = "rts_putStrLn", .addr = @intFromPtr(&rts_io.rts_putStrLn) },
@@ -257,22 +309,17 @@ pub const JitEngine = struct {
             return JitError.RtsRegistrationFailed;
         }
     }
-
 };
 
-/// Create a copy of the GRIN program with `replExpr__` renamed to `main`.
-///
-/// The GRIN-to-LLVM translator special-cases "main" to use the C ABI
-/// (i32 return type). Other zero-param functions get void return, which
-/// is incorrect for the REPL entry point. This function works around
-/// that limitation by renaming the entry point before translation.
-fn patchEntryPointName(allocator: Allocator, program: *const grin_ast.Program) Allocator.Error!grin_ast.Program {
+/// Create a copy of the GRIN program with `replExpr__` renamed to the
+/// given target name. The unique ID is preserved.
+fn patchEntryPointName(allocator: Allocator, program: *const grin_ast.Program, target_name: []const u8) Allocator.Error!grin_ast.Program {
     const new_defs = try allocator.alloc(grin_ast.Def, program.defs.len);
     for (program.defs, 0..) |def, i| {
         new_defs[i] = def;
         if (std.mem.eql(u8, def.name.base, "replExpr__")) {
             new_defs[i].name = .{
-                .base = "main",
+                .base = target_name,
                 .unique = def.name.unique,
             };
         }

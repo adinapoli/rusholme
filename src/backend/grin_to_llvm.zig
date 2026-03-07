@@ -511,6 +511,12 @@ pub const GrinTranslator = struct {
     /// Buffer for formatting GRIN names as null-terminated C strings.
     /// Used by formatName() to create "base_unique" style names.
     name_buf: [256]u8 align(16) = undefined,
+    /// When set, the translator treats a function whose base name matches
+    /// this string the same way it treats "main" — using i64 return type
+    /// and emitting the name without a unique suffix. This allows the REPL
+    /// JIT engine to use per-evaluation entry point names (e.g.
+    /// "repl_expr_0", "repl_expr_1") instead of always colliding on "main".
+    repl_entry_point: ?[]const u8 = null,
 
     pub fn init(allocator: std.mem.Allocator) GrinTranslator {
         llvm.initialize();
@@ -534,6 +540,20 @@ pub const GrinTranslator = struct {
         llvm.disposeBuilder(self.builder);
         // Disposing the context also disposes modules created within it.
         llvm.disposeContext(self.ctx);
+    }
+
+    /// Returns true if `base` is an entry-point name — either the standard
+    /// "main" or the REPL-specific entry point set via `repl_entry_point`.
+    fn isEntryPoint(self: *const GrinTranslator, base: []const u8) bool {
+        if (std.mem.eql(u8, base, "main")) return true;
+        if (self.repl_entry_point) |ep| return std.mem.eql(u8, base, ep);
+        return false;
+    }
+
+    /// Like `isEntryPoint`, but checks the LLVM function name string
+    /// (a null-terminated C string obtained from `LLVMGetValueName`).
+    fn isEntryPointFunc(self: *const GrinTranslator, func_name: []const u8) bool {
+        return self.isEntryPoint(func_name);
     }
 
     /// Translate the entire GRIN program into the LLVM module.
@@ -616,14 +636,17 @@ pub const GrinTranslator = struct {
     }
 
     fn translateDef(self: *GrinTranslator, def: grin.Def) TranslationError!void {
-        // For M1, `main` follows the C ABI (i32 return, no params).
+        // Entry-point functions ("main" or REPL entry points like "repl_expr_0")
+        // use a specific return type: native `main` returns i32 (C ABI),
+        // REPL entry points return i64 (raw value or heap pointer).
         // All other user-defined functions use an opaque `ptr` representation
         // for parameters and return values — GRIN has no type information at
         // this stage and all heap values are pointers.
-        const is_main = std.mem.eql(u8, def.name.base, "main");
+        const is_entry = self.isEntryPoint(def.name.base);
+        const is_repl_entry = if (self.repl_entry_point) |ep| std.mem.eql(u8, def.name.base, ep) else false;
         const has_params = def.params.len > 0;
-        const value_type = if (is_main) llvm.i32Type() else ptrType();
-        const ret_type = if (is_main) llvm.i32Type() else if (has_params) value_type else llvm.voidType();
+        const value_type = if (is_entry) (if (is_repl_entry) llvm.i64Type() else llvm.i32Type()) else ptrType();
+        const ret_type = if (is_entry) value_type else if (has_params) value_type else llvm.voidType();
 
         // Parameter types: i32 for main (no params), ptr for all others.
         var param_types: [8]llvm.Type = undefined;
@@ -653,9 +676,9 @@ pub const GrinTranslator = struct {
         }
 
         // Translate the body and capture its value if needed.
-        // For non-main functions with parameters, we need to return the body's value.
+        // For non-entry functions with parameters, we need to return the body's value.
         // See: https://github.com/adinapuli/rusholme/issues/449
-        if (!is_main and has_params) {
+        if (!is_entry and has_params) {
             const body_val = try self.translateExprToValue(def.body, "result");
             const current_bb = c.LLVMGetInsertBlock(self.builder);
             if (current_bb != null and c.LLVMGetBasicBlockTerminator(current_bb) == null) {
@@ -671,16 +694,16 @@ pub const GrinTranslator = struct {
             // block does not already have one (a Return expr may have emitted it).
             const current_bb = c.LLVMGetInsertBlock(self.builder);
             if (current_bb != null and c.LLVMGetBasicBlockTerminator(current_bb) == null) {
-                if (is_main) {
-                    // REPL mode: main returns i64 (patched in jit_engine.zig).
-                    // Allocate a unit heap node (RtsTag.Unit = 0) and return its pointer as i64
+                if (is_entry) {
+                    // Entry-point functions return a unit heap node when
+                    // the body doesn't explicitly return. Allocate a unit
+                    // node (RtsTag.Unit = 0) and return its pointer as i64
                     // so formatJitResult can distinguish unit from boolean False.
                     const rts_alloc_fn = declareRtsAlloc(self.module);
-                    // Use Tag.Unit value (0) not GRIN-level discriminant
                     const unit_tag = @intFromEnum(rts_node.Tag.Unit);
                     const unit_disc = c.LLVMConstInt(llvm.i64Type(), unit_tag, 0);
                     var alloc_args = [_]llvm.Value{
-                        unit_disc, // RtsTag for unit
+                        unit_disc,
                         c.LLVMConstInt(llvm.i32Type(), 0, 0), // n_fields = 0
                     };
                     const node_ptr = c.LLVMBuildCall2(
@@ -691,7 +714,6 @@ pub const GrinTranslator = struct {
                         2,
                         "unit",
                     );
-                    // Convert node pointer to i64 for return
                     const as_i64 = c.LLVMBuildPtrToInt(self.builder, node_ptr, llvm.i64Type(), "unit_i64");
                     _ = llvm.buildRet(self.builder, as_i64);
                 } else {
@@ -1330,15 +1352,13 @@ pub const GrinTranslator = struct {
         const is_ptr = val_kind == c.LLVMPointerTypeKind;
 
         if (self.current_func != null) {
-            // Get the function name to check if it's main
             const func_name = c.LLVMGetValueName(self.current_func);
             if (func_name != null) {
                 const name_slice = std.mem.span(func_name);
-                const is_main = std.mem.eql(u8, name_slice, "main");
+                const is_entry = self.isEntryPointFunc(name_slice);
 
-                if (is_main) {
-                    // REPL mode: main returns i64 (patched in jit_engine.zig).
-                    // Convert return values to i64.
+                if (is_entry) {
+                    // Entry-point functions return i64 (raw value or heap pointer).
                     if (is_ptr) {
                         // Convert pointer to i64 using ptrtoint
                         const converted = c.LLVMBuildPtrToInt(self.builder, llvm_val, llvm.i64Type(), "ptr_to_i64");
@@ -1396,14 +1416,14 @@ pub const GrinTranslator = struct {
     /// Format a GRIN Name as a null-terminated C string using the translator's buffer.
     ///
     /// Special cases:
-    ///   - "main" (any unique): use just "main" for C ABI entry point
-    ///   - Everything else: use "base_unique" including unique 0
+    ///   - Entry-point names ("main" or the REPL entry point): use the base
+    ///     name without a unique suffix so the linker/JIT can find them.
+    ///   - Everything else: use "base_unique" including unique 0.
     fn formatName(self: *GrinTranslator, name: grin.Name) [:0]const u8 {
-        // Special case: "main" needs to map to C ABI entry point for the linker.
-        // The unique value is ignored for this entry point.
-        if (std.mem.eql(u8, name.base, "main")) {
-            const len = @min(4, self.name_buf.len - 1);
-            @memcpy(self.name_buf[0..len], "main");
+        // Entry-point names are emitted verbatim (no _unique suffix).
+        if (self.isEntryPoint(name.base)) {
+            const len = @min(name.base.len, self.name_buf.len - 1);
+            @memcpy(self.name_buf[0..len], name.base[0..len]);
             self.name_buf[len] = 0;
             return self.name_buf[0..len :0];
         }
