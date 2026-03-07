@@ -157,9 +157,13 @@ pub const JitEngine = struct {
 
         // 3. Wrap in a thread-safe module and add to JIT.
         //    LLVMOrcCreateNewThreadSafeModule takes ownership of both the
-        //    module and the context — do not dispose them after this call.
+        //    module and the context — the JIT will dispose them when the
+        //    module is removed.
         const ts_mod = c.LLVMOrcCreateNewThreadSafeModule(llvm_module, ts_ctx);
-        c.LLVMOrcDisposeThreadSafeContext(ts_ctx);
+        // NOTE: Do NOT dispose the ThreadSafeContext here. The ThreadSafeModule
+        // takes ownership and will clean it up when the JIT disposes the module.
+        // Premature disposal causes a use-after-free during JIT compilation.
+        // tracked in: https://github.com/adinapoli/rusholme/issues/485
 
         const main_dylib = c.LLVMOrcLLJITGetMainJITDylib(self.jit);
         const add_err = c.LLVMOrcLLJITAddLLVMIRModule(self.jit, main_dylib, ts_mod);
