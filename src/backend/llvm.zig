@@ -84,6 +84,10 @@ pub const OrcSymbolStringPoolEntryRef = c.LLVMOrcSymbolStringPoolEntryRef;
 /// A materialization unit (for defining absolute symbols).
 pub const OrcMaterializationUnitRef = c.LLVMOrcMaterializationUnitRef;
 
+/// A resource tracker for managing the lifetime of JIT'd code.
+/// Allows removal of individual modules from a JITDylib.
+pub const OrcResourceTrackerRef = c.LLVMOrcResourceTrackerRef;
+
 /// Initialize LLVM.
 /// Must be called before using any LLVM functions.
 pub fn initialize() void {

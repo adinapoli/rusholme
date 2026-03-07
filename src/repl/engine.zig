@@ -17,6 +17,9 @@ const grin_ast = @import("../grin/ast.zig");
 const evaluator_mod = @import("../grin/evaluator.zig");
 const GrinEvaluator = evaluator_mod.GrinEvaluator;
 
+// Fallback for testing.io: tests don't need actual I/O
+const testing_io: std.Io = undefined;
+
 // ── Result types ──────────────────────────────────────────────────────
 
 /// Result of executing a GRIN program.
@@ -208,7 +211,7 @@ test "engine: execute trivial GRIN program" {
 
     const program = grin_ast.Program{ .defs = defs };
 
-    var engine = GrinEngine.init(alloc, testing.io);
+    var engine = GrinEngine.init(alloc, testing_io);
     const result = try engine.execute(&program);
 
     try testing.expectEqualStrings("42", result.value);

@@ -409,6 +409,30 @@ pub const TyEnv = struct {
             frame = f.outer;
         }
     }
+
+    /// Collect all schemes from all frames into a map.
+    ///
+    /// This is used by the REPL to ensure that bindings from previous inputs
+    /// are available to the desugarer when compiling subsequent inputs.
+    ///
+    /// The caller is responsible for deiniting `out`.
+    pub fn collectAllSchemes(
+        self: *const TyEnv,
+        out: *std.AutoHashMapUnmanaged(Unique, TyScheme),
+        alloc: std.mem.Allocator,
+    ) std.mem.Allocator.Error!void {
+        var frame: ?*Frame = self.current;
+        while (frame) |f| {
+            var it = f.bindings.iterator();
+            while (it.next()) |entry| {
+                // Skip if already in out (inner shadowing outer)
+                if (!out.contains(entry.key_ptr.*)) {
+                    try out.put(alloc, entry.key_ptr.*, entry.value_ptr.*);
+                }
+            }
+            frame = f.outer;
+        }
+    }
 };
 
 /// RAII scope handle.  Returned by `TyEnv.enterScope`; call `exit` to pop.

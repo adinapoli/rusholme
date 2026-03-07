@@ -156,10 +156,14 @@ pub const Pipeline = struct {
     ) CompileError!grin_ast.Program {
         const alloc = self.allocator;
 
-        // The RenameEnv holds a pointer to its DiagnosticCollector from
-        // init time. Each compileModule call creates a fresh collector,
-        // so we must update the pointer before renaming.
+        // The RenameEnv holds pointers to its DiagnosticCollector and
+        // UniqueSupply from init time. Session.init() constructs the
+        // session as a local and returns it by value, so the pointers
+        // captured during RenameEnv.init() become dangling once the
+        // init frame returns. Update them to the caller's stable
+        // addresses before each compilation.
         rename_env.diags = diags;
+        rename_env.supply = u_supply;
 
         // ── Parse ──────────────────────────────────────────────────
         var lexer = Lexer.init(alloc, source, file_id);
@@ -258,21 +262,32 @@ pub const Pipeline = struct {
 
         // Try as an expression: wrap in replExpr__ = <expr>
         {
-            // Clear diagnostics from the failed declaration attempt before
-            // trying the expression compilation (don't report declaration
-            // parse errors when expression succeeds)
-            while (diags.diagnostics.items.len > 0) {
-                const diag = diags.diagnostics.orderedRemove(0);
-                alloc.free(diag.message);
-                if (diag.notes.len > 0) alloc.free(diag.notes);
-            }
+            // Clear diagnostics from the failed declaration attempt BEFORE
+            // trying expression compilation only the expression succeeds.
+            // If expression also fails, we'll merge both diagnostics.
+
+            // First, save declaration diagnostics for possible merging
+            const decl_diag_count = diags.diagnostics.items.len;
 
             const expr_source = std.fmt.allocPrint(alloc, "module ReplInput where\nreplExpr__ = {s}\n", .{input}) catch {
                 return CompileError.OutOfMemory;
             };
 
-            const program = try self.compileModule(expr_source, file_id, u_supply, rename_env, ty_env, mv_supply, diags);
-            return .{ .program = program, .kind = .expression };
+            if (self.compileModule(expr_source, file_id, u_supply, rename_env, ty_env, mv_supply, diags)) |program| {
+                // Expression succeeded - clear declaration diagnostics since they're irrelevant now
+                var i: usize = 0;
+                while (i < decl_diag_count) : (i += 1) {
+                    if (diags.diagnostics.items.len > 0) {
+                        const diag = diags.diagnostics.orderedRemove(0);
+                        alloc.free(diag.message);
+                        if (diag.notes.len > 0) alloc.free(diag.notes);
+                    }
+                }
+                return .{ .program = program, .kind = .expression };
+            } else |_| {
+                // Expression also failed - keep both declaration and expression diagnostics
+                return CompileError.CompilationFailed;
+            }
         }
     }
 };

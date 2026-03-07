@@ -11,6 +11,7 @@ const std = @import("std");
 pub const buffer = @import("buffer.zig");
 pub const eval_mod = @import("eval.zig");
 const Session = @import("session.zig").Session;
+const protocol = @import("protocol.zig");
 
 // ── Global state ──────────────────────────────────────────────────────
 
@@ -22,6 +23,12 @@ var session_arena: ?std.heap.ArenaAllocator = null;
 
 /// The active REPL session.
 var session: ?Session = null;
+
+/// Single-threaded IO backend for WASM. The WASM binary is built as a
+/// WASI reactor (no std.process.Init), so we construct our own `std.Io`
+/// from a single-threaded `Io.Threaded` instance. IO primops (fd_write
+/// etc.) route through WASI syscalls, which the browser's JS shim handles.
+var io_backend: std.Io.Threaded = std.Io.Threaded.init_single_threaded;
 
 pub fn main() void {
     // No-op entry point for WASM.
@@ -39,10 +46,7 @@ pub export fn repl_init() void {
     session_arena = std.heap.ArenaAllocator.init(page_alloc);
     const alloc = session_arena.?.allocator();
 
-    // On wasm32-wasi, there is no std.process.Init to provide std.Io.
-    // Pass undefined — IO primops will trap if invoked, which is
-    // acceptable until browser_wasi_shim is wired (Task 9).
-    session = Session.init(alloc, undefined) catch {
+    session = Session.init(alloc, io_backend.io()) catch {
         _ = writeError("Failed to initialise REPL session");
         return;
     };
@@ -65,8 +69,9 @@ pub export fn repl_get_output_buffer() [*]u8 {
 /// output buffer and the result length is returned.
 ///
 /// JSON format:
-///   Success: {"status":"success","value":"<result>"}
-///   Error:   {"status":"error","message":"<description>"}
+///   Success:     {"status":"success","value":"<result>"}
+///   Declaration: {"status":"success","value":""}
+///   Error:       {"status":"error","message":"<description>"}
 pub export fn repl_evaluate(length: usize) usize {
     const input_buf = buffer.getInputBuffer();
     if (length > buffer.INPUT_BUFFER_SIZE) return writeError("Input too long");
@@ -78,11 +83,16 @@ pub export fn repl_evaluate(length: usize) usize {
 
     const s = &(session orelse return writeError("Session not initialised — call repl_init() first"));
 
-    const result = s.eval(input) catch {
-        return writeError("Compilation failed");
+    const alloc = session_arena.?.allocator();
+    const result = protocol.evaluate(alloc, s, input) catch {
+        return writeError("Internal error during evaluation");
     };
 
-    return writeSuccess(result.value);
+    return switch (result.status) {
+        .success => writeSuccess(result.value),
+        .silent => writeSuccess(""),
+        .failed => writeError(result.value),
+    };
 }
 
 // ── Output formatting ─────────────────────────────────────────────────

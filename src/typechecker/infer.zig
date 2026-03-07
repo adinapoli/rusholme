@@ -1890,61 +1890,24 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
         try result.schemes.put(ctx.alloc, entry.key_ptr.*, entry.value_ptr.*);
     }
 
-    // Add built-in constructor and function schemes so the desugarer can find them.
-    // These are mono-bound in TyEnv via initBuiltins() but the desugarer
-    // only looks in ModuleTypes.schemes.
-    // Unique IDs from src/naming/known.zig
+    // Add all bindings from ctx.env to ModuleTypes so the desugarer can find them.
+    // This is crucial for the REPL where bindings from previous inputs are stored
+    // in ctx.env but need to be available to the desugarer for the current input.
+    //
+    // Without this, when evaluating expressions like "id 42" where "id" was defined
+    // in a previous REPL input, the desugarer would panic because it only looks in
+    // ModuleTypes.schemes (which only contains bindings from this module).
+    var env_schemes = std.AutoHashMapUnmanaged(naming_mod.Unique, env_mod.TyScheme){};
+    defer env_schemes.deinit(ctx.alloc);
+    try ctx.env.collectAllSchemes(&env_schemes, ctx.alloc);
 
-    // Prelude functions (IDs 0-24)
-    const built_in_fns = [_]naming_mod.Unique{
-        .{ .value = 0 },  // putStrLn
-        .{ .value = 1 },  // putStr
-        .{ .value = 2 },  // print
-        .{ .value = 3 },  // getLine
-        .{ .value = 4 },  // @"return"
-        .{ .value = 5 },  // @"error"
-        .{ .value = 6 },  // @"undefined"
-        .{ .value = 7 },  // negate
-        .{ .value = 8 },  // abs
-        .{ .value = 9 },  // signum
-        .{ .value = 10 }, // fromInteger
-        .{ .value = 11 }, // head
-        .{ .value = 12 }, // tail
-        .{ .value = 13 }, // null_
-        .{ .value = 14 }, // length
-        .{ .value = 15 }, // map
-        .{ .value = 16 }, // filter
-        .{ .value = 17 }, // foldl
-        .{ .value = 18 }, // foldr
-        .{ .value = 19 }, // concat
-        .{ .value = 20 }, // zip
-        .{ .value = 21 }, // unzip
-        .{ .value = 22 }, // show
-        .{ .value = 23 }, // read
-        .{ .value = 24 }, // otherwise
-    };
-    for (built_in_fns) |unique| {
-        if (ctx.env.lookupScheme(unique)) |scheme| {
-            try result.schemes.put(ctx.alloc, unique, scheme);
+    var env_it = env_schemes.iterator();
+    while (env_it.next()) |entry| {
+        // Skip if already in result.schemes (module bindings take precedence)
+        if (result.schemes.contains(entry.key_ptr.*)) {
+            continue;
         }
-    }
-
-    // Built-in constructors (IDs 200-208)
-    const built_in_cons = [_]naming_mod.Unique{
-        .{ .value = 200 }, // True
-        .{ .value = 201 }, // False
-        .{ .value = 202 }, // Nothing
-        .{ .value = 203 }, // Just
-        .{ .value = 204 }, // Left
-        .{ .value = 205 }, // Right
-        .{ .value = 206 }, // Unit
-        .{ .value = 207 }, // Nil  ([] data constructor)
-        .{ .value = 208 }, // Cons ((:) data constructor)
-    };
-    for (built_in_cons) |unique| {
-        if (ctx.env.lookupScheme(unique)) |scheme| {
-            try result.schemes.put(ctx.alloc, unique, scheme);
-        }
+        try result.schemes.put(ctx.alloc, entry.key_ptr.*, entry.value_ptr.*);
     }
 
     return result;
