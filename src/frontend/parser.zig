@@ -235,10 +235,15 @@ pub const Parser = struct {
         }
         const got = try self.peek();
         var buf: [128]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "expected {s}, got {s}", .{
-            @tagName(tag),
-            @tagName(std.meta.activeTag(got.token)),
-        }) catch "unexpected token";
+        const msg = switch (got.token) {
+            .lex_error => |lex_msg| std.fmt.bufPrint(&buf, "{s}", .{
+                lex_msg,
+            }) catch "lexical error",
+            else => std.fmt.bufPrint(&buf, "expected {s}, got {s}", .{
+                @tagName(tag),
+                @tagName(std.meta.activeTag(got.token)),
+            }) catch "unexpected token",
+        };
         try self.emitErrorMsg(got.span, msg);
         return error.UnexpectedToken;
     }

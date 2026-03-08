@@ -370,6 +370,7 @@ pub const Pipeline = struct {
             // Save declaration state for possible restoration.
             const decl_diag_count = diags.diagnostics.items.len;
             const decl_source = self.last_source;
+            const decl_kind = self.last_input_kind;
 
             const expr_source = std.fmt.allocPrint(alloc, "module ReplInput where\nreplExpr__ = {s}\n", .{input}) catch {
                 return CompileError.OutOfMemory;
@@ -402,7 +403,7 @@ pub const Pipeline = struct {
                     // restore the declaration wrapper source.
                     clearTrailingDiags(alloc, diags, decl_diag_count);
                     self.last_source = decl_source;
-                    self.last_input_kind = .declaration;
+                    self.last_input_kind = decl_kind;
                 }
                 return CompileError.CompilationFailed;
             }
