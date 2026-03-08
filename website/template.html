@@ -1256,6 +1256,8 @@
             term.writeln('');
 
             let currentLine = '';
+            let inputMode = 'normal'; // 'normal' | 'multiline'
+            let multilineBuffer = [];
 
             // REPL Bridge
             window.replBridge = {
@@ -1367,16 +1369,46 @@
 
                 if (code === 13) { // Enter key
                     term.writeln('');
-                    if (currentLine.trim()) {
-                        replBridge.evaluate(currentLine);
+                    if (inputMode === 'multiline') {
+                        if (currentLine.trim() === ':}') {
+                            // Seal the multiline block
+                            const content = multilineBuffer.join('\n');
+                            const wrapped = ':{' + '\n' + content + '\n' + ':}';
+                            multilineBuffer = [];
+                            inputMode = 'normal';
+                            replBridge.evaluate(wrapped);
+                        } else {
+                            // Accumulate line
+                            multilineBuffer.push(currentLine);
+                            term.write('\x1b[32m| \x1b[0m');
+                        }
                     } else {
-                        term.write('\x1b[32m> \x1b[0m');
+                        // Normal mode
+                        if (currentLine.trim() === ':{') {
+                            inputMode = 'multiline';
+                            multilineBuffer = [];
+                            term.write('\x1b[32m| \x1b[0m');
+                        } else if (currentLine.trim()) {
+                            replBridge.evaluate(currentLine);
+                        } else {
+                            term.write('\x1b[32m> \x1b[0m');
+                        }
                     }
                     currentLine = '';
                 } else if (code === 3) { // Ctrl+C
                     term.writeln('\x1b[33m^C\x1b[0m');
+                    multilineBuffer = [];
+                    inputMode = 'normal';
                     currentLine = '';
                     term.write('\x1b[32m> \x1b[0m');
+                } else if (code === 4) { // Ctrl+D
+                    if (inputMode === 'multiline') {
+                        term.writeln('\x1b[33m^D\x1b[0m');
+                        multilineBuffer = [];
+                        inputMode = 'normal';
+                        currentLine = '';
+                        term.write('\x1b[32m> \x1b[0m');
+                    }
                 } else if (code >= 32 && code <= 126) { // Printable characters
                     currentLine += data;
                     term.write(data);
