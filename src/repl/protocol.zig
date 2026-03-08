@@ -58,7 +58,7 @@ test "protocol: Status enum has expected variants" {
 /// Evaluate a REPL input through the protocol.
 pub fn evaluate(allocator: Allocator, session: *Session, input: []const u8) !ProtocolResult {
     // Delegate to Session.eval which handles expression vs declaration
-    const session_result = session.eval(input) catch {
+    const session_result = session.eval(input) catch |err| {
         // On error, return error status with diagnostics
         var diags = session.getDiagnosticsForInput(allocator, input) catch &.{};
 
@@ -71,10 +71,12 @@ pub fn evaluate(allocator: Allocator, session: *Session, input: []const u8) !Pro
             };
         }
 
-        // If no diagnostics available, return generic error
+        // No diagnostics available — format the error itself so the user
+        // gets something more useful than a generic "evaluation failed".
+        const msg = std.fmt.allocPrint(allocator, "{s}", .{@errorName(err)}) catch "evaluation failed";
         return ProtocolResult{
             .status = .failed,
-            .value = "evaluation failed",
+            .value = msg,
             .diagnostics = diags,
         };
     };
