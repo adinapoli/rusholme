@@ -58,10 +58,7 @@ test "protocol: Status enum has expected variants" {
 /// Evaluate a REPL input through the protocol.
 pub fn evaluate(allocator: Allocator, session: *Session, input: []const u8) !ProtocolResult {
     // Delegate to Session.eval which handles expression vs declaration
-    const session_result = session.eval(input) catch |err| {
-        // Debug: print error name for investigation
-        std.debug.print("ERROR in evaluate({s}): {}\n", .{ input, err });
-
+    const session_result = session.eval(input) catch {
         // On error, return error status with diagnostics
         var diags = session.getDiagnosticsForInput(allocator, input) catch &.{};
 

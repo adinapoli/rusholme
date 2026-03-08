@@ -229,10 +229,7 @@ pub const JitEngine = struct {
 
         var llvm_module: llvm.Module = null;
         if (c.LLVMParseIRInContext(ctx, buf, &llvm_module, &err_msg) != 0) {
-            if (err_msg) |msg| {
-                std.debug.print("LLVM IR Parse Error: {s}\n", .{msg});
-                c.LLVMDisposeMessage(msg);
-            }
+            if (err_msg) |msg| c.LLVMDisposeMessage(msg);
             c.LLVMOrcDisposeThreadSafeContext(ts_ctx);
             return JitError.TranslationFailed;
         }

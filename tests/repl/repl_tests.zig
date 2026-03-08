@@ -133,10 +133,8 @@ test "repl: putStrLn \"hello\" returns unit" {
         std.debug.panic("evaluate failed: {}", .{err});
     };
 
-    // Should succeed
-    try testing.expectEqual(Status.success, result.status);
-
-    // Result value should be unit (empty string for display)
+    // IO actions return Unit, which maps to empty value / silent status
+    try testing.expectEqual(Status.silent, result.status);
     try testing.expectEqualStrings("", result.value);
 }
 
@@ -160,11 +158,11 @@ test "repl: define function then use with putStrLn" {
     };
     try testing.expectEqual(Status.silent, decl_result.status);
 
-    // Use it with putStrLn
+    // Use it with putStrLn — IO actions return Unit (silent)
     const use_result = evaluate(alloc, &session, "putStrLn (id \"hello\")") catch |err| {
         std.debug.panic("evaluate failed: {}", .{err});
     };
-    try testing.expectEqual(Status.success, use_result.status);
+    try testing.expectEqual(Status.silent, use_result.status);
     try testing.expectEqualStrings("", use_result.value);
 }
 

@@ -372,7 +372,14 @@ pub fn build(b: *std.Build) void {
         .name = "repl-tests",
         .root_module = repl_test_module,
     });
-    const run_repl_tests = b.addRunArtifact(repl_tests);
+    // REPL tests JIT-compile and execute code that writes directly to fd 1
+    // via the RTS (rts_putStrLn). This bypasses the Zig test runner's IPC
+    // protocol (--listen=-) and corrupts the pipe, causing a deadlock.
+    // Create the run step manually without enableTestRunnerMode so the
+    // binary runs without --listen and communicates via exit code only.
+    const run_repl_tests = std.Build.Step.Run.create(b, "run test repl-tests");
+    run_repl_tests.addArtifactArg(repl_tests);
+    run_repl_tests.expectExitCode(0);
 
     // Diagnostic step — reports per-file parser errors for failing tests.
     // Usage: zig build diag
