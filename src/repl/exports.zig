@@ -15,6 +15,8 @@ const protocol = @import("protocol.zig");
 const JsonRenderer = @import("../diagnostics/json.zig").JsonRenderer;
 const FileId = @import("../diagnostics/span.zig").FileId;
 const Diagnostic = @import("../diagnostics/diagnostic.zig").Diagnostic;
+const pipeline_mod = @import("pipeline.zig");
+const translateSpan = pipeline_mod.translateSpan;
 
 // ── Global state ──────────────────────────────────────────────────────
 
@@ -94,7 +96,7 @@ pub export fn repl_evaluate(length: usize) usize {
     return switch (result.status) {
         .success => writeSuccess(result.value),
         .silent => writeSuccess(""),
-        .failed => writeErrorWithDiagnostics(alloc, result.diagnostics, result.value),
+        .failed => writeErrorWithDiagnostics(alloc, s, result.diagnostics, result.value),
     };
 }
 
@@ -116,19 +118,35 @@ fn writeError(message: []const u8) usize {
 
 /// Write an error response with structured diagnostic JSON.
 ///
+/// Translates wrapper-relative spans to user-input-relative coordinates
+/// before rendering, so the browser sees the user's code positions.
+///
 /// Produces:
 ///   {"status":"error","message":"<fallback>","diagnostics":[...]}
 ///
 /// If rendering fails, falls back to the flat error format.
-fn writeErrorWithDiagnostics(alloc: std.mem.Allocator, diagnostics: []const Diagnostic, fallback_message: []const u8) usize {
+fn writeErrorWithDiagnostics(alloc: std.mem.Allocator, s: *Session, diagnostics: []const Diagnostic, fallback_message: []const u8) usize {
     // Build lookup maps for the JSON renderer.
     var path_lookup = std.AutoHashMap(FileId, []const u8).init(alloc);
     defer path_lookup.deinit();
     path_lookup.put(0, "<repl>") catch return writeError(fallback_message);
 
+    // Translate spans from wrapper-relative to user-input-relative.
+    const translated = alloc.alloc(Diagnostic, diagnostics.len) catch return writeError(fallback_message);
+    for (diagnostics, 0..) |diag, i| {
+        translated[i] = .{
+            .severity = diag.severity,
+            .code = diag.code,
+            .span = translateSpan(diag.span, s.last_input_kind) orelse diag.span,
+            .message = diag.message,
+            .notes = diag.notes,
+            .payload = diag.payload,
+        };
+    }
+
     const renderer = JsonRenderer.init(alloc, &path_lookup);
 
-    const diag_json = renderer.renderAll(diagnostics) catch
+    const diag_json = renderer.renderAll(translated) catch
         return writeError(fallback_message);
 
     // Compose the full response with the diagnostics array embedded.

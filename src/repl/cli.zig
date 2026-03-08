@@ -22,6 +22,8 @@ const protocol_mod = @import("protocol.zig");
 const Status = protocol_mod.Status;
 const evaluate = protocol_mod.evaluate;
 const TerminalRenderer = @import("../diagnostics/terminal.zig").TerminalRenderer;
+const pipeline_mod = @import("pipeline.zig");
+const translateSpan = pipeline_mod.translateSpan;
 
 const InputMode = enum {
     normal,
@@ -293,9 +295,9 @@ fn writeStderr(io: Io, msg: []const u8) !void {
 
 /// Render diagnostics to stderr using the TerminalRenderer.
 ///
-/// Builds the file path and contents lookup maps that the renderer needs,
-/// using the session's `last_source` (the wrapper source whose spans the
-/// diagnostics reference) and a synthetic `<repl>` filename.
+/// Translates wrapper-relative spans to user-input-relative coordinates
+/// so the rendered output shows the user's code (not the internal module
+/// wrapper) with correct caret positioning.
 fn renderDiagnostics(io: Io, alloc: Allocator, session: *Session, diagnostics: []const Diagnostic) void {
     var path_lookup = std.AutoHashMap(FileId, []const u8).init(alloc);
     defer path_lookup.deinit();
@@ -303,17 +305,29 @@ fn renderDiagnostics(io: Io, alloc: Allocator, session: *Session, diagnostics: [
 
     var file_contents = std.AutoHashMap(FileId, []const u8).init(alloc);
     defer file_contents.deinit();
-    file_contents.put(0, session.last_source) catch return;
+    // Use the raw user input, not the module wrapper source.
+    file_contents.put(0, session.last_input) catch return;
 
     const renderer = TerminalRenderer.init(&path_lookup, &file_contents);
 
-    // Render each diagnostic into a heap-allocated buffer, then flush to stderr.
+    // Render each diagnostic with translated spans.
     for (diagnostics) |diag| {
+        // Translate the span from wrapper-relative to user-input-relative.
+        const translated_span = translateSpan(diag.span, session.last_input_kind) orelse diag.span;
+
+        const translated_diag = Diagnostic{
+            .severity = diag.severity,
+            .code = diag.code,
+            .span = translated_span,
+            .message = diag.message,
+            .notes = diag.notes,
+            .payload = diag.payload,
+        };
+
         var out: std.Io.Writer.Allocating = .init(alloc);
         defer out.deinit();
 
-        renderer.render(&out.writer, diag) catch {
-            // Fall back to flat rendering on allocation failure.
+        renderer.render(&out.writer, translated_diag) catch {
             writeStderr(io, "Error: ") catch {};
             writeStderr(io, diag.message) catch {};
             writeStderr(io, "\n") catch {};

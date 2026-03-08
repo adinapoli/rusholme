@@ -57,6 +57,47 @@ pub const InputKind = enum {
     declaration,
 };
 
+/// Length of the expression wrapper prefix `"replExpr__ = "` (13 chars).
+const EXPR_PREFIX_LEN: u32 = 13;
+
+/// Translate a diagnostic span from wrapper-relative coordinates to
+/// user-input-relative coordinates.
+///
+/// Both wrappers prepend `module ReplInput where\n` (line 1), so all
+/// line numbers are decremented by 1. The expression wrapper additionally
+/// prepends `replExpr__ = ` (14 chars) on the first user-code line
+/// (wrapper line 2), so columns on that line are shifted left.
+///
+/// Returns `null` if the span falls entirely within the wrapper prefix
+/// (i.e. before the user's code), which shouldn't happen in practice.
+pub fn translateSpan(span: span_mod.SourceSpan, kind: InputKind) ?span_mod.SourceSpan {
+    const start = translatePos(span.start, kind) orelse return null;
+    const end = translatePos(span.end, kind) orelse return null;
+    return span_mod.SourceSpan.init(start, end);
+}
+
+fn translatePos(pos: span_mod.SourcePos, kind: InputKind) ?span_mod.SourcePos {
+    // SourcePos.isValid() treats file_id 0 as invalid, but the REPL
+    // legitimately uses file_id 0. Only skip truly zero positions
+    // (line == 0 indicates a synthetic/invalid position).
+    if (pos.line == 0) return pos;
+
+    // The wrapper header `module ReplInput where\n` is line 1.
+    // User code starts at wrapper line 2.
+    if (pos.line < 2) return null;
+    const user_line = pos.line - 1;
+
+    var user_col = pos.column;
+    if (kind == .expression and pos.line == 2) {
+        // First line of user code in expression wrapper has
+        // `replExpr__ = ` prepended (14 chars).
+        if (pos.column <= EXPR_PREFIX_LEN) return null;
+        user_col = pos.column - EXPR_PREFIX_LEN;
+    }
+
+    return span_mod.SourcePos.init(pos.file_id, user_line, user_col);
+}
+
 /// Result of a successful compilation.
 pub const CompileResult = struct {
     /// The GRIN program produced by the pipeline.
@@ -95,6 +136,11 @@ pub const Pipeline = struct {
     /// attempt in `compileInput`, so on failure it holds the last-attempted
     /// wrapper source whose spans the diagnostics reference.
     last_source: []const u8 = "",
+
+    /// Which kind of wrapper produced the most recent diagnostics.
+    /// Used to translate wrapper-relative spans back to user-input-relative
+    /// coordinates for rendering.
+    last_input_kind: InputKind = .declaration,
 
     /// Create a new pipeline.
     pub fn init(allocator: Allocator, io: std.Io) Pipeline {
@@ -252,6 +298,7 @@ pub const Pipeline = struct {
                 return CompileError.OutOfMemory;
             };
             self.last_source = decl_source;
+            self.last_input_kind = .declaration;
 
             var decl_diags = DiagnosticCollector.init();
             defer decl_diags.deinit(alloc);
@@ -281,6 +328,7 @@ pub const Pipeline = struct {
                 return CompileError.OutOfMemory;
             };
             self.last_source = expr_source;
+            self.last_input_kind = .expression;
 
             if (self.compileModule(expr_source, file_id, u_supply, rename_env, ty_env, mv_supply, diags)) |program| {
                 // Expression succeeded - clear declaration diagnostics since they're irrelevant now
@@ -294,7 +342,17 @@ pub const Pipeline = struct {
                 }
                 return .{ .program = program, .kind = .expression };
             } else |_| {
-                // Expression also failed - keep both declaration and expression diagnostics
+                // Expression also failed — discard the declaration-attempt
+                // diagnostics so the user only sees errors from the last
+                // (expression) attempt, which has the most relevant context.
+                var i: usize = 0;
+                while (i < decl_diag_count) : (i += 1) {
+                    if (diags.diagnostics.items.len > 0) {
+                        const diag = diags.diagnostics.orderedRemove(0);
+                        alloc.free(diag.message);
+                        if (diag.notes.len > 0) alloc.free(diag.notes);
+                    }
+                }
                 return CompileError.CompilationFailed;
             }
         }
@@ -395,6 +453,74 @@ test "pipeline: compile function declaration" {
 
     try testing.expect(result.kind == .declaration);
     try testing.expect(result.program.defs.len > 0);
+}
+
+test "translateSpan: expression wrapper adjusts line and column" {
+    const SourcePos = span_mod.SourcePos;
+    const SourceSpan = span_mod.SourceSpan;
+
+    // Span at wrapper line 2, cols 14-27 (e.g. `replExpr__ = undefined_var`)
+    // User code starts at col 14 (after 13-char prefix "replExpr__ = ").
+    const span = SourceSpan.init(
+        SourcePos.init(0, 2, 14),
+        SourcePos.init(0, 2, 27),
+    );
+
+    const result = translateSpan(span, .expression).?;
+    try testing.expectEqual(@as(u32, 1), result.start.line);
+    try testing.expectEqual(@as(u32, 1), result.start.column);
+    try testing.expectEqual(@as(u32, 1), result.end.line);
+    try testing.expectEqual(@as(u32, 14), result.end.column);
+}
+
+test "translateSpan: declaration wrapper adjusts line only" {
+    const SourcePos = span_mod.SourcePos;
+    const SourceSpan = span_mod.SourceSpan;
+
+    // Span at wrapper line 2, cols 1-10 (e.g. `data Color`)
+    const span = SourceSpan.init(
+        SourcePos.init(0, 2, 1),
+        SourcePos.init(0, 2, 10),
+    );
+
+    const result = translateSpan(span, .declaration).?;
+    try testing.expectEqual(@as(u32, 1), result.start.line);
+    try testing.expectEqual(@as(u32, 1), result.start.column);
+    try testing.expectEqual(@as(u32, 1), result.end.line);
+    try testing.expectEqual(@as(u32, 10), result.end.column);
+}
+
+test "translateSpan: multiline expression preserves later lines" {
+    const SourcePos = span_mod.SourcePos;
+    const SourceSpan = span_mod.SourceSpan;
+
+    // Error on wrapper line 3 (user line 2) — column unchanged for
+    // expression wrapper since the prefix only affects wrapper line 2.
+    const span = SourceSpan.init(
+        SourcePos.init(0, 3, 5),
+        SourcePos.init(0, 3, 10),
+    );
+
+    const result = translateSpan(span, .expression).?;
+    try testing.expectEqual(@as(u32, 2), result.start.line);
+    try testing.expectEqual(@as(u32, 5), result.start.column);
+    try testing.expectEqual(@as(u32, 2), result.end.line);
+    try testing.expectEqual(@as(u32, 10), result.end.column);
+}
+
+test "translateSpan: wrapper header line returns null" {
+    const SourcePos = span_mod.SourcePos;
+    const SourceSpan = span_mod.SourceSpan;
+
+    // Span on wrapper line 1 (the `module ReplInput where` header) —
+    // this shouldn't happen in practice, but we handle it gracefully.
+    const span = SourceSpan.init(
+        SourcePos.init(0, 1, 1),
+        SourcePos.init(0, 1, 22),
+    );
+
+    try testing.expect(translateSpan(span, .expression) == null);
+    try testing.expect(translateSpan(span, .declaration) == null);
 }
 
 test "pipeline: handle let prefix in declarations" {

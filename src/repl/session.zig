@@ -15,9 +15,11 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
-const Pipeline = @import("pipeline.zig").Pipeline;
-const CompileResult = @import("pipeline.zig").CompileResult;
-const CompileError = @import("pipeline.zig").CompileError;
+const pipeline_mod = @import("pipeline.zig");
+const Pipeline = pipeline_mod.Pipeline;
+const CompileResult = pipeline_mod.CompileResult;
+const CompileError = pipeline_mod.CompileError;
+const InputKind = pipeline_mod.InputKind;
 
 const renamer_mod = @import("../renamer/renamer.zig");
 const RenameEnv = renamer_mod.RenameEnv;
@@ -107,9 +109,17 @@ pub const Session = struct {
 
     // Source text from the most recent compilation attempt. Contains the
     // full module wrapper (e.g. "module ReplInput where\n...") whose spans
-    // the diagnostics reference. Used by the CLI and WASM layers to feed
-    // the TerminalRenderer/JsonRenderer for rich error display.
+    // the diagnostics reference.
     last_source: []const u8 = "",
+
+    // The raw user input from the most recent compilation. Used by
+    // diagnostic renderers to show the user's code (not the wrapper).
+    last_input: []const u8 = "",
+
+    // Which kind of wrapper produced the most recent diagnostics.
+    // Used to compute span adjustments when translating wrapper-relative
+    // positions to user-input-relative positions.
+    last_input_kind: InputKind = .declaration,
 
     // Accumulated GRIN function definitions from successful declarations.
     // For expressions, we merge these with the current expression's definition
@@ -206,8 +216,10 @@ pub const Session = struct {
             &self.mv_supply,
             &diags,
         ) catch |err| {
-            // Capture the wrapper source for diagnostic rendering.
+            // Capture compilation context for diagnostic rendering.
             self.last_source = self.pipeline.last_source;
+            self.last_input = input;
+            self.last_input_kind = self.pipeline.last_input_kind;
 
             // Save diagnostics before returning error so callers can inspect them
             // Note: we need to dupe the message allocation since diags will be deinitialized
@@ -230,8 +242,10 @@ pub const Session = struct {
             return err;
         };
 
-        // Capture the wrapper source for diagnostic rendering.
+        // Capture compilation context for diagnostic rendering.
         self.last_source = self.pipeline.last_source;
+        self.last_input = input;
+        self.last_input_kind = self.pipeline.last_input_kind;
 
         // Success: save diagnostics and leave scope frames in place
         for (diags.diagnostics.items) |diag| {
