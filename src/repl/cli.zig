@@ -237,7 +237,11 @@ fn loadFile(io: Io, path: []const u8, allocator: Allocator, session: *Session) v
         return;
     };
 
-    const result = evaluate(allocator, session, contents) catch {
+    // Strip `module ... where` header if present, since evaluate()
+    // wraps input in its own `module ReplInput where` wrapper.
+    const body = stripModuleHeader(contents);
+
+    const result = evaluate(allocator, session, body) catch {
         writeStderr(io, "Error loading file\n") catch {};
         return;
     };
@@ -252,6 +256,44 @@ fn loadFile(io: Io, path: []const u8, allocator: Allocator, session: *Session) v
             renderDiagnostics(io, allocator, session, result.diagnostics);
         },
     }
+}
+
+// ── File loading helpers ──────────────────────────────────────────────
+
+/// Strip a `module <Name> where` header line from file contents.
+///
+/// Haskell source files typically start with `module Foo where` but
+/// the REPL wraps input in its own `module ReplInput where`, so we
+/// need to remove the file's header to avoid a nested module error.
+/// Returns the contents starting after the `where` keyword and its
+/// following newline, or the original contents if no header is found.
+fn stripModuleHeader(contents: []const u8) []const u8 {
+    // Skip leading whitespace/blank lines.
+    var i: usize = 0;
+    while (i < contents.len and (contents[i] == ' ' or contents[i] == '\t' or contents[i] == '\n' or contents[i] == '\r')) {
+        i += 1;
+    }
+
+    // Check for `module` keyword.
+    if (!std.mem.startsWith(u8, contents[i..], "module ")) return contents;
+
+    // Find `where` followed by end-of-line or end-of-file.
+    if (std.mem.indexOf(u8, contents[i..], "where")) |where_offset| {
+        const after_where = i + where_offset + "where".len;
+        // Skip past the newline after `where`.
+        if (after_where < contents.len and contents[after_where] == '\n') {
+            return contents[after_where + 1 ..];
+        } else if (after_where < contents.len and contents[after_where] == '\r') {
+            const skip = if (after_where + 1 < contents.len and contents[after_where + 1] == '\n')
+                after_where + 2
+            else
+                after_where + 1;
+            return contents[skip..];
+        }
+        return contents[after_where..];
+    }
+
+    return contents;
 }
 
 // ── Output helpers ────────────────────────────────────────────────────
