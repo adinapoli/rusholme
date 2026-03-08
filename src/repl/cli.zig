@@ -12,6 +12,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const Dir = Io.Dir;
 const File = Io.File;
 const FileId = @import("../diagnostics/span.zig").FileId;
 
@@ -127,7 +128,7 @@ pub fn run(allocator: Allocator, io: Io) !void {
                 continue;
             }
 
-            const should_continue = handleCommand(io, line);
+            const should_continue = handleCommand(io, line, alloc, &session);
             if (!should_continue) break;
             continue;
         }
@@ -185,7 +186,7 @@ fn readLine(io: Io, buf: []u8) ![]const u8 {
 
 /// Handle a REPL command (line starting with ':').
 /// Returns true if the REPL should continue, false to exit.
-fn handleCommand(io: Io, line: []const u8) bool {
+fn handleCommand(io: Io, line: []const u8, allocator: Allocator, session: *Session) bool {
     const cmd = std.mem.trim(u8, line[1..], " \t\r");
 
     if (std.mem.eql(u8, cmd, "quit") or std.mem.eql(u8, cmd, "q")) {
@@ -198,6 +199,13 @@ fn handleCommand(io: Io, line: []const u8) bool {
         return true;
     }
 
+    if (std.mem.startsWith(u8, cmd, "load ") or std.mem.startsWith(u8, cmd, "l ")) {
+        const path_start: usize = if (std.mem.startsWith(u8, cmd, "load ")) 5 else 2;
+        const path = std.mem.trim(u8, cmd[path_start..], " \t");
+        loadFile(io, path, allocator, session);
+        return true;
+    }
+
     if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "h") or std.mem.eql(u8, cmd, "?")) {
         printHelp(io) catch {};
         return true;
@@ -205,6 +213,49 @@ fn handleCommand(io: Io, line: []const u8) bool {
 
     writeStdout(io, "Unknown command. Type :help for available commands.\n") catch {};
     return true;
+}
+
+// ── File loading ──────────────────────────────────────────────────────
+
+/// Load a Haskell source file from disk and evaluate its contents
+/// within the current REPL session.
+fn loadFile(io: Io, path: []const u8, allocator: Allocator, session: *Session) void {
+    const file = Dir.openFile(.cwd(), io, path, .{}) catch {
+        writeStdout(io, "Cannot open file: ") catch {};
+        writeStdout(io, path) catch {};
+        writeStdout(io, "\n") catch {};
+        return;
+    };
+    defer file.close(io);
+
+    var read_buf: [8192]u8 = undefined;
+    var rdr = file.reader(io, &read_buf);
+    const contents = rdr.interface.allocRemaining(allocator, .limited(1024 * 1024)) catch {
+        writeStdout(io, "Failed to read file: ") catch {};
+        writeStdout(io, path) catch {};
+        writeStdout(io, "\n") catch {};
+        return;
+    };
+
+    const result = evaluate(allocator, session, contents) catch {
+        writeStderr(io, "Error loading file\n") catch {};
+        return;
+    };
+
+    switch (result.status) {
+        .success, .silent => {
+            writeStdout(io, "Loaded: ") catch {};
+            writeStdout(io, path) catch {};
+            writeStdout(io, "\n") catch {};
+        },
+        .failed => {
+            for (result.diagnostics) |diag| {
+                writeStderr(io, "Error: ") catch {};
+                writeStderr(io, diag.message) catch {};
+                writeStderr(io, "\n") catch {};
+            }
+        },
+    }
 }
 
 // ── Output helpers ────────────────────────────────────────────────────
@@ -222,6 +273,7 @@ fn printHelp(io: Io) !void {
         \\Available commands:
         \\  :quit, :q       Exit the REPL
         \\  :type <expr>    Show the type of an expression (not yet implemented)
+        \\  :load <file>, :l  Load a Haskell file into the session
         \\  :{              Begin multi-line input block
         \\  :}              End multi-line input block and evaluate
         \\  :help, :h, :?   Show this help message
