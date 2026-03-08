@@ -49,24 +49,33 @@ const grin_ast = @import("../grin/ast.zig");
 
 // ── Result types ──────────────────────────────────────────────────────
 
-/// The kind of input that was compiled.
+/// The kind of input that was compiled, and any prefix adjustments needed
+/// for translating wrapper-relative spans back to user-input coordinates.
 pub const InputKind = enum {
     /// A bare expression (e.g. `2 + 3`, `not True`).
     expression,
     /// A top-level declaration (e.g. `data Color = Red`, `f x = x + 1`).
     declaration,
+    /// A declaration where `let ` was stripped (e.g. user typed `let f x = x`).
+    /// Columns on the first user line need +4 adjustment.
+    declaration_let_stripped,
 };
 
 /// Length of the expression wrapper prefix `"replExpr__ = "` (13 chars).
 const EXPR_PREFIX_LEN: u32 = 13;
+
+/// Length of the `"let "` prefix stripped from declaration input.
+const LET_PREFIX_LEN: u32 = 4;
 
 /// Translate a diagnostic span from wrapper-relative coordinates to
 /// user-input-relative coordinates.
 ///
 /// Both wrappers prepend `module ReplInput where\n` (line 1), so all
 /// line numbers are decremented by 1. The expression wrapper additionally
-/// prepends `replExpr__ = ` (14 chars) on the first user-code line
-/// (wrapper line 2), so columns on that line are shifted left.
+/// prepends `replExpr__ = ` (13 chars) on the first user-code line
+/// (wrapper line 2), so columns on that line are shifted left. The
+/// `declaration_let_stripped` variant shifts columns right by 4 to
+/// account for the stripped `let ` prefix.
 ///
 /// Returns `null` if the span falls entirely within the wrapper prefix
 /// (i.e. before the user's code), which shouldn't happen in practice.
@@ -90,12 +99,51 @@ fn translatePos(pos: span_mod.SourcePos, kind: InputKind) ?span_mod.SourcePos {
     var user_col = pos.column;
     if (kind == .expression and pos.line == 2) {
         // First line of user code in expression wrapper has
-        // `replExpr__ = ` prepended (14 chars).
+        // `replExpr__ = ` prepended (13 chars).
         if (pos.column <= EXPR_PREFIX_LEN) return null;
         user_col = pos.column - EXPR_PREFIX_LEN;
+    } else if (kind == .declaration_let_stripped and pos.line == 2) {
+        // The `let ` prefix was stripped before wrapping, so the
+        // wrapper column is 4 positions too early. Shift right.
+        user_col = pos.column + LET_PREFIX_LEN;
     }
 
     return span_mod.SourcePos.init(pos.file_id, user_line, user_col);
+}
+
+// ── Diagnostic selection helpers ───────────────────────────────────────
+
+/// Return the highest `DiagnosticCode` ordinal in a slice, or 0 if empty.
+/// Used to determine which compilation attempt got furthest in the
+/// pipeline (parse < rename < typecheck).
+fn maxDiagCode(items: []const Diagnostic) u32 {
+    var best: u32 = 0;
+    for (items) |d| {
+        const ord = @intFromEnum(d.code);
+        if (ord > best) best = ord;
+    }
+    return best;
+}
+
+/// Free and remove the first `count` diagnostics from a collector.
+fn clearLeadingDiags(alloc: Allocator, diags: *DiagnosticCollector, count: usize) void {
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        if (diags.diagnostics.items.len > 0) {
+            const diag = diags.diagnostics.orderedRemove(0);
+            alloc.free(diag.message);
+            if (diag.notes.len > 0) alloc.free(diag.notes);
+        }
+    }
+}
+
+/// Free and remove diagnostics after index `keep_count` from a collector.
+fn clearTrailingDiags(alloc: Allocator, diags: *DiagnosticCollector, keep_count: usize) void {
+    while (diags.diagnostics.items.len > keep_count) {
+        const diag = diags.diagnostics.pop() orelse break;
+        alloc.free(diag.message);
+        if (diag.notes.len > 0) alloc.free(diag.notes);
+    }
 }
 
 /// Result of a successful compilation.
@@ -290,15 +338,17 @@ pub const Pipeline = struct {
         // the caller's arena is destroyed).
         {
             var decl_input = input;
+            var decl_kind: InputKind = .declaration;
             if (std.mem.startsWith(u8, input, "let ")) {
                 decl_input = input[4..]; // Skip past "let "
+                decl_kind = .declaration_let_stripped;
             }
 
             const decl_source = std.fmt.allocPrint(alloc, "module ReplInput where\n{s}\n", .{decl_input}) catch {
                 return CompileError.OutOfMemory;
             };
             self.last_source = decl_source;
-            self.last_input_kind = .declaration;
+            self.last_input_kind = decl_kind;
 
             var decl_diags = DiagnosticCollector.init();
             defer decl_diags.deinit(alloc);
@@ -306,7 +356,7 @@ pub const Pipeline = struct {
             if (self.compileModule(decl_source, file_id, u_supply, rename_env, ty_env, mv_supply, &decl_diags)) |program| {
                 // Copy any diagnostics from the attempt
                 try copyDiagnostics(alloc, &decl_diags, diags);
-                return .{ .program = program, .kind = .declaration };
+                return .{ .program = program, .kind = decl_kind };
             } else |_| {
                 // Declaration attempt failed — preserve its diagnostics
                 // before trying as expression
@@ -317,12 +367,9 @@ pub const Pipeline = struct {
 
         // Try as an expression: wrap in replExpr__ = <expr>
         {
-            // Clear diagnostics from the failed declaration attempt BEFORE
-            // trying expression compilation only the expression succeeds.
-            // If expression also fails, we'll merge both diagnostics.
-
-            // First, save declaration diagnostics for possible merging
+            // Save declaration state for possible restoration.
             const decl_diag_count = diags.diagnostics.items.len;
+            const decl_source = self.last_source;
 
             const expr_source = std.fmt.allocPrint(alloc, "module ReplInput where\nreplExpr__ = {s}\n", .{input}) catch {
                 return CompileError.OutOfMemory;
@@ -331,27 +378,31 @@ pub const Pipeline = struct {
             self.last_input_kind = .expression;
 
             if (self.compileModule(expr_source, file_id, u_supply, rename_env, ty_env, mv_supply, diags)) |program| {
-                // Expression succeeded - clear declaration diagnostics since they're irrelevant now
-                var i: usize = 0;
-                while (i < decl_diag_count) : (i += 1) {
-                    if (diags.diagnostics.items.len > 0) {
-                        const diag = diags.diagnostics.orderedRemove(0);
-                        alloc.free(diag.message);
-                        if (diag.notes.len > 0) alloc.free(diag.notes);
-                    }
-                }
+                // Expression succeeded — clear declaration diagnostics.
+                clearLeadingDiags(alloc, diags, decl_diag_count);
                 return .{ .program = program, .kind = .expression };
             } else |_| {
-                // Expression also failed — discard the declaration-attempt
-                // diagnostics so the user only sees errors from the last
-                // (expression) attempt, which has the most relevant context.
-                var i: usize = 0;
-                while (i < decl_diag_count) : (i += 1) {
-                    if (diags.diagnostics.items.len > 0) {
-                        const diag = diags.diagnostics.orderedRemove(0);
-                        alloc.free(diag.message);
-                        if (diag.notes.len > 0) alloc.free(diag.notes);
-                    }
+                // Both attempts failed. Keep whichever diagnostics came
+                // from the later pipeline stage (more informative).
+                // Parse errors (E001) < rename/type errors, so a higher
+                // max code means the attempt got further.
+                const decl_items = diags.diagnostics.items[0..decl_diag_count];
+                const expr_items = diags.diagnostics.items[decl_diag_count..];
+                const decl_max = maxDiagCode(decl_items);
+                const expr_max = maxDiagCode(expr_items);
+
+                if (expr_max > decl_max) {
+                    // Expression diagnostics are more informative — keep
+                    // them, discard declaration diagnostics.
+                    clearLeadingDiags(alloc, diags, decl_diag_count);
+                    self.last_input_kind = .expression;
+                } else {
+                    // Declaration diagnostics are at least as informative
+                    // — keep them, discard expression diagnostics, and
+                    // restore the declaration wrapper source.
+                    clearTrailingDiags(alloc, diags, decl_diag_count);
+                    self.last_source = decl_source;
+                    self.last_input_kind = .declaration;
                 }
                 return CompileError.CompilationFailed;
             }
@@ -508,6 +559,25 @@ test "translateSpan: multiline expression preserves later lines" {
     try testing.expectEqual(@as(u32, 10), result.end.column);
 }
 
+test "translateSpan: declaration_let_stripped shifts columns right" {
+    const SourcePos = span_mod.SourcePos;
+    const SourceSpan = span_mod.SourceSpan;
+
+    // User typed `let f x = y`. Declaration wrapper strips `let `,
+    // so wrapper contains `f x = y`. Span for `y` is at wrapper
+    // line 2, col 7. User-relative: line 1, col 7 + 4 = 11.
+    const span = SourceSpan.init(
+        SourcePos.init(0, 2, 7),
+        SourcePos.init(0, 2, 8),
+    );
+
+    const result = translateSpan(span, .declaration_let_stripped).?;
+    try testing.expectEqual(@as(u32, 1), result.start.line);
+    try testing.expectEqual(@as(u32, 11), result.start.column);
+    try testing.expectEqual(@as(u32, 1), result.end.line);
+    try testing.expectEqual(@as(u32, 12), result.end.column);
+}
+
 test "translateSpan: wrapper header line returns null" {
     const SourcePos = span_mod.SourcePos;
     const SourceSpan = span_mod.SourceSpan;
@@ -549,6 +619,6 @@ test "pipeline: handle let prefix in declarations" {
         &diags,
     );
 
-    try testing.expect(result.kind == .declaration);
+    try testing.expect(result.kind == .declaration_let_stripped);
     try testing.expect(result.program.defs.len > 0);
 }

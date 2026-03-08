@@ -262,7 +262,7 @@ pub const Session = struct {
         }
 
         // Accumulate definitions from successful declarations
-        if (result.kind == .declaration) {
+        if (result.kind == .declaration or result.kind == .declaration_let_stripped) {
             for (result.program.defs) |def| {
                 try self.accumulated_defs.append(self.allocator, def);
             }
@@ -327,7 +327,7 @@ pub const Session = struct {
                     return .{ .value = exec.value };
                 }
             },
-            .declaration => {
+            .declaration, .declaration_let_stripped => {
                 if (!is_wasi) {
                     // JIT path: add declarations to the JIT engine so
                     // their symbols are available for future expressions.
