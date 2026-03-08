@@ -195,7 +195,7 @@ test "cli e2e: error output goes to stderr" {
     defer result.deinit(testing.allocator);
 
     // Errors should appear on stderr, not stdout.
-    try expectContains(result.stderr, "Error");
+    try expectContains(result.stderr, "error");
     try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
 }
 
