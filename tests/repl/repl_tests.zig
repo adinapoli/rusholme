@@ -220,3 +220,161 @@ test "repl: function call after declaration accumulates correctly" {
         try testing.expectEqualStrings("99", use_result.value);
     }
 }
+
+// ── Test: error recovery ─────────────────────────────────────────────────
+
+test "repl: error recovery — bad then good" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Evaluate an undefined identifier — should fail
+    const bad_result = evaluate(alloc, &session, "not_defined_xyz") catch |err| {
+        std.debug.panic("evaluate failed: {}", .{err});
+    };
+    try testing.expectEqual(Status.failed, bad_result.status);
+
+    // Evaluate a valid expression — session should not be corrupted
+    const good_result = evaluate(alloc, &session, "42") catch |err| {
+        std.debug.panic("evaluate failed after error: {}", .{err});
+    };
+    try testing.expectEqual(Status.success, good_result.status);
+    try testing.expectEqualStrings("42", good_result.value);
+}
+
+// ── Test: chained declarations ───────────────────────────────────────────
+
+test "repl: chained declarations" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Define wrap — wraps a value in identity
+    // (Avoids arithmetic operators which require Num typeclass support)
+    const decl1 = evaluate(alloc, &session, "wrap x = x") catch |err| {
+        std.debug.panic("evaluate failed: {}", .{err});
+    };
+    try testing.expectEqual(Status.silent, decl1.status);
+
+    // Define apply in terms of wrap
+    const decl2 = evaluate(alloc, &session, "apply x = wrap (wrap x)") catch |err| {
+        std.debug.panic("evaluate failed: {}", .{err});
+    };
+    try testing.expectEqual(Status.silent, decl2.status);
+
+    // Use apply — should chain through wrap twice and return the value
+    const result = evaluate(alloc, &session, "apply 3") catch |err| {
+        std.debug.panic("evaluate failed: {}", .{err});
+    };
+    try testing.expectEqual(Status.success, result.status);
+    try testing.expectEqualStrings("3", result.value);
+}
+
+// ── Test: multiline block via joined content ─────────────────────────────
+
+test "repl: multiline block via joined content" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Send two declarations joined by a newline, simulating a :{ ... :} block
+    const decl_result = evaluate(alloc, &session, "f x = x\ng y = f y") catch |err| {
+        std.debug.panic("evaluate failed: {}", .{err});
+    };
+    // We expect the declaration(s) to be accepted silently
+    try testing.expectEqual(Status.silent, decl_result.status);
+
+    // Use the second function, which depends on the first
+    const use_result = evaluate(alloc, &session, "g 42") catch |err| {
+        std.debug.panic("evaluate failed: {}", .{err});
+    };
+    try testing.expectEqual(Status.success, use_result.status);
+    try testing.expectEqualStrings("42", use_result.value);
+}
+
+// ── Test: empty input ────────────────────────────────────────────────────
+
+test "repl: empty input" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Empty input should not crash the session
+    _ = evaluate(alloc, &session, "") catch {};
+
+    // Verify session still works
+    const result = evaluate(alloc, &session, "42") catch |err| {
+        std.debug.panic("evaluate failed after empty input: {}", .{err});
+    };
+    try testing.expectEqual(Status.success, result.status);
+    try testing.expectEqualStrings("42", result.value);
+}
+
+// ── Test: whitespace-only input ──────────────────────────────────────────
+
+test "repl: whitespace-only input" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Whitespace-only input should not crash the session
+    _ = evaluate(alloc, &session, "   ") catch {};
+
+    // Verify session still works
+    const result = evaluate(alloc, &session, "42") catch |err| {
+        std.debug.panic("evaluate failed after whitespace input: {}", .{err});
+    };
+    try testing.expectEqual(Status.success, result.status);
+    try testing.expectEqualStrings("42", result.value);
+}
+
+// ── Test: let syntax ─────────────────────────────────────────────────────
+
+test "repl: let syntax" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // GHCi-style let binding
+    const decl_result = evaluate(alloc, &session, "let f x = x") catch |err| {
+        std.debug.panic("evaluate failed: {}", .{err});
+    };
+    try testing.expectEqual(Status.silent, decl_result.status);
+
+    // Use the let-bound function
+    const use_result = evaluate(alloc, &session, "f 99") catch |err| {
+        std.debug.panic("evaluate failed: {}", .{err});
+    };
+    try testing.expectEqual(Status.success, use_result.status);
+    try testing.expectEqualStrings("99", use_result.value);
+}
