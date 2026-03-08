@@ -20,6 +20,7 @@ Thumbs.db
 .claude
 tags
 website/logo.png
+website/index.html
 node_modules
 
 # https://github.com/anthropic-experimental/sandbox-runtime/issues/139

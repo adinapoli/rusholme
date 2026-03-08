@@ -35,22 +35,17 @@ function copyLogo() {
   }
 }
 
-// Copy repl.wasm from zig build output to website directories
+// Copy repl.wasm from zig build output to website root
 function copyReplWasm() {
   const wasmSource = path.join(__dirname, '../zig-out/bin/repl.wasm');
-  const targets = [
-    path.join(__dirname, 'repl.wasm'),
-    path.join(__dirname, 'repl', 'repl.wasm'),
-  ];
+  const target = path.join(__dirname, 'repl.wasm');
 
   if (!fs.existsSync(wasmSource)) {
     console.warn('   ⚠️  zig-out/bin/repl.wasm not found — run "zig build" first');
     return;
   }
 
-  for (const target of targets) {
-    fs.copyFileSync(wasmSource, target);
-  }
+  fs.copyFileSync(wasmSource, target);
   console.log('   ✓ Copied repl.wasm from zig-out/bin/');
 }
 

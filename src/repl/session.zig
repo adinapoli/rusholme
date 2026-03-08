@@ -12,11 +12,14 @@
 //! See docs/decisions/0006-repl-architecture.md for the full design.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
-const Pipeline = @import("pipeline.zig").Pipeline;
-const CompileResult = @import("pipeline.zig").CompileResult;
-const CompileError = @import("pipeline.zig").CompileError;
+const pipeline_mod = @import("pipeline.zig");
+const Pipeline = pipeline_mod.Pipeline;
+const CompileResult = pipeline_mod.CompileResult;
+const CompileError = pipeline_mod.CompileError;
+const InputKind = pipeline_mod.InputKind;
 
 const renamer_mod = @import("../renamer/renamer.zig");
 const RenameEnv = renamer_mod.RenameEnv;
@@ -36,8 +39,13 @@ const env_mod = @import("../typechecker/env.zig");
 
 const engine_mod = @import("engine.zig");
 const GrinEngine = engine_mod.GrinEngine;
-const ExecResult = engine_mod.ExecResult;
 const ExecError = engine_mod.ExecError;
+
+const is_wasi = builtin.target.os.tag == .wasi;
+const jit_engine_mod = if (!is_wasi) @import("jit_engine.zig") else struct {};
+const JitEngine = if (!is_wasi) jit_engine_mod.JitEngine else void;
+const JitError = if (!is_wasi) jit_engine_mod.JitError else error{};
+const Engine = if (is_wasi) GrinEngine else JitEngine;
 
 const Note = diag_mod.Note;
 
@@ -64,7 +72,7 @@ pub const EvalResult = struct {
 /// Errors that can occur during session processing.
 pub const SessionError = error{
     OutOfMemory,
-} || CompileError || ExecError || error{
+} || CompileError || ExecError || (if (!is_wasi) JitError else error{}) || error{
     InitFailed,
 };
 
@@ -93,11 +101,25 @@ pub const Session = struct {
     pipeline: Pipeline,
 
     // The execution engine for evaluating compiled GRIN programs.
-    engine: GrinEngine,
+    engine: Engine,
 
     // Cached diagnostics from the most recent compilation attempt.
     // Persists across failed compilations so callers can inspect errors.
     last_diagnostics: std.ArrayListUnmanaged(Diagnostic),
+
+    // Source text from the most recent compilation attempt. Contains the
+    // full module wrapper (e.g. "module ReplInput where\n...") whose spans
+    // the diagnostics reference.
+    last_source: []const u8 = "",
+
+    // The raw user input from the most recent compilation. Used by
+    // diagnostic renderers to show the user's code (not the wrapper).
+    last_input: []const u8 = "",
+
+    // Which kind of wrapper produced the most recent diagnostics.
+    // Used to compute span adjustments when translating wrapper-relative
+    // positions to user-input-relative positions.
+    last_input_kind: InputKind = .declaration,
 
     // Accumulated GRIN function definitions from successful declarations.
     // For expressions, we merge these with the current expression's definition
@@ -136,7 +158,7 @@ pub const Session = struct {
             .mv_supply = .{},
             .next_file_id = 1,
             .pipeline = Pipeline.init(allocator, io),
-            .engine = GrinEngine.init(allocator, io),
+            .engine = if (is_wasi) GrinEngine.init(allocator, io) else JitEngine.init(allocator) catch return SessionError.InitFailed,
             .last_diagnostics = .{},
             .accumulated_defs = .{},
         };
@@ -144,6 +166,7 @@ pub const Session = struct {
 
     /// Release all session resources.
     pub fn deinit(self: *Session) void {
+        // GrinEngine has no deinit; only JitEngine does.
         self.last_diagnostics.deinit(self.allocator);
         self.accumulated_defs.deinit(self.allocator);
         self.rename_env.deinit();
@@ -193,6 +216,11 @@ pub const Session = struct {
             &self.mv_supply,
             &diags,
         ) catch |err| {
+            // Capture compilation context for diagnostic rendering.
+            self.last_source = self.pipeline.last_source;
+            self.last_input = input;
+            self.last_input_kind = self.pipeline.last_input_kind;
+
             // Save diagnostics before returning error so callers can inspect them
             // Note: we need to dupe the message allocation since diags will be deinitialized
             for (diags.diagnostics.items) |diag| {
@@ -214,6 +242,11 @@ pub const Session = struct {
             return err;
         };
 
+        // Capture compilation context for diagnostic rendering.
+        self.last_source = self.pipeline.last_source;
+        self.last_input = input;
+        self.last_input_kind = self.pipeline.last_input_kind;
+
         // Success: save diagnostics and leave scope frames in place
         for (diags.diagnostics.items) |diag| {
             self.last_diagnostics.append(self.allocator, .{
@@ -229,7 +262,7 @@ pub const Session = struct {
         }
 
         // Accumulate definitions from successful declarations
-        if (result.kind == .declaration) {
+        if (result.kind == .declaration or result.kind == .declaration_let_stripped) {
             for (result.program.defs) |def| {
                 try self.accumulated_defs.append(self.allocator, def);
             }
@@ -258,35 +291,48 @@ pub const Session = struct {
     /// the GRIN program and returns the formatted result value.
     ///
     /// For declarations: compiles through the pipeline (accumulating
-    /// bindings in the session state) and returns a confirmation.
+    /// bindings in the session state) and adds the definitions to the
+    /// JIT engine so subsequent expressions can reference them.
     pub fn eval(self: *Session, input: []const u8) SessionError!EvalResult {
         const process = try self.processInput(input);
 
         switch (process.compile.kind) {
             .expression => {
-                // Build a complete program with accumulated definitions
-                // and the current expression for evaluation.
-                // We allocate an array that includes both accumulated defs
-                // and the current expression's def.
-                const total_defs = self.accumulated_defs.items.len + 1;
-                const all_defs = try self.allocator.alloc(grin_ast.Def, total_defs);
-                errdefer self.allocator.free(all_defs);
+                if (is_wasi) {
+                    // WASM path: merge accumulated defs with the expression
+                    // program, since the GRIN tree-walker needs all defs in
+                    // a single program.
+                    const total_defs = self.accumulated_defs.items.len + 1;
+                    const all_defs = try self.allocator.alloc(grin_ast.Def, total_defs);
+                    errdefer self.allocator.free(all_defs);
 
-                // Copy accumulated definitions
-                for (self.accumulated_defs.items, 0..) |def, i| {
-                    all_defs[i] = def;
+                    for (self.accumulated_defs.items, 0..) |def, i| {
+                        all_defs[i] = def;
+                    }
+
+                    if (process.compile.program.defs.len != 1) {
+                        std.debug.panic("Expression compilation produced {} definitions, expected 1", .{process.compile.program.defs.len});
+                    }
+                    all_defs[total_defs - 1] = process.compile.program.defs[0];
+
+                    const merged_program = grin_ast.Program{ .defs = all_defs };
+                    const exec = try self.engine.execute(&merged_program);
+                    self.allocator.free(all_defs);
+                    return .{ .value = exec.value };
+                } else {
+                    // JIT path: pass only the expression's def. Previously-
+                    // declared functions are already in the JIT's main dylib
+                    // and will be resolved automatically by the ORC linker.
+                    const exec = try self.engine.execute(&process.compile.program);
+                    return .{ .value = exec.value };
                 }
-
-                // Add the expression's definition
-                all_defs[total_defs - 1] = process.compile.program.defs[0];
-
-                const merged_program = grin_ast.Program{ .defs = all_defs };
-                const exec = try self.engine.execute(&merged_program);
-
-                self.allocator.free(all_defs);
-                return .{ .value = exec.value };
             },
-            .declaration => {
+            .declaration, .declaration_let_stripped => {
+                if (!is_wasi) {
+                    // JIT path: add declarations to the JIT engine so
+                    // their symbols are available for future expressions.
+                    try self.engine.addDeclarations(&process.compile.program);
+                }
                 return .{ .value = "" };
             },
         }
@@ -407,6 +453,18 @@ test "session: failed input does not corrupt state" {
     // Session should still work after the failed input
     const r = try session.processInput("42");
     try testing.expect(r.compile.kind == .expression);
+}
+
+test "session: putStrLn compiles as expression" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = try Session.init(alloc, testing.io);
+    defer session.deinit();
+
+    const result = try session.processInput("putStrLn \"hello\"");
+    try testing.expect(result.compile.kind == .expression);
 }
 
 test "session: processInput returns diagnostics on error" {

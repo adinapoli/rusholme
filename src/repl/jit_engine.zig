@@ -49,18 +49,26 @@ pub const JitError = error{
     OutOfMemory,
     /// RTS symbol registration failed.
     RtsRegistrationFailed,
+    /// Value is not a valid heap node (raw pointer to non-heap memory).
+    InvalidNode,
 };
 
 // ── JIT Engine ────────────────────────────────────────────────────────
 
 /// Execution engine backed by LLVM ORC LLJIT.
 ///
-/// For each program, translates GRIN → LLVM IR, feeds the IR module
-/// to LLJIT, resolves the entry-point symbol, calls it, and formats
-/// the result.
+/// Manages JIT compilation and execution for the REPL. Declarations are
+/// added permanently to the main JITDylib; expressions use unique entry
+/// point names and resource trackers for per-evaluation cleanup.
 pub const JitEngine = struct {
     allocator: Allocator,
     jit: llvm.OrcLLJITRef,
+    /// Monotonically increasing counter for generating unique entry
+    /// point names ("repl_expr_0", "repl_expr_1", ...).
+    eval_counter: u64 = 0,
+    /// Buffer for formatting the entry point name as a null-terminated
+    /// C string for LLVM symbol lookup.
+    entry_name_buf: [64]u8 = undefined,
 
     /// Create a new JIT engine backed by LLVM ORC LLJIT.
     pub fn init(allocator: Allocator) JitError!JitEngine {
@@ -91,45 +99,123 @@ pub const JitEngine = struct {
         }
     }
 
-    /// Translate a GRIN program to LLVM IR, JIT-compile it, execute the
-    /// entry point, and return the formatted result.
-    pub fn execute(self: *JitEngine, program: *const grin_ast.Program) JitError!ExecResult {
-        // 1. Translate GRIN → LLVM IR string.
-        //    We use a temporary GrinTranslator to produce the IR text,
-        //    then parse it into a fresh module owned by a ThreadSafeContext.
-        //    This avoids a double-free: GrinTranslator.deinit() destroys its
-        //    own LLVM context (and any modules created in it), but LLJIT also
-        //    takes ownership of the module. By going through IR text we
-        //    cleanly decouple the two ownership domains.
-        //
-        //    Before translating, we rename the REPL entry point to "main"
-        //    so the translator emits the correct C-ABI return type (i32).
-        //    The translator special-cases "main" but treats other zero-param
-        //    functions as void-returning, which is incorrect for our use case.
-        //    tracked in: https://github.com/adinapoli/rusholme/issues/484
-        const patched_program = patchEntryPointName(self.allocator, program) catch {
-            return JitError.OutOfMemory;
-        };
+    /// Add declaration definitions permanently to the JIT's main dylib.
+    ///
+    /// These symbols persist across REPL inputs so that subsequent
+    /// expressions can reference user-defined functions and data types.
+    pub fn addDeclarations(self: *JitEngine, program: *const grin_ast.Program) JitError!void {
+        if (program.defs.len == 0) return;
 
         var translator = GrinTranslator.init(self.allocator);
         defer translator.deinit();
 
-        const raw_ir = translator.translateProgram(patched_program) catch {
+        const ir_text = translator.translateProgram(program.*) catch {
             return JitError.TranslationFailed;
-        };
-        defer self.allocator.free(raw_ir);
-
-        // The GRIN-to-LLVM translator declares main as returning i32 but
-        // emits `ret i64 <val>` for integer literals — a type mismatch that
-        // the textual IR parser rejects.  We patch the IR to use i64 return,
-        // matching the actual ret instructions.
-        // tracked in: https://github.com/adinapoli/rusholme/issues/484
-        const ir_text = std.mem.replaceOwned(u8, self.allocator, raw_ir, "define i32 @main()", "define i64 @main()") catch {
-            return JitError.OutOfMemory;
         };
         defer self.allocator.free(ir_text);
 
-        // 2. Create a thread-safe context and parse the IR into it.
+        const ts_mod = try self.parseIrToThreadSafeModule(ir_text);
+
+        const main_dylib = c.LLVMOrcLLJITGetMainJITDylib(self.jit);
+        const add_err = c.LLVMOrcLLJITAddLLVMIRModule(self.jit, main_dylib, ts_mod);
+        if (add_err != null) {
+            c.LLVMConsumeError(add_err);
+            return JitError.ModuleAddFailed;
+        }
+    }
+
+    /// Translate a GRIN expression program to LLVM IR, JIT-compile it,
+    /// execute the entry point, and return the formatted result.
+    ///
+    /// Each call uses a unique entry point name and a resource tracker
+    /// so the expression's symbols are removed after execution. This
+    /// allows multiple expressions to be evaluated without symbol
+    /// collisions.
+    pub fn execute(self: *JitEngine, program: *const grin_ast.Program) JitError!ExecResult {
+        // 1. Generate a unique entry point name for this evaluation.
+        const entry_name = std.fmt.bufPrint(&self.entry_name_buf, "repl_expr_{d}", .{self.eval_counter}) catch {
+            return JitError.OutOfMemory;
+        };
+        self.entry_name_buf[entry_name.len] = 0;
+        const entry_name_z: [:0]const u8 = self.entry_name_buf[0..entry_name.len :0];
+        self.eval_counter += 1;
+
+        // 2. Patch the GRIN program: rename replExpr__ to the unique name.
+        const patched_program = patchEntryPointName(self.allocator, program, entry_name) catch {
+            return JitError.OutOfMemory;
+        };
+
+        // 3. Translate GRIN → LLVM IR text.
+        //    We use a temporary GrinTranslator to produce IR text, then
+        //    parse it into a fresh module owned by a ThreadSafeContext.
+        //    This avoids a double-free: GrinTranslator.deinit() destroys
+        //    its own LLVM context, but LLJIT also takes ownership of the
+        //    module. Going through IR text decouples the two ownership
+        //    domains.
+        var translator = GrinTranslator.init(self.allocator);
+        defer translator.deinit();
+        translator.repl_entry_point = entry_name;
+
+        const ir_text = translator.translateProgram(patched_program) catch {
+            return JitError.TranslationFailed;
+        };
+        defer self.allocator.free(ir_text);
+
+        // 4. Parse IR and add to JIT with a resource tracker.
+        const ts_mod = try self.parseIrToThreadSafeModule(ir_text);
+
+        const main_dylib = c.LLVMOrcLLJITGetMainJITDylib(self.jit);
+        const tracker = c.LLVMOrcJITDylibCreateResourceTracker(main_dylib);
+
+        const add_err = c.LLVMOrcLLJITAddLLVMIRModuleWithRT(self.jit, tracker, ts_mod);
+        if (add_err != null) {
+            c.LLVMConsumeError(add_err);
+            c.LLVMOrcReleaseResourceTracker(tracker);
+            return JitError.ModuleAddFailed;
+        }
+
+        // 5. Look up the unique entry point.
+        var addr: llvm.OrcExecutorAddress = 0;
+        const lookup_err = c.LLVMOrcLLJITLookup(self.jit, &addr, entry_name_z);
+        if (lookup_err != null) {
+            c.LLVMConsumeError(lookup_err);
+            // Clean up before returning.
+            const rm_err = c.LLVMOrcResourceTrackerRemove(tracker);
+            if (rm_err != null) c.LLVMConsumeError(rm_err);
+            c.LLVMOrcReleaseResourceTracker(tracker);
+            return JitError.EntryPointNotFound;
+        }
+
+        // 6. Call the entry point. REPL entry points return i64 (either
+        //    a literal value or a pointer to a heap node cast to i64).
+        const EntryFn = *const fn () callconv(.c) i64;
+        const entry_fn: EntryFn = @ptrFromInt(addr);
+        const raw_result = entry_fn();
+
+        // 7. Format the result before cleaning up.
+        const formatted = formatJitResult(self.allocator, raw_result) catch {
+            const rm_err = c.LLVMOrcResourceTrackerRemove(tracker);
+            if (rm_err != null) c.LLVMConsumeError(rm_err);
+            c.LLVMOrcReleaseResourceTracker(tracker);
+            return JitError.FormatError;
+        };
+
+        // 8. Remove the expression's symbols from the dylib. The result
+        //    has already been captured as a formatted string, so the
+        //    JIT'd code is no longer needed.
+        const rm_err = c.LLVMOrcResourceTrackerRemove(tracker);
+        if (rm_err != null) c.LLVMConsumeError(rm_err);
+        c.LLVMOrcReleaseResourceTracker(tracker);
+
+        return .{ .value = formatted };
+    }
+
+    /// Parse LLVM IR text into a ThreadSafeModule ready for LLJIT.
+    ///
+    /// Sets the data layout and target triple to match the JIT engine.
+    /// The returned ThreadSafeModule takes ownership of the underlying
+    /// LLVM module and context.
+    fn parseIrToThreadSafeModule(self: *JitEngine, ir_text: []const u8) JitError!llvm.OrcThreadSafeModuleRef {
         const ts_ctx = c.LLVMOrcCreateNewThreadSafeContext();
         if (ts_ctx == null) return JitError.ContextCreationFailed;
 
@@ -148,47 +234,17 @@ pub const JitEngine = struct {
             return JitError.TranslationFailed;
         }
 
-        // Set the module's data layout and triple to match the JIT.
         const data_layout_str = c.LLVMOrcLLJITGetDataLayoutStr(self.jit);
         c.LLVMSetDataLayout(llvm_module, data_layout_str);
         const triple = c.LLVMGetDefaultTargetTriple();
         defer c.LLVMDisposeMessage(triple);
         c.LLVMSetTarget(llvm_module, triple);
 
-        // 3. Wrap in a thread-safe module and add to JIT.
-        //    LLVMOrcCreateNewThreadSafeModule takes ownership of both the
-        //    module and the context — do not dispose them after this call.
         const ts_mod = c.LLVMOrcCreateNewThreadSafeModule(llvm_module, ts_ctx);
-        c.LLVMOrcDisposeThreadSafeContext(ts_ctx);
-
-        const main_dylib = c.LLVMOrcLLJITGetMainJITDylib(self.jit);
-        const add_err = c.LLVMOrcLLJITAddLLVMIRModule(self.jit, main_dylib, ts_mod);
-        if (add_err != null) {
-            c.LLVMConsumeError(add_err);
-            return JitError.ModuleAddFailed;
-        }
-
-        // 4. Look up the entry point. After patching, the entry point is
-        //    always named "main".
-        var addr: llvm.OrcExecutorAddress = 0;
-        const lookup_err = c.LLVMOrcLLJITLookup(self.jit, &addr, "main");
-        if (lookup_err != null) {
-            c.LLVMConsumeError(lookup_err);
-            return JitError.EntryPointNotFound;
-        }
-
-        // 4. Call the entry point. GRIN functions return i64 (either a
-        //    literal value or a pointer to a heap node cast to i64).
-        const EntryFn = *const fn () callconv(.c) i64;
-        const entry_fn: EntryFn = @ptrFromInt(addr);
-        const raw_result = entry_fn();
-
-        // 5. Format the result.
-        const formatted = formatJitResult(self.allocator, raw_result) catch {
-            return JitError.FormatError;
-        };
-
-        return .{ .value = formatted };
+        // NOTE: Do NOT dispose the ThreadSafeContext here. The ThreadSafeModule
+        // takes ownership and will clean it up when the JIT disposes the module.
+        // Disposing it here causes a use-after-free when the JIT tries to compile.
+        return ts_mod;
     }
 
     /// Register the RTS functions as absolute symbols in the JIT's main
@@ -206,7 +262,6 @@ pub const JitEngine = struct {
             .{ .name = "rts_store", .addr = @intFromPtr(&rts_node.rts_store) },
         };
 
-        // Also register IO functions.
         const rts_io = @import("../rts/io.zig");
         const io_symbols = [_]Symbol{
             .{ .name = "rts_putStrLn", .addr = @intFromPtr(&rts_io.rts_putStrLn) },
@@ -251,22 +306,17 @@ pub const JitEngine = struct {
             return JitError.RtsRegistrationFailed;
         }
     }
-
 };
 
-/// Create a copy of the GRIN program with `replExpr__` renamed to `main`.
-///
-/// The GRIN-to-LLVM translator special-cases "main" to use the C ABI
-/// (i32 return type). Other zero-param functions get void return, which
-/// is incorrect for the REPL entry point. This function works around
-/// that limitation by renaming the entry point before translation.
-fn patchEntryPointName(allocator: Allocator, program: *const grin_ast.Program) Allocator.Error!grin_ast.Program {
+/// Create a copy of the GRIN program with `replExpr__` renamed to the
+/// given target name. The unique ID is preserved.
+fn patchEntryPointName(allocator: Allocator, program: *const grin_ast.Program, target_name: []const u8) Allocator.Error!grin_ast.Program {
     const new_defs = try allocator.alloc(grin_ast.Def, program.defs.len);
     for (program.defs, 0..) |def, i| {
         new_defs[i] = def;
         if (std.mem.eql(u8, def.name.base, "replExpr__")) {
             new_defs[i].name = .{
-                .base = "main",
+                .base = target_name,
                 .unique = def.name.unique,
             };
         }
@@ -286,6 +336,12 @@ fn patchEntryPointName(allocator: Allocator, program: *const grin_ast.Program) A
 /// aligned) and try to interpret it as a node. If that fails, we
 /// treat it as a plain integer.
 fn formatJitResult(allocator: Allocator, raw: i64) Allocator.Error![]const u8 {
+    // Check if this is a boolean literal (encoded as 0 or 1 directly, not a heap node)
+    // Booleans in GRIN are unboxed i64 values where 1 = True and 0 = False
+    // (from grin_to_llvm.zig where true_val maps to 1 and false_val maps to 0)
+    if (raw == 1) return allocator.dupe(u8, "True");
+    if (raw == 0) return allocator.dupe(u8, "False");
+
     // Check if the result is a valid-looking pointer to a heap node.
     // Heap nodes are allocated by rts_alloc and have a specific layout
     // with a tag in the first 8 bytes.
@@ -295,23 +351,111 @@ fn formatJitResult(allocator: Allocator, raw: i64) Allocator.Error![]const u8 {
         // Try to interpret as a heap node pointer.
         const node_ptr: *const rts_node.Node = @ptrFromInt(as_usize);
 
-        // Validate: check that tag and n_fields look reasonable.
-        // Heap nodes have tag >= 0 and n_fields < some reasonable bound.
-        if (node_ptr.n_fields < 1024) {
+        // Quick validation: check if tag in reasonable range before formatting
+        const tag_int: u64 = @intFromEnum(node_ptr.tag);
+        if (tag_int <= 0x10000 and node_ptr.n_fields <= 1024) {
+            // Looks like a valid heap node format it
             return formatNode(allocator, node_ptr);
         }
     }
 
-    // Plain integer literal.
+    // If not a heap node, check if it looks like a C string (NUL-terminated)
+    // Global string literals from LLVM GlobalStringPtr return as raw pointers
+    // Only attempt to read if the address is in a reasonable range (not too small like an integer)
+    const MIN_VALID_PTR: usize = 0x1000; // Typical page boundary, integers 0-4095 are likely literal values
+    if (as_usize >= MIN_VALID_PTR) {
+        const str_ptr: [*]const u8 = @ptrFromInt(as_usize);
+        
+        // Check first byte for printable ASCII
+        if (str_ptr[0] >= 32 and str_ptr[0] <= 126) {
+            var len: usize = 0;
+            const max_len: usize = 256; // Reasonable safety limit
+            
+            // Read until NUL or we hit non-printable bytes
+            while (len < max_len) {
+                const byte = str_ptr[len];
+                if (byte == 0) break; // NUL terminator found
+                if (byte < 32 or byte > 126) break; // Non-printable
+                len += 1;
+            }
+            
+            // If we found a reasonable-looking string
+            if (len > 0 and len < max_len and str_ptr[len] == 0) {
+                const str_slice = str_ptr[0..len];
+                return std.fmt.allocPrint(allocator, "\"{s}\"", .{str_slice});
+            }
+        }
+    }
+
+    // Not a valid heap node - treat as plain integer literal.
     return std.fmt.allocPrint(allocator, "{d}", .{raw});
 }
 
+// Known Prelude constant tags for boolean/unit formatting
+// These match the unique IDs from grin_to_llvm.zig's `known` struct
+const KNOWN_TRUE_ID: u64 = 200;
+const KNOWN_FALSE_ID: u64 = 201;
+const KNOWN_UNIT_ID: u64 = 206;
+
 /// Format a heap node as a human-readable string.
-fn formatNode(allocator: Allocator, node: *const rts_node.Node) Allocator.Error![]const u8 {
+/// Assumes the caller has already validated that this is a valid heap node
+/// (tag in reasonable range, n_fields reasonable).
+fn formatNode(allocator: Allocator, node: *const rts_node.Node) ![]const u8 {
+    const tag_int: u64 = @intFromEnum(node.tag);
+
+    // Caller should have validated, but if we somehow got here with invalid data,
+    // conservatively return a generic representation
+    if (tag_int > 0x10000 or node.n_fields > 1024) {
+        return std.fmt.allocPrint(allocator, "<invalid node tag={d}>", .{tag_int});
+    }
+
+    // Handle unit (RtsTag.Unit = 0) - display as empty string
+    // Direct tag value comparison since node.tag was set by LLVM code
+    if (tag_int == @intFromEnum(rts_node.Tag.Unit)) {
+        return allocator.dupe(u8, "");
+    }
+
+    // Check if the RtsTag is the user-defined Data type
+    // For these, the actual constructor discriminant is stored in the first field
+    // (tracked in GRIN tag table as unique IDs like 200=True, 201=False, etc.)
+    if (node.tag == .Data) {
+        // Try to read the actual discriminant from the first field
+        if (node.n_fields >= 1) {
+            const disc = rts_node.rts_load_field(node, 0);
+            // Handle boolean values by their GRIN-level discriminant
+            if (disc == KNOWN_TRUE_ID) return allocator.dupe(u8, "True");
+            if (disc == KNOWN_FALSE_ID) return allocator.dupe(u8, "False");
+            if (disc == KNOWN_UNIT_ID) return allocator.dupe(u8, "");
+        }
+    }
+
+    // Handle String nodes - read the string content from the stored pointer
+    if (node.tag == .String and node.n_fields >= 1) {
+        const str_ptr = rts_node.stringValue(node);
+        // Get C string length
+        var len: usize = 0;
+        while (str_ptr[len] != 0) : (len += 1) {}
+        // Format with quotes and escape
+        const str_slice = str_ptr[0..len];
+        var result = try std.ArrayList(u8).initCapacity(allocator, len + 10);
+        try result.append(allocator, '"');
+        try result.appendSlice(allocator, str_slice);
+        try result.append(allocator, '"');
+        return result.toOwnedSlice(allocator);
+    }
+
+    // Handle boolean values using discriminant from tag table
+    // True has stable ID 200, False has ID 201
+    if (tag_int == KNOWN_TRUE_ID) {
+        return allocator.dupe(u8, "True");
+    }
+    if (tag_int == KNOWN_FALSE_ID) {
+        return allocator.dupe(u8, "False");
+    }
+
     // For nullary constructors, just print the tag number for now.
     // A full implementation would map tag IDs back to constructor names,
     // but that requires threading the tag table from compilation.
-    const tag_int = @intFromEnum(node.tag);
     if (node.n_fields == 0) {
         return std.fmt.allocPrint(allocator, "<constructor tag={d}>", .{tag_int});
     }

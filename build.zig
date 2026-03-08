@@ -362,6 +362,43 @@ pub fn build(b: *std.Build) void {
     e2e_tests.step.dependOn(b.getInstallStep());
     const run_e2e_tests = b.addRunArtifact(e2e_tests);
 
+    // REPL test runner - TDD tests for REPL behavior
+    const repl_test_module = b.createModule(.{
+        .root_source_file = b.path("tests/repl/repl_tests.zig"),
+        .target = target,
+        .imports = &.{.{ .name = "rusholme", .module = mod }},
+    });
+    const repl_tests = b.addTest(.{
+        .name = "repl-tests",
+        .root_module = repl_test_module,
+    });
+    // REPL tests JIT-compile and execute code that writes directly to fd 1
+    // via the RTS (rts_putStrLn). This bypasses the Zig test runner's IPC
+    // protocol (--listen=-) and corrupts the pipe, causing a deadlock.
+    // Create the run step manually without enableTestRunnerMode so the
+    // binary runs without --listen and communicates via exit code only.
+    const run_repl_tests = std.Build.Step.Run.create(b, "run test repl-tests");
+    run_repl_tests.addArtifactArg(repl_tests);
+    run_repl_tests.expectExitCode(0);
+
+    // CLI end-to-end REPL tests — spawn rhc repl as subprocess.
+    // These test the real interactive experience: prompts, commands,
+    // multiline accumulation, and :load from disk.
+    const cli_e2e_module = b.createModule(.{
+        .root_source_file = b.path("tests/repl/cli_e2e_tests.zig"),
+        .target = target,
+    });
+    const cli_e2e_tests = b.addTest(.{
+        .name = "cli-e2e-tests",
+        .root_module = cli_e2e_module,
+    });
+    // CLI e2e tests need the rhc binary built first.
+    cli_e2e_tests.step.dependOn(b.getInstallStep());
+    // Same technique as repl-tests: no IPC mode, communicate via exit code.
+    const run_cli_e2e_tests = std.Build.Step.Run.create(b, "run test cli-e2e-tests");
+    run_cli_e2e_tests.addArtifactArg(cli_e2e_tests);
+    run_cli_e2e_tests.expectExitCode(0);
+
     // Diagnostic step — reports per-file parser errors for failing tests.
     // Usage: zig build diag
     const diag_module = b.createModule(.{
@@ -387,6 +424,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_parser_tests.step);
     test_step.dependOn(&run_runtime_tests.step);
     test_step.dependOn(&run_e2e_tests.step);
+    test_step.dependOn(&run_repl_tests.step);
+    test_step.dependOn(&run_cli_e2e_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
@@ -423,6 +462,11 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSmall,
         }),
     });
+    // Reactor mode: the REPL is a long-lived module with exported functions,
+    // not a command that runs once and exits. In reactor mode the entry point
+    // is `_initialize` (no `proc_exit`), which avoids the noreturn trap that
+    // occurs when the JS WASI shim returns from `proc_exit` in command mode.
+    repl_wasm.wasi_exec_model = .reactor;
     // Export all `pub export` symbols so JavaScript can call them.
     repl_wasm.rdynamic = true;
 

@@ -11,6 +11,12 @@ const std = @import("std");
 pub const buffer = @import("buffer.zig");
 pub const eval_mod = @import("eval.zig");
 const Session = @import("session.zig").Session;
+const protocol = @import("protocol.zig");
+const JsonRenderer = @import("../diagnostics/json.zig").JsonRenderer;
+const FileId = @import("../diagnostics/span.zig").FileId;
+const Diagnostic = @import("../diagnostics/diagnostic.zig").Diagnostic;
+const pipeline_mod = @import("pipeline.zig");
+const translateSpan = pipeline_mod.translateSpan;
 
 // ── Global state ──────────────────────────────────────────────────────
 
@@ -22,6 +28,12 @@ var session_arena: ?std.heap.ArenaAllocator = null;
 
 /// The active REPL session.
 var session: ?Session = null;
+
+/// Single-threaded IO backend for WASM. The WASM binary is built as a
+/// WASI reactor (no std.process.Init), so we construct our own `std.Io`
+/// from a single-threaded `Io.Threaded` instance. IO primops (fd_write
+/// etc.) route through WASI syscalls, which the browser's JS shim handles.
+var io_backend: std.Io.Threaded = std.Io.Threaded.init_single_threaded;
 
 pub fn main() void {
     // No-op entry point for WASM.
@@ -39,10 +51,7 @@ pub export fn repl_init() void {
     session_arena = std.heap.ArenaAllocator.init(page_alloc);
     const alloc = session_arena.?.allocator();
 
-    // On wasm32-wasi, there is no std.process.Init to provide std.Io.
-    // Pass undefined — IO primops will trap if invoked, which is
-    // acceptable until browser_wasi_shim is wired (Task 9).
-    session = Session.init(alloc, undefined) catch {
+    session = Session.init(alloc, io_backend.io()) catch {
         _ = writeError("Failed to initialise REPL session");
         return;
     };
@@ -65,8 +74,9 @@ pub export fn repl_get_output_buffer() [*]u8 {
 /// output buffer and the result length is returned.
 ///
 /// JSON format:
-///   Success: {"status":"success","value":"<result>"}
-///   Error:   {"status":"error","message":"<description>"}
+///   Success:     {"status":"success","value":"<result>"}
+///   Declaration: {"status":"success","value":""}
+///   Error:       {"status":"error","message":"<description>"}
 pub export fn repl_evaluate(length: usize) usize {
     const input_buf = buffer.getInputBuffer();
     if (length > buffer.INPUT_BUFFER_SIZE) return writeError("Input too long");
@@ -78,11 +88,16 @@ pub export fn repl_evaluate(length: usize) usize {
 
     const s = &(session orelse return writeError("Session not initialised — call repl_init() first"));
 
-    const result = s.eval(input) catch {
-        return writeError("Compilation failed");
+    const alloc = session_arena.?.allocator();
+    const result = protocol.evaluate(alloc, s, input) catch {
+        return writeError("Internal error during evaluation");
     };
 
-    return writeSuccess(result.value);
+    return switch (result.status) {
+        .success => writeSuccess(result.value),
+        .silent => writeSuccess(""),
+        .failed => writeErrorWithDiagnostics(alloc, s, result.diagnostics, result.value),
+    };
 }
 
 // ── Output formatting ─────────────────────────────────────────────────
@@ -98,5 +113,45 @@ fn writeError(message: []const u8) usize {
     const output = buffer.getOutputBuffer()[0..buffer.OUTPUT_BUFFER_SIZE];
     const json = std.fmt.bufPrint(output, "{{\"status\":\"error\",\"message\":\"{s}\"}}", .{message}) catch
         return 0;
+    return json.len;
+}
+
+/// Write an error response with structured diagnostic JSON.
+///
+/// Translates wrapper-relative spans to user-input-relative coordinates
+/// before rendering, so the browser sees the user's code positions.
+///
+/// Produces:
+///   {"status":"error","message":"<fallback>","diagnostics":[...]}
+///
+/// If rendering fails, falls back to the flat error format.
+fn writeErrorWithDiagnostics(alloc: std.mem.Allocator, s: *Session, diagnostics: []const Diagnostic, fallback_message: []const u8) usize {
+    // Build lookup maps for the JSON renderer.
+    var path_lookup = std.AutoHashMap(FileId, []const u8).init(alloc);
+    defer path_lookup.deinit();
+    path_lookup.put(0, "<repl>") catch return writeError(fallback_message);
+
+    // Translate spans from wrapper-relative to user-input-relative.
+    const translated = alloc.alloc(Diagnostic, diagnostics.len) catch return writeError(fallback_message);
+    for (diagnostics, 0..) |diag, i| {
+        translated[i] = .{
+            .severity = diag.severity,
+            .code = diag.code,
+            .span = translateSpan(diag.span, s.last_input_kind) orelse diag.span,
+            .message = diag.message,
+            .notes = diag.notes,
+            .payload = diag.payload,
+        };
+    }
+
+    const renderer = JsonRenderer.init(alloc, &path_lookup);
+
+    const diag_json = renderer.renderAll(translated) catch
+        return writeError(fallback_message);
+
+    // Compose the full response with the diagnostics array embedded.
+    const output = buffer.getOutputBuffer()[0..buffer.OUTPUT_BUFFER_SIZE];
+    const json = std.fmt.bufPrint(output, "{{\"status\":\"error\",\"message\":\"{s}\",\"diagnostics\":{s}}}", .{ fallback_message, diag_json }) catch
+        return writeError(fallback_message);
     return json.len;
 }
