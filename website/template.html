@@ -1139,22 +1139,32 @@
         //
         // See docs/decisions/0006-repl-architecture.md for the full design.
         function createWasiShim(wasmInstance, term) {
+            // Shared iovec write helper used by both fd_write and fd_pwrite.
+            // Decodes iovec buffers from WASM linear memory and writes text
+            // to the xterm terminal for stdout (fd 1) and stderr (fd 2).
+            function writeIovecs(fd, iovs_ptr, iovs_len, nwritten_ptr) {
+                const mem = new DataView(wasmInstance.exports.memory.buffer);
+                let totalWritten = 0;
+                for (let i = 0; i < iovs_len; i++) {
+                    const bufPtr = mem.getUint32(iovs_ptr + i * 8, true);
+                    const bufLen = mem.getUint32(iovs_ptr + i * 8 + 4, true);
+                    const bytes = new Uint8Array(wasmInstance.exports.memory.buffer, bufPtr, bufLen);
+                    const text = new TextDecoder().decode(bytes);
+                    if (fd === 1 || fd === 2) {
+                        // xterm.js requires \r\n for proper line breaks;
+                        // bare \n moves the cursor down without returning
+                        // to column 0, causing indentation drift.
+                        term.write(text.replace(/\n/g, '\r\n'));
+                    }
+                    totalWritten += bufLen;
+                }
+                mem.setUint32(nwritten_ptr, totalWritten, true);
+                return 0;
+            }
+
             return {
                 fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) {
-                    const mem = new DataView(wasmInstance.exports.memory.buffer);
-                    let totalWritten = 0;
-                    for (let i = 0; i < iovs_len; i++) {
-                        const bufPtr = mem.getUint32(iovs_ptr + i * 8, true);
-                        const bufLen = mem.getUint32(iovs_ptr + i * 8 + 4, true);
-                        const bytes = new Uint8Array(wasmInstance.exports.memory.buffer, bufPtr, bufLen);
-                        const text = new TextDecoder().decode(bytes);
-                        if (fd === 1 || fd === 2) {
-                            term.write(text);
-                        }
-                        totalWritten += bufLen;
-                    }
-                    mem.setUint32(nwritten_ptr, totalWritten, true);
-                    return 0;
+                    return writeIovecs(fd, iovs_ptr, iovs_len, nwritten_ptr);
                 },
                 fd_read() { return 52; },
                 fd_close() { return 0; },
@@ -1169,7 +1179,11 @@
                 },
                 fd_prestat_get() { return 8; },
                 fd_prestat_dir_name() { return 8; },
-                fd_pwrite() { return 52; },
+                fd_pwrite(fd, iovs_ptr, iovs_len, _offset, nwritten_ptr) {
+                    // Zig's std lib uses fd_pwrite for stdout on wasm32-wasi.
+                    // For character devices the offset is meaningless.
+                    return writeIovecs(fd, iovs_ptr, iovs_len, nwritten_ptr);
+                },
                 fd_pread() { return 52; },
                 fd_sync() { return 52; },
                 fd_filestat_get() { return 8; },
