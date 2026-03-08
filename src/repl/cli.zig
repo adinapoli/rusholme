@@ -21,6 +21,11 @@ const protocol_mod = @import("protocol.zig");
 const Status = protocol_mod.Status;
 const evaluate = protocol_mod.evaluate;
 
+const InputMode = enum {
+    normal,
+    multiline,
+};
+
 // ── REPL loop ─────────────────────────────────────────────────────────
 
 /// Run the interactive REPL.
@@ -45,19 +50,83 @@ pub fn run(allocator: Allocator, io: Io) !void {
 
     // Main loop: read a line, evaluate, print result.
     var line_buf: [4096]u8 = undefined;
+    var mode: InputMode = .normal;
+    var multiline_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer multiline_buf.deinit(allocator);
+
     while (true) {
-        try writeStdout(io, "rusholme> ");
+        const prompt = switch (mode) {
+            .normal => "rusholme> ",
+            .multiline => "rusholme| ",
+        };
+        try writeStdout(io, prompt);
 
         const line = readLine(io, &line_buf) catch {
-            // EOF or read error — exit gracefully.
+            // EOF or read error — cancel any multiline block and exit.
+            if (mode == .multiline) {
+                multiline_buf.clearRetainingCapacity();
+                mode = .normal;
+            }
             try writeStdout(io, "\n");
             break;
         };
 
         if (line.len == 0) continue;
 
+        // ── Multiline mode handling ───────────────────────────────
+        if (mode == .multiline) {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+
+            // :} closes the block and evaluates.
+            if (std.mem.eql(u8, trimmed, ":}")) {
+                const input = multiline_buf.items;
+                defer multiline_buf.clearRetainingCapacity();
+                mode = .normal;
+
+                if (input.len == 0) continue;
+
+                const result = evaluate(alloc, &session, input) catch |err| {
+                    try printError(io, err);
+                    continue;
+                };
+                if (result.status == .success) {
+                    try writeStdout(io, result.value);
+                    try writeStdout(io, "\n");
+                } else if (result.status == .failed) {
+                    for (result.diagnostics) |diag| {
+                        try writeStderr(io, "Error: ");
+                        try writeStderr(io, diag.message);
+                        try writeStderr(io, "\n");
+                    }
+                }
+                continue;
+            }
+
+            // :quit / :q exits even from multiline mode.
+            if (std.mem.eql(u8, trimmed, ":quit") or std.mem.eql(u8, trimmed, ":q")) {
+                multiline_buf.clearRetainingCapacity();
+                mode = .normal;
+                break;
+            }
+
+            // Otherwise, accumulate the line.
+            try multiline_buf.appendSlice(allocator, line);
+            try multiline_buf.append(allocator, '\n');
+            continue;
+        }
+
+        // ── Normal mode ───────────────────────────────────────────
+
         // Check for REPL commands (leading ':').
         if (line[0] == ':') {
+            const cmd = std.mem.trim(u8, line[1..], " \t\r");
+
+            // :{ enters multiline mode.
+            if (std.mem.eql(u8, cmd, "{")) {
+                mode = .multiline;
+                continue;
+            }
+
             const should_continue = handleCommand(io, line);
             if (!should_continue) break;
             continue;
@@ -153,6 +222,8 @@ fn printHelp(io: Io) !void {
         \\Available commands:
         \\  :quit, :q       Exit the REPL
         \\  :type <expr>    Show the type of an expression (not yet implemented)
+        \\  :{              Begin multi-line input block
+        \\  :}              End multi-line input block and evaluate
         \\  :help, :h, :?   Show this help message
         \\
     );
