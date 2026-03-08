@@ -1151,7 +1151,10 @@
                     const bytes = new Uint8Array(wasmInstance.exports.memory.buffer, bufPtr, bufLen);
                     const text = new TextDecoder().decode(bytes);
                     if (fd === 1 || fd === 2) {
-                        term.write(text);
+                        // xterm.js requires \r\n for proper line breaks;
+                        // bare \n moves the cursor down without returning
+                        // to column 0, causing indentation drift.
+                        term.write(text.replace(/\n/g, '\r\n'));
                     }
                     totalWritten += bufLen;
                 }
