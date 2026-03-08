@@ -1253,11 +1253,31 @@
             term.writeln('');
             term.writeln('Type Haskell expressions and definitions, then press Enter to evaluate.');
             term.writeln('For multi-line blocks, surround with \x1b[33m:{\x1b[0m and \x1b[33m:}\x1b[0m');
+            term.writeln('Type \x1b[33m:load\x1b[0m or \x1b[33m:l\x1b[0m to load a .hs file');
             term.writeln('');
 
             let currentLine = '';
             let inputMode = 'normal'; // 'normal' | 'multiline'
             let multilineBuffer = [];
+
+            // Hidden file input for :load command
+            const fileInput = document.createElement('input');
+            fileInput.type = 'file';
+            fileInput.accept = '.hs';
+            fileInput.style.display = 'none';
+            document.body.appendChild(fileInput);
+
+            fileInput.addEventListener('change', (event) => {
+                const file = event.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = () => {
+                    term.writeln('Loading: ' + file.name);
+                    replBridge.evaluate(reader.result);
+                };
+                reader.readAsText(file);
+                fileInput.value = ''; // allow re-selecting same file
+            });
 
             // REPL Bridge
             window.replBridge = {
@@ -1388,6 +1408,10 @@
                             inputMode = 'multiline';
                             multilineBuffer = [];
                             term.write('\x1b[32m| \x1b[0m');
+                        } else if (currentLine.trim() === ':load' || currentLine.trim() === ':l') {
+                            fileInput.click();
+                            currentLine = '';
+                            return;
                         } else if (currentLine.trim()) {
                             replBridge.evaluate(currentLine);
                         } else {
