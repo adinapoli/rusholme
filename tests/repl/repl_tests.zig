@@ -13,6 +13,10 @@ const protocol = rusholme.repl.protocol;
 const Status = protocol.Status;
 const evaluate = protocol.evaluate;
 
+const engine_mod = rusholme.repl.engine;
+const GrinEngine = engine_mod.GrinEngine;
+const grin_ast = rusholme.grin.ast;
+
 const testing_io = testing.io;
 
 // ── Test: literal expressions ─────────────────────────────────────────────
@@ -354,6 +358,104 @@ test "repl: whitespace-only input" {
 }
 
 // ── Test: let syntax ─────────────────────────────────────────────────────
+
+// ── Test: GrinEngine path (simulates WASM REPL) ─────────────────────
+
+test "repl: GrinEngine — define then use function (WASM path)" {
+    // This test exercises the exact code path the WASM REPL takes:
+    // 1. Compile a declaration, accumulate its GRIN defs
+    // 2. Compile an expression that references the declaration
+    // 3. Merge accumulated_defs + expression def into one program
+    // 4. Execute via GrinEngine (tree-walking evaluator)
+    //
+    // On native, session.eval() uses JitEngine which resolves symbols
+    // via the ORC linker. On WASM, it uses GrinEngine which needs all
+    // defs in a single program. This test catches WASM-specific failures.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Step 1: Define identity function
+    const decl = session.processInput("let identity x = x") catch |err| {
+        std.debug.panic("Declaration compilation failed: {}", .{err});
+    };
+    try testing.expect(decl.compile.kind == .declaration_let_stripped);
+
+    // Step 2: Compile expression that uses identity
+    const expr = session.processInput("identity 42") catch |err| {
+        std.debug.panic("Expression compilation failed: {}", .{err});
+    };
+    try testing.expect(expr.compile.kind == .expression);
+
+    // Step 3: Merge accumulated_defs + expression def (exactly as Session.eval does for WASM)
+    const total_defs = session.accumulated_defs.items.len + expr.compile.program.defs.len;
+    const all_defs = try alloc.alloc(grin_ast.Def, total_defs);
+
+    for (session.accumulated_defs.items, 0..) |def, i| {
+        all_defs[i] = def;
+    }
+    for (expr.compile.program.defs, 0..) |def, i| {
+        all_defs[session.accumulated_defs.items.len + i] = def;
+    }
+
+    const merged_program = grin_ast.Program{ .defs = all_defs };
+
+    // Step 4: Execute via GrinEngine (the WASM path)
+    var engine = GrinEngine.init(alloc, testing_io);
+    const result = engine.execute(&merged_program) catch |err| {
+        std.debug.panic("GrinEngine execution failed: {s}", .{@errorName(err)});
+    };
+
+    try testing.expectEqualStrings("42", result.value);
+}
+
+test "repl: GrinEngine — define then use with putStrLn (WASM path)" {
+    // Tests the specific failure case: putStrLn (identity "hello")
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Define identity
+    _ = session.processInput("let identity x = x") catch |err| {
+        std.debug.panic("Declaration failed: {}", .{err});
+    };
+
+    // Compile putStrLn (identity "hello")
+    const expr = session.processInput("putStrLn (identity \"hello\")") catch |err| {
+        std.debug.panic("Expression compilation failed: {}", .{err});
+    };
+
+    // Merge and execute via GrinEngine
+    const total_defs = session.accumulated_defs.items.len + expr.compile.program.defs.len;
+    const all_defs = try alloc.alloc(grin_ast.Def, total_defs);
+
+    for (session.accumulated_defs.items, 0..) |def, i| {
+        all_defs[i] = def;
+    }
+    for (expr.compile.program.defs, 0..) |def, i| {
+        all_defs[session.accumulated_defs.items.len + i] = def;
+    }
+
+    const merged_program = grin_ast.Program{ .defs = all_defs };
+
+    var engine = GrinEngine.init(alloc, testing_io);
+    const result = engine.execute(&merged_program) catch |err| {
+        std.debug.panic("GrinEngine execution failed: {s}", .{@errorName(err)});
+    };
+
+    // IO actions return Unit, which formats as empty string
+    try testing.expectEqualStrings("", result.value);
+}
 
 test "repl: let syntax" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
