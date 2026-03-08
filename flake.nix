@@ -16,31 +16,73 @@
         };
 
         isDarwin = pkgs.stdenv.isDarwin;
+
+        # Shared toolchain used by both dev shells
+        zigToolchain = with pkgs; [
+          zigpkgs.master          # latest Zig nightly (matches 0.16.0-dev)
+          llvmPackages_19.llvm    # LLVM for future backend work
+          llvmPackages_19.lld     # LLVM linker
+        ];
+
+        websiteDevScript = pkgs.writeShellScriptBin "website-dev" ''
+          set -euo pipefail
+          cd "$(git rev-parse --show-toplevel)"
+
+          echo "Building Rusholme (zig build)..."
+          zig build
+
+          echo "Installing website dependencies..."
+          cd website
+          npm install --silent
+
+          echo "Building website (copies repl.wasm, fetches GitHub data)..."
+          npm run build
+
+          echo ""
+          echo "Serving website on http://localhost:3000"
+          npx serve .
+        '';
       in
       {
-        devShells.default = pkgs.mkShell {
-          name = "rusholme";
+        devShells = {
+          default = pkgs.mkShell {
+            name = "rusholme";
 
-          buildInputs = with pkgs; [
-            # Compiler toolchain
-            zigpkgs.master          # latest Zig nightly (matches 0.16.0-dev)
-            llvmPackages_19.llvm    # LLVM for future backend work
-            llvmPackages_19.lld     # LLVM linker
+            buildInputs = zigToolchain ++ (with pkgs; [
+              git
+              pre-commit
+            ]) ++ pkgs.lib.optionals (!isDarwin) [
+              pkgs.valgrind
+            ];
 
-            # Development tools
-            git
-            pre-commit
-          ] ++ pkgs.lib.optionals (!isDarwin) [
-            # Linux-only tools
-            valgrind
-          ];
+            shellHook = ''
+              echo "🍛 Rusholme dev environment loaded"
+              echo "   Zig:  $(zig version)"
+              echo "   LLVM: $(llvm-config --version)"
+              echo ""
+            '';
+          };
 
-          shellHook = ''
-            echo "🍛 Rusholme dev environment loaded"
-            echo "   Zig:  $(zig version)"
-            echo "   LLVM: $(llvm-config --version)"
-            echo ""
-          '';
+          website = pkgs.mkShell {
+            name = "rusholme-website";
+
+            buildInputs = zigToolchain ++ (with pkgs; [
+              nodejs_22
+              git
+            ]);
+
+            nativeBuildInputs = [ websiteDevScript ];
+
+            shellHook = ''
+              echo "🍛 Rusholme website dev environment loaded"
+              echo "   Zig:  $(zig version)"
+              echo "   Node: $(node --version)"
+              echo ""
+              echo "Quick start:  website-dev"
+              echo "Manual:       zig build && cd website && npm run build && npx serve ."
+              echo ""
+            '';
+          };
         };
       }
     );
