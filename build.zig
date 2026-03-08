@@ -381,6 +381,24 @@ pub fn build(b: *std.Build) void {
     run_repl_tests.addArtifactArg(repl_tests);
     run_repl_tests.expectExitCode(0);
 
+    // CLI end-to-end REPL tests — spawn rhc repl as subprocess.
+    // These test the real interactive experience: prompts, commands,
+    // multiline accumulation, and :load from disk.
+    const cli_e2e_module = b.createModule(.{
+        .root_source_file = b.path("tests/repl/cli_e2e_tests.zig"),
+        .target = target,
+    });
+    const cli_e2e_tests = b.addTest(.{
+        .name = "cli-e2e-tests",
+        .root_module = cli_e2e_module,
+    });
+    // CLI e2e tests need the rhc binary built first.
+    cli_e2e_tests.step.dependOn(b.getInstallStep());
+    // Same technique as repl-tests: no IPC mode, communicate via exit code.
+    const run_cli_e2e_tests = std.Build.Step.Run.create(b, "run test cli-e2e-tests");
+    run_cli_e2e_tests.addArtifactArg(cli_e2e_tests);
+    run_cli_e2e_tests.expectExitCode(0);
+
     // Diagnostic step — reports per-file parser errors for failing tests.
     // Usage: zig build diag
     const diag_module = b.createModule(.{
@@ -407,6 +425,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_runtime_tests.step);
     test_step.dependOn(&run_e2e_tests.step);
     test_step.dependOn(&run_repl_tests.step);
+    test_step.dependOn(&run_cli_e2e_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
