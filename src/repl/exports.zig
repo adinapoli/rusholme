@@ -12,6 +12,9 @@ pub const buffer = @import("buffer.zig");
 pub const eval_mod = @import("eval.zig");
 const Session = @import("session.zig").Session;
 const protocol = @import("protocol.zig");
+const JsonRenderer = @import("../diagnostics/json.zig").JsonRenderer;
+const FileId = @import("../diagnostics/span.zig").FileId;
+const Diagnostic = @import("../diagnostics/diagnostic.zig").Diagnostic;
 
 // ── Global state ──────────────────────────────────────────────────────
 
@@ -91,7 +94,7 @@ pub export fn repl_evaluate(length: usize) usize {
     return switch (result.status) {
         .success => writeSuccess(result.value),
         .silent => writeSuccess(""),
-        .failed => writeError(result.value),
+        .failed => writeErrorWithDiagnostics(alloc, result.diagnostics, result.value),
     };
 }
 
@@ -108,5 +111,29 @@ fn writeError(message: []const u8) usize {
     const output = buffer.getOutputBuffer()[0..buffer.OUTPUT_BUFFER_SIZE];
     const json = std.fmt.bufPrint(output, "{{\"status\":\"error\",\"message\":\"{s}\"}}", .{message}) catch
         return 0;
+    return json.len;
+}
+
+/// Write an error response with structured diagnostic JSON.
+///
+/// Produces:
+///   {"status":"error","message":"<fallback>","diagnostics":[...]}
+///
+/// If rendering fails, falls back to the flat error format.
+fn writeErrorWithDiagnostics(alloc: std.mem.Allocator, diagnostics: []const Diagnostic, fallback_message: []const u8) usize {
+    // Build lookup maps for the JSON renderer.
+    var path_lookup = std.AutoHashMap(FileId, []const u8).init(alloc);
+    defer path_lookup.deinit();
+    path_lookup.put(0, "<repl>") catch return writeError(fallback_message);
+
+    const renderer = JsonRenderer.init(alloc, &path_lookup);
+
+    const diag_json = renderer.renderAll(diagnostics) catch
+        return writeError(fallback_message);
+
+    // Compose the full response with the diagnostics array embedded.
+    const output = buffer.getOutputBuffer()[0..buffer.OUTPUT_BUFFER_SIZE];
+    const json = std.fmt.bufPrint(output, "{{\"status\":\"error\",\"message\":\"{s}\",\"diagnostics\":{s}}}", .{ fallback_message, diag_json }) catch
+        return writeError(fallback_message);
     return json.len;
 }

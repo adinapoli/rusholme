@@ -89,6 +89,13 @@ pub const Pipeline = struct {
     allocator: Allocator,
     io: std.Io,
 
+    /// Source text from the most recent compilation attempt, for diagnostic
+    /// rendering. Contains the full module wrapper (e.g.
+    /// "module ReplInput where\n..."). Updated before each compilation
+    /// attempt in `compileInput`, so on failure it holds the last-attempted
+    /// wrapper source whose spans the diagnostics reference.
+    last_source: []const u8 = "",
+
     /// Create a new pipeline.
     pub fn init(allocator: Allocator, io: std.Io) Pipeline {
         return .{
@@ -244,6 +251,7 @@ pub const Pipeline = struct {
             const decl_source = std.fmt.allocPrint(alloc, "module ReplInput where\n{s}\n", .{decl_input}) catch {
                 return CompileError.OutOfMemory;
             };
+            self.last_source = decl_source;
 
             var decl_diags = DiagnosticCollector.init();
             defer decl_diags.deinit(alloc);
@@ -272,6 +280,7 @@ pub const Pipeline = struct {
             const expr_source = std.fmt.allocPrint(alloc, "module ReplInput where\nreplExpr__ = {s}\n", .{input}) catch {
                 return CompileError.OutOfMemory;
             };
+            self.last_source = expr_source;
 
             if (self.compileModule(expr_source, file_id, u_supply, rename_env, ty_env, mv_supply, diags)) |program| {
                 // Expression succeeded - clear declaration diagnostics since they're irrelevant now

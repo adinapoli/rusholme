@@ -1279,6 +1279,45 @@
                 fileInput.value = ''; // allow re-selecting same file
             });
 
+            // Render structured diagnostics to the xterm.js terminal with
+            // ANSI coloring. Each diagnostic carries severity, code, location,
+            // message, and optional notes (matching the JsonRenderer schema).
+            function renderDiagnostics(term, diagnostics) {
+                const RESET  = '\x1b[0m';
+                const RED    = '\x1b[1;31m';
+                const YELLOW = '\x1b[1;33m';
+                const CYAN   = '\x1b[1;36m';
+                const GREY   = '\x1b[90m';
+
+                for (const diag of diagnostics) {
+                    // Severity color
+                    const sevColor = diag.severity === 'error' ? RED
+                        : diag.severity === 'warning' ? YELLOW : CYAN;
+                    const sevLabel = diag.severity || 'error';
+                    const code = diag.code || '';
+
+                    // Location: file:line:col
+                    const loc = (diag.file || '<unknown>') + ':' + diag.startLine + ':' + diag.startCol;
+
+                    term.writeln(
+                        GREY + loc + ' ' + RESET
+                        + sevColor + sevLabel + '[' + code + ']' + RESET
+                    );
+                    term.writeln('    ' + sevColor + diag.message + RESET);
+
+                    // Render notes
+                    if (diag.notes) {
+                        for (const note of diag.notes) {
+                            let notePrefix = '   \u251C\u2500\u2500 ';
+                            if (note.file) {
+                                notePrefix = '   \u250C\u2500 ' + note.file + ':' + note.startLine + ':' + note.startCol + ' ';
+                            }
+                            term.writeln(notePrefix + CYAN + 'note' + RESET + ' ' + note.message);
+                        }
+                    }
+                }
+            }
+
             // REPL Bridge
             window.replBridge = {
                 wasmInstance: null,
@@ -1365,7 +1404,11 @@
                         const result = JSON.parse(jsonString);
 
                         if (result.status === 'error') {
-                            term.writeln('\x1b[31mError: ' + result.message + '\x1b[0m');
+                            if (result.diagnostics && result.diagnostics.length > 0) {
+                                renderDiagnostics(term, result.diagnostics);
+                            } else {
+                                term.writeln('\x1b[31mError: ' + result.message + '\x1b[0m');
+                            }
                         } else if (result.value) {
                             term.writeln(result.value);
                         }

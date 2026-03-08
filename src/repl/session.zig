@@ -105,6 +105,12 @@ pub const Session = struct {
     // Persists across failed compilations so callers can inspect errors.
     last_diagnostics: std.ArrayListUnmanaged(Diagnostic),
 
+    // Source text from the most recent compilation attempt. Contains the
+    // full module wrapper (e.g. "module ReplInput where\n...") whose spans
+    // the diagnostics reference. Used by the CLI and WASM layers to feed
+    // the TerminalRenderer/JsonRenderer for rich error display.
+    last_source: []const u8 = "",
+
     // Accumulated GRIN function definitions from successful declarations.
     // For expressions, we merge these with the current expression's definition
     // to create a complete program for evaluation.
@@ -200,6 +206,9 @@ pub const Session = struct {
             &self.mv_supply,
             &diags,
         ) catch |err| {
+            // Capture the wrapper source for diagnostic rendering.
+            self.last_source = self.pipeline.last_source;
+
             // Save diagnostics before returning error so callers can inspect them
             // Note: we need to dupe the message allocation since diags will be deinitialized
             for (diags.diagnostics.items) |diag| {
@@ -220,6 +229,9 @@ pub const Session = struct {
             self.rename_env.scope.pop();
             return err;
         };
+
+        // Capture the wrapper source for diagnostic rendering.
+        self.last_source = self.pipeline.last_source;
 
         // Success: save diagnostics and leave scope frames in place
         for (diags.diagnostics.items) |diag| {

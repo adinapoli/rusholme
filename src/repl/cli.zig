@@ -21,6 +21,7 @@ const Diagnostic = @import("../diagnostics/diagnostic.zig").Diagnostic;
 const protocol_mod = @import("protocol.zig");
 const Status = protocol_mod.Status;
 const evaluate = protocol_mod.evaluate;
+const TerminalRenderer = @import("../diagnostics/terminal.zig").TerminalRenderer;
 
 const InputMode = enum {
     normal,
@@ -94,11 +95,7 @@ pub fn run(allocator: Allocator, io: Io) !void {
                     try writeStdout(io, result.value);
                     try writeStdout(io, "\n");
                 } else if (result.status == .failed) {
-                    for (result.diagnostics) |diag| {
-                        try writeStderr(io, "Error: ");
-                        try writeStderr(io, diag.message);
-                        try writeStderr(io, "\n");
-                    }
+                    renderDiagnostics(io, alloc, &session, result.diagnostics);
                 }
                 continue;
             }
@@ -145,12 +142,7 @@ pub fn run(allocator: Allocator, io: Io) !void {
             try writeStdout(io, result.value);
             try writeStdout(io, "\n");
         } else if (result.status == .failed) {
-            // Render diagnostics to stderr
-            for (result.diagnostics) |diag| {
-                try writeStderr(io, "Error: ");
-                try writeStderr(io, diag.message);
-                try writeStderr(io, "\n");
-            }
+            renderDiagnostics(io, alloc, &session, result.diagnostics);
         }
         // .silent: no output for declarations
     }
@@ -249,11 +241,7 @@ fn loadFile(io: Io, path: []const u8, allocator: Allocator, session: *Session) v
             writeStdout(io, "\n") catch {};
         },
         .failed => {
-            for (result.diagnostics) |diag| {
-                writeStderr(io, "Error: ") catch {};
-                writeStderr(io, diag.message) catch {};
-                writeStderr(io, "\n") catch {};
-            }
+            renderDiagnostics(io, allocator, session, result.diagnostics);
         },
     }
 }
@@ -301,4 +289,44 @@ fn writeStderr(io: Io, msg: []const u8) !void {
     var fw: File.Writer = .init(.stderr(), io, &buf);
     try fw.interface.writeAll(msg);
     try fw.interface.flush();
+}
+
+/// Render diagnostics to stderr using the TerminalRenderer.
+///
+/// Builds the file path and contents lookup maps that the renderer needs,
+/// using the session's `last_source` (the wrapper source whose spans the
+/// diagnostics reference) and a synthetic `<repl>` filename.
+fn renderDiagnostics(io: Io, alloc: Allocator, session: *Session, diagnostics: []const Diagnostic) void {
+    var path_lookup = std.AutoHashMap(FileId, []const u8).init(alloc);
+    defer path_lookup.deinit();
+    path_lookup.put(0, "<repl>") catch return;
+
+    var file_contents = std.AutoHashMap(FileId, []const u8).init(alloc);
+    defer file_contents.deinit();
+    file_contents.put(0, session.last_source) catch return;
+
+    const renderer = TerminalRenderer.init(&path_lookup, &file_contents);
+
+    // Render each diagnostic into a heap-allocated buffer, then flush to stderr.
+    for (diagnostics) |diag| {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        renderer.render(&out.writer, diag) catch {
+            // Fall back to flat rendering on allocation failure.
+            writeStderr(io, "Error: ") catch {};
+            writeStderr(io, diag.message) catch {};
+            writeStderr(io, "\n") catch {};
+            continue;
+        };
+
+        const rendered = out.toOwnedSlice() catch {
+            writeStderr(io, "Error: ") catch {};
+            writeStderr(io, diag.message) catch {};
+            writeStderr(io, "\n") catch {};
+            continue;
+        };
+        defer alloc.free(rendered);
+        writeStderr(io, rendered) catch {};
+    }
 }
