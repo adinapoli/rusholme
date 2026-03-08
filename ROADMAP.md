@@ -6,6 +6,11 @@
 **Architecture Decisions:**
 - **#0001**: PrimOps and RTS Architecture — defines the contract between compiler and runtime via ~15-30 primitive operations. See `docs/decisions/0001-primops-and-rts-architecture.md`.
 
+**Recent Progress (2026-03-08):**
+- ✓ #75: Implement basic REPL loop (PR #486 merged — consolidation, multiline, :load, diagnostics)
+- ✓ #64: Implement end-to-end test runner (PR merged)
+- ✓ #477: Resolve WASM external imports via RTS cross-compilation (PR #481 merged)
+
 **Recent Progress (2026-03-04):**
 - ✓ #477: Implement cross-platform IO for WASM target (LLVM runtime)
 - ✓ #481: Implement cross-platform IO for WASM target (PR #481 merged)
@@ -125,6 +130,10 @@
 | [#225](https://github.com/adinapoli/rusholme/issues/225) | infra: track libxev for future parallel compilation and LSP async I/O | — | :white_circle: |
 | [#290](https://github.com/adinapoli/rusholme/issues/290) | Research: Evaluate toposort library for dependency ordering | — | :white_circle: |
 | [#288](https://github.com/adinapoli/rusholme/issues/288) | Research: Evaluate zig-graph for dependency and analysis graphs | — | :green_circle: |
+| [#287](https://github.com/adinapoli/rusholme/issues/287) | Research: Evaluate zon2nix and zig2nix for Nix integration | — | :white_circle: |
+| [#291](https://github.com/adinapoli/rusholme/issues/291) | Research: Evaluate benchmarking libraries (zBench, poop) | — | :white_circle: |
+| [#292](https://github.com/adinapoli/rusholme/issues/292) | Research: Evaluate CLI argument parsing libraries (zig-clap, yazap, zli) | — | :white_circle: |
+| [#295](https://github.com/adinapoli/rusholme/issues/295) | Research: Evaluate alternative allocators for compilation phases | — | :white_circle: |
 
 ### Epic [#3](https://github.com/adinapoli/rusholme/issues/3): Structured Error Diagnostics
 
@@ -146,10 +155,11 @@
 |---|-------|------|--------|
 | [#62](https://github.com/adinapoli/rusholme/issues/62) | Set up Zig test harness and project test structure | — | :green_circle: |
 | [#63](https://github.com/adinapoli/rusholme/issues/63) | Implement golden/snapshot test runner | [#62](https://github.com/adinapoli/rusholme/issues/62) | :green_circle: |
-| [#64](https://github.com/adinapoli/rusholme/issues/64) | Implement end-to-end test runner (compile + run + check stdout) | [#63](https://github.com/adinapoli/rusholme/issues/63) | :yellow_circle: |
+| [#64](https://github.com/adinapoli/rusholme/issues/64) | Implement end-to-end test runner (compile + run + check stdout) | [#63](https://github.com/adinapoli/rusholme/issues/63) | :green_circle: |
 | [#65](https://github.com/adinapoli/rusholme/issues/65) | Research and import simple test programs from GHC's testsuite | [#63](https://github.com/adinapoli/rusholme/issues/63) | :green_circle: |
 | [#415](https://github.com/adinapoli/rusholme/issues/415) | testing: add parse and GRIN output golden variants to test runner | [#63](https://github.com/adinapoli/rusholme/issues/63) | :white_circle: |
 | [#460](https://github.com/adinapoli/rusholme/issues/460) | e2e runner: capture and assert stderr output | [#64](https://github.com/adinapoli/rusholme/issues/64) | :white_circle: |
+| [#462](https://github.com/adinapoli/rusholme/issues/462) | Add M2 Prelude reminder for enabling e2e tests | [#64](https://github.com/adinapoli/rusholme/issues/64) | :white_circle: |
 
 ### Epic [#106](https://github.com/adinapoli/rusholme/issues/106): Zero-Leak Compiler
 
@@ -175,6 +185,8 @@
 | [#23](https://github.com/adinapoli/rusholme/issues/23) | Define lexer token types for Haskell | [#22](https://github.com/adinapoli/rusholme/issues/22) | :green_circle: |
 | [#24](https://github.com/adinapoli/rusholme/issues/24) | Implement Unicode character classification | — | :green_circle: |
 | [#224](https://github.com/adinapoli/rusholme/issues/224) | lexer: evaluate and adopt uucode for Unicode character classification | [#24](https://github.com/adinapoli/rusholme/issues/24) | :white_circle: |
+| [#283](https://github.com/adinapoli/rusholme/issues/283) | Research: Evaluate ziglyph for Unicode text processing | [#24](https://github.com/adinapoli/rusholme/issues/24) | :white_circle: |
+| [#286](https://github.com/adinapoli/rusholme/issues/286) | Research: Evaluate zig-tree-sitter for parsing and LSP | — | :white_circle: |
 | [#85](https://github.com/adinapoli/rusholme/issues/85) | Lexer: Numeric Literals | [#23](https://github.com/adinapoli/rusholme/issues/23), [#24](https://github.com/adinapoli/rusholme/issues/24) | :green_circle: |
 | [#86](https://github.com/adinapoli/rusholme/issues/86) | Lexer: String and Character Literals | [#85](https://github.com/adinapoli/rusholme/issues/85) | :green_circle: |
 | [#25](https://github.com/adinapoli/rusholme/issues/25) | Lexer: Identifiers, Keywords and Operators | [#85](https://github.com/adinapoli/rusholme/issues/85), [#86](https://github.com/adinapoli/rusholme/issues/86) | :green_circle: |
@@ -225,6 +237,7 @@
 | [#255](https://github.com/adinapoli/rusholme/issues/255) | parser: support LANGUAGE pragmas ({-# LANGUAGE ... #-}) | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
 | [#256](https://github.com/adinapoli/rusholme/issues/256) | parser: support quasi-quotation syntax ([name\| ... \|]) | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
 | [#316](https://github.com/adinapoli/rusholme/issues/316) | Add validation for duplicate record field names in data types | [#135](https://github.com/adinapoli/rusholme/issues/135) | :green_circle: |
+| [#444](https://github.com/adinapoli/rusholme/issues/444) | Refactor parseImportHeaders to eliminate redundant parsing | [#29](https://github.com/adinapoli/rusholme/issues/29) | :white_circle: |
 
 ### CLI
 
@@ -239,6 +252,8 @@
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#68](https://github.com/adinapoli/rusholme/issues/68) | Research: Name uniqueness strategy (De Bruijn vs Unique supply vs hybrid) | — | :green_circle: |
+| [#289](https://github.com/adinapoli/rusholme/issues/289) | Research: Study Aro C compiler for LLVM and diagnostic patterns | — | :white_circle: |
+| [#293](https://github.com/adinapoli/rusholme/issues/293) | Research: Evaluate string libraries (zig-string, zigstr) for compiler use | — | :white_circle: |
 | [#69](https://github.com/adinapoli/rusholme/issues/69) | Implement chosen name uniqueness mechanism | [#68](https://github.com/adinapoli/rusholme/issues/68) | :green_circle: |
 | [#66](https://github.com/adinapoli/rusholme/issues/66) | Research: Calling convention (eval/apply vs push/enter vs CPS) | — | :green_circle: |
 | [#67](https://github.com/adinapoli/rusholme/issues/67) | Implement chosen calling convention in runtime and codegen | [#66](https://github.com/adinapoli/rusholme/issues/66), [#54](https://github.com/adinapoli/rusholme/issues/54) | :white_circle: |
@@ -299,11 +314,14 @@
 | [#417](https://github.com/adinapoli/rusholme/issues/417) | Desugar guarded equations in pattern match compiler | [#377](https://github.com/adinapoli/rusholme/issues/377) | :green_circle: |
 | [#418](https://github.com/adinapoli/rusholme/issues/418) | Desugar list patterns in match compiler | [#377](https://github.com/adinapoli/rusholme/issues/377) | :green_circle: |
 | [#378](https://github.com/adinapoli/rusholme/issues/378) | Tier 3: Optimal decision trees with exhaustiveness/redundancy checking | [#377](https://github.com/adinapoli/rusholme/issues/377) | :white_circle: |
+| [#297](https://github.com/adinapoli/rusholme/issues/297) | Compare Core IR emitted by GHC vs Rusholme | [#38](https://github.com/adinapoli/rusholme/issues/38) | :white_circle: |
+| [#309](https://github.com/adinapoli/rusholme/issues/309) | Implement list comprehension (ListComp) support | [#38](https://github.com/adinapoli/rusholme/issues/38) | :white_circle: |
 
 ### Epic [#6](https://github.com/adinapoli/rusholme/issues/6): GRIN IR and Core→GRIN Translation
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
+| [#43](https://github.com/adinapoli/rusholme/issues/43) | Implement Core to GRIN translation | [#314](https://github.com/adinapoli/rusholme/issues/314), [#315](https://github.com/adinapoli/rusholme/issues/315), [#317](https://github.com/adinapoli/rusholme/issues/317) | :white_circle: |
 | [#40](https://github.com/adinapoli/rusholme/issues/40) | Define GRIN IR types (Modern GRIN dialect) | [#69](https://github.com/adinapoli/rusholme/issues/69) | :green_circle: |
 | [#41](https://github.com/adinapoli/rusholme/issues/41) | Implement GRIN IR pretty-printer | [#40](https://github.com/adinapoli/rusholme/issues/40) | :green_circle: |
 | [#42](https://github.com/adinapoli/rusholme/issues/42) | Research: Core to GRIN translation strategy | [#34](https://github.com/adinapoli/rusholme/issues/34), [#40](https://github.com/adinapoli/rusholme/issues/40) | :green_circle: |
@@ -331,6 +349,15 @@
 | [#342](https://github.com/adinapoli/rusholme/issues/342) | Shrink known.zig to PrimOp names only | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
 | [#343](https://github.com/adinapoli/rusholme/issues/343) | Implement heap operation PrimOps (MutVar) | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
 | [#344](https://github.com/adinapoli/rusholme/issues/344) | Implement FFI bridge (ccall PrimOp) | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
+| [#387](https://github.com/adinapoli/rusholme/issues/387) | Implement proper write() for runtime IO primitives | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
+
+### Epic [#280](https://github.com/adinapoli/rusholme/issues/280): Rusholme Run-Time System (RTS)
+
+| # | Issue | Deps | Status |
+|---|-------|------|--------|
+| [#280](https://github.com/adinapoli/rusholme/issues/280) | Epic: Rusholme Run-Time System (RTS) | — | :white_circle: |
+| [#284](https://github.com/adinapoli/rusholme/issues/284) | Research: Study zig-gc as reference for Immix GC implementation | — | :white_circle: |
+| [#294](https://github.com/adinapoli/rusholme/issues/294) | Research: Evaluate libvaxis TUI library for future REPL | — | :white_circle: |
 
 ### Epic [#8](https://github.com/adinapoli/rusholme/issues/8): Tree-Walking Interpreter
 
@@ -362,6 +389,8 @@
 | [#410](https://github.com/adinapoli/rusholme/issues/410) | backend: nullary constructors not handled in GRIN→LLVM codegen (Val.Var lookup fails) | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
 | [#425](https://github.com/adinapoli/rusholme/issues/425) | Fix GRIN→LLVM codegen for programs with ADTs and higher-order functions | [#410](https://github.com/adinapoli/rusholme/issues/410) | :green_circle: |
 | [#447](https://github.com/adinapoli/rusholme/issues/447) | LLVM backend: undefined reference to RTS functions during linking | [#57](https://github.com/adinapoli/rusholme/issues/57) | :green_circle: |
+| [#381](https://github.com/adinapoli/rusholme/issues/381) | Epic: GRIN to LLVM Translation - Compiler Path to M1 | [#55](https://github.com/adinapoli/rusholme/issues/55) | :white_circle: |
+| [#396](https://github.com/adinapoli/rusholme/issues/396) | Research: Zig LLVM bitcode compatibility with llvm-link | [#57](https://github.com/adinapoli/rusholme/issues/57) | :white_circle: |
 
 ---
 
@@ -383,6 +412,7 @@
 | [#370](https://github.com/adinapoli/rusholme/issues/370) | Bootstrap Prelude from Haskell source | [#368](https://github.com/adinapoli/rusholme/issues/368), [#58](https://github.com/adinapoli/rusholme/issues/58), [#59](https://github.com/adinapoli/rusholme/issues/59) | :white_circle: |
 | [#436](https://github.com/adinapoli/rusholme/issues/436) | design: use LLVM bitcode (`.bc`) as per-module backend artifact | [#366](https://github.com/adinapoli/rusholme/issues/366), [#368](https://github.com/adinapoli/rusholme/issues/368) | :green_circle: |
 | [#433](https://github.com/adinapoli/rusholme/issues/433) | Research: Definition-level inter-module dependency graph (beyond `.hs-boot`) | [#366](https://github.com/adinapoli/rusholme/issues/366), [#367](https://github.com/adinapoli/rusholme/issues/367), [#368](https://github.com/adinapoli/rusholme/issues/368) | :green_circle: |
+| [#453](https://github.com/adinapoli/rusholme/issues/453) | backend: .bc artifacts use path-inferred name instead of declared module name | [#436](https://github.com/adinapoli/rusholme/issues/436) | :white_circle: |
 
 ### Epic [#10](https://github.com/adinapoli/rusholme/issues/10): Minimal Prelude
 
@@ -430,14 +460,18 @@
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#75](https://github.com/adinapoli/rusholme/issues/75) | Implement basic REPL loop (read-eval-print with interpreter) | [#50](https://github.com/adinapoli/rusholme/issues/50), [#51](https://github.com/adinapoli/rusholme/issues/51) | :white_circle: |
+| [#75](https://github.com/adinapoli/rusholme/issues/75) | Implement basic REPL loop (read-eval-print with interpreter) | [#50](https://github.com/adinapoli/rusholme/issues/50), [#51](https://github.com/adinapoli/rusholme/issues/51) | :green_circle: |
 | [#76](https://github.com/adinapoli/rusholme/issues/76) | Implement REPL auto-completion and multi-line input | [#75](https://github.com/adinapoli/rusholme/issues/75) | :white_circle: |
+| [#487](https://github.com/adinapoli/rusholme/issues/487) | REPL stdin reader drops first byte of subsequent lines in piped mode | [#75](https://github.com/adinapoli/rusholme/issues/75) | :white_circle: |
 
 ### Epic: Multi-Backend Architecture
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#395](https://github.com/adinapoli/rusholme/issues/395) | Implement multi-backend architecture with GraalVM via Sulong | [#57](https://github.com/adinapoli/rusholme/issues/57) | :green_circle: |
+| [#336](https://github.com/adinapoli/rusholme/issues/336) | Investigate running rusholme on GraalVM via Sulong | [#395](https://github.com/adinapoli/rusholme/issues/395) | :white_circle: |
+| [#397](https://github.com/adinapoli/rusholme/issues/397) | Investigate: GraalVM build integration and Nix packaging | [#395](https://github.com/adinapoli/rusholme/issues/395) | :white_circle: |
+| [#398](https://github.com/adinapoli/rusholme/issues/398) | Research: GraalVM backend testing strategy for CI | [#395](https://github.com/adinapoli/rusholme/issues/395) | :white_circle: |
 
 ### Epic [#16](https://github.com/adinapoli/rusholme/issues/16): WebAssembly Output
 
@@ -445,7 +479,7 @@
 |---|-------|------|--------|
 | [#77](https://github.com/adinapoli/rusholme/issues/77) | Configure LLVM backend to emit WebAssembly | [#57](https://github.com/adinapoli/rusholme/issues/57), [#395](https://github.com/adinapoli/rusholme/issues/395) | :green_circle: |
 | [#474](https://github.com/adinapoli/rusholme/issues/474) | WASM backend emits non-standard env imports preventing WASI runtime execution | [#77](https://github.com/adinapoli/rusholme/issues/77) | :green_circle: |
-| [#477](https://github.com/adinapoli/rusholme/issues/477) | WASM backend has unresolved external imports (env::puts, env::rts_alloc) | [#474](https://github.com/adinapoli/rusholme/issues/474) | :yellow_circle: |
+| [#477](https://github.com/adinapoli/rusholme/issues/477) | WASM backend has unresolved external imports (env::puts, env::rts_alloc) | [#474](https://github.com/adinapoli/rusholme/issues/474) | :green_circle: |
 | [#479](https://github.com/adinapoli/rusholme/issues/479) | Implement Show typeclass and fix print PrimOp desugaring | [#477](https://github.com/adinapoli/rusholme/issues/477) | :white_circle: |
 | [#480](https://github.com/adinapoli/rusholme/issues/480) | Reduce WASM binary WASI import footprint to minimum required set | [#477](https://github.com/adinapoli/rusholme/issues/477) | :white_circle: |
 | [#471](https://github.com/adinapoli/rusholme/issues/471) | Implement WASM runtime execution | [#77](https://github.com/adinapoli/rusholme/issues/77) | :white_circle: |
