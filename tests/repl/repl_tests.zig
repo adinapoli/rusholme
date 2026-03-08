@@ -13,10 +13,7 @@ const protocol = rusholme.repl.protocol;
 const Status = protocol.Status;
 const evaluate = protocol.evaluate;
 
-// For test purposes, we need to provide an io parameter even though
-// we don't use it. Use undefined as a placeholder since tests don't
-// perform actual I/O operations.
-const testing_io: std.Io = undefined;
+const testing_io = testing.io;
 
 // ── Test: literal expressions ─────────────────────────────────────────────
 

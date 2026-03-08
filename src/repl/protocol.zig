@@ -6,9 +6,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-// Fallback for testing.io: tests don't need actual I/O
-// We pass undefined since Session.io is not used in tests
-const testing_io = @as(std.Io, undefined);
+const testing_io = testing.io;
 
 const Session = @import("session.zig").Session;
 const Diagnostic = @import("../diagnostics/diagnostic.zig").Diagnostic;
@@ -136,8 +134,7 @@ test "protocol: evaluate handles errors with diagnostics" {
     var session = try Session.init(alloc, testing_io);
     defer session.deinit();
 
-    // Error: undefined variable
-    // FIXME: This test hangs - temporarily disabled
-    // const result = try evaluate(alloc, &session, "undefined_var");
-    // try testing.expectEqual(Status.failed, result.status);
+    // Error: undefined variable should return failed status
+    const result = try evaluate(alloc, &session, "undefined_var");
+    try testing.expectEqual(Status.failed, result.status);
 }

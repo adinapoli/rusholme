@@ -17,8 +17,7 @@ const grin_ast = @import("../grin/ast.zig");
 const evaluator_mod = @import("../grin/evaluator.zig");
 const GrinEvaluator = evaluator_mod.GrinEvaluator;
 
-// Fallback for testing.io: tests don't need actual I/O
-const testing_io: std.Io = undefined;
+const testing_io = testing.io;
 
 // ── Result types ──────────────────────────────────────────────────────
 
