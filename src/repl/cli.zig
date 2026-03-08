@@ -195,7 +195,9 @@ fn handleCommand(io: Io, line: []const u8, allocator: Allocator, session: *Sessi
 
     if (std.mem.startsWith(u8, cmd, "load ") or std.mem.startsWith(u8, cmd, "l ")) {
         const path_start: usize = if (std.mem.startsWith(u8, cmd, "load ")) 5 else 2;
-        const path = std.mem.trim(u8, cmd[path_start..], " \t");
+        const raw_path = std.mem.trim(u8, cmd[path_start..], " \t");
+        const path = expandTilde(raw_path, allocator) orelse raw_path;
+        defer if (path.ptr != raw_path.ptr) allocator.free(path);
         loadFile(io, path, allocator, session);
         return true;
     }
@@ -259,6 +261,18 @@ fn loadFile(io: Io, path: []const u8, allocator: Allocator, session: *Session) v
 }
 
 // ── File loading helpers ──────────────────────────────────────────────
+
+/// Expand a leading `~/` to the user's home directory.
+/// Returns an allocated string on success, or null if the path doesn't
+/// start with `~/` or the HOME environment variable is not set.
+fn expandTilde(path: []const u8, allocator: Allocator) ?[]const u8 {
+    if (path.len >= 2 and path[0] == '~' and path[1] == '/') {
+        const home_ptr = std.c.getenv("HOME") orelse return null;
+        const home = std.mem.sliceTo(home_ptr, 0);
+        return std.fmt.allocPrint(allocator, "{s}{s}", .{ home, path[1..] }) catch return null;
+    }
+    return null;
+}
 
 /// Strip a `module <Name> where` header line from file contents.
 ///
