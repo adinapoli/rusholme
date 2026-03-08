@@ -214,20 +214,26 @@ fn handleCommand(io: Io, line: []const u8, allocator: Allocator, session: *Sessi
 /// Load a Haskell source file from disk and evaluate its contents
 /// within the current REPL session.
 fn loadFile(io: Io, path: []const u8, allocator: Allocator, session: *Session) void {
-    const file = Dir.openFile(.cwd(), io, path, .{}) catch {
-        writeStdout(io, "Cannot open file: ") catch {};
-        writeStdout(io, path) catch {};
-        writeStdout(io, "\n") catch {};
+    const file = Dir.openFile(.cwd(), io, path, .{}) catch |err| {
+        writeStderr(io, "Cannot open file '") catch {};
+        writeStderr(io, path) catch {};
+        writeStderr(io, "': ") catch {};
+        var err_buf: [128]u8 = undefined;
+        const err_msg = std.fmt.bufPrint(&err_buf, "{}\n", .{err}) catch "unknown error\n";
+        writeStderr(io, err_msg) catch {};
         return;
     };
     defer file.close(io);
 
     var read_buf: [8192]u8 = undefined;
     var rdr = file.reader(io, &read_buf);
-    const contents = rdr.interface.allocRemaining(allocator, .limited(1024 * 1024)) catch {
-        writeStdout(io, "Failed to read file: ") catch {};
-        writeStdout(io, path) catch {};
-        writeStdout(io, "\n") catch {};
+    const contents = rdr.interface.allocRemaining(allocator, .limited(1024 * 1024)) catch |err| {
+        writeStderr(io, "Failed to read file '") catch {};
+        writeStderr(io, path) catch {};
+        writeStderr(io, "': ") catch {};
+        var err_buf: [128]u8 = undefined;
+        const err_msg = std.fmt.bufPrint(&err_buf, "{}\n", .{err}) catch "unknown error\n";
+        writeStderr(io, err_msg) catch {};
         return;
     };
 
