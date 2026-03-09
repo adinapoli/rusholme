@@ -1476,8 +1476,8 @@
                 if (!file) return;
                 const reader = new FileReader();
                 reader.onload = () => {
-                    term.writeln('Loaded: ' + file.name);
                     const body = stripModuleHeader(reader.result);
+                    term.writeln('Loading: ' + file.name + ' (' + body.split('\n').length + ' lines)');
                     replBridge.evaluate(body);
                 };
                 reader.readAsText(file);
