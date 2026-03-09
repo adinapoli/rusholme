@@ -1,14 +1,17 @@
 <!DOCTYPE html>
 <html lang="en" class="scroll-smooth">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Rusholme — A Toy Haskell Compiler in Zig</title>
-    <meta name="description" content="Rusholme is a toy Haskell compiler written in Zig, developed collaboratively with AI assistance. Built with Zig, targeting Haskell 2010, exploring compiler construction.">
+    <meta name="description"
+        content="Rusholme is a toy Haskell compiler written in Zig, developed collaboratively with AI assistance. Built with Zig, targeting Haskell 2010, exploring compiler construction.">
 
     <!-- Open Graph -->
     <meta property="og:title" content="Rusholme — A Toy Haskell Compiler in Zig">
-    <meta property="og:description" content="A toy Haskell compiler written in Zig - baked with LLMs, served with curry. Exploring compiler construction through AI-assisted development.">
+    <meta property="og:description"
+        content="A toy Haskell compiler written in Zig - baked with LLMs, served with curry. Exploring compiler construction through AI-assisted development.">
     <meta property="og:image" content="https://adinapoli.github.io/rusholme/logo.png">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://adinapoli.github.io/rusholme/">
@@ -53,7 +56,9 @@
     <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+        rel="stylesheet">
 
     <style>
         :root {
@@ -83,7 +88,7 @@
             padding: 1px;
         }
 
-        .gradient-border > div {
+        .gradient-border>div {
             background: #111827;
         }
 
@@ -124,21 +129,73 @@
             max-width: none;
         }
 
-        .prose-custom h1, .prose-custom h2, .prose-custom h3 {
+        .prose-custom h1,
+        .prose-custom h2,
+        .prose-custom h3 {
             color: #f1f5f9;
             font-weight: 600;
         }
 
-        .prose-custom h1 { font-size: 1.875rem; margin-bottom: 1rem; }
-        .prose-custom h2 { font-size: 1.5rem; margin-top: 1.5rem; margin-bottom: 0.75rem; }
-        .prose-custom h3 { font-size: 1.25rem; margin-top: 1.25rem; margin-bottom: 0.5rem; }
-        .prose-custom p { color: #94a3b8; margin-bottom: 0.75rem; line-height: 1.7; }
-        .prose-custom ul, .prose-custom ol { color: #94a3b8; margin-left: 1.5rem; margin-bottom: 0.75rem; }
-        .prose-custom li { margin-bottom: 0.25rem; }
-        .prose-custom code { background: #1e293b; color: var(--zig); padding: 0.125rem 0.375rem; border-radius: 0.25rem; font-size: 0.875rem; }
-        .prose-custom pre { background: #1e293b; padding: 1rem; border-radius: 0.5rem; overflow-x: auto; margin-bottom: 1rem; }
-        .prose-custom pre code { background: none; color: #e2e8f0; padding: 0; }
-        .prose-custom a { color: var(--zig); text-decoration: underline; }
+        .prose-custom h1 {
+            font-size: 1.875rem;
+            margin-bottom: 1rem;
+        }
+
+        .prose-custom h2 {
+            font-size: 1.5rem;
+            margin-top: 1.5rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .prose-custom h3 {
+            font-size: 1.25rem;
+            margin-top: 1.25rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .prose-custom p {
+            color: #94a3b8;
+            margin-bottom: 0.75rem;
+            line-height: 1.7;
+        }
+
+        .prose-custom ul,
+        .prose-custom ol {
+            color: #94a3b8;
+            margin-left: 1.5rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .prose-custom li {
+            margin-bottom: 0.25rem;
+        }
+
+        .prose-custom code {
+            background: #1e293b;
+            color: var(--zig);
+            padding: 0.125rem 0.375rem;
+            border-radius: 0.25rem;
+            font-size: 0.875rem;
+        }
+
+        .prose-custom pre {
+            background: #1e293b;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            overflow-x: auto;
+            margin-bottom: 1rem;
+        }
+
+        .prose-custom pre code {
+            background: none;
+            color: #e2e8f0;
+            padding: 0;
+        }
+
+        .prose-custom a {
+            color: var(--zig);
+            text-decoration: underline;
+        }
 
         .glow-effect {
             box-shadow: 0 0 60px rgba(247, 164, 29, 0.3);
@@ -149,9 +206,22 @@
         }
 
         @keyframes bounce {
-            0%, 20%, 50%, 80%, 100% { transform: translateY(0) translateX(-50%); }
-            40% { transform: translateY(-10px) translateX(-50%); }
-            60% { transform: translateY(-5px) translateX(-50%); }
+
+            0%,
+            20%,
+            50%,
+            80%,
+            100% {
+                transform: translateY(0) translateX(-50%);
+            }
+
+            40% {
+                transform: translateY(-10px) translateX(-50%);
+            }
+
+            60% {
+                transform: translateY(-5px) translateX(-50%);
+            }
         }
 
         /* Custom scrollbar */
@@ -185,10 +255,13 @@
         }
 
         @keyframes dash {
-            to { stroke-dashoffset: -10; }
+            to {
+                stroke-dashoffset: -10;
+            }
         }
     </style>
 </head>
+
 <body class="min-h-screen">
     <!-- Navigation -->
     <nav class="fixed top-0 left-0 right-0 z-50 bg-gray-950/80 backdrop-blur-custom border-b border-gray-800/50">
@@ -200,17 +273,26 @@
                 </a>
 
                 <div class="hidden md:flex items-center space-x-8">
-                    <a href="#home" class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">Home</a>
-                    <a href="#about" class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">About</a>
-                    <a href="#pipeline" class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">Pipeline</a>
-                    <a href="#roadmap" class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">Roadmap</a>
-                    <a href="#grin" class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">GRIN</a>
-                    <a href="#design" class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">Design</a>
-                    <a href="#try-in-browser" class="nav-link text-sm font-medium text-zig hover:text-white transition-colors">Try in Browser</a>
+                    <a href="#home"
+                        class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">Home</a>
+                    <a href="#about"
+                        class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">About</a>
+                    <a href="#pipeline"
+                        class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">Pipeline</a>
+                    <a href="#roadmap"
+                        class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">Roadmap</a>
+                    <a href="#grin"
+                        class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">GRIN</a>
+                    <a href="#design"
+                        class="nav-link text-sm font-medium text-gray-300 hover:text-white transition-colors">Design</a>
+                    <a href="#try-in-browser"
+                        class="nav-link text-sm font-medium text-zig hover:text-white transition-colors">Try in
+                        Browser</a>
                 </div>
 
                 <div class="flex items-center gap-4">
-                    <a href="https://github.com/adinapoli/rusholme" target="_blank" class="text-gray-400 hover:text-white transition-colors">
+                    <a href="https://github.com/adinapoli/rusholme" target="_blank"
+                        class="text-gray-400 hover:text-white transition-colors">
                         <i data-lucide="github" class="w-5 h-5"></i>
                     </a>
                     <button id="mobile-menu-btn" class="md:hidden text-gray-400 hover:text-white">
@@ -223,13 +305,21 @@
         <!-- Mobile Menu -->
         <div id="mobile-menu" class="hidden md:hidden bg-gray-950/95 border-t border-gray-800">
             <div class="px-4 py-4 space-y-3">
-                <a href="#home" class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">Home</a>
-                <a href="#about" class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">About</a>
-                <a href="#pipeline" class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">Pipeline</a>
-                <a href="#roadmap" class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">Roadmap</a>
-                <a href="#grin" class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">GRIN</a>
-                <a href="#design" class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">Design</a>
-                <a href="#try-in-browser" class="block px-3 py-2 rounded-lg text-base font-medium text-zig hover:text-white hover:bg-gray-800 transition-colors">Try in Browser</a>
+                <a href="#home"
+                    class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">Home</a>
+                <a href="#about"
+                    class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">About</a>
+                <a href="#pipeline"
+                    class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">Pipeline</a>
+                <a href="#roadmap"
+                    class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">Roadmap</a>
+                <a href="#grin"
+                    class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">GRIN</a>
+                <a href="#design"
+                    class="block px-3 py-2 rounded-lg text-base font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors">Design</a>
+                <a href="#try-in-browser"
+                    class="block px-3 py-2 rounded-lg text-base font-medium text-zig hover:text-white hover:bg-gray-800 transition-colors">Try
+                    in Browser</a>
             </div>
         </div>
     </nav>
@@ -238,19 +328,28 @@
     <section id="home" class="relative min-h-screen flex items-center justify-center overflow-hidden">
         <!-- Background gradient orbs -->
         <div class="absolute inset-0 overflow-hidden pointer-events-none">
-            <div class="absolute top-1/4 -right-1/4 w-[600px] h-[600px] rounded-full bg-zig/10 blur-3xl animate-float"></div>
-            <div class="absolute bottom-1/4 -left-1/4 w-[600px] h-[600px] rounded-full bg-haskell/10 blur-3xl animate-float-delayed"></div>
-            <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] rounded-full bg-gradient-to-br from-zig/5 to-haskell/5 blur-3xl"></div>
+            <div class="absolute top-1/4 -right-1/4 w-[600px] h-[600px] rounded-full bg-zig/10 blur-3xl animate-float">
+            </div>
+            <div
+                class="absolute bottom-1/4 -left-1/4 w-[600px] h-[600px] rounded-full bg-haskell/10 blur-3xl animate-float-delayed">
+            </div>
+            <div
+                class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] rounded-full bg-gradient-to-br from-zig/5 to-haskell/5 blur-3xl">
+            </div>
         </div>
 
         <!-- Grid pattern -->
-        <div class="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.02)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.02)_1px,transparent_1px)] bg-[size:60px_60px]"></div>
+        <div
+            class="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.02)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.02)_1px,transparent_1px)] bg-[size:60px_60px]">
+        </div>
 
         <div class="relative z-10 text-center px-4 sm:px-6 lg:px-8 max-w-5xl mx-auto pt-20">
             <!-- Logo -->
             <div class="mb-8 animate-float">
                 <div class="relative inline-block">
-                    <div class="absolute -inset-4 bg-gradient-to-br from-zig to-haskell rounded-full opacity-50 blur-3xl"></div>
+                    <div
+                        class="absolute -inset-4 bg-gradient-to-br from-zig to-haskell rounded-full opacity-50 blur-3xl">
+                    </div>
                     <img src="logo.png" alt="Rusholme Logo" class="relative w-40 h-40 md:w-48 md:h-48 object-contain">
                 </div>
             </div>
@@ -274,13 +373,15 @@
 
             <!-- CTA Buttons -->
             <div class="flex flex-wrap justify-center gap-4 mb-16">
-                <a href="#about" class="group relative px-8 py-4 bg-gradient-to-r from-zig to-haskell text-white font-semibold rounded-xl shadow-lg hover:shadow-2xl transition-all duration-300 hover:scale-105">
+                <a href="#about"
+                    class="group relative px-8 py-4 bg-gradient-to-r from-zig to-haskell text-white font-semibold rounded-xl shadow-lg hover:shadow-2xl transition-all duration-300 hover:scale-105">
                     <span class="relative z-10 flex items-center gap-2">
                         Explore the Project
                         <i data-lucide="arrow-right" class="w-4 h-4 group-hover:translate-x-1 transition-transform"></i>
                     </span>
                 </a>
-                <a href="https://github.com/adinapoli/rusholme" target="_blank" class="px-8 py-4 bg-gray-800 text-white font-semibold rounded-xl border border-gray-700 hover:bg-gray-700 transition-all duration-300 hover:scale-105 flex items-center gap-2">
+                <a href="https://github.com/adinapoli/rusholme" target="_blank"
+                    class="px-8 py-4 bg-gray-800 text-white font-semibold rounded-xl border border-gray-700 hover:bg-gray-700 transition-all duration-300 hover:scale-105 flex items-center gap-2">
                     <i data-lucide="github" class="w-5 h-5"></i>
                     View on GitHub
                 </a>
@@ -324,7 +425,8 @@
                     </h2>
 
                     <p class="text-lg text-gray-400 mb-6 leading-relaxed">
-                        <a href="https://en.wikipedia.org/wiki/Rusholme" target="_blank" class="text-zig hover:underline font-medium">Rusholme</a>
+                        <a href="https://en.wikipedia.org/wiki/Rusholme" target="_blank"
+                            class="text-zig hover:underline font-medium">Rusholme</a>
                         is an area in Manchester, England, famous as <strong>"the Curry Mile"</strong> —
                         a vibrant street lined with Indian restaurants. Since
                         <em class="text-white">currying</em> is the signature technique from Haskell (after the
@@ -342,22 +444,26 @@
                             </div>
                             <div>
                                 <h3 class="font-semibold text-white mb-1">Learning Zig</h3>
-                                <p class="text-sm text-gray-500">By building a real, non-trivial compiler from scratch</p>
+                                <p class="text-sm text-gray-500">By building a real, non-trivial compiler from scratch
+                                </p>
                             </div>
                         </div>
 
                         <div class="flex items-start gap-4 p-4 bg-gray-900/50 rounded-xl border border-gray-800">
-                            <div class="w-12 h-12 rounded-xl bg-haskell/10 flex items-center justify-center flex-shrink-0">
+                            <div
+                                class="w-12 h-12 rounded-xl bg-haskell/10 flex items-center justify-center flex-shrink-0">
                                 <i data-lucide="cpu" class="w-6 h-6 text-haskell"></i>
                             </div>
                             <div>
                                 <h3 class="font-semibold text-white mb-1">Understanding Compilers</h3>
-                                <p class="text-sm text-gray-500">Implementing a full Haskell frontend and multiple backends</p>
+                                <p class="text-sm text-gray-500">Implementing a full Haskell frontend and multiple
+                                    backends</p>
                             </div>
                         </div>
                     </div>
 
-                    <div class="flex items-center gap-3 px-6 py-4 bg-gradient-to-r from-zig/10 to-haskell/10 rounded-xl border border-zig/20">
+                    <div
+                        class="flex items-center gap-3 px-6 py-4 bg-gradient-to-r from-zig/10 to-haskell/10 rounded-xl border border-zig/20">
                         <div class="w-3 h-3 rounded-full bg-green-500 animate-pulse"></div>
                         <div>
                             <span class="text-white font-medium">Status: </span>
@@ -413,77 +519,100 @@
                     <svg viewBox="0 0 1000 250" class="w-full h-auto min-w-[600px]">
                         <defs>
                             <marker id="arrow" markerWidth="12" markerHeight="12" refX="11" refY="6" orient="auto">
-                                <path d="M2,2 L10,6 L2,10 L4,6 Z" fill="#64748b"/>
+                                <path d="M2,2 L10,6 L2,10 L4,6 Z" fill="#64748b" />
                             </marker>
                             <linearGradient id="flowGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                                <stop offset="0%" stop-color="#f7a41d"/>
-                                <stop offset="100%" stop-color="#b87e18"/>
+                                <stop offset="0%" stop-color="#f7a41d" />
+                                <stop offset="100%" stop-color="#b87e18" />
                             </linearGradient>
                         </defs>
 
                         <!-- Stage 1: Haskell Source -->
                         <g>
-                            <rect x="20" y="85" width="120" height="80" rx="12" fill="#1f2937" stroke="url(#flowGradient)" stroke-width="2"/>
-                            <text x="80" y="115" text-anchor="middle" fill="#f1f5f9" font-size="12" font-weight="600">Haskell</text>
+                            <rect x="20" y="85" width="120" height="80" rx="12" fill="#1f2937"
+                                stroke="url(#flowGradient)" stroke-width="2" />
+                            <text x="80" y="115" text-anchor="middle" fill="#f1f5f9" font-size="12"
+                                font-weight="600">Haskell</text>
                             <text x="80" y="135" text-anchor="middle" fill="#9ca3af" font-size="10">Source</text>
                         </g>
 
                         <!-- Arrow -->
-                        <line x1="140" y1="125" x2="170" y2="125" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)" class="pipeline-line"/>
+                        <line x1="140" y1="125" x2="170" y2="125" stroke="#64748b" stroke-width="2"
+                            marker-end="url(#arrow)" class="pipeline-line" />
 
                         <!-- Stage 2: Lexer/Parser -->
                         <g>
-                            <rect x="170" y="85" width="130" height="80" rx="12" fill="#1f2937" stroke="url(#flowGradient)" stroke-width="2"/>
-                            <text x="235" y="110" text-anchor="middle" fill="#f1f5f9" font-size="11" font-weight="600">Lexer</text>
-                            <text x="235" y="125" text-anchor="middle" fill="#f1f5f9" font-size="11" font-weight="600">Parser</text>
+                            <rect x="170" y="85" width="130" height="80" rx="12" fill="#1f2937"
+                                stroke="url(#flowGradient)" stroke-width="2" />
+                            <text x="235" y="110" text-anchor="middle" fill="#f1f5f9" font-size="11"
+                                font-weight="600">Lexer</text>
+                            <text x="235" y="125" text-anchor="middle" fill="#f1f5f9" font-size="11"
+                                font-weight="600">Parser</text>
                             <text x="235" y="145" text-anchor="middle" fill="#9ca3af" font-size="10">AST</text>
                         </g>
 
                         <!-- Arrow -->
-                        <line x1="300" y1="125" x2="330" y2="125" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)" class="pipeline-line"/>
+                        <line x1="300" y1="125" x2="330" y2="125" stroke="#64748b" stroke-width="2"
+                            marker-end="url(#arrow)" class="pipeline-line" />
 
                         <!-- Stage 3: Typecheck/Desugar -->
                         <g>
-                            <rect x="330" y="85" width="130" height="80" rx="12" fill="#1f2937" stroke="url(#flowGradient)" stroke-width="2"/>
-                            <text x="395" y="110" text-anchor="middle" fill="#f1f5f9" font-size="10" font-weight="600">Typecheck</text>
-                            <text x="395" y="125" text-anchor="middle" fill="#f1f5f9" font-size="10" font-weight="600">Desugar</text>
+                            <rect x="330" y="85" width="130" height="80" rx="12" fill="#1f2937"
+                                stroke="url(#flowGradient)" stroke-width="2" />
+                            <text x="395" y="110" text-anchor="middle" fill="#f1f5f9" font-size="10"
+                                font-weight="600">Typecheck</text>
+                            <text x="395" y="125" text-anchor="middle" fill="#f1f5f9" font-size="10"
+                                font-weight="600">Desugar</text>
                             <text x="395" y="145" text-anchor="middle" fill="#9ca3af" font-size="10">Core (F_C)</text>
                         </g>
 
                         <!-- Arrow -->
-                        <line x1="460" y1="125" x2="490" y2="125" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)" class="pipeline-line"/>
+                        <line x1="460" y1="125" x2="490" y2="125" stroke="#64748b" stroke-width="2"
+                            marker-end="url(#arrow)" class="pipeline-line" />
 
                         <!-- Stage 4: Core → GRIN -->
                         <g>
-                            <rect x="490" y="85" width="120" height="80" rx="12" fill="#1f2937" stroke="url(#flowGradient)" stroke-width="2"/>
-                            <text x="550" y="115" text-anchor="middle" fill="#f1f5f9" font-size="11" font-weight="600">Core → GRIN</text>
+                            <rect x="490" y="85" width="120" height="80" rx="12" fill="#1f2937"
+                                stroke="url(#flowGradient)" stroke-width="2" />
+                            <text x="550" y="115" text-anchor="middle" fill="#f1f5f9" font-size="11"
+                                font-weight="600">Core → GRIN</text>
                             <text x="550" y="135" text-anchor="middle" fill="#9ca3af" font-size="10">GRIN</text>
                         </g>
 
                         <!-- Arrow -->
-                        <line x1="610" y1="125" x2="650" y2="125" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)" class="pipeline-line"/>
+                        <line x1="610" y1="125" x2="650" y2="125" stroke="#64748b" stroke-width="2"
+                            marker-end="url(#arrow)" class="pipeline-line" />
 
                         <!-- Backends -->
                         <g>
-                            <rect x="650" y="25" width="80" height="50" rx="8" fill="#1f2937" stroke="#22c55e" stroke-width="2"/>
-                            <text x="690" y="55" text-anchor="middle" fill="#f1f5f9" font-size="11" font-weight="600">LLVM</text>
+                            <rect x="650" y="25" width="80" height="50" rx="8" fill="#1f2937" stroke="#22c55e"
+                                stroke-width="2" />
+                            <text x="690" y="55" text-anchor="middle" fill="#f1f5f9" font-size="11"
+                                font-weight="600">LLVM</text>
                         </g>
 
                         <g>
-                            <rect x="650" y="85" width="80" height="80" rx="8" fill="#1f2937" stroke="#22c55e" stroke-width="2"/>
-                            <text x="690" y="115" text-anchor="middle" fill="#f1f5f9" font-size="11" font-weight="600">C / JS</text>
+                            <rect x="650" y="85" width="80" height="80" rx="8" fill="#1f2937" stroke="#22c55e"
+                                stroke-width="2" />
+                            <text x="690" y="115" text-anchor="middle" fill="#f1f5f9" font-size="11" font-weight="600">C
+                                / JS</text>
                             <text x="690" y="135" text-anchor="middle" fill="#9ca3af" font-size="10">Portable</text>
                         </g>
 
                         <g>
-                            <rect x="650" y="175" width="80" height="50" rx="8" fill="#1f2937" stroke="#22c55e" stroke-width="2"/>
-                            <text x="690" y="205" text-anchor="middle" fill="#f1f5f9" font-size="11" font-weight="600">Wasm</text>
+                            <rect x="650" y="175" width="80" height="50" rx="8" fill="#1f2937" stroke="#22c55e"
+                                stroke-width="2" />
+                            <text x="690" y="205" text-anchor="middle" fill="#f1f5f9" font-size="11"
+                                font-weight="600">Wasm</text>
                         </g>
 
                         <!-- Dashed lines to backends -->
-                        <line x1="610" y1="125" x2="650" y2="50" stroke="#64748b" stroke-width="2" stroke-dasharray="5,5" marker-end="url(#arrow)"/>
-                        <line x1="610" y1="125" x2="650" y2="125" stroke="#64748b" stroke-width="2" stroke-dasharray="5,5" marker-end="url(#arrow)"/>
-                        <line x1="610" y1="125" x2="650" y2="200" stroke="#64748b" stroke-width="2" stroke-dasharray="5,5" marker-end="url(#arrow)"/>
+                        <line x1="610" y1="125" x2="650" y2="50" stroke="#64748b" stroke-width="2"
+                            stroke-dasharray="5,5" marker-end="url(#arrow)" />
+                        <line x1="610" y1="125" x2="650" y2="125" stroke="#64748b" stroke-width="2"
+                            stroke-dasharray="5,5" marker-end="url(#arrow)" />
+                        <line x1="610" y1="125" x2="650" y2="200" stroke="#64748b" stroke-width="2"
+                            stroke-dasharray="5,5" marker-end="url(#arrow)" />
 
                         <!-- Labels -->
                         <text x="80" y="185" text-anchor="middle" fill="#6b7280" font-size="9">Haskell 2010</text>
@@ -552,7 +681,8 @@
                     <span class="text-zig font-semibold text-sm uppercase tracking-wider">Progress</span>
                     <h2 class="text-4xl md:text-5xl font-bold text-white mt-4">Roadmap</h2>
                 </div>
-                <a href="https://github.com/adinapoli/rusholme/blob/main/ROADMAP.md" target="_blank" class="flex items-center gap-2 text-zig hover:text-zig/80 transition-colors group">
+                <a href="https://github.com/adinapoli/rusholme/blob/main/ROADMAP.md" target="_blank"
+                    class="flex items-center gap-2 text-zig hover:text-zig/80 transition-colors group">
                     View full roadmap
                     <i data-lucide="external-link" class="w-4 h-4 group-hover:translate-x-1 transition-transform"></i>
                 </a>
@@ -574,14 +704,15 @@
                 </div>
             </div>
 
-    </div>
+        </div>
     </section>
 
     <!-- GRIN Showcase Section -->
     <section id="grin" class="py-24 px-4 sm:px-6 lg:px-8 bg-gray-950 relative">
         <div class="max-w-7xl mx-auto">
             <div class="text-center mb-16">
-                <span class="text-purple-400 font-semibold text-sm uppercase tracking-wider">Intermediate Representation</span>
+                <span class="text-purple-400 font-semibold text-sm uppercase tracking-wider">Intermediate
+                    Representation</span>
                 <h2 class="text-4xl md:text-5xl font-bold text-white mt-4 mb-6">
                     Why <span class="gradient-text">GRIN</span>?
                 </h2>
@@ -647,7 +778,8 @@
                             </div>
                             <span class="text-gray-500 text-xs font-mono">Nodes.hs</span>
                         </div>
-                        <pre class="p-6 text-sm font-mono leading-relaxed overflow-x-auto"><code><span class="text-gray-500">module</span> <span class="text-white">Nodes</span> <span class="text-gray-500">where</span>
+                        <pre
+                            class="p-6 text-sm font-mono leading-relaxed overflow-x-auto"><code><span class="text-gray-500">module</span> <span class="text-white">Nodes</span> <span class="text-gray-500">where</span>
 
 <span class="text-gray-500">data</span> <span class="text-white">Pair</span> <span class="text-zig">=</span> <span class="text-white">Pair</span> <span class="text-blue-300">Int</span> <span class="text-blue-300">Int</span>
 
@@ -669,7 +801,8 @@
                                 </div>
                                 <span class="text-gray-500 text-xs font-mono">ghc -ddump-stg-final Nodes.hs</span>
                             </div>
-                            <span class="text-xs px-2 py-1 bg-gray-800 text-purple-300 rounded-full font-mono">GHC STG</span>
+                            <span class="text-xs px-2 py-1 bg-gray-800 text-purple-300 rounded-full font-mono">GHC
+                                STG</span>
                         </div>
                         <pre class="p-6 text-sm font-mono leading-relaxed overflow-x-auto"><code><span class="text-zig">swap</span> <span class="text-gray-400">=</span> <span class="text-purple-300">\r</span> [<span class="text-green-300">ds</span>]
   <span class="text-blue-300">case</span> <span class="text-green-300">ds</span> <span class="text-blue-300">of</span> {
@@ -678,8 +811,10 @@
   };</code></pre>
                         <div class="px-6 pb-6 space-y-2">
                             <p class="text-xs text-gray-500 leading-relaxed">
-                                <span class="text-yellow-400 font-mono">\r</span> is a calling convention marker ("re-entrant"), not explicit code.
-                                <span class="text-yellow-400 font-mono">Pair [b a]</span> allocates on the heap — but this is <em>implicit</em>, inferred
+                                <span class="text-yellow-400 font-mono">\r</span> is a calling convention marker
+                                ("re-entrant"), not explicit code.
+                                <span class="text-yellow-400 font-mono">Pair [b a]</span> allocates on the heap — but
+                                this is <em>implicit</em>, inferred
                                 by the STG-to-Cmm lowering from info tables and closure entry points.
                             </p>
                         </div>
@@ -696,9 +831,12 @@
                                 </div>
                                 <span class="text-gray-500 text-xs font-mono">rhc grin Nodes.hs</span>
                             </div>
-                            <span class="text-xs px-2 py-1 bg-purple-900/40 text-purple-300 rounded-full font-mono">Rusholme GRIN</span>
+                            <span
+                                class="text-xs px-2 py-1 bg-purple-900/40 text-purple-300 rounded-full font-mono">Rusholme
+                                GRIN</span>
                         </div>
-                        <pre class="p-6 text-sm font-mono leading-relaxed overflow-x-auto"><code><span class="text-zig">swap</span> <span class="text-green-300">arg_0_1</span> <span class="text-gray-400">=</span>
+                        <pre
+                            class="p-6 text-sm font-mono leading-relaxed overflow-x-auto"><code><span class="text-zig">swap</span> <span class="text-green-300">arg_0_1</span> <span class="text-gray-400">=</span>
   <span class="text-blue-300">case</span> <span class="text-green-300">arg_0_1</span> <span class="text-blue-300">of</span>
     (<span class="text-white">CPair</span> <span class="text-green-300">a_2</span> <span class="text-green-300">b_3</span>) <span class="text-gray-400">-&gt;</span>
       <span class="text-purple-400 font-semibold">store</span> (<span class="text-white">CPair</span> <span class="text-green-300">b_3</span> <span class="text-green-300">a_2</span>) <span class="text-gray-400">;</span>
@@ -708,9 +846,12 @@
       <span class="text-blue-300">pure</span> <span class="text-yellow-300">#"Non-exhaustive patterns"</span></code></pre>
                         <div class="px-6 pb-6 space-y-2">
                             <p class="text-xs text-gray-500 leading-relaxed">
-                                <span class="text-purple-400 font-mono">store</span> is the <em>only</em> way to allocate on the heap — it is a
-                                first-class monadic operation. The result is bound to <span class="text-green-300 font-mono">node_5</span>
-                                via a monadic continuation <span class="text-gray-400 font-mono">\node_5 -&gt;</span>, making the
+                                <span class="text-purple-400 font-mono">store</span> is the <em>only</em> way to
+                                allocate on the heap — it is a
+                                first-class monadic operation. The result is bound to <span
+                                    class="text-green-300 font-mono">node_5</span>
+                                via a monadic continuation <span class="text-gray-400 font-mono">\node_5 -&gt;</span>,
+                                making the
                                 heap address explicit and inspectable at every optimisation pass.
                             </p>
                         </div>
@@ -761,7 +902,8 @@
             </div>
 
             <!-- Reference -->
-            <div class="mt-12 p-6 bg-gray-900/50 rounded-2xl border border-gray-800 flex flex-col sm:flex-row items-start sm:items-center gap-4">
+            <div
+                class="mt-12 p-6 bg-gray-900/50 rounded-2xl border border-gray-800 flex flex-col sm:flex-row items-start sm:items-center gap-4">
                 <div class="w-12 h-12 rounded-xl bg-gray-800 flex items-center justify-center flex-shrink-0">
                     <i data-lucide="book-open" class="w-6 h-6 text-gray-400"></i>
                 </div>
@@ -808,14 +950,18 @@
                         <div class="bg-gray-950 rounded-xl p-6 max-h-80 overflow-y-auto">
                             <div id="design-content" class="prose-custom">
                                 <div class="flex items-center gap-3 text-gray-500">
-                                    <div class="w-5 h-5 border-2 border-zig border-t-transparent rounded-full animate-spin"></div>
+                                    <div
+                                        class="w-5 h-5 border-2 border-zig border-t-transparent rounded-full animate-spin">
+                                    </div>
                                     <span class="text-sm">Loading documentation...</span>
                                 </div>
                             </div>
                         </div>
-                        <a href="https://github.com/adinapoli/rusholme/blob/main/DESIGN.md" target="_blank" class="mt-4 flex items-center gap-2 text-zig hover:text-zig/80 transition-colors text-sm font-medium group">
+                        <a href="https://github.com/adinapoli/rusholme/blob/main/DESIGN.md" target="_blank"
+                            class="mt-4 flex items-center gap-2 text-zig hover:text-zig/80 transition-colors text-sm font-medium group">
                             Read full design document
-                            <i data-lucide="arrow-right" class="w-4 h-4 group-hover:translate-x-1 transition-transform"></i>
+                            <i data-lucide="arrow-right"
+                                class="w-4 h-4 group-hover:translate-x-1 transition-transform"></i>
                         </a>
                     </div>
                 </div>
@@ -837,14 +983,18 @@
                         <div class="bg-gray-950 rounded-xl p-6 max-h-80 overflow-y-auto">
                             <div id="roadmap-content" class="prose-custom">
                                 <div class="flex items-center gap-3 text-gray-500">
-                                    <div class="w-5 h-5 border-2 border-zig border-t-transparent rounded-full animate-spin"></div>
+                                    <div
+                                        class="w-5 h-5 border-2 border-zig border-t-transparent rounded-full animate-spin">
+                                    </div>
                                     <span class="text-sm">Loading documentation...</span>
                                 </div>
                             </div>
                         </div>
-                        <a href="https://github.com/adinapoli/rusholme/blob/main/ROADMAP.md" target="_blank" class="mt-4 flex items-center gap-2 text-zig hover:text-zig/80 transition-colors text-sm font-medium group">
+                        <a href="https://github.com/adinapoli/rusholme/blob/main/ROADMAP.md" target="_blank"
+                            class="mt-4 flex items-center gap-2 text-zig hover:text-zig/80 transition-colors text-sm font-medium group">
                             Read full roadmap
-                            <i data-lucide="arrow-right" class="w-4 h-4 group-hover:translate-x-1 transition-transform"></i>
+                            <i data-lucide="arrow-right"
+                                class="w-4 h-4 group-hover:translate-x-1 transition-transform"></i>
                         </a>
                     </div>
                 </div>
@@ -861,18 +1011,21 @@
                     Try <span class="gradient-text">Rusholme</span> in Your Browser
                 </h2>
                 <p class="text-gray-400 max-w-3xl mx-auto text-lg mb-4">
-                    Rusholme targets <em class="text-white">WebAssembly</em> via its WASM backend, enabling browser-based
+                    Rusholme targets <em class="text-white">WebAssembly</em> via its WASM backend, enabling
+                    browser-based
                     Haskell evaluation without installing the compiler.
                 </p>
                 <p class="text-sm text-gray-500">
                     The REPL below compiles Haskell expressions to WebAssembly binaries (.wasm) right in your browser.
-                    Type expressions and press Enter to evaluate — multi-line blocks supported with <code class="text-zig">:{ ... :}</code>.
+                    Type expressions and press Enter to evaluate — multi-line blocks supported with <code
+                        class="text-zig">:{ ... :}</code>.
                 </p>
             </div>
 
             <!-- Mac-style Terminal Window with REPL -->
             <div class="max-w-5xl mx-auto">
-                <div class="bg-gradient-to-b from-gray-800 to-gray-900 rounded-2xl shadow-2xl overflow-hidden border border-gray-700">
+                <div
+                    class="bg-gradient-to-b from-gray-800 to-gray-900 rounded-2xl shadow-2xl overflow-hidden border border-gray-700">
                     <!-- Traffic light window controls -->
                     <div class="px-4 py-3 bg-gray-800/50 border-b border-gray-700 flex items-center gap-2">
                         <div class="w-3 h-3 rounded-full bg-red-500/80"></div>
@@ -886,7 +1039,8 @@
                 </div>
 
                 <p class="text-center text-gray-500 text-sm mt-4">
-                    Press Enter to evaluate • Ctrl+C to clear • <code class="text-gray-400">{:{</code> and <code class="text-gray-400">:}</code> for multi-line blocks
+                    Press Enter to evaluate • Ctrl+C to clear • <code class="text-gray-400">{:{</code> and <code
+                        class="text-gray-400">:}</code> for multi-line blocks
                 </p>
             </div>
         </div>
@@ -907,13 +1061,16 @@
             </p>
 
             <div class="flex flex-wrap justify-center gap-4">
-                <a href="https://github.com/adinapoli/rusholme" target="_blank" class="group px-8 py-4 bg-white text-zig font-semibold rounded-xl shadow-2xl hover:shadow-3xl transition-all duration-300 hover:scale-105 flex items-center gap-3">
+                <a href="https://github.com/adinapoli/rusholme" target="_blank"
+                    class="group px-8 py-4 bg-white text-zig font-semibold rounded-xl shadow-2xl hover:shadow-3xl transition-all duration-300 hover:scale-105 flex items-center gap-3">
                     <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
-                        <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+                        <path
+                            d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
                     </svg>
                     Star on GitHub
                 </a>
-                <a href="https://github.com/adinapoli/rusholme/issues" target="_blank" class="px-8 py-4 bg-gray-900/80 text-white font-semibold rounded-xl border border-gray-700 hover:bg-gray-800 transition-all duration-300 hover:scale-105 backdrop-blur-sm flex items-center gap-3">
+                <a href="https://github.com/adinapoli/rusholme/issues" target="_blank"
+                    class="px-8 py-4 bg-gray-900/80 text-white font-semibold rounded-xl border border-gray-700 hover:bg-gray-800 transition-all duration-300 hover:scale-105 backdrop-blur-sm flex items-center gap-3">
                     <i data-lucide="message-square" class="w-6 h-6"></i>
                     Browse Issues
                 </a>
@@ -938,23 +1095,31 @@
                     <h4 class="font-semibold text-white mb-4">Links</h4>
                     <ul class="space-y-2">
                         <li><a href="#home" class="text-gray-500 hover:text-zig transition-colors text-sm">Home</a></li>
-                        <li><a href="#about" class="text-gray-500 hover:text-zig transition-colors text-sm">About</a></li>
-                        <li><a href="#pipeline" class="text-gray-500 hover:text-zig transition-colors text-sm">Pipeline</a></li>
-                        <li><a href="#roadmap" class="text-gray-500 hover:text-zig transition-colors text-sm">Roadmap</a></li>
+                        <li><a href="#about" class="text-gray-500 hover:text-zig transition-colors text-sm">About</a>
+                        </li>
+                        <li><a href="#pipeline"
+                                class="text-gray-500 hover:text-zig transition-colors text-sm">Pipeline</a></li>
+                        <li><a href="#roadmap"
+                                class="text-gray-500 hover:text-zig transition-colors text-sm">Roadmap</a></li>
                         <li><a href="#grin" class="text-gray-500 hover:text-zig transition-colors text-sm">GRIN</a></li>
                     </ul>
                 </div>
                 <div>
                     <h4 class="font-semibold text-white mb-4">Community</h4>
                     <ul class="space-y-2">
-                        <li><a href="https://github.com/adinapoli/rusholme" target="_blank" class="text-gray-500 hover:text-zig transition-colors text-sm flex items-center gap-2"><i data-lucide="github" class="w-4 h-4"></i> GitHub</a></li>
-                        <li><a href="https://github.com/adinapoli/rusholme/issues" target="_blank" class="text-gray-500 hover:text-zig transition-colors text-sm flex items-center gap-2"><i data-lucide="message-square" class="w-4 h-4"></i> Issues</a></li>
+                        <li><a href="https://github.com/adinapoli/rusholme" target="_blank"
+                                class="text-gray-500 hover:text-zig transition-colors text-sm flex items-center gap-2"><i
+                                    data-lucide="github" class="w-4 h-4"></i> GitHub</a></li>
+                        <li><a href="https://github.com/adinapoli/rusholme/issues" target="_blank"
+                                class="text-gray-500 hover:text-zig transition-colors text-sm flex items-center gap-2"><i
+                                    data-lucide="message-square" class="w-4 h-4"></i> Issues</a></li>
                     </ul>
                 </div>
             </div>
             <div class="border-t border-gray-900 pt-8 flex flex-col md:flex-row justify-between items-center gap-4">
                 <p class="text-gray-600 text-sm">
-                    &copy; 2025 Rusholme. Built with <span class="text-zig">Zig</span> + <span class="text-haskell">Haskell</span> in mind.
+                    &copy; 2025 Rusholme. Built with <span class="text-zig">Zig</span> + <span
+                        class="text-haskell">Haskell</span> in mind.
                 </p>
                 <a href="#home" class="text-gray-600 hover:text-zig transition-colors flex items-center gap-2 text-sm">
                     Back to top <i data-lucide="arrow-up" class="w-4 h-4"></i>
@@ -983,7 +1148,7 @@
 
         // Smooth scroll for anchor links
         document.querySelectorAll('a[href^="#"]').forEach(anchor => {
-            anchor.addEventListener('click', function(e) {
+            anchor.addEventListener('click', function (e) {
                 e.preventDefault();
                 const target = document.querySelector(this.getAttribute('href'));
                 if (target) {
@@ -1234,7 +1399,7 @@
         }
 
         // REPL terminal for xterm.js + WASM integration
-        (function() {
+        (function () {
             const terminalContainer = document.getElementById('repl-terminal');
             if (!terminalContainer) return;
 
@@ -1281,13 +1446,39 @@
             fileInput.style.display = 'none';
             document.body.appendChild(fileInput);
 
+            function stripModuleHeader(contents) {
+                // Skip leading whitespace/blank lines
+                let i = 0;
+                while (i < contents.length && (contents[i] === ' ' || contents[i] === '\t' || contents[i] === '\n' || contents[i] === '\r')) {
+                    i++;
+                }
+
+                // Check for `module` keyword
+                if (!contents.substring(i).startsWith("module ")) return contents;
+
+                // Find `where`
+                const whereIdx = contents.indexOf("where", i);
+                if (whereIdx !== -1) {
+                    const afterWhere = whereIdx + "where".length;
+                    if (afterWhere < contents.length && contents[afterWhere] === '\n') {
+                        return contents.substring(afterWhere + 1);
+                    } else if (afterWhere < contents.length && contents[afterWhere] === '\r') {
+                        const skip = (afterWhere + 1 < contents.length && contents[afterWhere + 1] === '\n') ? afterWhere + 2 : afterWhere + 1;
+                        return contents.substring(skip);
+                    }
+                    return contents.substring(afterWhere);
+                }
+                return contents;
+            }
+
             fileInput.addEventListener('change', (event) => {
                 const file = event.target.files[0];
                 if (!file) return;
                 const reader = new FileReader();
                 reader.onload = () => {
-                    term.writeln('Loading: ' + file.name);
-                    replBridge.evaluate(reader.result);
+                    term.writeln('Loaded: ' + file.name);
+                    const body = stripModuleHeader(reader.result);
+                    replBridge.evaluate(body);
                 };
                 reader.readAsText(file);
                 fileInput.value = ''; // allow re-selecting same file
@@ -1297,11 +1488,11 @@
             // ANSI coloring. Each diagnostic carries severity, code, location,
             // message, and optional notes (matching the JsonRenderer schema).
             function renderDiagnostics(term, diagnostics) {
-                const RESET  = '\x1b[0m';
-                const RED    = '\x1b[1;31m';
+                const RESET = '\x1b[0m';
+                const RED = '\x1b[1;31m';
                 const YELLOW = '\x1b[1;33m';
-                const CYAN   = '\x1b[1;36m';
-                const GREY   = '\x1b[90m';
+                const CYAN = '\x1b[1;36m';
+                const GREY = '\x1b[90m';
 
                 for (const diag of diagnostics) {
                     // Severity color
@@ -1341,7 +1532,7 @@
                 // Uses two-phase instantiation: a Proxy shim handles WASI
                 // calls during instantiation (before we have a memory
                 // reference), then the real shim is wired in afterwards.
-                init: async function() {
+                init: async function () {
                     try {
                         const response = await fetch('repl.wasm');
                         if (!response.ok) {
@@ -1390,7 +1581,7 @@
                 },
 
                 // Evaluate expression via WASM REPL
-                evaluate: function(expr) {
+                evaluate: function (expr) {
                     if (!this.wasmInstance) {
                         term.writeln('\x1b[31mError: REPL not initialized\x1b[0m');
                         term.write('\x1b[32m> \x1b[0m');
@@ -1447,13 +1638,18 @@
                 if (code === 13) { // Enter key
                     term.writeln('');
                     if (inputMode === 'multiline') {
-                        if (currentLine.trim() === ':}') {
+                        const trimmed = currentLine.trim();
+                        if (trimmed === ':}') {
                             // Seal the multiline block
                             const content = multilineBuffer.join('\n');
                             const wrapped = ':{' + '\n' + content + '\n' + ':}';
                             multilineBuffer = [];
                             inputMode = 'normal';
                             replBridge.evaluate(wrapped);
+                        } else if (trimmed === ':quit' || trimmed === ':q') {
+                            multilineBuffer = [];
+                            inputMode = 'normal';
+                            term.write('\x1b[32m> \x1b[0m');
                         } else {
                             // Accumulate line
                             multilineBuffer.push(currentLine);
@@ -1461,15 +1657,38 @@
                         }
                     } else {
                         // Normal mode
-                        if (currentLine.trim() === ':{') {
-                            inputMode = 'multiline';
-                            multilineBuffer = [];
-                            term.write('\x1b[32m| \x1b[0m');
-                        } else if (currentLine.trim() === ':load' || currentLine.trim() === ':l') {
-                            fileInput.click();
-                            currentLine = '';
-                            return;
-                        } else if (currentLine.trim()) {
+                        const trimmed = currentLine.trim();
+                        if (trimmed.startsWith(':')) {
+                            const cmd = trimmed.substring(1).trim();
+
+                            if (cmd === '{') {
+                                inputMode = 'multiline';
+                                multilineBuffer = [];
+                                term.write('\x1b[32m| \x1b[0m');
+                            } else if (cmd === 'quit' || cmd === 'q') {
+                                term.writeln('REPL closed. Refresh the page to start a new session.');
+                                term.write('\x1b[32m> \x1b[0m');
+                            } else if (cmd.startsWith('type ') || cmd.startsWith('t ')) {
+                                term.writeln(':type is not yet implemented');
+                                term.write('\x1b[32m> \x1b[0m');
+                            } else if (cmd.startsWith('load ') || cmd.startsWith('l ') || cmd === 'load' || cmd === 'l') {
+                                fileInput.click();
+                                currentLine = '';
+                                return;
+                            } else if (cmd === 'help' || cmd === 'h' || cmd === '?') {
+                                term.writeln('Available commands:');
+                                term.writeln('  :quit, :q       Exit the REPL');
+                                term.writeln('  :type <expr>    Show the type of an expression (not yet implemented)');
+                                term.writeln('  :load <file>, :l  Load a Haskell file into the session');
+                                term.writeln('  :{              Begin multi-line input block');
+                                term.writeln('  :}              End multi-line input block and evaluate');
+                                term.writeln('  :help, :h, :?   Show this help message');
+                                term.write('\x1b[32m> \x1b[0m');
+                            } else {
+                                term.writeln('Unknown command. Type :help for available commands.');
+                                term.write('\x1b[32m> \x1b[0m');
+                            }
+                        } else if (trimmed) {
                             replBridge.evaluate(currentLine);
                         } else {
                             term.write('\x1b[32m> \x1b[0m');
@@ -1508,4 +1727,5 @@
         })();
     </script>
 </body>
+
 </html>
