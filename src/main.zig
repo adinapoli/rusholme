@@ -526,7 +526,7 @@ fn cmdGrin(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     }
 
     // ── Translate to GRIN ───────────────────────────────────────────────
-    const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted);
+    const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted, null);
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
@@ -625,7 +625,7 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     }
 
     // ── Translate to GRIN ───────────────────────────────────────────────
-    const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted);
+    const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted, null);
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
@@ -723,7 +723,7 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     for (module_order) |mod_name| {
         const core_prog = session.programs.get(mod_name) orelse continue;
         const core_lifted = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog);
-        const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted);
+        const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted, null);
         try per_module_grin.append(arena_alloc, grin_prog);
     }
 

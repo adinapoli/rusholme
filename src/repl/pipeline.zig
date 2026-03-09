@@ -47,6 +47,8 @@ const lift_mod = @import("../core/lift.zig");
 const translate_mod = @import("../grin/translate.zig");
 const grin_ast = @import("../grin/ast.zig");
 
+const ArityMap = std.AutoHashMapUnmanaged(u64, u32);
+
 // ── Result types ──────────────────────────────────────────────────────
 
 /// The kind of input that was compiled, and any prefix adjustments needed
@@ -254,6 +256,7 @@ pub const Pipeline = struct {
         ty_env: *env_mod.TyEnv,
         mv_supply: *htype_mod.MetaVarSupply,
         diags: *DiagnosticCollector,
+        external_arities: ?*const ArityMap,
     ) CompileError!grin_ast.Program {
         const alloc = self.allocator;
 
@@ -306,7 +309,7 @@ pub const Pipeline = struct {
         if (diags.hasErrors()) return CompileError.CompilationFailed;
 
         // ── Translate to GRIN ──────────────────────────────────────
-        const grin_prog = translate_mod.translateProgram(alloc, core_lifted) catch {
+        const grin_prog = translate_mod.translateProgram(alloc, core_lifted, external_arities) catch {
             return CompileError.OutOfMemory;
         };
         if (diags.hasErrors()) return CompileError.CompilationFailed;
@@ -325,6 +328,7 @@ pub const Pipeline = struct {
         ty_env: *env_mod.TyEnv,
         mv_supply: *htype_mod.MetaVarSupply,
         diags: *DiagnosticCollector,
+        external_arities: ?*const ArityMap,
     ) CompileError!CompileResult {
         const alloc = self.allocator;
         const file_id: FileId = 0;
@@ -353,7 +357,7 @@ pub const Pipeline = struct {
             var decl_diags = DiagnosticCollector.init();
             defer decl_diags.deinit(alloc);
 
-            if (self.compileModule(decl_source, file_id, u_supply, rename_env, ty_env, mv_supply, &decl_diags)) |program| {
+            if (self.compileModule(decl_source, file_id, u_supply, rename_env, ty_env, mv_supply, &decl_diags, external_arities)) |program| {
                 // Copy any diagnostics from the attempt
                 try copyDiagnostics(alloc, &decl_diags, diags);
                 return .{ .program = program, .kind = decl_kind };
@@ -378,7 +382,7 @@ pub const Pipeline = struct {
             self.last_source = expr_source;
             self.last_input_kind = .expression;
 
-            if (self.compileModule(expr_source, file_id, u_supply, rename_env, ty_env, mv_supply, diags)) |program| {
+            if (self.compileModule(expr_source, file_id, u_supply, rename_env, ty_env, mv_supply, diags, external_arities)) |program| {
                 // Expression succeeded — clear declaration diagnostics.
                 clearLeadingDiags(alloc, diags, decl_diag_count);
                 return .{ .program = program, .kind = .expression };
@@ -438,6 +442,7 @@ test "pipeline: compile simple literal expression" {
         &ty_env,
         &mv_supply,
         &diags,
+        null,
     );
 
     try testing.expect(result.program.defs.len > 0);
@@ -469,6 +474,7 @@ test "pipeline: compile data declaration" {
         &ty_env,
         &mv_supply,
         &diags,
+        null,
     );
 
     // Data declarations are classified as declarations.
@@ -501,6 +507,7 @@ test "pipeline: compile function declaration" {
         &ty_env,
         &mv_supply,
         &diags,
+        null,
     );
 
     try testing.expect(result.kind == .declaration);
@@ -618,6 +625,7 @@ test "pipeline: handle let prefix in declarations" {
         &ty_env,
         &mv_supply,
         &diags,
+        null,
     );
 
     try testing.expect(result.kind == .declaration_let_stripped);

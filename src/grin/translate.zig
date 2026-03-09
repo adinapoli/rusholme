@@ -283,7 +283,11 @@ fn countLambdaArity(expr: *const CoreExpr) !u32 {
 }
 
 /// Translate a Core program to a GRIN program.
-pub fn translateProgram(alloc: std.mem.Allocator, core_prog: CoreProgram) !GrinProgram {
+pub fn translateProgram(
+    alloc: std.mem.Allocator,
+    core_prog: CoreProgram,
+    external_arities: ?*const std.AutoHashMapUnmanaged(u64, u32),
+) !GrinProgram {
     // Build the arity map for partial/over-application handling.
     var arity_map = try buildArityMap(alloc, core_prog);
     defer arity_map.deinit(alloc);
@@ -299,6 +303,18 @@ pub fn translateProgram(alloc: std.mem.Allocator, core_prog: CoreProgram) !GrinP
     var iter = arity_map.iterator();
     while (iter.next()) |entry| {
         try ctx.arity_map.put(alloc, entry.key_ptr.*, entry.value_ptr.*);
+    }
+
+    // Seed with external arities (from REPL session's prior inputs).
+    // Local entries take precedence — only add externals not already present.
+    if (external_arities) |ext| {
+        var ext_iter = ext.iterator();
+        while (ext_iter.next()) |entry| {
+            const gop = try ctx.arity_map.getOrPut(alloc, entry.key_ptr.*);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = entry.value_ptr.*;
+            }
+        }
     }
 
     // Copy the constructor map into the context.
@@ -394,9 +410,27 @@ fn translateExpr(ctx: *TranslateCtx, expr: *const CoreExpr) !*GrinExpr {
                     new_expr.* = .{ .Return = .{ .Var = grin_name } };
                 }
             } else {
-                // Ordinary variable reference.
                 const grin_name = try ctx.getCoreVar(v.name);
-                new_expr.* = .{ .Return = .{ .Var = grin_name } };
+                // If this is a known function with arity 0, emit a call
+                // (App with no args) rather than a bare variable reference.
+                // This is critical for the REPL: when the user types `main`
+                // after `:l`, the translator must call `main` (not just
+                // return a reference to it).
+                if (ctx.getFunctionArity(grin_name)) |arity| {
+                    if (arity == 0) {
+                        new_expr.* = .{ .App = .{
+                            .name = grin_name,
+                            .args = &.{},
+                        } };
+                    } else {
+                        // Non-zero arity function used as a value (higher-order).
+                        // Return as a variable reference.
+                        new_expr.* = .{ .Return = .{ .Var = grin_name } };
+                    }
+                } else {
+                    // Unknown function — ordinary variable reference.
+                    new_expr.* = .{ .Return = .{ .Var = grin_name } };
+                }
             }
         },
         .Lit => |l| {
@@ -1391,7 +1425,7 @@ test "translateProgram: simple identity function" {
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog);
+    const grin_prog = try translateProgram(alloc, core_prog, null);
 
     // Should have one definition with one parameter.
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
@@ -1466,7 +1500,7 @@ test "translateProgram: literal value" {
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog);
+    const grin_prog = try translateProgram(alloc, core_prog, null);
 
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
 
@@ -1833,7 +1867,7 @@ test "translateProgram: partial application generates P-tag" {
         .binds = &[_]CoreBind{ .{ .NonRec = map_pair }, .{ .NonRec = main_pair } },
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog);
+    const grin_prog = try translateProgram(alloc, core_prog, null);
 
     // Should have 2 definitions: map and main
     try testing.expectEqual(@as(usize, 2), grin_prog.defs.len);
@@ -1916,7 +1950,7 @@ test "translateProgram: over-application generates chained apply calls" {
         .binds = &[_]CoreBind{ .{ .NonRec = id_pair }, .{ .NonRec = main_pair } },
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog);
+    const grin_prog = try translateProgram(alloc, core_prog, null);
 
     // Should have 2 definitions: id and main
     try testing.expectEqual(@as(usize, 2), grin_prog.defs.len);
@@ -2027,7 +2061,7 @@ test "translateApp: nested application f (g x) emits Bind for complex arg (#374)
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog);
+    const grin_prog = try translateProgram(alloc, core_prog, null);
 
     // Should have one definition with 3 parameters (f, g, x).
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
@@ -2076,5 +2110,59 @@ test "translateApp: nested application f (g x) emits Bind for complex arg (#374)
             // If the body is a bare App, the bug is still present!
             return error.TestUnexpectedResult;
         },
+    }
+}
+
+test "translateProgram: external 0-arity function produces App not Return Var" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Simulate: `main` was defined in a prior REPL input with arity 0.
+    // Current input: `replExpr__ = main` (a bare variable reference).
+    // The translator should emit App(main, []) not Return(Var(main)).
+    const main_unique: u64 = 999;
+
+    var external_arities = std.AutoHashMapUnmanaged(u64, u32){};
+    defer external_arities.deinit(alloc);
+    try external_arities.put(alloc, main_unique, 0);
+
+    // Build Core program: replExpr__ = main
+    const rhs = try alloc.create(core.Expr);
+    rhs.* = .{ .Var = .{
+        .name = .{ .base = "main", .unique = .{ .value = main_unique } },
+        .ty = .{ .TyVar = .{ .base = "IO", .unique = .{ .value = 0 } } },
+        .span = undefined,
+    } };
+
+    const bind_pair = CoreBindPair{
+        .binder = .{
+            .name = .{ .base = "replExpr__", .unique = .{ .value = 1000 } },
+            .ty = undefined,
+            .span = undefined,
+        },
+        .rhs = rhs,
+    };
+
+    const core_prog = CoreProgram{
+        .data_decls = &.{},
+        .binds = &.{.{ .NonRec = bind_pair }},
+    };
+
+    const grin_prog = try translateProgram(alloc, core_prog, &external_arities);
+
+    try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
+
+    // The body of replExpr__ should be App(main, []), not Return(Var(main)).
+    switch (grin_prog.defs[0].body.*) {
+        .App => |app| {
+            try testing.expectEqualStrings("main", app.name.base);
+            try testing.expectEqual(@as(usize, 0), app.args.len);
+        },
+        .Return => {
+            // This is the bug: should NOT be Return(Var(main)).
+            return error.TestUnexpectedResult;
+        },
+        else => return error.TestUnexpectedResult,
     }
 }
