@@ -306,7 +306,7 @@ pub const Pipeline = struct {
         if (diags.hasErrors()) return CompileError.CompilationFailed;
 
         // ── Translate to GRIN ──────────────────────────────────────
-        const grin_prog = translate_mod.translateProgram(alloc, core_lifted) catch {
+        const grin_prog = translate_mod.translateProgram(alloc, core_lifted, null) catch {
             return CompileError.OutOfMemory;
         };
         if (diags.hasErrors()) return CompileError.CompilationFailed;

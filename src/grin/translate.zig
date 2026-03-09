@@ -283,7 +283,11 @@ fn countLambdaArity(expr: *const CoreExpr) !u32 {
 }
 
 /// Translate a Core program to a GRIN program.
-pub fn translateProgram(alloc: std.mem.Allocator, core_prog: CoreProgram) !GrinProgram {
+pub fn translateProgram(
+    alloc: std.mem.Allocator,
+    core_prog: CoreProgram,
+    external_arities: ?*const std.AutoHashMapUnmanaged(u64, u32),
+) !GrinProgram {
     // Build the arity map for partial/over-application handling.
     var arity_map = try buildArityMap(alloc, core_prog);
     defer arity_map.deinit(alloc);
@@ -299,6 +303,18 @@ pub fn translateProgram(alloc: std.mem.Allocator, core_prog: CoreProgram) !GrinP
     var iter = arity_map.iterator();
     while (iter.next()) |entry| {
         try ctx.arity_map.put(alloc, entry.key_ptr.*, entry.value_ptr.*);
+    }
+
+    // Seed with external arities (from REPL session's prior inputs).
+    // Local entries take precedence — only add externals not already present.
+    if (external_arities) |ext| {
+        var ext_iter = ext.iterator();
+        while (ext_iter.next()) |entry| {
+            const gop = try ctx.arity_map.getOrPut(alloc, entry.key_ptr.*);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = entry.value_ptr.*;
+            }
+        }
     }
 
     // Copy the constructor map into the context.
@@ -1391,7 +1407,7 @@ test "translateProgram: simple identity function" {
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog);
+    const grin_prog = try translateProgram(alloc, core_prog, null);
 
     // Should have one definition with one parameter.
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
@@ -1466,7 +1482,7 @@ test "translateProgram: literal value" {
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog);
+    const grin_prog = try translateProgram(alloc, core_prog, null);
 
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
 
@@ -1833,7 +1849,7 @@ test "translateProgram: partial application generates P-tag" {
         .binds = &[_]CoreBind{ .{ .NonRec = map_pair }, .{ .NonRec = main_pair } },
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog);
+    const grin_prog = try translateProgram(alloc, core_prog, null);
 
     // Should have 2 definitions: map and main
     try testing.expectEqual(@as(usize, 2), grin_prog.defs.len);
@@ -1916,7 +1932,7 @@ test "translateProgram: over-application generates chained apply calls" {
         .binds = &[_]CoreBind{ .{ .NonRec = id_pair }, .{ .NonRec = main_pair } },
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog);
+    const grin_prog = try translateProgram(alloc, core_prog, null);
 
     // Should have 2 definitions: id and main
     try testing.expectEqual(@as(usize, 2), grin_prog.defs.len);
@@ -2027,7 +2043,7 @@ test "translateApp: nested application f (g x) emits Bind for complex arg (#374)
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog);
+    const grin_prog = try translateProgram(alloc, core_prog, null);
 
     // Should have one definition with 3 parameters (f, g, x).
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
