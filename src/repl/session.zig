@@ -126,6 +126,12 @@ pub const Session = struct {
     // to create a complete program for evaluation.
     accumulated_defs: std.ArrayListUnmanaged(grin_ast.Def),
 
+    // Accumulated function arities from successful declarations.
+    // Maps unique ID -> parameter count. Passed to the GRIN translator
+    // so cross-session function references are correctly translated
+    // (e.g. 0-arity functions emit App instead of Return Var).
+    accumulated_arities: std.AutoHashMapUnmanaged(u64, u32),
+
     /// Create a new REPL session with initialised compiler state.
     pub fn init(allocator: Allocator, io: std.Io) SessionError!Session {
         var u_supply = UniqueSupply{};
@@ -161,12 +167,14 @@ pub const Session = struct {
             .engine = if (is_wasi) GrinEngine.init(allocator, io) else JitEngine.init(allocator) catch return SessionError.InitFailed,
             .last_diagnostics = .{},
             .accumulated_defs = .{},
+            .accumulated_arities = .{},
         };
     }
 
     /// Release all session resources.
     pub fn deinit(self: *Session) void {
         // GrinEngine has no deinit; only JitEngine does.
+        self.accumulated_arities.deinit(self.allocator);
         self.last_diagnostics.deinit(self.allocator);
         self.accumulated_defs.deinit(self.allocator);
         self.rename_env.deinit();
@@ -215,6 +223,7 @@ pub const Session = struct {
             &self.ty_env,
             &self.mv_supply,
             &diags,
+            &self.accumulated_arities,
         ) catch |err| {
             // Capture compilation context for diagnostic rendering.
             self.last_source = self.pipeline.last_source;
@@ -265,6 +274,11 @@ pub const Session = struct {
         if (result.kind == .declaration or result.kind == .declaration_let_stripped) {
             for (result.program.defs) |def| {
                 try self.accumulated_defs.append(self.allocator, def);
+                try self.accumulated_arities.put(
+                    self.allocator,
+                    def.name.unique.value,
+                    @intCast(def.params.len),
+                );
             }
         }
 
