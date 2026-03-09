@@ -51,15 +51,15 @@ const c = llvm.c;
 // Known Prelude constants with stable unique IDs
 // These are used when variables reference Prelude literals like True, False, etc.
 const known = struct {
-    pub const true_val = 200;     // True
-    pub const false_val = 201;    // False
-    pub const nothing_val = 202;   // Nothing
-    pub const just_val = 203;     // Just
-    pub const left_val = 204;     // Left
-    pub const right_val = 205;    // Right
-    pub const unit_val = 206;     // ()
-    pub const nil_val = 207;      // []
-    pub const cons_val = 208;     // (:)
+    pub const true_val = 200; // True
+    pub const false_val = 201; // False
+    pub const nothing_val = 202; // Nothing
+    pub const just_val = 203; // Just
+    pub const left_val = 204; // Left
+    pub const right_val = 205; // Right
+    pub const unit_val = 206; // ()
+    pub const nil_val = 207; // []
+    pub const cons_val = 208; // (:)
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -927,6 +927,33 @@ pub const GrinTranslator = struct {
             llvm_args[i] = try self.translateValToLlvm(val);
         }
 
+        // Detect calls to `main` from the REPL entry point.
+        // `main` was compiled with an i32 return type (C ABI exit code),
+        // but the generic user-function call path assumes ptr return type.
+        // Calling main for its side effects (IO) and discarding its result
+        // avoids the type mismatch. The REPL entry-point return logic
+        // handles null body_val by returning a Unit heap node.
+        //
+        // Note: `main` typically lives in a separate JIT dylib (loaded via
+        // `:l` / addDeclarations), so LLVMGetNamedFunction may not find it
+        // in the current module. We forward-declare it with the correct
+        // signature so the ORC linker resolves it at execution time.
+        if (std.mem.eql(u8, name.base, "main") and self.repl_entry_point != null) {
+            const fn_name_z = self.formatName(name);
+            const main_fn_type = llvm.functionType(llvm.i32Type(), &.{}, false);
+            const func = c.LLVMGetNamedFunction(self.module, fn_name_z) orelse
+                llvm.addFunction(self.module, fn_name_z, main_fn_type);
+            _ = c.LLVMBuildCall2(
+                self.builder,
+                main_fn_type,
+                func,
+                @ptrCast(&llvm_args),
+                @intCast(arg_count),
+                "",
+            );
+            return null;
+        }
+
         // Build a ptr-returning function type for indirect/forward calls.
         var param_types: [8]llvm.Type = undefined;
         for (0..arg_count) |i| param_types[i] = ptrType();
@@ -1075,13 +1102,11 @@ pub const GrinTranslator = struct {
                 // 2. Check if variable is a known Prelude constant (True, False, None, etc.)
                 //    These have stable unique IDs and should be emitted as literals.
                 switch (name.unique.value) {
-                    known.true_val, known.false_val => break :blk c.LLVMConstInt(llvm.i64Type(), @bitCast(
-                        @as(i64, if (name.unique.value == known.true_val) 1 else 0)
-                    ), 1),
-                    known.unit_val => break :blk c.LLVMConstInt(llvm.i64Type(), 0, 1),
+                    known.true_val, known.false_val => break :blk c.LLVMConstInt(llvm.i64Type(), @bitCast(@as(i64, if (name.unique.value == known.true_val) 1 else 0)), 1),
+                    known.unit_val => break :blk self.buildUnitNode(),
                     else => {},
                 }
-                
+
                 // 2b. If not a known literal, check tag discriminant for nullary constructors.
                 //    Tracked in: https://github.com/adinapoli/rusholme/issues/410
                 if (self.tag_table.discriminantByName(name)) |disc| {
@@ -1178,7 +1203,7 @@ pub const GrinTranslator = struct {
                             "boxed_field",
                         );
                     } else try self.translateValToLlvm(field);
-                    
+
                     const field_ty = c.LLVMTypeOf(raw_val);
                     const kind = c.LLVMGetTypeKind(field_ty);
                     const is_ptr = kind == c.LLVMPointerTypeKind;
