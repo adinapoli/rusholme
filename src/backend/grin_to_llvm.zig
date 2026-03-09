@@ -1096,8 +1096,12 @@ pub const GrinTranslator = struct {
                 if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |fn_val| {
                     break :blk fn_val;
                 }
-                std.debug.print("UnsupportedGrinVal: Var {s}_{d} not found in params, tag table, or module\n", .{ name.base, name.unique.value });
-                return error.UnsupportedGrinVal;
+                // Cross-module function reference: forward-declare as
+                // external so the ORC linker can resolve it from a
+                // previously-loaded module. This mirrors the pattern
+                // used by translateApp for unknown function calls.
+                const ext_fn_type = llvm.functionType(ptrType(), &.{}, false);
+                break :blk llvm.addFunction(self.module, fn_name_z, ext_fn_type);
             },
             .ConstTagNode => |ctn| blk: {
                 // Allocate a heap node and return the pointer.
