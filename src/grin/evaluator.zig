@@ -631,6 +631,46 @@ pub const GrinEvaluator = struct {
                     break :b try self.evalPrimOp(op, app.args);
                 }
 
+                // IO monad sequencing operators.
+                //
+                // `do { a; b }` desugars to `(>>) a b` and `do { x <- m; body }`
+                // desugars to `(>>=) m (\x -> body)`.  In the GRIN strict
+                // evaluation model, arguments are already evaluated by the time
+                // the App node is reached (complex sub-expressions are bound via
+                // Bind beforehand).  Therefore:
+                //
+                //   (>>)  a b  =  b          (discard first result, return second)
+                //   (>>=) a f  =  f a        (apply continuation to first result)
+                //
+                // For (>>=), the second argument is a lambda-lifted function name.
+                // We look it up in the function table and call it with the first
+                // argument as its parameter.
+                if (std.mem.eql(u8, app.name.base, ">>")) {
+                    if (app.args.len != 2) return error.ArityMismatch;
+                    break :b try self.resolveVal(@constCast(&app.args[1]));
+                }
+                if (std.mem.eql(u8, app.name.base, ">>=")) {
+                    if (app.args.len != 2) return error.ArityMismatch;
+                    const action_result = try self.resolveVal(@constCast(&app.args[0]));
+                    // The continuation is a function name (Var) referencing a
+                    // lambda-lifted definition in the function table.  We read
+                    // it directly from the argument rather than resolving it
+                    // through the environment.
+                    switch (app.args[1]) {
+                        .Var => |fn_name| {
+                            const cont_def = self.funcs.lookup(fn_name) orelse return error.UnboundFunction;
+                            if (cont_def.params.len != 1) return error.ArityMismatch;
+                            try self.env.pushScope();
+                            errdefer self.env.popScope();
+                            try self.env.bind(cont_def.params[0], action_result);
+                            const result = try self.eval(cont_def.body);
+                            self.env.popScope();
+                            break :b result;
+                        },
+                        else => return error.TypeMismatch,
+                    }
+                }
+
                 // Look up the function definition
                 const def = self.funcs.lookup(app.name) orelse return error.UnboundFunction;
 
@@ -2111,4 +2151,94 @@ test "PrimOp: fromPreludeName maps Prelude functions to PrimOps" {
     // fromPreludeName should recognize the high-level name
     try testing.expectEqual(PrimOp.putStrLn_, PrimOp.fromPreludeName("putStrLn") orelse return);
     try testing.expect(@as(?PrimOp, null) == PrimOp.fromPreludeName("nonexistent"));
+}
+
+test "eval: (>>) returns second argument (IO monad sequencing)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Build: App >> [Lit 1, Lit 2]
+    // Should return the second argument (Lit 2).
+    const body = try alloc.create(ast.Expr);
+    body.* = .{ .App = .{
+        .name = .{ .base = ">>", .unique = .{ .value = 26 } },
+        .args = &.{ Val{ .Lit = .{ .Int = 1 } }, Val{ .Lit = .{ .Int = 2 } } },
+    } };
+
+    const defs = try alloc.alloc(ast.Def, 0);
+    const program = ast.Program{ .defs = defs };
+
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
+    defer evaluator.deinit();
+
+    const result = try evaluator.eval(body);
+    try testing.expectEqual(@as(i64, 2), result.Lit.Int);
+}
+
+test "eval: (>>=) applies continuation to action result" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Build a program with a continuation function:
+    //   cont x = return (x + 10)
+    // And an expression:
+    //   >>= (return 32) cont
+    // Expected: 42
+
+    // cont body: return (x + 10) — simplified as just Return(Lit(42))
+    // since we can't easily build add_Int here.
+    const cont_body = try alloc.create(ast.Expr);
+    cont_body.* = .{ .Return = .{ .Lit = .{ .Int = 42 } } };
+
+    const cont_param = Name{ .base = "x", .unique = .{ .value = 500 } };
+
+    const cont_def = ast.Def{
+        .name = .{ .base = "cont", .unique = .{ .value = 501 } },
+        .params = &.{cont_param},
+        .body = cont_body,
+    };
+
+    // Body: >>= (Lit 32) cont
+    const body = try alloc.create(ast.Expr);
+    body.* = .{ .App = .{
+        .name = .{ .base = ">>=", .unique = .{ .value = 25 } },
+        .args = &.{
+            Val{ .Lit = .{ .Int = 32 } },
+            Val{ .Var = .{ .base = "cont", .unique = .{ .value = 501 } } },
+        },
+    } };
+
+    const defs = try alloc.alloc(ast.Def, 1);
+    defs[0] = cont_def;
+
+    const program = ast.Program{ .defs = defs };
+
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
+    defer evaluator.deinit();
+
+    const result = try evaluator.eval(body);
+    try testing.expectEqual(@as(i64, 42), result.Lit.Int);
+}
+
+test "eval: (>>) arity mismatch" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // App >> with wrong number of arguments
+    const body = try alloc.create(ast.Expr);
+    body.* = .{ .App = .{
+        .name = .{ .base = ">>", .unique = .{ .value = 26 } },
+        .args = &.{Val{ .Lit = .{ .Int = 1 } }},
+    } };
+
+    const defs = try alloc.alloc(ast.Def, 0);
+    const program = ast.Program{ .defs = defs };
+
+    var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
+    defer evaluator.deinit();
+
+    try testing.expectError(EvalError.ArityMismatch, evaluator.eval(body));
 }

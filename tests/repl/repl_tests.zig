@@ -559,3 +559,70 @@ test "repl: load file body then evaluate main (issue #494)" {
     // putStrLn returns IO (), which should be silent (empty value)
     try testing.expectEqual(Status.silent, main_result.status);
 }
+
+test "repl: multi-declaration load then evaluate main (issue #494 reproducer)" {
+    // Reproduces the browser REPL scenario where a multi-declaration
+    // .hs file is loaded, then "main" is evaluated. The file body
+    // (with module header stripped) is sent as a single evaluate() call.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Simulate loading a file with multiple declarations (like a 25-line hello.hs)
+    const file_body =
+        \\greet name = putStrLn name
+        \\
+        \\main = greet "hello"
+    ;
+
+    const load_result = evaluate(alloc, &session, file_body) catch |err| {
+        std.debug.panic("load evaluate failed: {s}", .{@errorName(err)});
+    };
+    try testing.expectEqual(Status.silent, load_result.status);
+
+    // Now evaluate "main" — should find it from the loaded definitions
+    const main_result = evaluate(alloc, &session, "main") catch |err| {
+        std.debug.panic("main evaluate failed: {s}", .{@errorName(err)});
+    };
+    try testing.expectEqual(Status.silent, main_result.status);
+}
+
+test "repl: load file with comments then evaluate main (issue #494)" {
+    // Reproduces the browser REPL scenario with a file containing
+    // comments and blank lines — typical of a real .hs file.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Simulate a file body after stripping "module Main where\n"
+    // This is what a typical hello.hs might look like.
+    const file_body =
+        \\-- A simple greeting program
+        \\
+        \\greet name = putStrLn name
+        \\
+        \\-- Main entry point
+        \\main = greet "hello"
+    ;
+
+    const load_result = evaluate(alloc, &session, file_body) catch |err| {
+        std.debug.panic("load evaluate failed: {s}", .{@errorName(err)});
+    };
+    try testing.expectEqual(Status.silent, load_result.status);
+
+    // Now evaluate "main"
+    const main_result = evaluate(alloc, &session, "main") catch |err| {
+        std.debug.panic("main evaluate failed: {s}", .{@errorName(err)});
+    };
+    try testing.expectEqual(Status.silent, main_result.status);
+}
