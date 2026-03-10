@@ -421,3 +421,202 @@ test "wasm e2e: multiline data type and function in one eval" {
     defer if (r) |s| testing.allocator.free(s);
     try testing.expectEqualStrings("North", r.?);
 }
+
+// ── Case expressions ──────────────────────────────────────────────────
+
+test "wasm e2e: case expression on nullary constructors" {
+    const input =
+        \\{"jsonrpc":"2.0","id":1,"method":"init"}
+        \\{"jsonrpc":"2.0","id":2,"method":"eval","params":["data Color = Red | Green | Blue"]}
+        \\{"jsonrpc":"2.0","id":3,"method":"eval","params":["showColor c = case c of { Red -> 1 ; Green -> 2 ; Blue -> 3 }"]}
+        \\{"jsonrpc":"2.0","id":4,"method":"eval","params":["showColor Red"]}
+        \\{"jsonrpc":"2.0","id":5,"method":"eval","params":["showColor Blue"]}
+        \\
+    ;
+    const result = try runServer(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+
+    const lines = try splitLines(testing.allocator, result.stdout);
+    defer testing.allocator.free(lines);
+
+    try testing.expect(lines.len >= 5);
+
+    const r4 = try extractResult(testing.allocator, lines[3]);
+    defer if (r4) |s| testing.allocator.free(s);
+    try testing.expectEqualStrings("1", r4.?);
+
+    const r5 = try extractResult(testing.allocator, lines[4]);
+    defer if (r5) |s| testing.allocator.free(s);
+    try testing.expectEqualStrings("3", r5.?);
+}
+
+test "wasm e2e: case expression on constructor with fields" {
+    // Constructors with fields are stored on the heap; case matching
+    // must auto-fetch through the heap pointer.
+    const input =
+        \\{"jsonrpc":"2.0","id":1,"method":"init"}
+        \\{"jsonrpc":"2.0","id":2,"method":"eval","params":["data List a = Nil | Cons a (List a)"]}
+        \\{"jsonrpc":"2.0","id":3,"method":"eval","params":["head_it xs = case xs of { Cons y ys -> y }"]}
+        \\{"jsonrpc":"2.0","id":4,"method":"eval","params":["head_it (Cons 42 Nil)"]}
+        \\
+    ;
+    const result = try runServer(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+
+    const lines = try splitLines(testing.allocator, result.stdout);
+    defer testing.allocator.free(lines);
+
+    try testing.expect(lines.len >= 4);
+
+    const r4 = try extractResult(testing.allocator, lines[3]);
+    defer if (r4) |s| testing.allocator.free(s);
+    try testing.expectEqualStrings("42", r4.?);
+}
+
+// ── Higher-order functions ────────────────────────────────────────────
+
+test "wasm e2e: higher-order function application" {
+    const input =
+        \\{"jsonrpc":"2.0","id":1,"method":"init"}
+        \\{"jsonrpc":"2.0","id":2,"method":"eval","params":["apply f x = f x"]}
+        \\{"jsonrpc":"2.0","id":3,"method":"eval","params":["identity x = x"]}
+        \\{"jsonrpc":"2.0","id":4,"method":"eval","params":["apply identity 42"]}
+        \\
+    ;
+    const result = try runServer(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+
+    const lines = try splitLines(testing.allocator, result.stdout);
+    defer testing.allocator.free(lines);
+
+    try testing.expect(lines.len >= 4);
+
+    const r4 = try extractResult(testing.allocator, lines[3]);
+    defer if (r4) |s| testing.allocator.free(s);
+    try testing.expectEqualStrings("42", r4.?);
+}
+
+test "wasm e2e: recursive higher-order function (map)" {
+    const input =
+        \\{"jsonrpc":"2.0","id":1,"method":"init"}
+        \\{"jsonrpc":"2.0","id":2,"method":"eval","params":["data List a = Nil | Cons a (List a)"]}
+        \\{"jsonrpc":"2.0","id":3,"method":"eval","params":["identity x = x"]}
+        \\{"jsonrpc":"2.0","id":4,"method":"eval","params":["map_it f xs = case xs of { Nil -> Nil ; Cons y ys -> Cons (f y) (map_it f ys) }"]}
+        \\{"jsonrpc":"2.0","id":5,"method":"eval","params":["head_it xs = case xs of { Cons y ys -> y }"]}
+        \\{"jsonrpc":"2.0","id":6,"method":"eval","params":["head_it (map_it identity (Cons 99 Nil))"]}
+        \\
+    ;
+    const result = try runServer(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+
+    const lines = try splitLines(testing.allocator, result.stdout);
+    defer testing.allocator.free(lines);
+
+    try testing.expect(lines.len >= 6);
+
+    const r6 = try extractResult(testing.allocator, lines[5]);
+    defer if (r6) |s| testing.allocator.free(s);
+    try testing.expectEqualStrings("99", r6.?);
+}
+
+// ── IO and do-notation ────────────────────────────────────────────────
+
+test "wasm e2e: putStrLn produces output" {
+    const input =
+        \\{"jsonrpc":"2.0","id":1,"method":"init"}
+        \\{"jsonrpc":"2.0","id":2,"method":"eval","params":["putStrLn \"Hello\""]}
+        \\
+    ;
+    const result = try runServer(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+
+    // putStrLn writes to stdout before the JSON-RPC response.
+    try expectContains(result.stdout, "Hello\n");
+}
+
+test "wasm e2e: do-notation with multiple putStrLn" {
+    const input =
+        \\{"jsonrpc":"2.0","id":1,"method":"init"}
+        \\{"jsonrpc":"2.0","id":2,"method":"eval","params":["do { putStrLn \"Hello\" ; putStrLn \"World\" }"]}
+        \\
+    ;
+    const result = try runServer(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+
+    try expectContains(result.stdout, "Hello\n");
+    try expectContains(result.stdout, "World\n");
+}
+
+test "wasm e2e: dollar operator with putStrLn" {
+    const input =
+        \\{"jsonrpc":"2.0","id":1,"method":"init"}
+        \\{"jsonrpc":"2.0","id":2,"method":"eval","params":["($) f x = f x"]}
+        \\{"jsonrpc":"2.0","id":3,"method":"eval","params":["identity x = x"]}
+        \\{"jsonrpc":"2.0","id":4,"method":"eval","params":["putStrLn $ identity \"Hello\""]}
+        \\
+    ;
+    const result = try runServer(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+
+    try expectContains(result.stdout, "Hello\n");
+}
+
+// ── Full hello.hs integration ─────────────────────────────────────────
+
+test "wasm e2e: hello.hs feature set" {
+    // Exercises all features from the hello.hs target program:
+    // ($), identity, data List, map_it, head_it, do-notation, putStrLn.
+    const input =
+        \\{"jsonrpc":"2.0","id":1,"method":"init"}
+        \\{"jsonrpc":"2.0","id":2,"method":"eval","params":["($) f x = f x"]}
+        \\{"jsonrpc":"2.0","id":3,"method":"eval","params":["identity x = x"]}
+        \\{"jsonrpc":"2.0","id":4,"method":"eval","params":["data List a = Nil | Cons a (List a)"]}
+        \\{"jsonrpc":"2.0","id":5,"method":"eval","params":["map_it f xs = case xs of { Nil -> Nil ; Cons y ys -> Cons (f y) (map_it f ys) }"]}
+        \\{"jsonrpc":"2.0","id":6,"method":"eval","params":["head_it xs = case xs of { Cons y ys -> y }"]}
+        \\{"jsonrpc":"2.0","id":7,"method":"eval","params":["head_it (Cons 42 Nil)"]}
+        \\{"jsonrpc":"2.0","id":8,"method":"eval","params":["head_it (map_it identity (Cons 99 Nil))"]}
+        \\{"jsonrpc":"2.0","id":9,"method":"eval","params":["do { putStrLn $ identity \"Hello\" ; putStrLn \"World\" }"]}
+        \\
+    ;
+    const result = try runServer(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+
+    const lines = try splitLines(testing.allocator, result.stdout);
+    defer testing.allocator.free(lines);
+
+    // Find the JSON-RPC responses for ids 7, 8 (value assertions).
+    // Note: putStrLn output lines are interleaved with JSON-RPC responses.
+    // We search by content rather than relying on fixed line indices.
+    var found_42 = false;
+    var found_99 = false;
+    for (lines) |line| {
+        const r = try extractResult(testing.allocator, line);
+        defer if (r) |s| testing.allocator.free(s);
+        if (r) |val| {
+            if (std.mem.eql(u8, val, "42")) found_42 = true;
+            if (std.mem.eql(u8, val, "99")) found_99 = true;
+        }
+    }
+    try testing.expect(found_42);
+    try testing.expect(found_99);
+
+    // Verify IO output.
+    try expectContains(result.stdout, "Hello\n");
+    try expectContains(result.stdout, "World\n");
+}
