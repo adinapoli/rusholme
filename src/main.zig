@@ -140,7 +140,17 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (std.mem.eql(u8, command, "repl")) {
-        try cmdRepl(allocator, io);
+        const cmd_args = user_args[1..];
+        var server_mode = false;
+        
+        // Parse flags for repl command
+        for (cmd_args) |arg| {
+            if (std.mem.eql(u8, arg, "--server")) {
+                server_mode = true;
+            }
+        }
+        
+        try cmdRepl(allocator, io, server_mode);
         return;
     }
 
@@ -664,8 +674,12 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
 /// so that cross-module names and types are available to downstream modules.
 ///
 /// Launch the interactive REPL.
-fn cmdRepl(allocator: std.mem.Allocator, io: Io) !void {
-    try rusholme.repl.cli.run(allocator, io);
+fn cmdRepl(allocator: std.mem.Allocator, io: Io, server_mode: bool) !void {
+    if (server_mode) {
+        try rusholme.repl.cli.runServer(allocator, io);
+    } else {
+        try rusholme.repl.cli.run(allocator, io);
+    }
 }
 
 /// Supports the following backends:
@@ -1139,7 +1153,8 @@ fn printUsage(io: Io) !void {
         \\  rhc build [--backend <kind>] [-o <out>] <file.hs>
         \\                         Full pipeline; compile to an executable
         \\                         Backends: native (default), graalvm, wasm, c
-        \\  rhc repl               Interactive REPL (read-eval-print loop)
+        \\  rhc repl [--server]   Interactive REPL (read-eval-print loop)
+        \\                         Use --server for JSON-RPC protocol mode
         \\  rhc --help             Show this help message
         \\  rhc --version          Show version information
         \\

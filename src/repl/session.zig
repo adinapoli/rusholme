@@ -331,8 +331,9 @@ pub const Session = struct {
 
                     const merged_program = grin_ast.Program{ .defs = all_defs };
                     const exec = try self.engine.execute(&merged_program);
+                    const value_copy = try self.allocator.dupe(u8, exec.value);
                     self.allocator.free(all_defs);
-                    return .{ .value = exec.value };
+                    return .{ .value = value_copy };
                 } else {
                     // JIT path: pass only the expression's def. Previously-
                     // declared functions are already in the JIT's main dylib

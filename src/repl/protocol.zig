@@ -73,7 +73,7 @@ pub fn evaluate(allocator: Allocator, session: *Session, input: []const u8) !Pro
 
         // No diagnostics available — format the error itself so the user
         // gets something more useful than a generic "evaluation failed".
-        const msg = std.fmt.allocPrint(allocator, "{s}", .{@errorName(err)}) catch "evaluation failed";
+        const msg = std.fmt.allocPrint(allocator, "Runtime error: {s} while evaluating: {s}", .{ @errorName(err), input }) catch "evaluation failed";
         return ProtocolResult{
             .status = .failed,
             .value = msg,

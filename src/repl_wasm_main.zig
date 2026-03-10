@@ -16,6 +16,8 @@ comptime {
     _ = &exports.repl_get_input_buffer;
     _ = &exports.repl_get_output_buffer;
     _ = &exports.repl_evaluate;
+    _ = &exports.repl_server_run;
+    _ = &exports.repl_set_server_mode;
 }
 
 pub fn main() void {}

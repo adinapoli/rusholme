@@ -20,6 +20,8 @@ const Session = @import("session.zig").Session;
 const Diagnostic = @import("../diagnostics/diagnostic.zig").Diagnostic;
 const protocol_mod = @import("protocol.zig");
 const Status = protocol_mod.Status;
+const server_mod = @import("server.zig");
+const ReplServer = server_mod.ReplServer;
 const evaluate = protocol_mod.evaluate;
 const TerminalRenderer = @import("../diagnostics/terminal.zig").TerminalRenderer;
 const pipeline_mod = @import("pipeline.zig");
@@ -29,6 +31,19 @@ const InputMode = enum {
     normal,
     multiline,
 };
+
+// ── Server Mode ─────────────────────────────────────────────────────
+
+/// Run the REPL in server mode (JSON-RPC protocol).
+///
+/// Reads JSON-RPC requests from stdin one line at a time,
+/// processes them via a Session, and writes responses to stdout.
+pub fn runServer(allocator: Allocator, io: Io) !void {
+    var server = try ReplServer.init(allocator, io);
+    defer server.deinit();
+
+    try server.run();
+}
 
 // ── REPL loop ─────────────────────────────────────────────────────────
 

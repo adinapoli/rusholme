@@ -480,3 +480,149 @@ test "repl: let syntax" {
     try testing.expectEqual(Status.success, use_result.status);
     try testing.expectEqualStrings("99", use_result.value);
 }
+
+// ── Test: issue #494 — :load then evaluate main ─────────────────────────
+
+test "repl: GrinEngine — load then evaluate main (WASM :load path, issue #494)" {
+    // This test reproduces the exact WASM REPL :load flow:
+    // 1. Compile "main = putStrLn \"hello\"" as a declaration
+    // 2. Compile "main" as an expression
+    // 3. Merge accumulated_defs + expression def
+    // 4. Execute via GrinEngine (tree-walking evaluator)
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Step 1: Load file body (declaration)
+    _ = session.processInput("main = putStrLn \"hello\"") catch |err| {
+        std.debug.panic("Declaration compilation failed: {}", .{err});
+    };
+
+    // Step 2: Compile expression "main"
+    const expr = session.processInput("main") catch |err| {
+        std.debug.panic("Expression compilation failed: {s}", .{@errorName(err)});
+    };
+    try testing.expect(expr.compile.kind == .expression);
+
+    // Step 3: Merge accumulated_defs + expression def
+    const total_defs = session.accumulated_defs.items.len + expr.compile.program.defs.len;
+    const all_defs = try alloc.alloc(grin_ast.Def, total_defs);
+
+    for (session.accumulated_defs.items, 0..) |def, i| {
+        all_defs[i] = def;
+    }
+    for (expr.compile.program.defs, 0..) |def, i| {
+        all_defs[session.accumulated_defs.items.len + i] = def;
+    }
+
+    const merged_program = grin_ast.Program{ .defs = all_defs };
+
+    // Step 4: Execute via GrinEngine (the WASM path)
+    var engine = GrinEngine.init(alloc, testing_io);
+    const result = engine.execute(&merged_program) catch |err| {
+        std.debug.panic("GrinEngine execution failed: {s}", .{@errorName(err)});
+    };
+
+    // putStrLn returns IO Unit, which formats as empty string
+    try testing.expectEqualStrings("", result.value);
+}
+
+test "repl: load file body then evaluate main (issue #494)" {
+    // Simulates the browser REPL :load flow:
+    // 1. User loads a file, JS strips "module Main where\n" header
+    // 2. File body is sent as a single evaluate() call
+    // 3. User types "main" to run the loaded program
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Step 1: Simulate :load by sending stripped file body
+    const load_result = evaluate(alloc, &session, "main = putStrLn \"hello\"") catch |err| {
+        std.debug.panic("load evaluate failed: {}", .{err});
+    };
+    try testing.expectEqual(Status.silent, load_result.status);
+
+    // Step 2: Type "main" — should execute the loaded main
+    const main_result = evaluate(alloc, &session, "main") catch |err| {
+        std.debug.panic("main evaluate failed: {}", .{err});
+    };
+    // putStrLn returns IO (), which should be silent (empty value)
+    try testing.expectEqual(Status.silent, main_result.status);
+}
+
+test "repl: multi-declaration load then evaluate main (issue #494 reproducer)" {
+    // Reproduces the browser REPL scenario where a multi-declaration
+    // .hs file is loaded, then "main" is evaluated. The file body
+    // (with module header stripped) is sent as a single evaluate() call.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Simulate loading a file with multiple declarations (like a 25-line hello.hs)
+    const file_body =
+        \\greet name = putStrLn name
+        \\
+        \\main = greet "hello"
+    ;
+
+    const load_result = evaluate(alloc, &session, file_body) catch |err| {
+        std.debug.panic("load evaluate failed: {s}", .{@errorName(err)});
+    };
+    try testing.expectEqual(Status.silent, load_result.status);
+
+    // Now evaluate "main" — should find it from the loaded definitions
+    const main_result = evaluate(alloc, &session, "main") catch |err| {
+        std.debug.panic("main evaluate failed: {s}", .{@errorName(err)});
+    };
+    try testing.expectEqual(Status.silent, main_result.status);
+}
+
+test "repl: load file with comments then evaluate main (issue #494)" {
+    // Reproduces the browser REPL scenario with a file containing
+    // comments and blank lines — typical of a real .hs file.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Simulate a file body after stripping "module Main where\n"
+    // This is what a typical hello.hs might look like.
+    const file_body =
+        \\-- A simple greeting program
+        \\
+        \\greet name = putStrLn name
+        \\
+        \\-- Main entry point
+        \\main = greet "hello"
+    ;
+
+    const load_result = evaluate(alloc, &session, file_body) catch |err| {
+        std.debug.panic("load evaluate failed: {s}", .{@errorName(err)});
+    };
+    try testing.expectEqual(Status.silent, load_result.status);
+
+    // Now evaluate "main"
+    const main_result = evaluate(alloc, &session, "main") catch |err| {
+        std.debug.panic("main evaluate failed: {s}", .{@errorName(err)});
+    };
+    try testing.expectEqual(Status.silent, main_result.status);
+}
