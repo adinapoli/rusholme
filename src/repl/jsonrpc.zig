@@ -7,6 +7,7 @@ const std = @import("std");
 
 pub const ParseError = error{
     InvalidRequest,
+    OutOfMemory,
 };
 
 pub const Request = struct {
@@ -26,21 +27,36 @@ pub const Response = struct {
     id: u32,
     result: ?std.json.Value = null,
     @"error": ?ErrorResponse = null,
+    allocator: std.mem.Allocator,
+
+    /// Free all memory allocated for this response.
+    /// Must be called before the response goes out of scope.
+    pub fn deinit(self: *Response) void {
+        if (self.result) |*r| {
+            r.deinit(self.allocator);
+        }
+    }
 };
 
 pub const ErrorResponse = struct {
     code: i32,
     message: []const u8,
+    /// Additional error details. This is a borrowed slice pointing into
+    /// the original JSON input string - it does not need to be freed.
     data: ?[]const u8 = null,
 };
 
 /// Parse a JSON-RPC request string into a Request struct.
 /// Returns ParseError.InvalidRequest if the request is malformed.
+/// Returns ParseError.OutOfMemory on allocation failure.
 /// Caller must call request.deinit() to free allocated memory.
 pub fn parseRequest(allocator: std.mem.Allocator, input: []const u8) ParseError!Request {
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, input, .{}) catch {
-        // Convert any parse error to InvalidRequest
-        return ParseError.InvalidRequest;
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, input, .{}) catch |err| {
+        // Propagate OutOfMemory, convert other errors to InvalidRequest
+        switch (err) {
+            error.OutOfMemory => return ParseError.OutOfMemory,
+            else => return ParseError.InvalidRequest,
+        }
     };
     defer parsed.deinit();
 
@@ -65,7 +81,7 @@ pub fn parseRequest(allocator: std.mem.Allocator, input: []const u8) ParseError!
     };
 
     // Copy the method string to the caller's allocator
-    const method = allocator.dupe(u8, method_slice) catch return ParseError.InvalidRequest;
+    const method = allocator.dupe(u8, method_slice) catch return ParseError.OutOfMemory;
 
     return .{
         .id = @intCast(id),
