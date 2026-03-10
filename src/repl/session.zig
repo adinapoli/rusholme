@@ -50,6 +50,7 @@ const Engine = if (is_wasi) GrinEngine else JitEngine;
 const Note = diag_mod.Note;
 
 const grin_ast = @import("../grin/ast.zig");
+const translate_mod = @import("../grin/translate.zig");
 
 // ── Result types ──────────────────────────────────────────────────────
 
@@ -132,6 +133,12 @@ pub const Session = struct {
     // (e.g. 0-arity functions emit App instead of Return Var).
     accumulated_arities: std.AutoHashMapUnmanaged(u64, u32),
 
+    // Accumulated constructor field counts from successful data declarations.
+    // Maps constructor unique ID -> field count. Passed to the GRIN translator
+    // so constructors from prior REPL inputs are recognised in later inputs
+    // (e.g. `Red` is treated as a nullary constructor, not a variable).
+    accumulated_con_map: std.AutoHashMapUnmanaged(u64, u32),
+
     /// Create a new REPL session with initialised compiler state.
     pub fn init(allocator: Allocator, io: std.Io) SessionError!Session {
         var u_supply = UniqueSupply{};
@@ -168,12 +175,14 @@ pub const Session = struct {
             .last_diagnostics = .{},
             .accumulated_defs = .{},
             .accumulated_arities = .{},
+            .accumulated_con_map = .{},
         };
     }
 
     /// Release all session resources.
     pub fn deinit(self: *Session) void {
         // GrinEngine has no deinit; only JitEngine does.
+        self.accumulated_con_map.deinit(self.allocator);
         self.accumulated_arities.deinit(self.allocator);
         self.last_diagnostics.deinit(self.allocator);
         self.accumulated_defs.deinit(self.allocator);
@@ -224,6 +233,7 @@ pub const Session = struct {
             &self.mv_supply,
             &diags,
             &self.accumulated_arities,
+            &self.accumulated_con_map,
         ) catch |err| {
             // Capture compilation context for diagnostic rendering.
             self.last_source = self.pipeline.last_source;
@@ -279,6 +289,18 @@ pub const Session = struct {
                     def.name.unique.value,
                     @intCast(def.params.len),
                 );
+            }
+
+            // Accumulate constructor field counts from data declarations
+            // so that constructors are recognised in subsequent inputs.
+            for (result.core_data_decls) |decl| {
+                for (decl.constructors) |con| {
+                    try self.accumulated_con_map.put(
+                        self.allocator,
+                        con.name.unique.value,
+                        translate_mod.countConFields(con.ty),
+                    );
+                }
             }
         }
 

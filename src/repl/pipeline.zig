@@ -46,8 +46,10 @@ const lift_mod = @import("../core/lift.zig");
 
 const translate_mod = @import("../grin/translate.zig");
 const grin_ast = @import("../grin/ast.zig");
+const core_ast = @import("../core/ast.zig");
 
 const ArityMap = std.AutoHashMapUnmanaged(u64, u32);
+const ConMap = std.AutoHashMapUnmanaged(u64, u32);
 
 // ── Result types ──────────────────────────────────────────────────────
 
@@ -154,6 +156,11 @@ pub const CompileResult = struct {
     program: grin_ast.Program,
     /// Whether the input was an expression or a declaration.
     kind: InputKind,
+    /// Data declarations from the Core program. The REPL session
+    /// accumulates these to build a constructor map for subsequent
+    /// inputs, so that user-defined constructors are recognised
+    /// across REPL interactions.
+    core_data_decls: []const core_ast.CoreDataDecl,
 };
 
 /// Errors that can occur during pipeline compilation.
@@ -247,6 +254,11 @@ pub const Pipeline = struct {
     ///
     /// On failure, diagnostics are collected but not rendered — the
     /// caller decides how to present them.
+    const ModuleResult = struct {
+        grin_prog: grin_ast.Program,
+        core_data_decls: []const core_ast.CoreDataDecl,
+    };
+
     pub fn compileModule(
         self: *Pipeline,
         source: []const u8,
@@ -257,7 +269,8 @@ pub const Pipeline = struct {
         mv_supply: *htype_mod.MetaVarSupply,
         diags: *DiagnosticCollector,
         external_arities: ?*const ArityMap,
-    ) CompileError!grin_ast.Program {
+        external_con_map: ?*const ConMap,
+    ) CompileError!ModuleResult {
         const alloc = self.allocator;
 
         // The RenameEnv holds pointers to its DiagnosticCollector and
@@ -309,12 +322,15 @@ pub const Pipeline = struct {
         if (diags.hasErrors()) return CompileError.CompilationFailed;
 
         // ── Translate to GRIN ──────────────────────────────────────
-        const grin_prog = translate_mod.translateProgram(alloc, core_lifted, external_arities) catch {
+        const grin_prog = translate_mod.translateProgram(alloc, core_lifted, external_arities, external_con_map) catch {
             return CompileError.OutOfMemory;
         };
         if (diags.hasErrors()) return CompileError.CompilationFailed;
 
-        return grin_prog;
+        return .{
+            .grin_prog = grin_prog,
+            .core_data_decls = core_lifted.data_decls,
+        };
     }
 
     /// Compile a REPL input by wrapping it as a module and running
@@ -329,6 +345,7 @@ pub const Pipeline = struct {
         mv_supply: *htype_mod.MetaVarSupply,
         diags: *DiagnosticCollector,
         external_arities: ?*const ArityMap,
+        external_con_map: ?*const ConMap,
     ) CompileError!CompileResult {
         const alloc = self.allocator;
         const file_id: FileId = 0;
@@ -357,10 +374,10 @@ pub const Pipeline = struct {
             var decl_diags = DiagnosticCollector.init();
             defer decl_diags.deinit(alloc);
 
-            if (self.compileModule(decl_source, file_id, u_supply, rename_env, ty_env, mv_supply, &decl_diags, external_arities)) |program| {
+            if (self.compileModule(decl_source, file_id, u_supply, rename_env, ty_env, mv_supply, &decl_diags, external_arities, external_con_map)) |result| {
                 // Copy any diagnostics from the attempt
                 try copyDiagnostics(alloc, &decl_diags, diags);
-                return .{ .program = program, .kind = decl_kind };
+                return .{ .program = result.grin_prog, .kind = decl_kind, .core_data_decls = result.core_data_decls };
             } else |_| {
                 // Declaration attempt failed — preserve its diagnostics
                 // before trying as expression
@@ -382,10 +399,10 @@ pub const Pipeline = struct {
             self.last_source = expr_source;
             self.last_input_kind = .expression;
 
-            if (self.compileModule(expr_source, file_id, u_supply, rename_env, ty_env, mv_supply, diags, external_arities)) |program| {
+            if (self.compileModule(expr_source, file_id, u_supply, rename_env, ty_env, mv_supply, diags, external_arities, external_con_map)) |result| {
                 // Expression succeeded — clear declaration diagnostics.
                 clearLeadingDiags(alloc, diags, decl_diag_count);
-                return .{ .program = program, .kind = .expression };
+                return .{ .program = result.grin_prog, .kind = .expression, .core_data_decls = result.core_data_decls };
             } else |_| {
                 // Both attempts failed. Keep whichever diagnostics came
                 // from the later pipeline stage (more informative).
@@ -443,6 +460,7 @@ test "pipeline: compile simple literal expression" {
         &mv_supply,
         &diags,
         null,
+        null,
     );
 
     try testing.expect(result.program.defs.len > 0);
@@ -474,6 +492,7 @@ test "pipeline: compile data declaration" {
         &ty_env,
         &mv_supply,
         &diags,
+        null,
         null,
     );
 
@@ -507,6 +526,7 @@ test "pipeline: compile function declaration" {
         &ty_env,
         &mv_supply,
         &diags,
+        null,
         null,
     );
 
@@ -625,6 +645,7 @@ test "pipeline: handle let prefix in declarations" {
         &ty_env,
         &mv_supply,
         &diags,
+        null,
         null,
     );
 

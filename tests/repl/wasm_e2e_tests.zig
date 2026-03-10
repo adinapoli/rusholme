@@ -175,10 +175,10 @@ test "wasm e2e: eval integer literal" {
     try testing.expectEqualStrings("42", r.?);
 }
 
-// NOTE: Boolean literals (True/False) and string literals are not yet
-// supported by the GRIN tree-walking evaluator used in WASM mode. They
-// work in the native REPL (which uses LLVM JIT) but fail here because
-// the GRIN evaluator cannot evaluate bare constructor applications.
+// NOTE: Built-in constructors (True/False) require a Prelude that provides
+// `data Bool = True | False` etc. User-defined constructors work because
+// their data declarations flow through the pipeline and populate the
+// GRIN translator's constructor map across REPL interactions.
 // tracked in: https://github.com/adinapoli/rusholme/issues/494
 
 test "wasm e2e: define function then apply" {
@@ -327,4 +327,97 @@ test "wasm e2e: unbound variable returns error" {
 
     try testing.expect(lines.len >= 2);
     try testing.expect(try hasError(testing.allocator, lines[1]));
+}
+
+// ── User-defined ADT tests ────────────────────────────────────────────
+
+test "wasm e2e: user-defined nullary constructors" {
+    // Define a data type and evaluate its constructors directly.
+    const input =
+        \\{"jsonrpc":"2.0","id":1,"method":"init"}
+        \\{"jsonrpc":"2.0","id":2,"method":"eval","params":["data Color = Red | Green | Blue"]}
+        \\{"jsonrpc":"2.0","id":3,"method":"eval","params":["Red"]}
+        \\{"jsonrpc":"2.0","id":4,"method":"eval","params":["Green"]}
+        \\{"jsonrpc":"2.0","id":5,"method":"eval","params":["Blue"]}
+        \\
+    ;
+    const result = try runServer(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+
+    const lines = try splitLines(testing.allocator, result.stdout);
+    defer testing.allocator.free(lines);
+
+    try testing.expect(lines.len >= 5);
+
+    // Data declaration is silent.
+    const r_decl = try extractResult(testing.allocator, lines[1]);
+    defer if (r_decl) |s| testing.allocator.free(s);
+    try testing.expectEqualStrings("", r_decl.?);
+
+    // Bare constructors evaluate to their tag name.
+    const r_red = try extractResult(testing.allocator, lines[2]);
+    defer if (r_red) |s| testing.allocator.free(s);
+    try testing.expectEqualStrings("Red", r_red.?);
+
+    const r_green = try extractResult(testing.allocator, lines[3]);
+    defer if (r_green) |s| testing.allocator.free(s);
+    try testing.expectEqualStrings("Green", r_green.?);
+
+    const r_blue = try extractResult(testing.allocator, lines[4]);
+    defer if (r_blue) |s| testing.allocator.free(s);
+    try testing.expectEqualStrings("Blue", r_blue.?);
+}
+
+test "wasm e2e: pass user-defined constructor through function" {
+    // Constructors should survive being passed through functions.
+    const input =
+        \\{"jsonrpc":"2.0","id":1,"method":"init"}
+        \\{"jsonrpc":"2.0","id":2,"method":"eval","params":["data Color = Red | Green | Blue"]}
+        \\{"jsonrpc":"2.0","id":3,"method":"eval","params":["id x = x"]}
+        \\{"jsonrpc":"2.0","id":4,"method":"eval","params":["id Red"]}
+        \\{"jsonrpc":"2.0","id":5,"method":"eval","params":["id Green"]}
+        \\
+    ;
+    const result = try runServer(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+
+    const lines = try splitLines(testing.allocator, result.stdout);
+    defer testing.allocator.free(lines);
+
+    try testing.expect(lines.len >= 5);
+
+    const r4 = try extractResult(testing.allocator, lines[3]);
+    defer if (r4) |s| testing.allocator.free(s);
+    try testing.expectEqualStrings("Red", r4.?);
+
+    const r5 = try extractResult(testing.allocator, lines[4]);
+    defer if (r5) |s| testing.allocator.free(s);
+    try testing.expectEqualStrings("Green", r5.?);
+}
+
+test "wasm e2e: multiline data type and function in one eval" {
+    // A data type and function defined together in a single multi-line eval.
+    const input =
+        \\{"jsonrpc":"2.0","id":1,"method":"init"}
+        \\{"jsonrpc":"2.0","id":2,"method":"eval","params":["data Dir = North | South\ngo x = x"]}
+        \\{"jsonrpc":"2.0","id":3,"method":"eval","params":["go North"]}
+        \\
+    ;
+    const result = try runServer(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+
+    const lines = try splitLines(testing.allocator, result.stdout);
+    defer testing.allocator.free(lines);
+
+    try testing.expect(lines.len >= 3);
+
+    const r = try extractResult(testing.allocator, lines[2]);
+    defer if (r) |s| testing.allocator.free(s);
+    try testing.expectEqualStrings("North", r.?);
 }
