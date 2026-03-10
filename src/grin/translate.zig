@@ -1012,16 +1012,21 @@ fn translateAlt(ctx: *TranslateCtx, alt: CoreAlt) !GrinAlt {
 fn translatePattern(ctx: *TranslateCtx, con: CoreAltCon, binders: []const CoreId) !GrinCPat {
     switch (con) {
         .DataAlt => |name| {
-            // Constructor pattern: bind field names.
-            var field_names = try ctx.alloc.alloc(GrinName, binders.len);
-            for (binders, 0..) |binder, i| {
-                field_names[i] = try ctx.mapBinder(&binder);
-            }
-
             const tag = GrinTag{
                 .tag_type = .Con,
                 .name = name,
             };
+
+            // Nullary constructors use TagPat (matches ValTag values);
+            // constructors with fields use NodePat (matches ConstTagNode).
+            if (binders.len == 0) {
+                return .{ .TagPat = tag };
+            }
+
+            var field_names = try ctx.alloc.alloc(GrinName, binders.len);
+            for (binders, 0..) |binder, i| {
+                field_names[i] = try ctx.mapBinder(&binder);
+            }
 
             return .{ .NodePat = .{
                 .tag = tag,
