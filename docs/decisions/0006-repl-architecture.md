@@ -293,6 +293,15 @@ is retained from #482 but repurposed to carry real results:
 {"status": "declaration", "name": "Color", "kind": "data"}
 ```
 
+For complete protocol documentation including server mode, see
+[docs/proxy/repl_protocol.md](../proxy/repl_protocol.md), which provides:
+
+- Full server mode specification (JSON-RPC 2.0 over stdin/stdout)
+- Command reference with request/response examples
+- WASM export documentation
+- Error handling patterns
+- Usage examples for native, WASM, and browser clients
+
 ---
 
 ## Error Handling

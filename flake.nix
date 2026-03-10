@@ -51,6 +51,7 @@
             buildInputs = zigToolchain ++ (with pkgs; [
               git
               pre-commit
+              wasmtime
             ]) ++ pkgs.lib.optionals (!isDarwin) [
               pkgs.valgrind
             ];
@@ -59,6 +60,7 @@
               echo "🍛 Rusholme dev environment loaded"
               echo "   Zig:  $(zig version)"
               echo "   LLVM: $(llvm-config --version)"
+              echo "   Wasmtime: $(wasmtime --version 2>&1 | head -n1 || echo 'not found')"
               echo ""
             '';
           };
