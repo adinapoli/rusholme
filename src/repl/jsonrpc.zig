@@ -14,11 +14,13 @@ pub const Request = struct {
     jsonrpc: []const u8 = "2.0",
     id: u32,
     method: []const u8,
+    params: ?std.json.Value = null,
     allocator: std.mem.Allocator,
 
     /// Free all memory allocated for this request.
     pub fn deinit(self: *Request) void {
         self.allocator.free(self.method);
+        // params is borrowed from the parsed JSON tree and does not need deinit
     }
 };
 
@@ -87,18 +89,42 @@ pub fn parseRequest(allocator: std.mem.Allocator, input: []const u8) ParseError!
     // Copy the method string to the caller's allocator
     const method = allocator.dupe(u8, method_slice) catch return ParseError.OutOfMemory;
 
+    // Extract optionally-present params field
+    const params = obj.get("params");
+
     return .{
         .id = @intCast(id),
         .method = method,
         .allocator = allocator,
+        .params = params,
     };
 }
 
 /// Format a JSON-RPC response as a JSON string.
 /// The returned string is allocated with the provided allocator and must be freed by the caller.
 pub fn formatResponse(allocator: std.mem.Allocator, response: Response) ![]const u8 {
-    // Use std.fmt.allocPrint for simple JSON formatting
-    return std.fmt.allocPrint(allocator, "{{\"jsonrpc\":\"2.0\",\"id\":{d}}}", .{response.id});
+    const ResponseJson = struct {
+        jsonrpc: []const u8,
+        id: u32,
+        result: ?std.json.Value = null,
+        @"error": ?ErrorResponse = null,
+    };
+
+    const response_json = ResponseJson{
+        .jsonrpc = "2.0",
+        .id = response.id,
+        .result = response.result,
+        .@"error" = response.@"error",
+    };
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    var write_stream: std.json.Stringify = .{
+        .writer = &out.writer,
+        .options = .{},
+    };
+
+    try write_stream.write(response_json);
+    return out.written();
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
