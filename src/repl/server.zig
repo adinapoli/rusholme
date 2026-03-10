@@ -81,8 +81,8 @@ pub const ReplServer = struct {
                 try self.sendSuccessResponseJson(id, std.json.Value{ .string = "" });
             },
             .failed => {
-                // Error result with diagnostics
-                try self.sendErrorResponse(id, -32603, "Evaluation failed");
+                // Error result with diagnostics — forward the actual message
+                try self.sendErrorResponse(id, -32603, result.value);
             },
         }
     }
