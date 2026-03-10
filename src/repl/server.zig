@@ -63,6 +63,7 @@ pub const ReplServer = struct {
             try self.sendErrorResponse(id, -32602, "Invalid params: expected string expression");
             return;
         };
+        defer self.allocator.free(input);
 
         const result = protocol_mod.evaluate(self.allocator, &self.session, input) catch |err| {
             // Error during evaluation - return error with diagnostics
@@ -95,7 +96,7 @@ pub const ReplServer = struct {
             try self.sendErrorResponse(id, -32602, "Invalid params: expected string expression");
             return;
         };
-        _ = input; // Will be used when type inference is implemented
+        defer self.allocator.free(input);
 
         // TODO: Implement type inference in Session and Pipeline
         // For now, return a placeholder indicating type checking is not yet available

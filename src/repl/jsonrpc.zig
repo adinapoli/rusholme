@@ -16,11 +16,14 @@ pub const Request = struct {
     method: []const u8,
     params: ?std.json.Value = null,
     allocator: std.mem.Allocator,
+    /// Owns the parsed JSON tree so that `params` (which borrows from it)
+    /// remains valid for the lifetime of this Request.
+    _parsed: std.json.Parsed(std.json.Value),
 
     /// Free all memory allocated for this request.
     pub fn deinit(self: *Request) void {
         self.allocator.free(self.method);
-        // params is borrowed from the parsed JSON tree and does not need deinit
+        self._parsed.deinit();
     }
 };
 
@@ -57,14 +60,15 @@ pub const ErrorResponse = struct {
 /// Returns ParseError.OutOfMemory on allocation failure.
 /// Caller must call request.deinit() to free allocated memory.
 pub fn parseRequest(allocator: std.mem.Allocator, input: []const u8) ParseError!Request {
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, input, .{}) catch |err| {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, input, .{}) catch |err| {
         // Propagate OutOfMemory, convert other errors to InvalidRequest
         switch (err) {
             error.OutOfMemory => return ParseError.OutOfMemory,
             else => return ParseError.InvalidRequest,
         }
     };
-    defer parsed.deinit();
+    // parsed is moved into the returned Request; do NOT deinit here.
+    errdefer parsed.deinit();
 
     const root = parsed.value;
 
@@ -89,7 +93,7 @@ pub fn parseRequest(allocator: std.mem.Allocator, input: []const u8) ParseError!
     // Copy the method string to the caller's allocator
     const method = allocator.dupe(u8, method_slice) catch return ParseError.OutOfMemory;
 
-    // Extract optionally-present params field
+    // Extract optionally-present params field (borrows from parsed tree)
     const params = obj.get("params");
 
     return .{
@@ -97,6 +101,7 @@ pub fn parseRequest(allocator: std.mem.Allocator, input: []const u8) ParseError!
         .method = method,
         .allocator = allocator,
         .params = params,
+        ._parsed = parsed,
     };
 }
 
@@ -120,11 +125,11 @@ pub fn formatResponse(allocator: std.mem.Allocator, response: Response) ![]const
     var out = std.Io.Writer.Allocating.init(allocator);
     var write_stream: std.json.Stringify = .{
         .writer = &out.writer,
-        .options = .{},
+        .options = .{ .emit_null_optional_fields = false },
     };
 
     try write_stream.write(response_json);
-    return out.written();
+    return try out.toOwnedSlice();
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
