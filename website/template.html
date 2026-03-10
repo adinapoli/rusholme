@@ -1523,11 +1523,43 @@
                 }
             }
 
-            // REPL Bridge
+            // REPL Bridge — communicates with the WASM REPL via JSON-RPC 2.0.
+            //
+            // All requests flow through repl_process_jsonrpc(), which reads
+            // a JSON-RPC request from the shared input buffer and writes
+            // the response to the shared output buffer. Side-effect output
+            // (e.g. putStrLn) is routed through fd_write → WASI shim → xterm.
             window.replBridge = {
                 wasmInstance: null,
+                nextId: 1,
 
-                // Initialize WASM module with WASI shim.
+                // Send a JSON-RPC request through the shared buffer protocol.
+                // Returns the parsed JSON-RPC response object.
+                sendRequest: function (method, params) {
+                    const request = { jsonrpc: '2.0', id: this.nextId++, method: method };
+                    if (params !== undefined) request.params = params;
+                    const requestStr = JSON.stringify(request);
+
+                    const inputPtr = this.wasmInstance.exports.repl_get_input_buffer();
+                    const encoder = new TextEncoder();
+                    const requestBytes = encoder.encode(requestStr);
+                    const inputView = new Uint8Array(
+                        this.wasmInstance.exports.memory.buffer, inputPtr
+                    );
+                    for (let i = 0; i < requestBytes.length && i < inputView.length; i++) {
+                        inputView[i] = requestBytes[i];
+                    }
+
+                    const responseLen = this.wasmInstance.exports.repl_process_jsonrpc(requestBytes.length);
+
+                    const outputPtr = this.wasmInstance.exports.repl_get_output_buffer();
+                    const responseStr = new TextDecoder().decode(new Uint8Array(
+                        this.wasmInstance.exports.memory.buffer, outputPtr, responseLen
+                    ));
+                    return JSON.parse(responseStr);
+                },
+
+                // Initialize WASM module with WASI shim, then send JSON-RPC init.
                 //
                 // Uses two-phase instantiation: a Proxy shim handles WASI
                 // calls during instantiation (before we have a memory
@@ -1562,12 +1594,16 @@
                         // Phase 2: wire the real shim now that memory is accessible.
                         wasiStub.impl = createWasiShim(this.wasmInstance, term);
 
-                        // WASI reactor convention: call _initialize if present,
-                        // then init the REPL session.
+                        // WASI reactor convention: call _initialize if present.
                         if (this.wasmInstance.exports._initialize) {
                             this.wasmInstance.exports._initialize();
                         }
-                        this.wasmInstance.exports.repl_init();
+
+                        // Initialise the REPL session via JSON-RPC.
+                        const initResult = this.sendRequest('init');
+                        if (initResult.error) {
+                            throw new Error(initResult.error.message);
+                        }
 
                         term.writeln('\x1b[32m \u2713 REPL ready\x1b[0m');
                         term.write('\x1b[32m> \x1b[0m');
@@ -1580,7 +1616,7 @@
                     }
                 },
 
-                // Evaluate expression via WASM REPL
+                // Evaluate expression via JSON-RPC eval method.
                 evaluate: function (expr) {
                     if (!this.wasmInstance) {
                         term.writeln('\x1b[31mError: REPL not initialized\x1b[0m');
@@ -1589,33 +1625,16 @@
                     }
 
                     try {
-                        const inputPtr = this.wasmInstance.exports.repl_get_input_buffer();
-                        const outputPtr = this.wasmInstance.exports.repl_get_output_buffer();
+                        const result = this.sendRequest('eval', [expr]);
 
-                        const encoder = new TextEncoder();
-                        const exprBytes = encoder.encode(expr);
-                        const inputView = new Uint8Array(
-                            this.wasmInstance.exports.memory.buffer, inputPtr
-                        );
-                        for (let i = 0; i < exprBytes.length && i < inputView.length; i++) {
-                            inputView[i] = exprBytes[i];
-                        }
-
-                        const resultLen = this.wasmInstance.exports.repl_evaluate(exprBytes.length);
-
-                        const jsonString = new TextDecoder().decode(new Uint8Array(
-                            this.wasmInstance.exports.memory.buffer, outputPtr, resultLen
-                        ));
-                        const result = JSON.parse(jsonString);
-
-                        if (result.status === 'error') {
-                            if (result.diagnostics && result.diagnostics.length > 0) {
-                                renderDiagnostics(term, result.diagnostics);
+                        if (result.error) {
+                            if (result.error.data && result.error.data.diagnostics) {
+                                renderDiagnostics(term, result.error.data.diagnostics);
                             } else {
-                                term.writeln('\x1b[31mError: ' + result.message + '\x1b[0m');
+                                term.writeln('\x1b[31mError: ' + result.error.message + '\x1b[0m');
                             }
-                        } else if (result.value) {
-                            term.writeln(result.value);
+                        } else if (result.result && result.result !== '') {
+                            term.writeln(result.result);
                         }
                     } catch (error) {
                         term.writeln('\x1b[31mError: ' + error.message + '\x1b[0m');

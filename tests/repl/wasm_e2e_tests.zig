@@ -32,11 +32,11 @@ const ServerResult = struct {
     }
 };
 
-/// Spawn `wasmtime run repl-server.wasm`, feed it `input` on stdin,
-/// and return collected stdout and stderr after the process exits.
+/// Spawn `wasmtime run --invoke repl_server_run repl.wasm`, feed it
+/// `input` on stdin, and return collected stdout/stderr after exit.
 fn runServer(allocator: std.mem.Allocator, input: []const u8) !ServerResult {
     const io = testing.io;
-    const argv = [_][]const u8{ "wasmtime", "run", "zig-out/bin/repl-server.wasm" };
+    const argv = [_][]const u8{ "wasmtime", "run", "--invoke", "repl_server_run", "zig-out/bin/repl.wasm" };
 
     var child = try process.spawn(io, .{
         .argv = &argv,

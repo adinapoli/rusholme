@@ -399,8 +399,8 @@ pub fn build(b: *std.Build) void {
     run_cli_e2e_tests.addArtifactArg(cli_e2e_tests);
     run_cli_e2e_tests.expectExitCode(0);
 
-    // WASM REPL server end-to-end tests — spawn wasmtime with
-    // repl-server.wasm and exercise the JSON-RPC protocol.
+    // WASM REPL end-to-end tests — spawn wasmtime with
+    // repl.wasm and exercise the JSON-RPC protocol.
     const wasm_e2e_module = b.createModule(.{
         .root_source_file = b.path("tests/repl/wasm_e2e_tests.zig"),
         .target = target,
@@ -409,7 +409,7 @@ pub fn build(b: *std.Build) void {
         .name = "wasm-e2e-tests",
         .root_module = wasm_e2e_module,
     });
-    // WASM e2e tests need the repl-server.wasm binary built first.
+    // WASM e2e tests need repl.wasm built first.
     wasm_e2e_tests.step.dependOn(b.getInstallStep());
     // Same technique as repl-tests: no IPC mode, communicate via exit code.
     const run_wasm_e2e_tests = std.Build.Step.Run.create(b, "run test wasm-e2e-tests");
@@ -490,26 +490,7 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(repl_wasm);
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // WASM REPL Server Executable - wasm32-wasi command mode for wasmtime
-    // ═══════════════════════════════════════════════════════════════════════
-    // A command-mode WASM binary that runs the JSON-RPC REPL server on
-    // stdin/stdout. Unlike the reactor-mode `repl.wasm` (for the browser),
-    // this binary is intended for headless testing via `wasmtime run`.
-    //
-    // Usage: wasmtime run repl-server.wasm
-    const repl_wasm_server = b.addExecutable(.{
-        .name = "repl-server",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/repl_wasm_server_main.zig"),
-            .target = b.resolveTargetQuery(.{
-                .cpu_arch = .wasm32,
-                .os_tag = .wasi,
-            }),
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    // Command mode (the default) — runs main() once and exits.
-
-    b.installArtifact(repl_wasm_server);
+    // The unified repl.wasm binary serves both browser and headless use:
+    //   Browser:  JS calls repl_process_jsonrpc() via shared buffers
+    //   Headless: wasmtime run --invoke repl_server_run repl.wasm
 }
