@@ -40,9 +40,13 @@ pub const Response = struct {
 
 pub const ErrorResponse = struct {
     code: i32,
+    /// Borrowed slice of the original JSON response.
+    /// Points into the input string used to create the Response;
+    /// does not need to be freed.
     message: []const u8,
     /// Additional error details. This is a borrowed slice pointing into
-    /// the original JSON input string - it does not need to be freed.
+    /// the original JSON response, or null if not present.
+    /// Does not need to be freed.
     data: ?[]const u8 = null,
 };
 
@@ -90,6 +94,13 @@ pub fn parseRequest(allocator: std.mem.Allocator, input: []const u8) ParseError!
     };
 }
 
+/// Format a JSON-RPC response as a JSON string.
+/// The returned string is allocated with the provided allocator and must be freed by the caller.
+pub fn formatResponse(allocator: std.mem.Allocator, response: Response) ![]const u8 {
+    // Use std.fmt.allocPrint for simple JSON formatting
+    return std.fmt.allocPrint(allocator, "{{\"jsonrpc\":\"2.0\",\"id\":{d}}}", .{response.id});
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -125,4 +136,12 @@ test "jsonrpc: parse invalid json returns error" {
     const input = "not valid json";
     const result = parseRequest(allocator, input);
     try testing.expectError(ParseError.InvalidRequest, result);
+}
+
+test "jsonrpc: format success response" {
+    const allocator = std.testing.allocator;
+    const response = Response{ .id = 1, .result = std.json.Value.null, .allocator = allocator };
+    const output = try formatResponse(allocator, response);
+    defer allocator.free(output);
+    try testing.expect(std.mem.indexOf(u8, output, "\"jsonrpc\":\"2.0\"") != null);
 }
