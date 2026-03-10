@@ -17,6 +17,7 @@ const FileId = @import("../diagnostics/span.zig").FileId;
 const Diagnostic = @import("../diagnostics/diagnostic.zig").Diagnostic;
 const pipeline_mod = @import("pipeline.zig");
 const translateSpan = pipeline_mod.translateSpan;
+const ReplServer = @import("server.zig").ReplServer;
 
 // ── Global state ──────────────────────────────────────────────────────
 
@@ -34,6 +35,17 @@ var session: ?Session = null;
 /// from a single-threaded `Io.Threaded` instance. IO primops (fd_write
 /// etc.) route through WASI syscalls, which the browser's JS shim handles.
 var io_backend: std.Io.Threaded = std.Io.Threaded.init_single_threaded;
+
+/// Server mode flag.
+///
+/// When true, the REPL runs in server mode (JSON-RPC interface)
+/// instead of interactive mode.
+var server_mode: bool = false;
+
+/// Server instance for JSON-RPC mode.
+///
+/// Created when server mode is activated and cleaned up on shutdown.
+var server: ?ReplServer = null;
 
 pub fn main() void {
     // No-op entry point for WASM.
@@ -154,4 +166,47 @@ fn writeErrorWithDiagnostics(alloc: std.mem.Allocator, s: *Session, diagnostics:
     const json = std.fmt.bufPrint(output, "{{\"status\":\"error\",\"message\":\"{s}\",\"diagnostics\":{s}}}", .{ fallback_message, diag_json }) catch
         return writeError(fallback_message);
     return json.len;
+}
+
+// ── Server mode exports ────────────────────────────────────────────────
+
+/// Enable server mode.
+///
+/// Sets the global flag that activates the JSON-RPC server interface
+/// instead of the interactive REPL.
+pub export fn repl_set_server_mode(enabled: bool) void {
+    server_mode = enabled;
+}
+
+/// Run the server loop.
+///
+/// Starts the JSON-RPC server which reads requests line-by-line from stdin
+/// and writes responses to stdout. This function blocks until the server
+/// is shut down via a "shutdown" request or stdin closes.
+///
+/// Must be called after `repl_init()` and when `server_mode` is true.
+pub export fn repl_server_run() void {
+    if (!server_mode) return;
+
+    // Create server instance
+    server = ReplServer.init(page_alloc, io_backend.io()) catch {
+        // Failed to initialize server - exit
+        return;
+    };
+
+    // Run the server loop
+    server.?.run() catch {
+        // Server failed - cleanup and exit
+        if (server) |*s| {
+            s.deinit();
+            server = null;
+        }
+        return;
+    };
+
+    // Server completed successfully - cleanup
+    if (server) |*s| {
+        s.deinit();
+        server = null;
+    }
 }

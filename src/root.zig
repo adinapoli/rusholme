@@ -80,6 +80,7 @@ pub const repl = struct {
     // JIT engine requires LLVM — only available on native targets.
     pub const jit_engine = if (builtin.target.os.tag != .wasi) @import("repl/jit_engine.zig") else struct {};
     pub const cli = @import("repl/cli.zig");
+    pub const server = @import("repl/server.zig");
 };
 
 // Runtime
