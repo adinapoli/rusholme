@@ -1702,8 +1702,29 @@
                                 term.writeln('REPL closed. Refresh the page to start a new session.');
                                 term.write('\x1b[32m> \x1b[0m');
                             } else if (cmd.startsWith('type ') || cmd.startsWith('t ')) {
-                                term.writeln(':type is not yet implemented');
+                                const expr = cmd.substring(cmd.startsWith('type ') ? 5 : 2).trim();
+                                if (!expr) {
+                                    term.writeln('\x1b[31mError: No expression provided\x1b[0m');
+                                    term.write('\x1b[32m> \x1b[0m');
+                                    return;
+                                }
+                                try {
+                                    const result = replBridge.sendRequest('type', [expr]);
+
+                                    if (result.error) {
+                                        if (result.error.data && result.error.data.diagnostics) {
+                                            renderDiagnostics(term, result.error.data.diagnostics);
+                                        } else {
+                                            term.writeln('\x1b[31mError: ' + result.error.message + '\x1b[0m');
+                                        }
+                                    } else if (result.result && result.result !== '') {
+                                        term.writeln(result.result);
+                                    }
+                                } catch (error) {
+                                    term.writeln('\x1b[31mError: ' + error.message + '\x1b[0m');
+                                }
                                 term.write('\x1b[32m> \x1b[0m');
+                                return;
                             } else if (cmd.startsWith('load ') || cmd.startsWith('l ') || cmd === 'load' || cmd === 'l') {
                                 fileInput.click();
                                 currentLine = '';
@@ -1711,7 +1732,7 @@
                             } else if (cmd === 'help' || cmd === 'h' || cmd === '?') {
                                 term.writeln('Available commands:');
                                 term.writeln('  :quit, :q       Exit the REPL');
-                                term.writeln('  :type <expr>    Show the type of an expression (not yet implemented)');
+                                term.writeln('  :type <expr>    Show the type of an expression');
                                 term.writeln('  :load <file>, :l  Load a Haskell file into the session');
                                 term.writeln('  :{              Begin multi-line input block');
                                 term.writeln('  :}              End multi-line input block and evaluate');
