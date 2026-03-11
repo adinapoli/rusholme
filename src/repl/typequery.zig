@@ -138,3 +138,25 @@ test "typequery: session state unchanged after query" {
     try testing.expectEqual(arities_before, session.accumulated_arities.count());
     try testing.expectEqual(con_map_before, session.accumulated_con_map.count());
 }
+
+test "typequery: polymorphic constructor type (#508)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = try Session.init(alloc, testing.io);
+    defer session.deinit();
+
+    // Define a polymorphic data type
+    _ = try session.processInput("data List a = Nil | Cons a (List a)");
+
+    // Query the type of Nil - should show "forall a. List a", not "forall a. List ?N"
+    const nil_result = try typeOf(alloc, &session, "Nil");
+    defer alloc.free(nil_result.display);
+    try testing.expectEqualStrings("Nil :: forall a. List a", nil_result.display);
+
+    // Query the type of Cons - should show proper polymorphic type
+    const cons_result = try typeOf(alloc, &session, "Cons");
+    defer alloc.free(cons_result.display);
+    try testing.expectEqualStrings("Cons :: forall a. a -> List a -> List a", cons_result.display);
+}
