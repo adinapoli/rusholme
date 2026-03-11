@@ -810,42 +810,66 @@ fn wrapWithPendingBinds(
 fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr {
     switch (let_expr.bind) {
         .NonRec => |pair| {
-            // Non-recursive let: Lazy evaluation means we store a thunk.
-            // let x = rhs in body
-            // becomes: store (F<func> [<args>]) >>= \x -> body
-
-            // Translate RHS into a thunk.
-            // For MVP, we'll just translate and store it directly.
-            // A full implementation would analyze strictness.
+            // Non-recursive let: translate `let x = rhs in body`.
+            //
+            // The treatment depends on the RHS shape:
+            //
+            //   Simple values (Var, Lit, ValTag):
+            //     `pure rhs >>= \x -> body`
+            //     These are already-evaluated values that don't need heap
+            //     allocation. Storing them would wrap the value in an
+            //     indirection (heap pointer), breaking function dispatch
+            //     for higher-order parameters and losing literal values.
+            //     This case is critical for the pattern-match compiler,
+            //     which generates `let f = arg_0` to alias a lambda
+            //     parameter to its equation-local name.
+            //
+            //   Heap-allocated nodes (ConstTagNode, VarTagNode):
+            //     `store rhs >>= \x -> body`
+            //     Constructor nodes live on the heap in GRIN; case
+            //     expressions fetch them via heap pointers.
+            //
+            //   Complex sub-expressions:
+            //     `rhs >>= \x -> body`
+            //     The RHS is already a monadic GRIN expression (e.g. App,
+            //     Store, Bind chain) whose result is bound to x.
             const rhs_expr = try translateExpr(ctx, pair.rhs);
 
-            // Store the thunk - we need to wrap in an F-tag for lazy evaluation,
-            // but for MVP we'll store the value directly.
-            const store_expr: *GrinExpr = blk: {
-                const e = try ctx.alloc.create(GrinExpr);
-                e.* = switch (rhs_expr.*) {
-                    .Return => |v| .{ .Store = v },
-                    else => {
-                        // Complex RHS - need to evaluate and store.
-                        // For MVP, store a unit placeholder.
-                        e.* = .{ .Return = .{ .Unit = {} } };
+            const lhs_expr: *GrinExpr = blk: {
+                switch (rhs_expr.*) {
+                    .Return => |v| {
+                        const e = try ctx.alloc.create(GrinExpr);
+                        switch (v) {
+                            // Simple values: pass through without heap allocation.
+                            .Var, .Lit, .ValTag, .Unit => {
+                                e.* = .{ .Return = v };
+                            },
+                            // Constructor nodes: store on heap.
+                            .ConstTagNode, .VarTagNode => {
+                                e.* = .{ .Store = v };
+                            },
+                        }
                         break :blk e;
                     },
-                };
-                break :blk e;
+                    else => {
+                        // Complex RHS (App, Bind, Case, etc.) — already a
+                        // monadic expression whose result we bind directly.
+                        break :blk rhs_expr;
+                    },
+                }
             };
 
-            // Bind the stored value using the actual let-bound binder name so the
+            // Bind the result using the actual let-bound binder name so the
             // body's references (via var_map) resolve correctly.
             const binder_name = try ctx.mapBinder(&pair.binder);
 
             // Translate the body.
             const body_expr = try translateExpr(ctx, let_expr.body);
 
-            // Create the bind expression: store X >>= \binder_name -> body
+            // Create the bind expression: lhs >>= \binder_name -> body
             const bind_expr = try ctx.alloc.create(GrinExpr);
             bind_expr.* = .{ .Bind = .{
-                .lhs = store_expr,
+                .lhs = lhs_expr,
                 .pat = .{ .Var = binder_name },
                 .rhs = body_expr,
             } };

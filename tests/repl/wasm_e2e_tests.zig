@@ -620,3 +620,70 @@ test "wasm e2e: hello.hs feature set" {
     try expectContains(result.stdout, "Hello\n");
     try expectContains(result.stdout, "World\n");
 }
+
+test "wasm e2e: multi-equation functions with higher-order arguments" {
+    // Regression test: multi-equation function definitions (desugared via
+    // the pattern-match compiler) must correctly pass through higher-order
+    // function arguments. The desugarer generates `let f = arg_0` bindings
+    // to alias lambda parameters to their equation-local names; these must
+    // be translated as value aliases (pure), not heap stores.
+    const input =
+        \\{"jsonrpc":"2.0","id":1,"method":"init"}
+        \\{"jsonrpc":"2.0","id":2,"method":"eval","params":["identity x = x"]}
+        \\{"jsonrpc":"2.0","id":3,"method":"eval","params":["data List a = Nil | Cons a (List a)"]}
+        \\{"jsonrpc":"2.0","id":4,"method":"eval","params":["map_it _ Nil = Nil\nmap_it f (Cons x xs) = Cons (f x) (map_it f xs)"]}
+        \\{"jsonrpc":"2.0","id":5,"method":"eval","params":["head_it (Cons x _) = x"]}
+        \\{"jsonrpc":"2.0","id":6,"method":"eval","params":["head_it (map_it identity (Cons 99 Nil))"]}
+        \\
+    ;
+    const result = try runServer(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+
+    const lines = try splitLines(testing.allocator, result.stdout);
+    defer testing.allocator.free(lines);
+
+    var found_99 = false;
+    for (lines) |line| {
+        const r = try extractResult(testing.allocator, line);
+        defer if (r) |s| testing.allocator.free(s);
+        if (r) |val| {
+            if (std.mem.eql(u8, val, "99")) found_99 = true;
+        }
+    }
+    try testing.expect(found_99);
+}
+
+test "wasm e2e: multi-equation variable pattern preserves literal values" {
+    // Regression test: `let n = arg_0` in desugared multi-equation functions
+    // must pass through literal values correctly. Previously, all let-bound
+    // values were heap-stored, causing literals to appear as `_hptr`.
+    const input =
+        \\{"jsonrpc":"2.0","id":1,"method":"init"}
+        \\{"jsonrpc":"2.0","id":2,"method":"eval","params":["f 0 = 42\nf n = n"]}
+        \\{"jsonrpc":"2.0","id":3,"method":"eval","params":["f 5"]}
+        \\{"jsonrpc":"2.0","id":4,"method":"eval","params":["f 0"]}
+        \\
+    ;
+    const result = try runServer(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+
+    const lines = try splitLines(testing.allocator, result.stdout);
+    defer testing.allocator.free(lines);
+
+    var found_5 = false;
+    var found_42 = false;
+    for (lines) |line| {
+        const r = try extractResult(testing.allocator, line);
+        defer if (r) |s| testing.allocator.free(s);
+        if (r) |val| {
+            if (std.mem.eql(u8, val, "5")) found_5 = true;
+            if (std.mem.eql(u8, val, "42")) found_42 = true;
+        }
+    }
+    try testing.expect(found_5);
+    try testing.expect(found_42);
+}

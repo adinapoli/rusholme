@@ -23,6 +23,9 @@ const jsonrpc_mod = @import("jsonrpc.zig");
 const protocol_mod = @import("protocol.zig");
 const ProtocolResult = protocol_mod.ProtocolResult;
 const Status = protocol_mod.Status;
+const Diagnostic = @import("../diagnostics/diagnostic.zig").Diagnostic;
+const JsonRenderer = @import("../diagnostics/json.zig").JsonRenderer;
+const FileId = @import("../diagnostics/span.zig").FileId;
 
 // ── ReplServer ────────────────────────────────────────────────────────
 
@@ -107,15 +110,7 @@ pub const ReplServer = struct {
         return switch (result.status) {
             .success => try self.formatSuccessStr(id, result.value),
             .silent => try self.formatSuccessStr(id, ""),
-            .failed => blk: {
-                const msg = try std.fmt.allocPrint(
-                    self.allocator,
-                    "Runtime error: {s} while evaluating: {s}",
-                    .{ result.value, input },
-                );
-                defer self.allocator.free(msg);
-                break :blk try self.formatErrorStr(id, -32603, msg);
-            },
+            .failed => try self.formatErrorWithDiagnosticsStr(id, -32603, result.value, result.diagnostics),
         };
     }
 
@@ -151,6 +146,59 @@ pub const ReplServer = struct {
             .id = id,
             .result = null,
             .@"error" = .{ .code = code, .message = message, .data = null },
+            .allocator = self.allocator,
+        };
+        return try jsonrpc_mod.formatResponse(self.allocator, response);
+    }
+
+    /// Format an error JSON-RPC response with structured diagnostics.
+    ///
+    /// When diagnostics are available, they are rendered as JSON and
+    /// included in the error's `data` field so that clients (e.g. the
+    /// browser REPL) can display rich, structured error information.
+    fn formatErrorWithDiagnosticsStr(
+        self: *ReplServer,
+        id: u32,
+        code: i32,
+        message: []const u8,
+        diagnostics: []const Diagnostic,
+    ) ![]const u8 {
+        if (diagnostics.len == 0) {
+            return try self.formatErrorStr(id, code, message);
+        }
+
+        // Build a path lookup for the JSON renderer.
+        var path_lookup = std.AutoHashMap(FileId, []const u8).init(self.allocator);
+        defer path_lookup.deinit();
+        try path_lookup.put(0, "<repl>");
+
+        const renderer = JsonRenderer.init(self.allocator, &path_lookup);
+        const diag_json_str = try renderer.renderAll(diagnostics);
+        defer self.allocator.free(diag_json_str);
+
+        // Parse the rendered JSON string into a std.json.Value so it
+        // is embedded as structured data, not a double-encoded string.
+        var parsed = try std.json.parseFromSlice(
+            std.json.Value,
+            self.allocator,
+            diag_json_str,
+            .{},
+        );
+        defer parsed.deinit();
+
+        // Build a data object: {"diagnostics": [...]}
+        var data_obj = std.json.ObjectMap.init(self.allocator);
+        try data_obj.put("diagnostics", parsed.value);
+
+        const response = jsonrpc_mod.Response{
+            .jsonrpc = "2.0",
+            .id = id,
+            .result = null,
+            .@"error" = .{
+                .code = code,
+                .message = message,
+                .data = .{ .object = data_obj },
+            },
             .allocator = self.allocator,
         };
         return try jsonrpc_mod.formatResponse(self.allocator, response);

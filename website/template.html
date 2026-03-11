@@ -1476,8 +1476,19 @@
                 if (!file) return;
                 const reader = new FileReader();
                 reader.onload = () => {
-                    const body = stripModuleHeader(reader.result);
-                    term.writeln('Loading: ' + file.name + ' (' + body.split('\n').length + ' lines)');
+                    const raw = reader.result;
+                    const body = stripModuleHeader(raw);
+                    console.log('[REPL] :load raw file (' + file.name + '):', JSON.stringify(raw));
+                    console.log('[REPL] :load after stripModuleHeader:', JSON.stringify(body));
+
+                    const lineCount = body.split('\n').length;
+                    term.writeln('Loading: ' + file.name + ' (' + lineCount + ' lines)');
+
+                    // Send the entire file body as a single eval request.
+                    // The WASM backend wraps it as `module ReplInput where`
+                    // and compiles it as a complete module, so multi-line
+                    // declarations, type signatures, data types, and
+                    // layout-based syntax all work correctly.
                     replBridge.evaluate(body);
                 };
                 reader.readAsText(file);
@@ -1539,6 +1550,7 @@
                     const request = { jsonrpc: '2.0', id: this.nextId++, method: method };
                     if (params !== undefined) request.params = params;
                     const requestStr = JSON.stringify(request);
+                    console.log('[REPL] >> request:', requestStr);
 
                     const inputPtr = this.wasmInstance.exports.repl_get_input_buffer();
                     const encoder = new TextEncoder();
@@ -1556,7 +1568,9 @@
                     const responseStr = new TextDecoder().decode(new Uint8Array(
                         this.wasmInstance.exports.memory.buffer, outputPtr, responseLen
                     ));
-                    return JSON.parse(responseStr);
+                    const parsed = JSON.parse(responseStr);
+                    console.log('[REPL] << response:', JSON.stringify(parsed, null, 2));
+                    return parsed;
                 },
 
                 // Initialize WASM module with WASI shim, then send JSON-RPC init.
