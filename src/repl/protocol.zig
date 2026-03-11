@@ -112,7 +112,7 @@ pub fn typeOf(allocator: Allocator, session: *Session, input: []const u8) !Proto
             };
         }
 
-        const msg = std.fmt.allocPrint(allocator, "Type checking failed: {s}", .{@errorName(err)});
+        const msg = std.fmt.allocPrint(allocator, "Type checking failed: {s}", .{@errorName(err)}) catch "type checking failed";
         return ProtocolResult{
             .status = .failed,
             .value = msg,
