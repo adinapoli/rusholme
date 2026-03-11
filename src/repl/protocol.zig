@@ -9,6 +9,7 @@ const Allocator = std.mem.Allocator;
 const testing_io = testing.io;
 
 const Session = @import("session.zig").Session;
+const typequery = @import("typequery.zig");
 const Diagnostic = @import("../diagnostics/diagnostic.zig").Diagnostic;
 
 // ── Public Types ──────────────────────────────────────────────────────
@@ -94,6 +95,39 @@ pub fn evaluate(allocator: Allocator, session: *Session, input: []const u8) !Pro
 /// Get diagnostics from the most recent evaluation.
 pub fn getDiagnostics(session: *Session) []const Diagnostic {
     return session.last_diagnostics.items;
+}
+
+/// Get the type of a REPL expression through the protocol.
+pub fn typeOf(allocator: Allocator, session: *Session, input: []const u8) !ProtocolResult {
+    const query_result = typequery.typeOf(allocator, session, input) catch |err| {
+        // On error, return error status with diagnostics
+        var diags = session.getDiagnosticsForInput(allocator, input) catch &.{};
+
+        // Get the first diagnostic's error message (or fall back to error name)
+        if (diags.len > 0) {
+            return ProtocolResult{
+                .status = .failed,
+                .value = diags[0].message,
+                .diagnostics = diags,
+            };
+        }
+
+        const msg = std.fmt.allocPrint(allocator, "Type checking failed: {s}", .{@errorName(err)});
+        return ProtocolResult{
+            .status = .failed,
+            .value = msg,
+            .diagnostics = diags,
+        };
+    };
+
+    // Success case: type query succeeded
+    // Note: result.value is session.allocator-allocated memory valid for the lifetime of the session.
+    // Diagnostics are owned by session.last_diagnostics.
+    return ProtocolResult{
+        .status = .success,
+        .value = query_result.display,  // Full "<expr> :: <type>" string
+        .diagnostics = &.{},
+    };
 }
 
 test "protocol: evaluate returns success for simple expression" {

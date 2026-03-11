@@ -36,7 +36,7 @@ pub const TypeQueryResult = struct {
 /// Type-check an expression and return its inferred type.
 /// Does NOT modify session state, does NOT evaluate, does NOT execute IO.
 pub fn typeOf(
-    alloc: std.mem.Allocator,
+    alloc: std.mem.Allocator,  // Reserved for future use (currently uses session.allocator)
     session: *Session,
     expr: []const u8,
 ) !TypeQueryResult {
