@@ -1706,6 +1706,7 @@
                                 if (!expr) {
                                     term.writeln('\x1b[31mError: No expression provided\x1b[0m');
                                     term.write('\x1b[32m> \x1b[0m');
+                                    currentLine = '';
                                     return;
                                 }
                                 try {
@@ -1724,6 +1725,7 @@
                                     term.writeln('\x1b[31mError: ' + error.message + '\x1b[0m');
                                 }
                                 term.write('\x1b[32m> \x1b[0m');
+                                currentLine = '';
                                 return;
                             } else if (cmd.startsWith('load ') || cmd.startsWith('l ') || cmd === 'load' || cmd === 'l') {
                                 fileInput.click();
