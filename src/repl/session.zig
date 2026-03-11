@@ -338,7 +338,13 @@ pub const Session = struct {
                     // WASM path: merge accumulated defs with the expression
                     // program, since the GRIN tree-walker needs all defs in
                     // a single program.
-                    const total_defs = self.accumulated_defs.items.len + 1;
+                    //
+                    // Lambda lifting may produce multiple definitions from a
+                    // single expression (e.g., `(\x -> 1) 2` produces
+                    // both the lifted lambda and the entry point). Include
+                    // ALL defs from expression compilation, not just one.
+                    const n_expr_defs = process.compile.program.defs.len;
+                    const total_defs = self.accumulated_defs.items.len + n_expr_defs;
                     const all_defs = try self.allocator.alloc(grin_ast.Def, total_defs);
                     errdefer self.allocator.free(all_defs);
 
@@ -346,10 +352,10 @@ pub const Session = struct {
                         all_defs[i] = def;
                     }
 
-                    if (process.compile.program.defs.len != 1) {
-                        std.debug.panic("Expression compilation produced {} definitions, expected 1", .{process.compile.program.defs.len});
+                    // Add all expression defs (including any lifted lambdas)
+                    for (process.compile.program.defs, 0..) |def, i| {
+                        all_defs[self.accumulated_defs.items.len + i] = def;
                     }
-                    all_defs[total_defs - 1] = process.compile.program.defs[0];
 
                     const merged_program = grin_ast.Program{ .defs = all_defs };
                     const exec = try self.engine.execute(&merged_program);
