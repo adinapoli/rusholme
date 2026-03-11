@@ -434,6 +434,20 @@ pub const GrinEvaluator = struct {
         return self.heap.alloc(node);
     }
 
+    /// Force a value to WHNF.
+    ///
+    /// If the value is a heap pointer (the `_hptr` convention), dereference
+    /// it and force any thunks. Otherwise return the value unchanged.
+    /// This is the public interface to `fetchHeapVal` — intended for use
+    /// by the REPL engine after `eval()` returns, while the evaluator
+    /// (and its heap) are still alive.
+    pub fn forceVal(self: *GrinEvaluator, val: Val) EvalError!Val {
+        if (val == .Var and std.mem.eql(u8, val.Var.base, "_hptr")) {
+            return self.fetchHeapVal(val);
+        }
+        return val;
+    }
+
     /// Read a node from the heap.
     pub fn readNode(self: GrinEvaluator, ptr: HeapPtr) ?HeapNode {
         return self.heap.read(ptr);
@@ -510,19 +524,73 @@ pub const GrinEvaluator = struct {
     /// Dereference a heap pointer value, returning the stored node as a Val.
     /// Used when a case scrutinee or other value is a heap pointer that needs
     /// to be fetched before pattern matching can proceed.
+    ///
+    /// If the heap node is a Thunk (F-tagged), this forces it by calling the
+    /// function with captured arguments, updating the heap cell with the result,
+    /// and looping until WHNF (a non-thunk value) is reached.
     fn fetchHeapVal(self: *GrinEvaluator, ptr_val: Val) EvalError!Val {
-        const heap_ptr = if (ptr_val.Var.unique.value < @as(u64, std.math.maxInt(u32)))
+        const current_ptr = if (ptr_val.Var.unique.value < @as(u64, std.math.maxInt(u32)))
             HeapPtr{ .index = @intCast(ptr_val.Var.unique.value) }
         else
             return error.InvalidHeapPointer;
 
-        const node = self.heap.read(heap_ptr) orelse return error.InvalidHeapPointer;
-        return switch (node) {
-            .Con => |con| Val{ .ConstTagNode = .{ .tag = con.tag, .fields = con.fields } },
-            .Lit => |lit| Val{ .Lit = lit },
-            .Unit => Val{ .Unit = {} },
-            else => return error.TypeMismatch,
-        };
+        while (true) {
+            const node = self.heap.read(current_ptr) orelse return error.InvalidHeapPointer;
+            switch (node) {
+                .Con => |con| return Val{ .ConstTagNode = .{ .tag = con.tag, .fields = con.fields } },
+                .Lit => |lit| return Val{ .Lit = lit },
+                .Unit => return Val{ .Unit = {} },
+                .Thunk => |thunk| {
+                    // Force the thunk: look up the function and call it
+                    const def = self.funcs.lookup(thunk.func_name) orelse return error.UnboundFunction;
+                    if (thunk.captured.len != def.params.len) return error.ArityMismatch;
+
+                    try self.env.pushScope();
+                    errdefer self.env.popScope();
+
+                    for (thunk.captured, def.params) |arg, param| {
+                        try self.env.bind(param, arg);
+                    }
+
+                    const result = try self.eval(def.body);
+                    self.env.popScope();
+
+                    // Update the heap cell with the result (memoize).
+                    // If the result is a heap pointer, store an indirection-like
+                    // update; otherwise store the value directly.
+                    if (result == .Var and std.mem.eql(u8, result.Var.base, "_hptr")) {
+                        // Result is itself a heap pointer — follow it next iteration
+                        const result_heap_ptr = if (result.Var.unique.value < @as(u64, std.math.maxInt(u32)))
+                            HeapPtr{ .index = @intCast(result.Var.unique.value) }
+                        else
+                            return error.InvalidHeapPointer;
+                        const result_node = self.heap.read(result_heap_ptr) orelse return error.InvalidHeapPointer;
+                        _ = self.heap.write(current_ptr, result_node);
+                        // The result node may itself be a thunk; loop to force it
+                        continue;
+                    }
+
+                    // Result is a direct value — store on heap and return
+                    const heap_update: HeapNode = switch (result) {
+                        .ConstTagNode => |ctn| switch (ctn.tag.tag_type) {
+                            .Fun => .{ .Thunk = .{ .func_name = ctn.tag.name, .captured = ctn.fields } },
+                            else => .{ .Con = .{ .tag = ctn.tag, .fields = ctn.fields } },
+                        },
+                        .Unit => .{ .Unit = {} },
+                        .Lit => |lit| .{ .Lit = lit },
+                        .ValTag => |tag| .{ .Con = .{ .tag = tag, .fields = &.{} } },
+                        else => return error.TypeMismatch,
+                    };
+                    _ = self.heap.write(current_ptr, heap_update);
+                    // If we wrote a thunk (result was an F-tagged ConstTagNode),
+                    // loop again to force it
+                    if (heap_update == .Thunk) continue;
+                    return result;
+                },
+                .Blackhole => return error.TypeMismatch, // TODO: proper blackhole error (#521)
+                .Partial => return error.TypeMismatch, // Partial apps not yet supported in eval
+            }
+        }
     }
 
     /// Evaluate a GRIN expression and return the resulting value.
@@ -537,11 +605,17 @@ pub const GrinEvaluator = struct {
                 if (resolved == .ConstTagNode) {
                     _ = self.untrackAllocation(resolved.ConstTagNode.fields);
                 }
-                const heap_node = switch (resolved) {
-                    .ConstTagNode => |ctn| HeapNode{ .Con = .{ .tag = ctn.tag, .fields = ctn.fields } },
-                    .Unit => HeapNode{ .Unit = {} },
-                    .Lit => |lit| HeapNode{ .Lit = lit },
-                    .ValTag => |tag| HeapNode{ .Con = .{ .tag = tag, .fields = &.{} } },
+                const heap_node: HeapNode = switch (resolved) {
+                    .ConstTagNode => |ctn| switch (ctn.tag.tag_type) {
+                        .Fun => .{ .Thunk = .{ .func_name = ctn.tag.name, .captured = ctn.fields } },
+                        else => .{ .Con = .{ .tag = ctn.tag, .fields = ctn.fields } },
+                    },
+                    .Unit => .{ .Unit = {} },
+                    .Lit => |lit| .{ .Lit = lit },
+                    .ValTag => |tag| switch (tag.tag_type) {
+                        .Fun => .{ .Thunk = .{ .func_name = tag.name, .captured = &.{} } },
+                        else => .{ .Con = .{ .tag = tag, .fields = &.{} } },
+                    },
                     .Var => unreachable, // Already resolved
                     .VarTagNode => unreachable, // Already resolved
                 };
@@ -563,22 +637,33 @@ pub const GrinEvaluator = struct {
 
                 const node = self.heap.read(heap_ptr) orelse return error.InvalidHeapPointer;
 
-                // If index is specified, extract that field
+                // If index is specified, extract that field.
+                // For thunks, force first via fetchHeapVal then index.
                 if (fetch.index) |idx| {
                     switch (node) {
                         .Con => |con| {
                             if (idx >= con.fields.len) return error.TypeMismatch;
                             break :b con.fields[idx];
                         },
+                        .Thunk => {
+                            // Force the thunk, then extract the field
+                            const forced = try self.fetchHeapVal(ptr_val);
+                            if (forced != .ConstTagNode) return error.TypeMismatch;
+                            if (idx >= forced.ConstTagNode.fields.len) return error.TypeMismatch;
+                            break :b forced.ConstTagNode.fields[idx];
+                        },
                         else => return error.TypeMismatch,
                     }
-                } else break :b switch (node) {
-                    // No index, return the whole node as a value
-                    .Con => |con| Val{ .ConstTagNode = .{ .tag = con.tag, .fields = con.fields } },
-                    .Lit => |lit| Val{ .Lit = lit },
-                    .Unit => Val{ .Unit = {} },
-                    else => return error.TypeMismatch,
-                };
+                } else {
+                    // No index — return the whole node. Force thunks to WHNF.
+                    break :b switch (node) {
+                        .Con => |con| Val{ .ConstTagNode = .{ .tag = con.tag, .fields = con.fields } },
+                        .Lit => |lit| Val{ .Lit = lit },
+                        .Unit => Val{ .Unit = {} },
+                        .Thunk => try self.fetchHeapVal(ptr_val),
+                        else => return error.TypeMismatch,
+                    };
+                }
             },
 
             .Update => |update| b: {
@@ -595,11 +680,17 @@ pub const GrinEvaluator = struct {
                 if (resolved == .ConstTagNode) {
                     _ = self.untrackAllocation(resolved.ConstTagNode.fields);
                 }
-                const heap_node = switch (resolved) {
-                    .ConstTagNode => |ctn| HeapNode{ .Con = .{ .tag = ctn.tag, .fields = ctn.fields } },
-                    .Unit => HeapNode{ .Unit = {} },
-                    .Lit => |lit| HeapNode{ .Lit = lit },
-                    .ValTag => |tag| HeapNode{ .Con = .{ .tag = tag, .fields = &.{} } },
+                const heap_node: HeapNode = switch (resolved) {
+                    .ConstTagNode => |ctn| switch (ctn.tag.tag_type) {
+                        .Fun => .{ .Thunk = .{ .func_name = ctn.tag.name, .captured = ctn.fields } },
+                        else => .{ .Con = .{ .tag = ctn.tag, .fields = ctn.fields } },
+                    },
+                    .Unit => .{ .Unit = {} },
+                    .Lit => |lit| .{ .Lit = lit },
+                    .ValTag => |tag| switch (tag.tag_type) {
+                        .Fun => .{ .Thunk = .{ .func_name = tag.name, .captured = &.{} } },
+                        else => .{ .Con = .{ .tag = tag, .fields = &.{} } },
+                    },
                     .Var => unreachable, // Already resolved
                     .VarTagNode => unreachable, // Already resolved
                 };

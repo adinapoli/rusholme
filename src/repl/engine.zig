@@ -68,8 +68,12 @@ pub const GrinEngine = struct {
             findDefByBaseName(program, "main") orelse
             return ExecError.EntryPointNotFound;
 
-        const val = try grin_eval.eval(entry.body);
-        
+        const raw_val = try grin_eval.eval(entry.body);
+        // Force the result to WHNF: if eval returned a heap pointer
+        // (e.g. from a constructor field extraction), dereference and
+        // force any thunks before formatting.
+        const val = try grin_eval.forceVal(raw_val);
+
         const formatted = formatVal(self.allocator, val) catch {
             return ExecError.FormatError;
         };

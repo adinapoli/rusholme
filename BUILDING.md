@@ -151,6 +151,27 @@ Baz.bc  ─┘
 The RTS (`librts.a`) is compiled separately and linked in at the final `cc` step,
 unchanged from the single-module flow.
 
+## Cache-Free Builds
+
+Zig's incremental build cache (`.zig-cache/`) can occasionally serve stale
+artifacts, leading to test results that differ between local and CI runs.
+To force a fully clean build:
+
+```bash
+rm -rf .zig-cache zig-out
+nix develop --command zig build test --summary all
+```
+
+Alternatively, redirect the cache to a disposable directory without touching
+your working tree:
+
+```bash
+nix develop --command zig build test --summary all --cache-dir /tmp/zig-fresh-cache
+```
+
+Either approach ensures every compilation unit is rebuilt from source.
+Use this when debugging test failures that only reproduce in CI.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |

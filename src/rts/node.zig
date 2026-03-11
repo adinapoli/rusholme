@@ -89,6 +89,11 @@ pub const Tag = enum(u64) {
     // Tags for user-defined constructors start at 0x1000.
     // Each unique constructor gets its own discriminant.
     Data = 0x1000,
+
+    // Non-exhaustive: the LLVM backend assigns dynamic discriminants to
+    // user-defined constructors (C-tags) and function thunks (F-tags).
+    // These are plain u64 values not known at compile time.
+    _,
 };
 
 // ═══════════════════════════════════════════════════════════════════════
