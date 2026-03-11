@@ -18,6 +18,9 @@ const process = std.process;
 const Io = std.Io;
 const File = Io.File;
 
+// Import type query tests
+const _ = @import("wasm_e2e_type_tests.zig");
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 /// Result of running the WASM server with piped input.
