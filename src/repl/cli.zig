@@ -17,6 +17,7 @@ const File = Io.File;
 const FileId = @import("../diagnostics/span.zig").FileId;
 
 const Session = @import("session.zig").Session;
+const typequery = @import("typequery.zig");
 const Diagnostic = @import("../diagnostics/diagnostic.zig").Diagnostic;
 const protocol_mod = @import("protocol.zig");
 const Status = protocol_mod.Status;
@@ -198,26 +199,68 @@ fn readLine(io: Io, buf: []u8) ![]const u8 {
 fn handleCommand(io: Io, line: []const u8, allocator: Allocator, session: *Session) bool {
     const cmd = std.mem.trim(u8, line[1..], " \t\r");
 
-    if (std.mem.eql(u8, cmd, "quit") or std.mem.eql(u8, cmd, "q")) {
+    // Parse the command: first word is the command, rest is arguments
+    var words = std.mem.splitScalar(u8, cmd, ' ');
+    const command = words.first();
+
+    // quit / q
+    if (std.mem.eql(u8, command, "quit") or std.mem.eql(u8, command, "q")) {
         return false;
     }
 
-    if (std.mem.startsWith(u8, cmd, "type ") or std.mem.startsWith(u8, cmd, "t ")) {
-        // :type is not yet implemented — tracked in the REPL design doc.
-        writeStdout(io, ":type is not yet implemented\n") catch {};
+    // type <expr> / t <expr>
+    if (std.mem.eql(u8, command, "type") or std.mem.eql(u8, command, "t")) {
+        const expr = std.mem.trim(u8, words.rest(), " \t");
+
+        if (expr.len == 0) {
+            writeStdout(io, "Usage: :type <expr> or :t <expr>\n") catch {};
+            return true;
+        }
+
+        const result = typequery.typeOf(allocator, session, expr) catch |err| {
+            switch (err) {
+                error.OutOfMemory => {
+                    writeStdout(io, "Error: Out of memory during type query\n") catch {};
+                },
+                error.CompilationFailed => {
+                    writeStdout(io, "Error: Failed to compile expression for type query\n") catch {};
+                },
+                else => {
+                    var buf: [256]u8 = undefined;
+                    const msg = std.fmt.bufPrint(&buf, "Error: Type query failed ({s})\n", .{@errorName(err)}) catch "Error: Type query failed\n";
+                    writeStdout(io, msg) catch {};
+                },
+            }
+            return true;
+        };
+        defer allocator.free(result.display);
+
+        if (result.diags.len > 0) {
+            renderDiagnostics(io, allocator, session, result.diags);
+        } else {
+            writeStdout(io, result.display) catch {};
+            writeStdout(io, "\n") catch {};
+        }
         return true;
     }
 
-    if (std.mem.startsWith(u8, cmd, "load ") or std.mem.startsWith(u8, cmd, "l ")) {
-        const path_start: usize = if (std.mem.startsWith(u8, cmd, "load ")) 5 else 2;
-        const raw_path = std.mem.trim(u8, cmd[path_start..], " \t");
+    // load <file> / l <file>
+    if (std.mem.eql(u8, command, "load") or std.mem.eql(u8, command, "l")) {
+        const raw_path = std.mem.trim(u8, words.rest(), " \t");
+
+        if (raw_path.len == 0) {
+            writeStdout(io, "Usage: :load <path> or :l <path>\n") catch {};
+            return true;
+        }
+
         const path = expandTilde(raw_path, allocator) orelse raw_path;
         defer if (path.ptr != raw_path.ptr) allocator.free(path);
         loadFile(io, path, allocator, session);
         return true;
     }
 
-    if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "h") or std.mem.eql(u8, cmd, "?")) {
+    // help / h / ?
+    if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "h") or std.mem.eql(u8, command, "?")) {
         printHelp(io) catch {};
         return true;
     }
@@ -338,12 +381,12 @@ fn printBanner(io: Io) !void {
 fn printHelp(io: Io) !void {
     try writeStdout(io,
         \\Available commands:
-        \\  :quit, :q       Exit the REPL
-        \\  :type <expr>    Show the type of an expression (not yet implemented)
-        \\  :load <file>, :l  Load a Haskell file into the session
-        \\  :{              Begin multi-line input block
-        \\  :}              End multi-line input block and evaluate
-        \\  :help, :h, :?   Show this help message
+        \\  :quit, :q           Exit the REPL
+        \\  :type <expr>, :t    Show the type of an expression
+        \\  :load <file>, :l    Load a Haskell file into the session
+        \\  :{                  Begin multi-line input block
+        \\  :}                  End multi-line input block and evaluate
+        \\  :help, :h, :?       Show this help message
         \\
     );
 }
