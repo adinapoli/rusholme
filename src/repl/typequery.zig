@@ -115,3 +115,25 @@ test "typequery: simple literal" {
 
     try testing.expectEqualStrings("42 :: Int", result.display);
 }
+
+test "typequery: session state unchanged after query" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = try Session.init(alloc, testing.io);
+    defer session.deinit();
+
+    // Define something first
+    _ = try session.processInput("id x = x");
+
+    const arities_before = session.accumulated_arities.count();
+    const con_map_before = session.accumulated_con_map.count();
+
+    // Query a type - should not modify accumulated state
+    _ = try typeOf(alloc, &session, "42");
+
+    // Session state should not be modified
+    try testing.expectEqual(arities_before, session.accumulated_arities.count());
+    try testing.expectEqual(con_map_before, session.accumulated_con_map.count());
+}
