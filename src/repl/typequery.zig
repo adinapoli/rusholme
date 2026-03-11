@@ -69,15 +69,10 @@ pub fn typeOf(
         return err;
     };
 
-    // 3. Transactional rollback: pop scope frames to restore state
-    // This ensures read-only semantics — the compilation is performed
-    // but all bindings are discarded after type lookup.
-    session.ty_env.pop();
-    session.rename_env.scope.pop();
-
-    // 4. Look up the type via the synthesized name
+    // 3. Look up the type via the synthesized name FIRST
     // Expressions are wrapped as `replExpr__ = <expr>` during compilation,
     // so the first def in the program should be the expression binding.
+    // IMPORTANT: Lookup must happen BEFORE rollback.
     if (compile.program.defs.len == 0) {
         return error.CompilationFailed;
     }
@@ -85,6 +80,12 @@ pub fn typeOf(
     const scheme = session.ty_env.lookupScheme(def.name.unique) orelse {
         return error.CompilationFailed;
     };
+
+    // 4. Transactional rollback: pop scope frames to restore state
+    // This ensures read-only semantics — the compilation is performed
+    // but all bindings are discarded after type lookup.
+    session.ty_env.pop();
+    session.rename_env.scope.pop();
 
     // 5. Format the display: "<expr> :: <type>"
     const type_str = try htype_mod.prettyScheme(scheme, session.allocator);
