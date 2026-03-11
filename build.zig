@@ -399,6 +399,23 @@ pub fn build(b: *std.Build) void {
     run_cli_e2e_tests.addArtifactArg(cli_e2e_tests);
     run_cli_e2e_tests.expectExitCode(0);
 
+    // WASM REPL end-to-end tests — spawn wasmtime with
+    // repl.wasm and exercise the JSON-RPC protocol.
+    const wasm_e2e_module = b.createModule(.{
+        .root_source_file = b.path("tests/repl/wasm_e2e_tests.zig"),
+        .target = target,
+    });
+    const wasm_e2e_tests = b.addTest(.{
+        .name = "wasm-e2e-tests",
+        .root_module = wasm_e2e_module,
+    });
+    // WASM e2e tests need repl.wasm built first.
+    wasm_e2e_tests.step.dependOn(b.getInstallStep());
+    // Same technique as repl-tests: no IPC mode, communicate via exit code.
+    const run_wasm_e2e_tests = std.Build.Step.Run.create(b, "run test wasm-e2e-tests");
+    run_wasm_e2e_tests.addArtifactArg(wasm_e2e_tests);
+    run_wasm_e2e_tests.expectExitCode(0);
+
     // Diagnostic step — reports per-file parser errors for failing tests.
     // Usage: zig build diag
     const diag_module = b.createModule(.{
@@ -426,6 +443,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_e2e_tests.step);
     test_step.dependOn(&run_repl_tests.step);
     test_step.dependOn(&run_cli_e2e_tests.step);
+    test_step.dependOn(&run_wasm_e2e_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
@@ -471,4 +489,8 @@ pub fn build(b: *std.Build) void {
     repl_wasm.rdynamic = true;
 
     b.installArtifact(repl_wasm);
+
+    // The unified repl.wasm binary serves both browser and headless use:
+    //   Browser:  JS calls repl_process_jsonrpc() via shared buffers
+    //   Headless: wasmtime run --invoke repl_server_run repl.wasm
 }

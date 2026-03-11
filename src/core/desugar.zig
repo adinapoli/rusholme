@@ -514,14 +514,58 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
         //
         // Each unsupported case has its own explicit handler below (tracked in
         // https://github.com/adinapoli/rusholme/issues/361). See #309 for ListComp.
-        .Case => {
-            // RExpr case expressions - desugar to Core case
-            // tracked in: https://github.com/adinapoli/rusholme/issues/361
-            node.* = .{ .Var = .{
-                .name = Name{ .base = "todo_case", .unique = .{ .value = 0 } },
-                .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
+        .Case => |c| {
+            // Desugar case expressions using the same pattern-match
+            // compiler infrastructure as function equations (applyPat).
+            //
+            //   case scrut of { p1 -> rhs1; p2 -> rhs2; ... }
+            //
+            // becomes nested Core Case expressions, built bottom-to-top:
+            // the last alternative's failure falls through to a
+            // non-exhaustive error, each earlier alternative wraps the
+            // accumulated body as its failure branch.
+
+            const scrut_core = try desugarExpr(ctx, c.scrutinee.*);
+
+            // Synthetic binder for the scrutinee value.
+            const scrut_id = ast_mod.Id{
+                .name = .{ .base = "_case_scrut", .unique = ctx.u_supply.fresh() },
+                .ty = dummyCoreType(),
                 .span = syntheticSpan(),
-            } };
+            };
+
+            // Start with a non-exhaustive error as the fallback.
+            var current_body = try alloc.create(ast_mod.Expr);
+            current_body.* = .{
+                .Lit = .{
+                    .val = .{ .String = "Non-exhaustive patterns in case" },
+                    .span = syntheticSpan(),
+                },
+            };
+
+            // Process alternatives bottom-to-top.
+            var alt_idx: usize = c.alts.len;
+            while (alt_idx > 0) {
+                alt_idx -= 1;
+                const alt = c.alts[alt_idx];
+
+                const rhs_body = try alloc.create(ast_mod.Expr);
+                rhs_body.* = try desugarRhs(ctx, alt.rhs);
+
+                current_body = try applyPat(
+                    ctx,
+                    scrut_core,
+                    scrut_id,
+                    dummyCoreType(),
+                    alt.pattern,
+                    rhs_body,
+                    current_body,
+                    0,
+                    0,
+                );
+            }
+
+            node.* = current_body.*;
         },
         .Do => {
             // Do-notation desugaring (issue #464)

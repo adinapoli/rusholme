@@ -466,7 +466,12 @@ pub const GrinEvaluator = struct {
     /// Resolve a Val to its runtime value, looking up variables if needed.
     fn resolveVal(self: *GrinEvaluator, v: *const Val) EvalError!Val {
         return switch (v.*) {
-            .Var => |name| self.env.lookup(name) orelse return error.UnboundVariable,
+            .Var => |name| self.env.lookup(name) orelse
+                // If the variable isn't in the environment, it may be a
+                // top-level function reference (e.g. `identity` passed as a
+                // higher-order argument). Return the Var as-is so the App
+                // handler can resolve it through the function table.
+                if (self.funcs.contains(name)) Val{ .Var = name } else return error.UnboundVariable,
             .Unit => Val{ .Unit = {} },
             .Lit => |lit| Val{ .Lit = lit },
             .ValTag => |tag| Val{ .ValTag = tag },
@@ -499,6 +504,24 @@ pub const GrinEvaluator = struct {
                     else => return error.TypeMismatch,
                 }
             },
+        };
+    }
+
+    /// Dereference a heap pointer value, returning the stored node as a Val.
+    /// Used when a case scrutinee or other value is a heap pointer that needs
+    /// to be fetched before pattern matching can proceed.
+    fn fetchHeapVal(self: *GrinEvaluator, ptr_val: Val) EvalError!Val {
+        const heap_ptr = if (ptr_val.Var.unique.value < @as(u64, std.math.maxInt(u32)))
+            HeapPtr{ .index = @intCast(ptr_val.Var.unique.value) }
+        else
+            return error.InvalidHeapPointer;
+
+        const node = self.heap.read(heap_ptr) orelse return error.InvalidHeapPointer;
+        return switch (node) {
+            .Con => |con| Val{ .ConstTagNode = .{ .tag = con.tag, .fields = con.fields } },
+            .Lit => |lit| Val{ .Lit = lit },
+            .Unit => Val{ .Unit = {} },
+            else => return error.TypeMismatch,
         };
     }
 
@@ -671,8 +694,17 @@ pub const GrinEvaluator = struct {
                     }
                 }
 
-                // Look up the function definition
-                const def = self.funcs.lookup(app.name) orelse return error.UnboundFunction;
+                // Look up the function definition. If the name is not a
+                // top-level function, it may be a local variable bound to a
+                // function reference (higher-order parameter). Resolve through
+                // the environment to find the actual function.
+                const def = self.funcs.lookup(app.name) orelse blk: {
+                    const fn_val = self.env.lookup(app.name) orelse return error.UnboundFunction;
+                    switch (fn_val) {
+                        .Var => |resolved_name| break :blk self.funcs.lookup(resolved_name) orelse return error.UnboundFunction,
+                        else => return error.TypeMismatch,
+                    }
+                };
 
                 // Resolve argument values
                 if (app.args.len != def.params.len) {
@@ -699,7 +731,13 @@ pub const GrinEvaluator = struct {
 
             .Case => |case_expr| b: {
                 // Evaluate the scrutinee to a value
-                const scrutinee_val = try self.resolveVal(@constCast(&case_expr.scrutinee));
+                var scrutinee_val = try self.resolveVal(@constCast(&case_expr.scrutinee));
+
+                // If the scrutinee is a heap pointer, fetch the node from the heap.
+                // This handles constructors with fields that were stored via `store`.
+                if (scrutinee_val == .Var and std.mem.eql(u8, scrutinee_val.Var.base, "_hptr")) {
+                    scrutinee_val = try self.fetchHeapVal(scrutinee_val);
+                }
 
                 // Try to match against each alternative
                 for (case_expr.alts) |alt| {
@@ -745,10 +783,18 @@ pub const GrinEvaluator = struct {
                 break :b std.meta.eql(val.Lit, lit_pat);
             },
             .TagPat => |tag_pat| b: {
-                // Match against a bare tag pattern
-                if (val != .ConstTagNode) break :b false;
-                if (val.ConstTagNode.fields.len != 0) break :b false;
-                break :b val.ConstTagNode.tag.eql(tag_pat);
+                // Match against a bare tag pattern (nullary constructor).
+                // A nullary constructor can appear as either:
+                //   - ValTag: direct tag value (from `pure CTag`)
+                //   - ConstTagNode with 0 fields (from `store (CTag)`)
+                if (val == .ValTag) {
+                    break :b val.ValTag.eql(tag_pat);
+                }
+                if (val == .ConstTagNode) {
+                    if (val.ConstTagNode.fields.len != 0) break :b false;
+                    break :b val.ConstTagNode.tag.eql(tag_pat);
+                }
+                break :b false;
             },
             .DefaultPat => true, // Wildcard always matches
         };

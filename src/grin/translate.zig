@@ -243,7 +243,7 @@ fn buildConMap(alloc: std.mem.Allocator, core_prog: CoreProgram) !std.AutoHashMa
 
 /// Count the value-level field count of a constructor type by counting
 /// leading FunTy arrows, stripping ForAllTy quantifiers first.
-fn countConFields(ty: CoreType) u32 {
+pub fn countConFields(ty: CoreType) u32 {
     var current = ty;
     // Strip leading ForAllTy quantifiers.
     while (true) {
@@ -287,6 +287,7 @@ pub fn translateProgram(
     alloc: std.mem.Allocator,
     core_prog: CoreProgram,
     external_arities: ?*const std.AutoHashMapUnmanaged(u64, u32),
+    external_con_map: ?*const std.AutoHashMapUnmanaged(u64, u32),
 ) !GrinProgram {
     // Build the arity map for partial/over-application handling.
     var arity_map = try buildArityMap(alloc, core_prog);
@@ -321,6 +322,18 @@ pub fn translateProgram(
     var con_iter = con_map.iterator();
     while (con_iter.next()) |entry| {
         try ctx.con_map.put(alloc, entry.key_ptr.*, entry.value_ptr.*);
+    }
+
+    // Seed with external constructor map (from REPL session's prior data declarations).
+    // Local entries take precedence — only add externals not already present.
+    if (external_con_map) |ext| {
+        var ext_iter = ext.iterator();
+        while (ext_iter.next()) |entry| {
+            const gop = try ctx.con_map.getOrPut(alloc, entry.key_ptr.*);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = entry.value_ptr.*;
+            }
+        }
     }
 
     var defs = std.ArrayListUnmanaged(GrinDef){};
@@ -797,42 +810,66 @@ fn wrapWithPendingBinds(
 fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr {
     switch (let_expr.bind) {
         .NonRec => |pair| {
-            // Non-recursive let: Lazy evaluation means we store a thunk.
-            // let x = rhs in body
-            // becomes: store (F<func> [<args>]) >>= \x -> body
-
-            // Translate RHS into a thunk.
-            // For MVP, we'll just translate and store it directly.
-            // A full implementation would analyze strictness.
+            // Non-recursive let: translate `let x = rhs in body`.
+            //
+            // The treatment depends on the RHS shape:
+            //
+            //   Simple values (Var, Lit, ValTag):
+            //     `pure rhs >>= \x -> body`
+            //     These are already-evaluated values that don't need heap
+            //     allocation. Storing them would wrap the value in an
+            //     indirection (heap pointer), breaking function dispatch
+            //     for higher-order parameters and losing literal values.
+            //     This case is critical for the pattern-match compiler,
+            //     which generates `let f = arg_0` to alias a lambda
+            //     parameter to its equation-local name.
+            //
+            //   Heap-allocated nodes (ConstTagNode, VarTagNode):
+            //     `store rhs >>= \x -> body`
+            //     Constructor nodes live on the heap in GRIN; case
+            //     expressions fetch them via heap pointers.
+            //
+            //   Complex sub-expressions:
+            //     `rhs >>= \x -> body`
+            //     The RHS is already a monadic GRIN expression (e.g. App,
+            //     Store, Bind chain) whose result is bound to x.
             const rhs_expr = try translateExpr(ctx, pair.rhs);
 
-            // Store the thunk - we need to wrap in an F-tag for lazy evaluation,
-            // but for MVP we'll store the value directly.
-            const store_expr: *GrinExpr = blk: {
-                const e = try ctx.alloc.create(GrinExpr);
-                e.* = switch (rhs_expr.*) {
-                    .Return => |v| .{ .Store = v },
-                    else => {
-                        // Complex RHS - need to evaluate and store.
-                        // For MVP, store a unit placeholder.
-                        e.* = .{ .Return = .{ .Unit = {} } };
+            const lhs_expr: *GrinExpr = blk: {
+                switch (rhs_expr.*) {
+                    .Return => |v| {
+                        const e = try ctx.alloc.create(GrinExpr);
+                        switch (v) {
+                            // Simple values: pass through without heap allocation.
+                            .Var, .Lit, .ValTag, .Unit => {
+                                e.* = .{ .Return = v };
+                            },
+                            // Constructor nodes: store on heap.
+                            .ConstTagNode, .VarTagNode => {
+                                e.* = .{ .Store = v };
+                            },
+                        }
                         break :blk e;
                     },
-                };
-                break :blk e;
+                    else => {
+                        // Complex RHS (App, Bind, Case, etc.) — already a
+                        // monadic expression whose result we bind directly.
+                        break :blk rhs_expr;
+                    },
+                }
             };
 
-            // Bind the stored value using the actual let-bound binder name so the
+            // Bind the result using the actual let-bound binder name so the
             // body's references (via var_map) resolve correctly.
             const binder_name = try ctx.mapBinder(&pair.binder);
 
             // Translate the body.
             const body_expr = try translateExpr(ctx, let_expr.body);
 
-            // Create the bind expression: store X >>= \binder_name -> body
+            // Create the bind expression: lhs >>= \binder_name -> body
             const bind_expr = try ctx.alloc.create(GrinExpr);
             bind_expr.* = .{ .Bind = .{
-                .lhs = store_expr,
+                .lhs = lhs_expr,
                 .pat = .{ .Var = binder_name },
                 .rhs = body_expr,
             } };
@@ -999,16 +1036,21 @@ fn translateAlt(ctx: *TranslateCtx, alt: CoreAlt) !GrinAlt {
 fn translatePattern(ctx: *TranslateCtx, con: CoreAltCon, binders: []const CoreId) !GrinCPat {
     switch (con) {
         .DataAlt => |name| {
-            // Constructor pattern: bind field names.
-            var field_names = try ctx.alloc.alloc(GrinName, binders.len);
-            for (binders, 0..) |binder, i| {
-                field_names[i] = try ctx.mapBinder(&binder);
-            }
-
             const tag = GrinTag{
                 .tag_type = .Con,
                 .name = name,
             };
+
+            // Nullary constructors use TagPat (matches ValTag values);
+            // constructors with fields use NodePat (matches ConstTagNode).
+            if (binders.len == 0) {
+                return .{ .TagPat = tag };
+            }
+
+            var field_names = try ctx.alloc.alloc(GrinName, binders.len);
+            for (binders, 0..) |binder, i| {
+                field_names[i] = try ctx.mapBinder(&binder);
+            }
 
             return .{ .NodePat = .{
                 .tag = tag,
@@ -1425,7 +1467,7 @@ test "translateProgram: simple identity function" {
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null);
+    const grin_prog = try translateProgram(alloc, core_prog, null, null);
 
     // Should have one definition with one parameter.
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
@@ -1500,7 +1542,7 @@ test "translateProgram: literal value" {
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null);
+    const grin_prog = try translateProgram(alloc, core_prog, null, null);
 
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
 
@@ -1867,7 +1909,7 @@ test "translateProgram: partial application generates P-tag" {
         .binds = &[_]CoreBind{ .{ .NonRec = map_pair }, .{ .NonRec = main_pair } },
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null);
+    const grin_prog = try translateProgram(alloc, core_prog, null, null);
 
     // Should have 2 definitions: map and main
     try testing.expectEqual(@as(usize, 2), grin_prog.defs.len);
@@ -1950,7 +1992,7 @@ test "translateProgram: over-application generates chained apply calls" {
         .binds = &[_]CoreBind{ .{ .NonRec = id_pair }, .{ .NonRec = main_pair } },
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null);
+    const grin_prog = try translateProgram(alloc, core_prog, null, null);
 
     // Should have 2 definitions: id and main
     try testing.expectEqual(@as(usize, 2), grin_prog.defs.len);
@@ -2061,7 +2103,7 @@ test "translateApp: nested application f (g x) emits Bind for complex arg (#374)
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null);
+    const grin_prog = try translateProgram(alloc, core_prog, null, null);
 
     // Should have one definition with 3 parameters (f, g, x).
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
@@ -2149,7 +2191,7 @@ test "translateProgram: external 0-arity function produces App not Return Var" {
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, &external_arities);
+    const grin_prog = try translateProgram(alloc, core_prog, &external_arities, null);
 
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
 

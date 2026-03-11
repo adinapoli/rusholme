@@ -4,6 +4,12 @@
 //! Read requests line-by-line from stdin, parse as JSON-RPC,
 //! handle via Session, and write responses to stdout.
 //!
+//! The core dispatch logic lives in `processRequestToString`, which
+//! is a pure function (input → output string, no IO side effects).
+//! This allows the same logic to be used from both the stdin/stdout
+//! server loop (`run`) and the WASM shared-buffer bridge
+//! (`repl_process_jsonrpc` in exports.zig).
+//!
 //! Usage: rhc repl --server
 
 const std = @import("std");
@@ -17,6 +23,9 @@ const jsonrpc_mod = @import("jsonrpc.zig");
 const protocol_mod = @import("protocol.zig");
 const ProtocolResult = protocol_mod.ProtocolResult;
 const Status = protocol_mod.Status;
+const Diagnostic = @import("../diagnostics/diagnostic.zig").Diagnostic;
+const JsonRenderer = @import("../diagnostics/json.zig").JsonRenderer;
+const FileId = @import("../diagnostics/span.zig").FileId;
 
 // ── ReplServer ────────────────────────────────────────────────────────
 
@@ -29,6 +38,10 @@ pub const ReplServer = struct {
     allocator: Allocator,
     session: Session,
     io: Io,
+
+    /// Set to true when a "shutdown" request has been processed.
+    /// The `run()` loop checks this after writing each response.
+    should_shutdown: bool = false,
 
     /// Initialize the server with a Session.
     ///
@@ -50,68 +63,201 @@ pub const ReplServer = struct {
         self.session.deinit();
     }
 
-    /// Handle the init protocol request.
-    /// Returns success status indicating the REPL session is ready.
-    fn handleInit(self: *ReplServer, id: u32) !void {
-        try self.sendSuccessResponseJson(id, std.json.Value{ .string = "ok" });
+    // ── Pure request dispatch ─────────────────────────────────────
+
+    /// Process a single JSON-RPC request and return the response as
+    /// an allocated string.  No IO side effects — the caller is
+    /// responsible for routing the response to stdout, a shared
+    /// buffer, etc.
+    ///
+    /// The caller must free the returned slice with `self.allocator`.
+    pub fn processRequestToString(self: *ReplServer, input: []const u8) ![]const u8 {
+        var request = jsonrpc_mod.parseRequest(self.allocator, input) catch {
+            return try self.formatErrorStr(0, -32700, "Parse error");
+        };
+        defer request.deinit();
+
+        const method = request.method;
+        const id = request.id;
+
+        if (std.mem.eql(u8, method, "init")) {
+            return try self.formatSuccessStr(id, "ok");
+        } else if (std.mem.eql(u8, method, "eval")) {
+            return try self.dispatchEval(id, request.params);
+        } else if (std.mem.eql(u8, method, "type")) {
+            return try self.dispatchType(id, request.params);
+        } else if (std.mem.eql(u8, method, "shutdown")) {
+            self.should_shutdown = true;
+            return try self.formatSuccessStr(id, "ok");
+        } else {
+            return try self.formatErrorStr(id, -32601, "Method not found");
+        }
     }
 
-    /// Handle the eval protocol request.
-    /// Evaluates a Haskell expression and returns the result.
-    fn handleEval(self: *ReplServer, id: u32, params: ?std.json.Value) !void {
+    /// Dispatch an "eval" request, returning the JSON-RPC response string.
+    fn dispatchEval(self: *ReplServer, id: u32, params: ?std.json.Value) ![]const u8 {
         const input = try self.extractParamString(params) orelse {
-            try self.sendErrorResponse(id, -32602, "Invalid params: expected string expression");
-            return;
+            return try self.formatErrorStr(id, -32602, "Invalid params: expected string expression");
         };
         defer self.allocator.free(input);
 
         const result = protocol_mod.evaluate(self.allocator, &self.session, input) catch |err| {
-            // Error during evaluation - return error with diagnostics
             const msg = try std.fmt.allocPrint(self.allocator, "Evaluation failed: {s}", .{@errorName(err)});
             defer self.allocator.free(msg);
-            try self.sendErrorResponse(id, -32603, msg);
-            return;
+            return try self.formatErrorStr(id, -32603, msg);
         };
 
-        switch (result.status) {
-            .success => {
-                try self.sendSuccessResponseJson(id, std.json.Value{ .string = result.value });
-            },
-            .silent => {
-                try self.sendSuccessResponseJson(id, std.json.Value{ .string = "" });
-            },
-            .failed => {
-                // Error result with diagnostics
-                try self.sendErrorResponse(id, -32603, "Evaluation failed");
-            },
-        }
+        return switch (result.status) {
+            .success => try self.formatSuccessStr(id, result.value),
+            .silent => try self.formatSuccessStr(id, ""),
+            .failed => try self.formatErrorWithDiagnosticsStr(id, -32603, result.value, result.diagnostics),
+        };
     }
 
-    /// Handle the type protocol request.
-    /// Type-checks an expression and returns its type.
-    /// Note: Type inference is not yet implemented in Session, so this
-    /// returns a placeholder for now.
-    fn handleType(self: *ReplServer, id: u32, params: ?std.json.Value) !void {
+    /// Dispatch a "type" request, returning the JSON-RPC response string.
+    fn dispatchType(self: *ReplServer, id: u32, params: ?std.json.Value) ![]const u8 {
         const input = try self.extractParamString(params) orelse {
-            try self.sendErrorResponse(id, -32602, "Invalid params: expected string expression");
-            return;
+            return try self.formatErrorStr(id, -32602, "Invalid params: expected string expression");
         };
         defer self.allocator.free(input);
 
-        // TODO: Implement type inference in Session and Pipeline
-        // For now, return a placeholder indicating type checking is not yet available
-        try self.sendErrorResponse(id, -32601, "Type checking not yet implemented - requires type inference support in Session");
+        // tracked in: https://github.com/adinapoli/rusholme/issues/494
+        return try self.formatErrorStr(id, -32601, "Type checking not yet implemented");
     }
 
-    /// Handle the shutdown protocol request.
-    /// Sends an OK response and shuts down the server gracefully.
-    fn handleShutdown(self: *ReplServer, id: u32) !void {
-        try self.sendSuccessResponseJson(id, std.json.Value{ .string = "ok" });
-        std.process.exit(0);
+    // ── Response formatting (pure, no IO) ─────────────────────────
+
+    /// Format a success JSON-RPC response as an allocated string.
+    fn formatSuccessStr(self: *ReplServer, id: u32, value: []const u8) ![]const u8 {
+        const response = jsonrpc_mod.Response{
+            .jsonrpc = "2.0",
+            .id = id,
+            .result = std.json.Value{ .string = value },
+            .@"error" = null,
+            .allocator = self.allocator,
+        };
+        return try jsonrpc_mod.formatResponse(self.allocator, response);
     }
+
+    /// Format an error JSON-RPC response as an allocated string.
+    fn formatErrorStr(self: *ReplServer, id: u32, code: i32, message: []const u8) ![]const u8 {
+        const response = jsonrpc_mod.Response{
+            .jsonrpc = "2.0",
+            .id = id,
+            .result = null,
+            .@"error" = .{ .code = code, .message = message, .data = null },
+            .allocator = self.allocator,
+        };
+        return try jsonrpc_mod.formatResponse(self.allocator, response);
+    }
+
+    /// Format an error JSON-RPC response with structured diagnostics.
+    ///
+    /// When diagnostics are available, they are rendered as JSON and
+    /// included in the error's `data` field so that clients (e.g. the
+    /// browser REPL) can display rich, structured error information.
+    fn formatErrorWithDiagnosticsStr(
+        self: *ReplServer,
+        id: u32,
+        code: i32,
+        message: []const u8,
+        diagnostics: []const Diagnostic,
+    ) ![]const u8 {
+        if (diagnostics.len == 0) {
+            return try self.formatErrorStr(id, code, message);
+        }
+
+        // Build a path lookup for the JSON renderer.
+        var path_lookup = std.AutoHashMap(FileId, []const u8).init(self.allocator);
+        defer path_lookup.deinit();
+        try path_lookup.put(0, "<repl>");
+
+        const renderer = JsonRenderer.init(self.allocator, &path_lookup);
+        const diag_json_str = try renderer.renderAll(diagnostics);
+        defer self.allocator.free(diag_json_str);
+
+        // Parse the rendered JSON string into a std.json.Value so it
+        // is embedded as structured data, not a double-encoded string.
+        var parsed = try std.json.parseFromSlice(
+            std.json.Value,
+            self.allocator,
+            diag_json_str,
+            .{},
+        );
+        defer parsed.deinit();
+
+        // Build a data object: {"diagnostics": [...]}
+        var data_obj = std.json.ObjectMap.init(self.allocator);
+        try data_obj.put("diagnostics", parsed.value);
+
+        const response = jsonrpc_mod.Response{
+            .jsonrpc = "2.0",
+            .id = id,
+            .result = null,
+            .@"error" = .{
+                .code = code,
+                .message = message,
+                .data = .{ .object = data_obj },
+            },
+            .allocator = self.allocator,
+        };
+        return try jsonrpc_mod.formatResponse(self.allocator, response);
+    }
+
+    // ── IO wrappers ───────────────────────────────────────────────
+
+    /// Process a JSON-RPC request and write the response to stdout.
+    ///
+    /// Thin IO wrapper around `processRequestToString`.
+    pub fn processRequest(self: *ReplServer, input: []const u8) !void {
+        const response_str = try self.processRequestToString(input);
+        defer self.allocator.free(response_str);
+
+        var stdout_buf: [4096]u8 = undefined;
+        var stdout_fw: File.Writer = .init(.stdout(), self.io, &stdout_buf);
+        const stdout = &stdout_fw.interface;
+
+        try stdout.writeAll(response_str);
+        try stdout.writeAll("\n");
+        try stdout.flush();
+    }
+
+    /// Main loop: read JSON-RPC requests line by line from stdin.
+    ///
+    /// Continues processing until stdin closes, a "shutdown" request
+    /// is received, or an unrecoverable error occurs.
+    /// Each line is expected to be a valid JSON-RPC 2.0 request object.
+    pub fn run(self: *ReplServer) !void {
+        var line_buffer: [8192]u8 = undefined;
+        var stdin_buf: [1]u8 = undefined;
+        var stdin_rdr = File.stdin().reader(self.io, &stdin_buf);
+        const stdin = &stdin_rdr.interface;
+
+        while (true) {
+            const line = readLine(stdin, &line_buffer) catch |err| {
+                switch (err) {
+                    error.EndOfStream => return,
+                    else => {
+                        log.err("Failed to read from stdin: {}", .{err});
+                        return err;
+                    },
+                }
+            };
+
+            if (line.len == 0) continue;
+
+            self.processRequest(line) catch {
+                continue;
+            };
+
+            if (self.should_shutdown) return;
+        }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────
 
     /// Extract a string parameter from JSON-RPC params.
-    /// Returns null if params is null, not an array, or the first element is not a string.
+    /// Supports both array form `["expr"]` and direct string form `"expr"`.
     fn extractParamString(self: *const ReplServer, params: ?std.json.Value) error{OutOfMemory}!?[]const u8 {
         if (params) |p| {
             switch (p) {
@@ -129,120 +275,6 @@ pub const ReplServer = struct {
         }
         return null;
     }
-
-    /// Send a success JSON-RPC response with a JSON value to stdout.
-    fn sendSuccessResponseJson(self: *ReplServer, id: u32, result: std.json.Value) !void {
-        var stdout_buf: [4096]u8 = undefined;
-        var stdout_fw: File.Writer = .init(.stdout(), self.io, &stdout_buf);
-        const stdout = &stdout_fw.interface;
-
-        const response = jsonrpc_mod.Response{
-            .jsonrpc = "2.0",
-            .id = id,
-            .result = result,
-            .@"error" = null,
-            .allocator = self.allocator,
-        };
-
-        const json_str = try jsonrpc_mod.formatResponse(self.allocator, response);
-        defer self.allocator.free(json_str);
-
-        try stdout.writeAll(json_str);
-        try stdout.writeAll("\n");
-        try stdout.flush();
-    }
-
-    /// Send an error JSON-RPC response to stdout.
-    fn sendErrorResponse(self: *ReplServer, id: ?u32, code: i32, message: []const u8) !void {
-        var stdout_buf: [4096]u8 = undefined;
-        var stdout_fw: File.Writer = .init(.stdout(), self.io, &stdout_buf);
-        const stdout = &stdout_fw.interface;
-
-        const response = jsonrpc_mod.Response{
-            .jsonrpc = "2.0",
-            .id = id orelse 0,
-            .result = null,
-            .@"error" = .{ .code = code, .message = message, .data = null },
-            .allocator = self.allocator,
-        };
-
-        const json_str = try jsonrpc_mod.formatResponse(self.allocator, response);
-        defer self.allocator.free(json_str);
-
-        try stdout.writeAll(json_str);
-        try stdout.writeAll("\n");
-        try stdout.flush();
-    }
-
-    /// Main loop: read JSON-RPC requests line by line from stdin.
-    ///
-    /// Continues processing until stdin closes or an unrecoverable error occurs.
-    /// Each line is expected to be a valid JSON-RPC 2.0 request object.
-    pub fn run(self: *ReplServer) !void {
-        var line_buffer: [8192]u8 = undefined;
-        var stdin_buf: [1]u8 = undefined;
-        var stdin_rdr = File.stdin().reader(self.io, &stdin_buf);
-        const stdin = &stdin_rdr.interface;
-
-        while (true) {
-            // Read a line from stdin
-            const line = readLine(stdin, &line_buffer) catch |err| {
-                switch (err) {
-                    error.EndOfStream => {
-                        // Graceful shutdown when stdin closes
-                        return;
-                    },
-                    else => {
-                        log.err("Failed to read from stdin: {}", .{err});
-                        return err;
-                    },
-                }
-            };
-
-            // Skip empty lines
-            if (line.len == 0) continue;
-
-            // Process the JSON-RPC request
-            self.processRequest(line) catch {
-                // Continue processing other requests even if one fails
-                continue;
-            };
-        }
-    }
-
-    /// Process a JSON-RPC request input.
-    ///
-    /// Parses the request into a Request struct, dispatches to the
-    /// appropriate handler based on method name, and writes the response
-    /// to stdout as a JSON-RPC response.
-    pub fn processRequest(self: *ReplServer, input: []const u8) !void {
-        // Parse the JSON-RPC request
-        var request = jsonrpc_mod.parseRequest(self.allocator, input) catch {
-            // Invalid request - send error response
-            try self.sendErrorResponse(null, -32700, "Parse error");
-            return;
-        };
-        defer request.deinit();
-
-        // Dispatch based on method
-        const method = request.method;
-        const id = request.id;
-
-        // Dispatch to appropriate handler
-        if (std.mem.eql(u8, method, "init")) {
-            try self.handleInit(id);
-        } else if (std.mem.eql(u8, method, "eval")) {
-            try self.handleEval(id, request.params);
-        } else if (std.mem.eql(u8, method, "type")) {
-            try self.handleType(id, request.params);
-        } else if (std.mem.eql(u8, method, "shutdown")) {
-            try self.handleShutdown(id);
-        } else {
-            // Method not found
-            try self.sendErrorResponse(id, -32601, "Method not found");
-        }
-    }
-
 };
 
 /// Read a line from stdin into the provided buffer.
@@ -262,7 +294,6 @@ fn readLine(stdin: anytype, buf: []u8) ![]const u8 {
         buf[pos] = byte;
         pos += 1;
     }
-    // Line too long — return what we have.
     return buf[0..pos];
 }
 
@@ -271,9 +302,6 @@ fn readLine(stdin: anytype, buf: []u8) ![]const u8 {
 const testing = std.testing;
 
 test "server: ReplServer has expected fields" {
-    // Session.init → initBuiltins allocates HType trees that TyEnv.deinit
-    // does not yet deep-free (tracked pre-existing issue). Use an arena so
-    // the leak-detecting allocator sees a clean exit.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -282,7 +310,6 @@ test "server: ReplServer has expected fields" {
     var server = try ReplServer.init(allocator, io);
     defer server.deinit();
 
-    // Verify server has expected allocator and io
     _ = server.allocator;
     _ = server.io;
 }
@@ -295,6 +322,74 @@ test "server: init and deinit work correctly" {
 
     var server = try ReplServer.init(allocator, io);
     server.deinit();
+}
 
-    // If we got here without panicking, init/deinit worked
+test "server: processRequestToString handles init" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = testing.io;
+
+    var server = try ReplServer.init(allocator, io);
+    defer server.deinit();
+
+    const response = try server.processRequestToString(
+        \\{"jsonrpc":"2.0","id":1,"method":"init"}
+    );
+    defer allocator.free(response);
+
+    try testing.expect(std.mem.indexOf(u8, response, "\"result\":\"ok\"") != null);
+}
+
+test "server: processRequestToString handles eval" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = testing.io;
+
+    var server = try ReplServer.init(allocator, io);
+    defer server.deinit();
+
+    const response = try server.processRequestToString(
+        \\{"jsonrpc":"2.0","id":1,"method":"eval","params":["42"]}
+    );
+    defer allocator.free(response);
+
+    try testing.expect(std.mem.indexOf(u8, response, "\"result\":\"42\"") != null);
+}
+
+test "server: processRequestToString handles shutdown" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = testing.io;
+
+    var server = try ReplServer.init(allocator, io);
+    defer server.deinit();
+
+    try testing.expect(!server.should_shutdown);
+
+    const response = try server.processRequestToString(
+        \\{"jsonrpc":"2.0","id":1,"method":"shutdown"}
+    );
+    defer allocator.free(response);
+
+    try testing.expect(server.should_shutdown);
+    try testing.expect(std.mem.indexOf(u8, response, "\"result\":\"ok\"") != null);
+}
+
+test "server: processRequestToString handles parse error" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = testing.io;
+
+    var server = try ReplServer.init(allocator, io);
+    defer server.deinit();
+
+    const response = try server.processRequestToString("not json");
+    defer allocator.free(response);
+
+    try testing.expect(std.mem.indexOf(u8, response, "\"error\"") != null);
+    try testing.expect(std.mem.indexOf(u8, response, "Parse error") != null);
 }

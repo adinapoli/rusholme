@@ -49,10 +49,9 @@ pub const ErrorResponse = struct {
     /// Points into the input string used to create the Response;
     /// does not need to be freed.
     message: []const u8,
-    /// Additional error details. This is a borrowed slice pointing into
-    /// the original JSON response, or null if not present.
-    /// Does not need to be freed.
-    data: ?[]const u8 = null,
+    /// Additional structured error data (e.g. diagnostics).
+    /// Serialized as a proper JSON value in the response.
+    data: ?std.json.Value = null,
 };
 
 /// Parse a JSON-RPC request string into a Request struct.
