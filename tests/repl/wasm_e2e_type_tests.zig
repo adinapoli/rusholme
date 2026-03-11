@@ -70,3 +70,27 @@ test "type e2e: session-defined function type" {
     try testing.expect(std.mem.indexOf(u8, r.?, "forall") != null);
     try testing.expect(std.mem.indexOf(u8, r.?, "a -> a") != null or std.mem.indexOf(u8, r.?, "forall a. a -> a") != null);
 }
+
+test "type e2e: polymorphic constructor type (#508)" {
+    // Regression test: polymorphic constructors should show type variables (e.g., "a")
+    // not metavariable IDs (e.g., "?5") in their types.
+    const input =
+        \\{"jsonrpc":"2.0","id":1,"method":"init"}
+        \\{"jsonrpc":"2.0","id":2,"method":"eval","params":["data List a = Nil | Cons a (List a)"]}
+        \\{"jsonrpc":"2.0","id":3,"method":"type","params":["Nil"]}
+        \\
+    ;
+    const result = try runServer(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    const lines = try splitLines(testing.allocator, result.stdout);
+    defer testing.allocator.free(lines);
+
+    const r = try extractResult(testing.allocator, lines[2]);
+    defer if (r) |s| testing.allocator.free(s);
+
+    // Should show "forall a. List a", NOT "forall a. List ?N"
+    try testing.expect(std.mem.indexOf(u8, r.?, "List a") != null);
+    // Ensure no metavariable IDs appear in the output
+    try testing.expect(std.mem.indexOf(u8, r.?, "?") == null);
+}
