@@ -690,3 +690,30 @@ test "wasm e2e: multi-equation variable pattern preserves literal values" {
     try testing.expect(found_5);
     try testing.expect(found_42);
 }
+
+// ── Anonymous lambda (issue #501) ────────────────────────────────────────
+
+test "wasm e2e: anonymous lambda in app position (#501)" {
+    // Regression test: expression-position lambdas must be lifted and
+    // evaluated correctly. Previously panicked with "Unexpected lambda in
+    // translateExpr" or produced no output.
+    const input =
+        \\{"jsonrpc":"2.0","id":1,"method":"init"}
+        \\{"jsonrpc":"2.0","id":2,"method":"eval","params":["(\\x -> 1) 2"]}
+        \\
+    ;
+    const result = try runServer(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+
+    const lines = try splitLines(testing.allocator, result.stdout);
+    defer testing.allocator.free(lines);
+
+    try testing.expect(lines.len >= 2);
+
+    // The lambda (\x -> 1) ignores its argument and returns 1.
+    const r = try extractResult(testing.allocator, lines[1]);
+    defer if (r) |s| testing.allocator.free(s);
+    try testing.expectEqualStrings("1", r.?);
+}
