@@ -380,7 +380,15 @@ fn solveMetaInTree(node: *HType, target_id: u32, rigid: *HType) void {
             }
         },
         .Rigid => {},
-        .Con => |c| for (c.args) |arg| solveMetaInTree(@constCast(&arg), target_id, rigid),
+        .Con => |c| {
+            // c.args is []const HType, but we need to mutate Meta.ref in place.
+            // Use indexed access to get a pointer to the actual slice element,
+            // not a pointer to a local copy from the for-loop iterator.
+            var i: usize = 0;
+            while (i < c.args.len) : (i += 1) {
+                solveMetaInTree(@constCast(&c.args[i]), target_id, rigid);
+            }
+        },
         .AppTy => |at| {
             solveMetaInTree(@constCast(at.head), target_id, rigid);
             solveMetaInTree(@constCast(at.arg), target_id, rigid);
