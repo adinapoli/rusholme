@@ -121,8 +121,18 @@ pub const ReplServer = struct {
         };
         defer self.allocator.free(input);
 
-        // tracked in: https://github.com/adinapoli/rusholme/issues/494
-        return try self.formatErrorStr(id, -32601, "Type checking not yet implemented");
+        const result = protocol_mod.typeOf(self.allocator, &self.session, input) catch |err| {
+            const msg = try std.fmt.allocPrint(self.allocator, "Type checking failed: {s}", .{@errorName(err)});
+            defer self.allocator.free(msg);
+            return try self.formatErrorStr(id, -32603, msg);
+        };
+
+        return switch (result.status) {
+            .success => try self.formatSuccessStr(id, result.value),
+            .failed => try self.formatErrorWithDiagnosticsStr(id, -32603, result.value, result.diagnostics),
+            // .silent case not applicable for type queries - type always returns a result or error
+            .silent => try self.formatErrorStr(id, -32603, "Internal error: silent status from type query"),
+        };
     }
 
     // ── Response formatting (pure, no IO) ─────────────────────────
