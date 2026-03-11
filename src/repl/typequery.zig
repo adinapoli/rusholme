@@ -18,6 +18,7 @@ const Session = @import("session.zig").Session;
 const pipeline = @import("pipeline.zig").Pipeline;
 const htype_mod = @import("../typechecker/htype.zig");
 const env_mod = @import("../typechecker/env.zig");
+const DiagnosticCollector = @import("../diagnostics/diagnostic.zig").DiagnosticCollector;
 
 pub const TypeQueryResult = struct {
     /// The inferred type scheme (polymorphic or monomorphic).
@@ -41,35 +42,51 @@ pub fn typeOf(
 ) !TypeQueryResult {
     _ = alloc;
 
-    // 1. Compile the expression through the pipeline
-    // NOTE: We pass null for diagnostics since typeOf is read-only
-    // and any diagnostics would be captured in session.last_diagnostics
-    const compile = try session.pipeline.compileInput(
+    // 1. Push transactional scope frames BEFORE compilation
+    session.rename_env.scope.push() catch return error.OutOfMemory;
+    session.ty_env.push() catch {
+        session.rename_env.scope.pop();
+        return error.OutOfMemory;
+    };
+
+    // 2. Compile the expression through the pipeline
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(session.allocator);
+
+    const compile = session.pipeline.compileInput(
         expr,
         &session.u_supply,
         &session.rename_env,
         &session.ty_env,
         &session.mv_supply,
-        null, // diags not needed here — caller can check session.last_diagnostics
+        &diags,
         &session.accumulated_arities,
         &session.accumulated_con_map,
-    );
+    ) catch |err| {
+        // Rollback: pop the scope frames to discard partial bindings
+        session.ty_env.pop();
+        session.rename_env.scope.pop();
+        return err;
+    };
 
-    // 2. Transactional rollback: pop scope frames to restore state
+    // 3. Transactional rollback: pop scope frames to restore state
     // This ensures read-only semantics — the compilation is performed
     // but all bindings are discarded after type lookup.
     session.ty_env.pop();
     session.rename_env.scope.pop();
 
-    // 3. Look up the type via the synthesized name
+    // 4. Look up the type via the synthesized name
     // Expressions are wrapped as `replExpr__ = <expr>` during compilation,
     // so the first def in the program should be the expression binding.
+    if (compile.program.defs.len == 0) {
+        return error.CompilationFailed;
+    }
     const def = compile.program.defs[0];
     const scheme = session.ty_env.lookupScheme(def.name.unique) orelse {
-        return error.TypeCheckFailed;
+        return error.CompilationFailed;
     };
 
-    // 4. Format the display: "<expr> :: <type>"
+    // 5. Format the display: "<expr> :: <type>"
     const type_str = try htype_mod.prettyScheme(scheme, session.allocator);
     defer session.allocator.free(type_str);
     const display = try std.fmt.allocPrint(session.allocator, "{s} :: {s}", .{ expr, type_str });
