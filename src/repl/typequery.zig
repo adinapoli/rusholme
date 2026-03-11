@@ -15,6 +15,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const Session = @import("session.zig").Session;
+const pipeline = @import("pipeline.zig").Pipeline;
 const htype_mod = @import("../typechecker/htype.zig");
 const env_mod = @import("../typechecker/env.zig");
 
@@ -39,7 +40,61 @@ pub fn typeOf(
     expr: []const u8,
 ) !TypeQueryResult {
     _ = alloc;
-    _ = session;
-    _ = expr;
-    @panic("Not implemented");
+
+    // 1. Compile the expression through the pipeline
+    // NOTE: We pass null for diagnostics since typeOf is read-only
+    // and any diagnostics would be captured in session.last_diagnostics
+    const compile = try session.pipeline.compileInput(
+        expr,
+        &session.u_supply,
+        &session.rename_env,
+        &session.ty_env,
+        &session.mv_supply,
+        null, // diags not needed here — caller can check session.last_diagnostics
+        &session.accumulated_arities,
+        &session.accumulated_con_map,
+    );
+
+    // 2. Transactional rollback: pop scope frames to restore state
+    // This ensures read-only semantics — the compilation is performed
+    // but all bindings are discarded after type lookup.
+    session.ty_env.pop();
+    session.rename_env.scope.pop();
+
+    // 3. Look up the type via the synthesized name
+    // Expressions are wrapped as `replExpr__ = <expr>` during compilation,
+    // so the first def in the program should be the expression binding.
+    const def = compile.program.defs[0];
+    const scheme = session.ty_env.lookupScheme(def.name.unique) orelse {
+        return error.TypeCheckFailed;
+    };
+
+    // 4. Format the display: "<expr> :: <type>"
+    const type_str = try htype_mod.prettyScheme(scheme, session.allocator);
+    defer session.allocator.free(type_str);
+    const display = try std.fmt.allocPrint(session.allocator, "{s} :: {s}", .{ expr, type_str });
+
+    return TypeQueryResult{
+        .scheme = scheme,
+        .display = display,
+        .diags = &.{},
+    };
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+test "typequery: simple literal" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = try Session.init(alloc, testing.io);
+    defer session.deinit();
+
+    const result = try typeOf(alloc, &session, "42");
+    defer alloc.free(result.display);
+
+    try testing.expectEqualStrings("42 :: Int", result.display);
 }
