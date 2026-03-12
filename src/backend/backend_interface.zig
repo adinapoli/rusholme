@@ -1,10 +1,10 @@
 //! Backend trait for multi-target code generation.
 //!
 //! This module defines the abstraction layer for different backends
-//! (native, GraalVM, WebAssembly, C, etc.). Each backend implements
+//! (native, JIT, WebAssembly, C, etc.). Each backend implements
 //! the Backend vtable with emit/link/run operations.
 //!
-//! See `docs/sulong-architecture.md` for full design details.
+//! See DESIGN.md for full design details.
 
 const std = @import("std");
 
@@ -19,8 +19,8 @@ pub const BackendKind = enum {
     /// Native executable via LLVM (default, current implementation).
     native,
 
-    /// GraalVM/Sulong interpreter (LLVM bitcode).
-    graalvm,
+    /// JIT backend — emits LLVM IR for execution via lli.
+    jit,
 
     /// WebAssembly (future, issues #77-#79).
     wasm,
@@ -33,7 +33,7 @@ pub const BackendKind = enum {
 pub fn backendName(kind: BackendKind) []const u8 {
     return switch (kind) {
         .native => "native",
-        .graalvm => "graalvm",
+        .jit => "jit",
         .wasm => "wasm",
         .c => "c",
     };
@@ -42,7 +42,7 @@ pub fn backendName(kind: BackendKind) []const u8 {
 /// Parse backend name string to enum.
 pub fn parseBackendKind(name: []const u8) ?BackendKind {
     if (std.mem.eql(u8, name, "native")) return .native;
-    if (std.mem.eql(u8, name, "graalvm")) return .graalvm;
+    if (std.mem.eql(u8, name, "jit")) return .jit;
     if (std.mem.eql(u8, name, "wasm")) return .wasm;
     if (std.mem.eql(u8, name, "c")) return .c;
     return null;
@@ -191,11 +191,11 @@ pub const VTable = struct {
 /// };
 /// ```
 ///
-/// Each backend struct (NativeBackend, GraalVMBackend, etc.) should:
+/// Each backend struct (NativeBackend, JitBackend, etc.) should:
 /// 1. Embed Backend as its first field (or in a known position)
 /// 2. Implement the vtable functions with @ptrCast to the concrete type
 pub const Backend = struct {
-    /// Kind of backend (native, graalvm, wasm, c).
+    /// Kind of backend (native, jit, wasm, c).
     kind: BackendKind,
 
     /// Human-readable name.
@@ -236,14 +236,14 @@ pub const Error = error{
 
 test "backendName" {
     try std.testing.expectEqualStrings("native", backendName(.native));
-    try std.testing.expectEqualStrings("graalvm", backendName(.graalvm));
+    try std.testing.expectEqualStrings("jit", backendName(.jit));
     try std.testing.expectEqualStrings("wasm", backendName(.wasm));
     try std.testing.expectEqualStrings("c", backendName(.c));
 }
 
 test "parseBackendKind" {
     try std.testing.expect(parseBackendKind("native").? == .native);
-    try std.testing.expect(parseBackendKind("graalvm").? == .graalvm);
+    try std.testing.expect(parseBackendKind("jit").? == .jit);
     try std.testing.expect(parseBackendKind("wasm").? == .wasm);
     try std.testing.expect(parseBackendKind("c").? == .c);
     try std.testing.expect(parseBackendKind("unknown") == null);
@@ -251,7 +251,7 @@ test "parseBackendKind" {
 
 test "BackendKind enum values" {
     try std.testing.expectEqual(@intFromEnum(BackendKind.native), 0);
-    try std.testing.expectEqual(@intFromEnum(BackendKind.graalvm), 1);
+    try std.testing.expectEqual(@intFromEnum(BackendKind.jit), 1);
     try std.testing.expectEqual(@intFromEnum(BackendKind.wasm), 2);
     try std.testing.expectEqual(@intFromEnum(BackendKind.c), 3);
 }

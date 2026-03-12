@@ -1,7 +1,7 @@
-//! GraalVM/Sulong backend - interprets LLVM bitcode via GraalVM.
+//! JIT backend — emits LLVM IR for execution via lli.
 //!
 //! This backend compiles the Zig runtime to LLVM bitcode and links it
-//! with Haskell LLVM IR for execution via GraalVM's lli launcher.
+//! with Haskell LLVM IR for execution via lli (LLVM interpreter/JIT).
 
 const std = @import("std");
 
@@ -17,7 +17,7 @@ const ZIG_BITCODE_FLAGS = &[_][]const u8{
     "-ofmt=bc",
 };
 
-/// Build Zig runtime system as LLVM bitcode for GraalVM.
+/// Build Zig runtime system as LLVM bitcode for the JIT backend.
 ///
 /// This invokes zig build-lib with the appropriate flags to produce
 /// a .bc file instead of a native object.
@@ -75,13 +75,13 @@ pub fn linkBitcode(allocator: std.mem.Allocator, haskell_bc: []const u8, zig_bc:
     }
 }
 
-/// Emit LLVM bitcode for execution via Sulong.
+/// Emit LLVM bitcode for execution via lli.
 const emit = struct {
     fn emit(
         backend: *const anyopaque,
         context: *const backend_mod.EmitContext,
     ) !backend_mod.EmissionResult {
-        const self_graalvm: *const GraalVMBackend = @ptrCast(@alignCast(backend));
+        const self_jit: *const JitBackend = @ptrCast(@alignCast(backend));
 
         // For M1 scope: emit haskell_llvm_to_bc
         // This would call grin_to_llvm.zig translator and then convert to bitcode
@@ -93,7 +93,7 @@ const emit = struct {
         // 3. Build runtime bitcode via zig build-lib
         // 4. Return path to combined bitcode or just the Haskell bitcode
 
-        _ = self_graalvm.allocator;
+        _ = self_jit.allocator;
         _ = context.grin_program;
 
         return .{ .bitcode = context.output_path };
@@ -106,30 +106,30 @@ const link_link = struct {
         backend: *const anyopaque,
         context: *const backend_mod.LinkContext,
     ) !void {
-        const self_graalvm: *const GraalVMBackend = @ptrCast(@alignCast(backend));
+        const self_jit: *const JitBackend = @ptrCast(@alignCast(backend));
 
         // Expected context: 2 files - [haskell_program.bc, runtime.bc]
         if (context.emitted_files.len < 2) {
-            std.log.err("GraalVM link expected at least 2 files, got {d}", .{context.emitted_files.len});
+            std.log.err("JIT link expected at least 2 files, got {d}", .{context.emitted_files.len});
             return error.InvalidInput;
         }
 
         const haskell_bc = context.emitted_files[0];
         const runtime_bc = context.emitted_files[1];
-        const output_name = context.output_name orelse "graalvm_app.bc";
+        const output_name = context.output_name orelse "jit_app.bc";
 
         // Build runtime bitcode if not already built
         // (In real implementation, check if runtime_bc exists)
-        try buildRuntimeBitcode(self_graalvm.allocator, runtime_bc);
+        try buildRuntimeBitcode(self_jit.allocator, runtime_bc);
 
         // Link them together
-        try linkBitcode(self_graalvm.allocator, haskell_bc, runtime_bc, output_name);
+        try linkBitcode(self_jit.allocator, haskell_bc, runtime_bc, output_name);
 
         std.log.info("Linked {s} and {s} into {s}", .{ haskell_bc, runtime_bc, output_name });
     }
 };
 
-/// Run bitcode via GraalVM's lli.
+/// Run LLVM IR via lli.
 const link_run = struct {
     fn run(
         backend: *const anyopaque,
@@ -137,8 +137,7 @@ const link_run = struct {
     ) !void {
         _ = backend;
 
-        // Invoke lli to execute the bitcode
-        // Check GraalVM is available on PATH
+        // Check lli is available on PATH
         var which_result = try std.process.run(std.heap.page_allocator, undefined, .{
             .argv = &.{ "which", "lli" },
         });
@@ -146,7 +145,7 @@ const link_run = struct {
         defer std.heap.page_allocator.free(which_result.stderr);
 
         if (@intFromEnum(which_result.term) != 0) {
-            return error.GraalVMNotFound;
+            return error.LliNotFound;
         }
 
         // For real execution, would run: lli <executable_path> [args...]
@@ -154,14 +153,14 @@ const link_run = struct {
     }
 };
 
-pub const GraalVMBackend = struct {
+pub const JitBackend = struct {
     /// Allocator for runtime allocations.
     allocator: std.mem.Allocator,
 
     /// Backend struct implementing the vtable operations.
     pub const inner = backend_mod.Backend{
-        .kind = .graalvm,
-        .name = "graalvm",
+        .kind = .jit,
+        .name = "jit",
         .vtable = .{
             .emit = emit.emit,
             .link = link_link.link,
@@ -169,20 +168,20 @@ pub const GraalVMBackend = struct {
         },
     };
 
-    /// Create a GraalVMBackend instance.
-    pub fn init(allocator: std.mem.Allocator) GraalVMBackend {
+    /// Create a JitBackend instance.
+    pub fn init(allocator: std.mem.Allocator) JitBackend {
         return .{ .allocator = allocator };
     }
 
     /// Get the Backend trait reference.
-    pub fn asBackend(self: *const GraalVMBackend) *const backend_mod.Backend {
+    pub fn asBackend(self: *const JitBackend) *const backend_mod.Backend {
         return &self.inner;
     }
 };
 
-test "GraalVMBackend: create and get backend reference" {
+test "JitBackend: create and get backend reference" {
     const allocator = std.testing.allocator;
-    const graalvm = GraalVMBackend.init(allocator);
-    _ = graalvm; // Use value
-    try std.testing.expectEqual(backend_mod.BackendKind.graalvm, GraalVMBackend.inner.kind);
+    const jit_backend = JitBackend.init(allocator);
+    _ = jit_backend;
+    try std.testing.expectEqual(backend_mod.BackendKind.jit, JitBackend.inner.kind);
 }

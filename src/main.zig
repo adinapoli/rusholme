@@ -8,7 +8,7 @@
 //!   rhc ll <file.hs>       Full pipeline; emit LLVM IR
 //!   rhc build [--backend <kind>] [-o <out>] <file.hs>
 //!                          Full pipeline; compile to native executable
-//!                          Backends: native (default), graalvm, wasm, c
+//!                          Backends: native (default), jit, wasm, c
 //!   rhc repl               Interactive REPL (read-eval-print loop)
 //!   rhc --help             Show this help message
 //!   rhc --version          Show version information
@@ -51,18 +51,18 @@ fn getWasmCompilerRtLibPath() []const u8 {
     return @embedFile("wasm_compiler_rt_lib_path");
 }
 
-/// Get the path to the GraalVM RTS LLVM bitcode baked in at compile time.
-/// Returns the path to rts_graalvm.bc which is merged with program bitcode
-/// via llvm-link so that lli can resolve rts_alloc, rts_putStrLn, etc.
-fn getGraalvmRtsBcPath() []const u8 {
-    return @embedFile("graalvm_rts_bc_path");
+/// Get the path to the JIT backend RTS LLVM bitcode baked in at compile time.
+/// Returns the path to rts_jit.bc which is merged with program bitcode
+/// in-process so that lli can resolve rts_alloc, rts_putStrLn, etc.
+fn getJitRtsBcPath() []const u8 {
+    return @embedFile("jit_rts_bc_path");
 }
 
-/// Get the path to the GraalVM compiler-rt LLVM bitcode baked in at compile time.
+/// Get the path to the JIT backend compiler-rt LLVM bitcode baked in at compile time.
 /// Provides __zig_probe_stack, __divti3, and other builtins that the Zig RTS
 /// references but which are normally resolved by the system linker.
-fn getGraalvmCompilerRtBcPath() []const u8 {
-    return @embedFile("graalvm_compiler_rt_bc_path");
+fn getJitCompilerRtBcPath() []const u8 {
+    return @embedFile("jit_compiler_rt_bc_path");
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -202,7 +202,7 @@ pub fn main(init: std.process.Init) !void {
                     var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
                     const stderr = &stderr_fw.interface;
                     try stderr.print("rhc build: unknown backend '{s}'\n", .{cmd_args[i]});
-                    try stderr.print("Valid backends: native, graalvm, wasm, c\n", .{});
+                    try stderr.print("Valid backends: native, jit, wasm, c\n", .{});
                     try stderr.flush();
                     std.process.exit(1);
                 };
@@ -699,7 +699,7 @@ fn cmdRepl(allocator: std.mem.Allocator, io: Io, server_mode: bool) !void {
 /// Supports the following backends:
 /// - native: compiles to native executable via LLVM
 /// - wasm: compiles to WebAssembly binary (.wasm)
-/// - graalvm, c: not yet implemented
+/// - jit, c: not yet implemented
 fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8, output_name: []const u8, backend_kind: rusholme.backend.backend_mod.BackendKind, is_repl: bool) !void {
     // REPL mode placeholder - for WASM backend compiles stateful REPL
     _ = is_repl;
@@ -767,7 +767,7 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     // ── Dispatch to backend-specific emission ─────────────────────────────
     switch (backend_kind) {
         .native => try emitNative(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name),
-        .graalvm => try emitGraalVM(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name),
+        .jit => try emitJit(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name),
         .wasm => try emitWasm(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name),
         .c => {
             var stderr_buf: [4096]u8 = undefined;
@@ -906,7 +906,7 @@ fn emitNative(
     Dir.deleteFile(.cwd(), io, obj_path) catch {};
 }
 
-/// Emit LLVM bitcode for execution via GraalVM's lli (or any LLVM interpreter).
+/// Emit LLVM IR for execution via lli (LLVM interpreter/JIT compiler).
 ///
 /// The flow mirrors emitNative / emitWasm:
 ///   1. Translate each module's GRIN to LLVM IR.
@@ -918,7 +918,7 @@ fn emitNative(
 ///
 /// The final output is `{output_name}.bc` which can be run with:
 ///   lli {output_name}.bc
-fn emitGraalVM(
+fn emitJit(
     allocator: std.mem.Allocator,
     io: Io,
     session: *const rusholme.modules.compile_env.CompileEnv,
@@ -952,7 +952,7 @@ fn emitGraalVM(
             var stderr_buf: [4096]u8 = undefined;
             var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
             const stderr = &stderr_fw.interface;
-            try stderr.print("rhc: LLVM codegen failed for GraalVM module '{s}': {}\n", .{ mod_name, err });
+            try stderr.print("rhc: LLVM codegen failed for JIT module '{s}': {}\n", .{ mod_name, err });
             try stderr.flush();
             std.process.exit(1);
         };
@@ -978,7 +978,7 @@ fn emitGraalVM(
     };
 
     // ── Set native target layout ────────────────────────────────────────
-    // GraalVM's Sulong accepts bitcode compiled for the host architecture.
+    // lli accepts bitcode/IR compiled for the host architecture.
     const machine = llvm.createNativeTargetMachine() catch |err| {
         var stderr_buf: [4096]u8 = undefined;
         var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
@@ -997,12 +997,12 @@ fn emitGraalVM(
     // them into the program module using LLVM's in-process linker.  This
     // avoids shelling out to llvm-link (which can fail on bitcode produced
     // by a different LLVM build — e.g. Zig's embedded LLVM vs Nix LLVM).
-    const graalvm_rts_bc_path = getGraalvmRtsBcPath();
-    const rts_mod = llvm.parseBitcodeFile(graalvm_rts_bc_path) catch |err| {
+    const jit_rts_bc_path = getJitRtsBcPath();
+    const rts_mod = llvm.parseBitcodeFile(jit_rts_bc_path) catch |err| {
         var stderr_buf: [4096]u8 = undefined;
         var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
         const stderr = &stderr_fw.interface;
-        try stderr.print("rhc: failed to load RTS bitcode '{s}': {}\n", .{ graalvm_rts_bc_path, err });
+        try stderr.print("rhc: failed to load RTS bitcode '{s}': {}\n", .{ jit_rts_bc_path, err });
         try stderr.flush();
         std.process.exit(1);
     };
@@ -1016,12 +1016,12 @@ fn emitGraalVM(
         std.process.exit(1);
     };
 
-    const graalvm_compiler_rt_bc_path = getGraalvmCompilerRtBcPath();
-    const compiler_rt_mod = llvm.parseBitcodeFile(graalvm_compiler_rt_bc_path) catch |err| {
+    const jit_compiler_rt_bc_path = getJitCompilerRtBcPath();
+    const compiler_rt_mod = llvm.parseBitcodeFile(jit_compiler_rt_bc_path) catch |err| {
         var stderr_buf: [4096]u8 = undefined;
         var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
         const stderr = &stderr_fw.interface;
-        try stderr.print("rhc: failed to load compiler-rt bitcode '{s}': {}\n", .{ graalvm_compiler_rt_bc_path, err });
+        try stderr.print("rhc: failed to load compiler-rt bitcode '{s}': {}\n", .{ jit_compiler_rt_bc_path, err });
         try stderr.flush();
         std.process.exit(1);
     };
@@ -1320,7 +1320,7 @@ fn printUsage(io: Io) !void {
         \\  rhc ll <file.hs>       Full pipeline; emit LLVM IR
         \\  rhc build [--backend <kind>] [-o <out>] <file.hs>
         \\                         Full pipeline; compile to an executable
-        \\                         Backends: native (default), graalvm, wasm, c
+        \\                         Backends: native (default), jit, wasm, c
         \\  rhc repl [--server]   Interactive REPL (read-eval-print loop)
         \\                         Use --server for JSON-RPC protocol mode
         \\  rhc --help             Show this help message

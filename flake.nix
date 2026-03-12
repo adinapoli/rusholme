@@ -52,7 +52,7 @@
               git
               pre-commit
               wasmtime
-              graalvmPackages.graalvm-ce  # GraalVM CE with Sulong for lli JIT
+              graalvmPackages.graalvm-ce  # Provides lli for the JIT backend
             ]) ++ pkgs.lib.optionals (!isDarwin) [
               pkgs.valgrind
             ];
@@ -62,7 +62,7 @@
               echo "   Zig:      $(zig version)"
               echo "   LLVM:     $(llvm-config --version)"
               echo "   Wasmtime: $(wasmtime --version 2>&1 | head -n1 || echo 'not found')"
-              echo "   GraalVM:  $(lli --version 2>&1 | head -n1 || echo 'not found')"
+              echo "   lli:      $(lli --version 2>&1 | head -n1 || echo 'not found')"
               echo ""
             '';
           };

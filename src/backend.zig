@@ -13,7 +13,7 @@
 //!   // Multi-backend trait interface (from #335)
 //!   const_backend_mod = rusholme.backend.backend_mod;
 //!   const native = rusholme.backend.native;
-//!   const graalvm = rusholme.backend.graalvm;
+//!   const jit = rusholme.backend.jit;
 
 // ═══════════════════════════════════════════════════════════════════════
 // Core Backend Infrastructure (from PR #57)
@@ -38,15 +38,15 @@ pub const codegen = @import("backend/codegen.zig");
 /// Backend interface for multi-target code generation.
 ///
 /// Defines the abstraction layer for pluggable backends
-/// (native, GraalVM, WebAssembly, C, etc.) using Zig's
+/// (native, JIT, WebAssembly, C, etc.) using Zig's
 /// function-pointer-in-struct pattern.
 pub const backend_mod = @import("backend/backend_interface.zig");
 
 /// Native LLVM backend implementation.
 pub const native = @import("backend/native.zig");
 
-/// GraalVM/Sulong backend implementation.
-pub const graalvm = @import("backend/graalvm.zig");
+/// JIT backend — emits LLVM IR for execution via lli.
+pub const jit = @import("backend/jit.zig");
 
 /// WebAssembly backend stub (issues #77–#79).
 pub const wasm = @import("backend/wasm.zig");
@@ -65,7 +65,7 @@ test {
     @import("std").testing.refAllDecls(linker);
     @import("std").testing.refAllDecls(backend_mod);
     @import("std").testing.refAllDecls(native);
-    @import("std").testing.refAllDecls(graalvm);
+    @import("std").testing.refAllDecls(jit);
     @import("std").testing.refAllDecls(wasm);
     @import("std").testing.refAllDecls(c_backend);
 }
