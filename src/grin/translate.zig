@@ -659,7 +659,7 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
                     .pat = .{ .Var = ptr_var },
                     .rhs = return_expr,
                 } };
-                return try wrapWithPendingBinds(ctx, bind_expr, pending_binds.items);
+                return try wrapWithLazyBindsForCon(ctx, bind_expr, pending_binds.items);
             }
             // Under-saturated constructor: fall through to partial-application path.
         }
@@ -770,6 +770,9 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
         .args = grin_args,
     } };
 
+    // Note: function arguments are eagerly evaluated here. Haskell semantics
+    // require lazy arguments (call-by-need).
+    // tracked in: https://github.com/adinapoli/rusholme/issues/517
     return try wrapWithPendingBinds(ctx, grin_app, pending_binds.items);
 }
 
@@ -806,7 +809,84 @@ fn wrapWithPendingBinds(
     return result;
 }
 
+/// Wrap an inner expression with lazy thunk stores for constructor arguments.
+///
+/// In Haskell, constructor arguments are lazy: `Succ (double x)` does not
+/// evaluate `double x` — it stores a thunk that captures the function and
+/// its arguments.  This function replaces eager binds with F-tagged stores
+/// for `App` complex expressions:
+///
+///   -- Eager (old):              -- Lazy (new):
+///   arg <- double x              arg <- store (Fdouble [x])
+///   store (CSucc [arg])          store (CSucc [arg])
+///
+/// Non-App complex expressions (Case, Bind chains) are kept eager since
+/// they represent control flow that must be resolved immediately.
+fn wrapWithLazyBindsForCon(
+    ctx: *TranslateCtx,
+    inner: *GrinExpr,
+    pending_binds: []const PendingBind,
+) anyerror!*GrinExpr {
+    if (pending_binds.len == 0) return inner;
+
+    // Partition pending_binds: App expressions become lazy thunks,
+    // everything else stays eager.
+    var eager_binds = std.ArrayListUnmanaged(PendingBind){};
+    defer eager_binds.deinit(ctx.alloc);
+
+    var result = inner;
+    var i: usize = pending_binds.len;
+    while (i > 0) {
+        i -= 1;
+        const pb = pending_binds[i];
+        switch (pb.complex_expr.*) {
+            .App => |app| {
+                // Only wrap as a lazy thunk if the function is a known
+                // top-level definition. Higher-order applications (where
+                // the function is a parameter variable) cannot be thunked
+                // because the F-tag dispatch requires a statically known
+                // function name in the function table.
+                // tracked in: https://github.com/adinapoli/rusholme/issues/517
+                if (ctx.getFunctionArity(app.name) != null) {
+                    // Replace the eager `app func [args]` with `store (Ffunc [args])`.
+                    // The F-tag carries the function's actual unique ID so the LLVM
+                    // tag table can register and dispatch on it correctly.
+                    const ftag = GrinTag{ .tag_type = .{ .Fun = {} }, .name = app.name };
+                    const store_expr = try ctx.alloc.create(GrinExpr);
+                    store_expr.* = .{ .Store = .{ .ConstTagNode = .{
+                        .tag = ftag,
+                        .fields = app.args,
+                    } } };
+                    const bind_expr = try ctx.alloc.create(GrinExpr);
+                    bind_expr.* = .{ .Bind = .{
+                        .lhs = store_expr,
+                        .pat = .{ .Var = pb.fresh_var },
+                        .rhs = result,
+                    } };
+                    result = bind_expr;
+                } else {
+                    // Higher-order application: evaluate eagerly.
+                    try eager_binds.append(ctx.alloc, pb);
+                }
+            },
+            else => {
+                // Non-App complex expression: keep eager evaluation.
+                // tracked in: https://github.com/adinapoli/rusholme/issues/518
+                try eager_binds.append(ctx.alloc, pb);
+            },
+        }
+    }
+
+    // Wrap any remaining eager binds around the (now lazy-wrapped) result.
+    // The eager_binds were collected in reverse order, so reverse them back.
+    std.mem.reverse(PendingBind, eager_binds.items);
+    return try wrapWithPendingBinds(ctx, result, eager_binds.items);
+}
+
 /// Translate a let binding.
+/// Note: let bindings are currently eager — the RHS is fully evaluated before
+/// the body.  Haskell semantics require lazy let (call-by-need).
+/// tracked in: https://github.com/adinapoli/rusholme/issues/516
 fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr {
     switch (let_expr.bind) {
         .NonRec => |pair| {
@@ -1082,12 +1162,20 @@ fn translateLiteral(lit: CoreLiteral) GrinLiteral {
 // ── Tag Collection ────────────────────────────────────────────────────────
 
 /// Collected tags from a GRIN program for eval/apply generation.
+/// Metadata for an F-tagged function thunk: base name and arity.
+const FunTagInfo = struct {
+    base: []const u8,
+    arity: u32,
+};
+
 const TagInfo = struct {
     /// Constructor tags (C-tagged)
     con_tags: std.ArrayListUnmanaged(GrinTag),
 
-    /// Function tags (F-tagged) - all top-level function names
-    fun_tags: std.StringHashMapUnmanaged(void), // deduplicated by name
+    /// Function tags (F-tagged), keyed by unique ID.
+    /// Carries the base name and arity so that eval can generate
+    /// NodePat field binders and pass captured args to the function.
+    fun_tags: std.AutoHashMapUnmanaged(u64, FunTagInfo),
 
     pub fn init() TagInfo {
         return .{
@@ -1107,9 +1195,13 @@ fn collectTags(alloc: std.mem.Allocator, program: GrinProgram) !TagInfo {
     var info = TagInfo.init();
     errdefer info.deinit(alloc);
 
-    // Collect function names (all Def names are potential F-tags)
+    // Collect function names with their unique IDs and arities.
+    // All top-level defs are potential F-tag targets for thunk forcing.
     for (program.defs) |def| {
-        try info.fun_tags.put(alloc, def.name.base, {});
+        try info.fun_tags.put(alloc, def.name.unique.value, .{
+            .base = def.name.base,
+            .arity = @intCast(def.params.len),
+        });
     }
 
     // Collect constructor tags by scanning all expressions for ConstTagNode
@@ -1267,14 +1359,18 @@ fn generateEvalFunc(alloc: std.mem.Allocator, tag_info: *const TagInfo) !GrinDef
         try alts.append(alloc, alt);
     }
 
-    // Add F-tag alternatives (thunks - need to force)
+    // Add F-tag alternatives (thunks - need to force).
+    // Each F-tag captures the function's arguments in its fields, so
+    // we use NodePat with field binders and pass them to the function call.
     var fun_iter = tag_info.fun_tags.iterator();
     while (fun_iter.next()) |entry| {
+        const unique = entry.key_ptr.*;
+        const info = entry.value_ptr.*;
         const func_name = GrinName{
-            .base = entry.key_ptr.*,
-            .unique = .{ .value = 0 }, // Use base name
+            .base = info.base,
+            .unique = .{ .value = unique },
         };
-        const alt = try generateFunTagAlt(alloc, p_param.*, result_var.*, func_name);
+        const alt = try generateFunTagAlt(alloc, p_param.*, result_var.*, func_name, info.arity);
         try alts.append(alloc, alt);
     }
 
@@ -1340,15 +1436,33 @@ fn generateConTagAlt(alloc: std.mem.Allocator, node_var: GrinName, con_tag: Grin
 
 /// Generate an F-tag alternative (thunk - need to force).
 ///
-/// Pattern: F<func>
-/// Body: app func [] >>= \result -> update p result; return result
-fn generateFunTagAlt(alloc: std.mem.Allocator, p: GrinName, result: GrinName, func_name: GrinName) !GrinAlt {
-    // Create app expression: app func []
+/// An F-tagged thunk `Ffunc [a0, a1, ...]` captures the function's arguments
+/// in its fields.  Forcing it means extracting those fields and calling the
+/// function, then updating the thunk with an indirection to the result.
+///
+/// Pattern: F<func> field_0 field_1 ... field_{arity-1}
+/// Body: app func [field_0, ..., field_{arity-1}] >>= \result ->
+///         update p result; return result
+fn generateFunTagAlt(alloc: std.mem.Allocator, p: GrinName, result: GrinName, func_name: GrinName, arity: u32) !GrinAlt {
+    const fun_tag = funTag(func_name.base, func_name.unique.value);
+
+    // Create field binder names for captured arguments.
+    const field_names = try alloc.alloc(GrinName, arity);
+    const field_args = try alloc.alloc(GrinVal, arity);
+    for (0..arity) |i| {
+        field_names[i] = .{
+            .base = "fld",
+            .unique = .{ .value = func_name.unique.value *% 100 +% i },
+        };
+        field_args[i] = .{ .Var = field_names[i] };
+    }
+
+    // Create app expression: app func [field_0, ..., field_{arity-1}]
     const app_expr = try alloc.create(GrinExpr);
     app_expr.* = .{
         .App = .{
             .name = func_name,
-            .args = &.{}, // No arguments (unforced thunk)
+            .args = field_args,
         },
     };
 
@@ -1359,7 +1473,7 @@ fn generateFunTagAlt(alloc: std.mem.Allocator, p: GrinName, result: GrinName, fu
         .val = .{ .Var = result },
     } };
 
-    // Create bind expression: app func [] >>= \result -> update p result
+    // Create bind expression: app func [args] >>= \result -> update p result
     const update_bind = try alloc.create(GrinExpr);
     update_bind.* = .{ .Bind = .{
         .lhs = app_expr,
@@ -1371,7 +1485,7 @@ fn generateFunTagAlt(alloc: std.mem.Allocator, p: GrinName, result: GrinName, fu
     const ret_expr = try alloc.create(GrinExpr);
     ret_expr.* = .{ .Return = .{ .Var = result } };
 
-    // Chain: (app func [] >>= \result -> update p result); return result
+    // Chain: (app func [args] >>= \result -> update p result); return result
     const alt_body = try alloc.create(GrinExpr);
     alt_body.* = .{ .Bind = .{
         .lhs = update_bind,
@@ -1379,10 +1493,8 @@ fn generateFunTagAlt(alloc: std.mem.Allocator, p: GrinName, result: GrinName, fu
         .rhs = ret_expr,
     } };
 
-    const fun_tag = funTag(func_name.base, func_name.unique.value);
-
     return GrinAlt{
-        .pat = .{ .TagPat = fun_tag },
+        .pat = .{ .NodePat = .{ .tag = fun_tag, .fields = field_names } },
         .body = alt_body,
     };
 }
@@ -1717,9 +1829,9 @@ test "TagInfo: collects constructor tags" {
     }
     try testing.expect(just_found);
 
-    // Should have collected the function name
+    // Should have collected the function name (keyed by unique ID)
     try testing.expect(tag_info.fun_tags.count() >= 1);
-    try testing.expect(tag_info.fun_tags.contains("testFunc"));
+    try testing.expect(tag_info.fun_tags.contains(10)); // testFunc unique = 10
 }
 
 test "generateApplyFunc: has proper signature" {
