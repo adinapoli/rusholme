@@ -1035,6 +1035,14 @@ fn emitGraalVM(
         std.process.exit(1);
     };
 
+    // ── Strip host-specific function attributes ──────────────────────
+    // The Zig-compiled RTS/compiler-rt bitcode carries per-function
+    // target-cpu and target-features attributes from the build host.
+    // These can reference features unknown to the system lli, causing
+    // noisy warnings.  Since lli JITs for the host anyway, the
+    // attributes are unnecessary — strip them before emitting the IR.
+    llvm.stripTargetAttributes(linked_mod);
+
     // ── Write final LLVM IR ────────────────────────────────────────────
     // We emit textual IR (.ll) rather than bitcode (.bc) because Zig
     // embeds its own LLVM build whose bitcode format may be incompatible

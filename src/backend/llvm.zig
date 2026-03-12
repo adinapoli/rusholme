@@ -489,6 +489,39 @@ pub fn writeIRToFile(module: Module, path: []const u8) TargetError!void {
     }
 }
 
+/// Strip `target-cpu` and `target-features` string attributes from every
+/// function in the module.
+///
+/// When Zig compiles the RTS and compiler-rt to bitcode, it stamps each
+/// function with the host CPU's full feature set (e.g. `target-cpu="znver5"`
+/// with hundreds of `+`/`-` features).  After in-process linking, these
+/// attributes survive into the final textual IR.  The system `lli` may use
+/// a slightly different LLVM build that does not recognise every feature
+/// name, producing noisy warnings like `'-amx-avx512' is not a recognized
+/// feature for this target (ignoring feature)`.
+///
+/// Stripping these attributes is safe because `lli` interprets/JITs the IR
+/// for the host anyway — it does not need compile-time target hints.
+pub fn stripTargetAttributes(module: Module) void {
+    const attrs_to_strip = [_][]const u8{ "target-cpu", "target-features" };
+    // LLVMAttributeFunctionIndex is defined as (unsigned)-1 in the C header.
+    // Zig's @cImport cannot represent the negative-to-unsigned cast, so we
+    // use the equivalent bit pattern directly.
+    const function_index: llvm_c.LLVMAttributeIndex = ~@as(llvm_c.LLVMAttributeIndex, 0);
+
+    var func = llvm_c.LLVMGetFirstFunction(module);
+    while (func != null) : (func = llvm_c.LLVMGetNextFunction(func)) {
+        for (attrs_to_strip) |attr_name| {
+            llvm_c.LLVMRemoveStringAttributeAtIndex(
+                func,
+                function_index,
+                attr_name.ptr,
+                @intCast(attr_name.len),
+            );
+        }
+    }
+}
+
 /// Merge `src` into `dest` using the LLVM in-process linker.
 ///
 /// After a successful call `src` is **disposed** by LLVM and must not be

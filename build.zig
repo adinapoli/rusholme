@@ -173,12 +173,19 @@ pub fn build(b: *std.Build) void {
     // as LLVM bitcode (.bc) instead of a static library (.a).  This bitcode
     // is merged with program bitcode via llvm-link so that lli can execute
     // the result without undefined rts_* symbols.
+    //
+    // We use a baseline CPU model (no host-specific features) so the emitted
+    // IR does not contain target-features strings (e.g. +amx-avx512) that
+    // the system lli may not recognise, avoiding noisy warnings.
+    const graalvm_target = b.resolveTargetQuery(.{
+        .cpu_model = .baseline,
+    });
     const graalvm_rts_lib = b.addLibrary(.{
         .name = "rts_graalvm",
         .linkage = .static,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/rts/root.zig"),
-            .target = target,
+            .target = graalvm_target,
             .optimize = optimize,
             .pic = true,
         }),
@@ -201,7 +208,7 @@ pub fn build(b: *std.Build) void {
         .linkage = .static,
         .root_module = b.createModule(.{
             .root_source_file = .{ .cwd_relative = compiler_rt_zig_path },
-            .target = target,
+            .target = graalvm_target,
             .optimize = .ReleaseSmall,
             .pic = true,
         }),
