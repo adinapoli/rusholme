@@ -52,15 +52,17 @@
               git
               pre-commit
               wasmtime
+              graalvmPackages.graalvm-ce  # GraalVM CE with Sulong for lli JIT
             ]) ++ pkgs.lib.optionals (!isDarwin) [
               pkgs.valgrind
             ];
 
             shellHook = ''
               echo "🍛 Rusholme dev environment loaded"
-              echo "   Zig:  $(zig version)"
-              echo "   LLVM: $(llvm-config --version)"
+              echo "   Zig:      $(zig version)"
+              echo "   LLVM:     $(llvm-config --version)"
               echo "   Wasmtime: $(wasmtime --version 2>&1 | head -n1 || echo 'not found')"
+              echo "   GraalVM:  $(lli --version 2>&1 | head -n1 || echo 'not found')"
               echo ""
             '';
           };

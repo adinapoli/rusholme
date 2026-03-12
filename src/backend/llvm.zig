@@ -13,6 +13,7 @@ const llvm_c = @cImport({
     @cInclude("llvm-c/IRReader.h");
     @cInclude("llvm-c/Linker.h");
     @cInclude("llvm-c/BitWriter.h");
+    @cInclude("llvm-c/BitReader.h");
     @cInclude("llvm-c/Orc.h");
     @cInclude("llvm-c/LLJIT.h");
     @cInclude("llvm-c/OrcEE.h");
@@ -439,6 +440,51 @@ pub fn writeBitcodeToFile(module: Module, path: []const u8) TargetError!void {
     defer std.heap.c_allocator.free(path_c);
 
     if (llvm_c.LLVMWriteBitcodeToFile(module, path_c) != 0) {
+        return error.EmitFailed;
+    }
+}
+
+/// Parse an LLVM bitcode file from disk into an in-memory module.
+///
+/// The returned module is created in a fresh LLVM context.  It can be
+/// merged into another module via `linkModules` — LLVM handles
+/// cross-context linking transparently.
+///
+/// The caller does **not** need to dispose the module explicitly if it
+/// will be consumed by `linkModules` (which disposes the source).
+pub fn parseBitcodeFile(path: []const u8) TargetError!Module {
+    const path_c = tryToNullTerminated(path);
+    defer std.heap.c_allocator.free(path_c);
+
+    var mem_buf: llvm_c.LLVMMemoryBufferRef = null;
+    var err_msg: [*c]u8 = null;
+
+    if (llvm_c.LLVMCreateMemoryBufferWithContentsOfFile(path_c, &mem_buf, &err_msg) != 0) {
+        if (err_msg) |msg| llvm_c.LLVMDisposeMessage(msg);
+        return error.EmitFailed;
+    }
+
+    var module: llvm_c.LLVMModuleRef = null;
+    if (llvm_c.LLVMParseBitcode2(mem_buf, &module) != 0) {
+        // LLVMParseBitcode2 takes ownership of mem_buf even on failure.
+        return error.EmitFailed;
+    }
+
+    return module orelse error.EmitFailed;
+}
+
+/// Write an LLVM module to a textual IR file (.ll).
+///
+/// Textual IR is portable across different LLVM builds of the same major
+/// version, unlike bitcode which can have binary format incompatibilities
+/// between builds (e.g. Zig's embedded LLVM vs a system LLVM package).
+pub fn writeIRToFile(module: Module, path: []const u8) TargetError!void {
+    const path_c = tryToNullTerminated(path);
+    defer std.heap.c_allocator.free(path_c);
+
+    var err_msg: [*c]u8 = null;
+    if (llvm_c.LLVMPrintModuleToFile(module, path_c, &err_msg) != 0) {
+        if (err_msg) |msg| llvm_c.LLVMDisposeMessage(msg);
         return error.EmitFailed;
     }
 }

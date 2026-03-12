@@ -51,6 +51,20 @@ fn getWasmCompilerRtLibPath() []const u8 {
     return @embedFile("wasm_compiler_rt_lib_path");
 }
 
+/// Get the path to the GraalVM RTS LLVM bitcode baked in at compile time.
+/// Returns the path to rts_graalvm.bc which is merged with program bitcode
+/// via llvm-link so that lli can resolve rts_alloc, rts_putStrLn, etc.
+fn getGraalvmRtsBcPath() []const u8 {
+    return @embedFile("graalvm_rts_bc_path");
+}
+
+/// Get the path to the GraalVM compiler-rt LLVM bitcode baked in at compile time.
+/// Provides __zig_probe_stack, __divti3, and other builtins that the Zig RTS
+/// references but which are normally resolved by the system linker.
+fn getGraalvmCompilerRtBcPath() []const u8 {
+    return @embedFile("graalvm_compiler_rt_bc_path");
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -753,8 +767,9 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     // ── Dispatch to backend-specific emission ─────────────────────────────
     switch (backend_kind) {
         .native => try emitNative(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name),
+        .graalvm => try emitGraalVM(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name),
         .wasm => try emitWasm(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name),
-        .graalvm, .c => {
+        .c => {
             var stderr_buf: [4096]u8 = undefined;
             var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
             const stderr = &stderr_fw.interface;
@@ -889,6 +904,151 @@ fn emitNative(
 
     // Delete the temp .o (the .bc files are kept as durable artifacts).
     Dir.deleteFile(.cwd(), io, obj_path) catch {};
+}
+
+/// Emit LLVM bitcode for execution via GraalVM's lli (or any LLVM interpreter).
+///
+/// The flow mirrors emitNative / emitWasm:
+///   1. Translate each module's GRIN to LLVM IR.
+///   2. Link LLVM modules in-process.
+///   3. Set native data layout and triple.
+///   4. Write combined program bitcode to a temp file.
+///   5. Invoke llvm-link to merge program + RTS bitcode → final .bc artifact.
+///   6. Clean up the intermediate program bitcode.
+///
+/// The final output is `{output_name}.bc` which can be run with:
+///   lli {output_name}.bc
+fn emitGraalVM(
+    allocator: std.mem.Allocator,
+    io: Io,
+    session: *const rusholme.modules.compile_env.CompileEnv,
+    module_order: []const []const u8,
+    per_module_grin: []const rusholme.grin.ast.Program,
+    all_grin: rusholme.grin.ast.Program,
+    output_name: []const u8,
+) !void {
+    _ = session;
+    const llvm = rusholme.backend.llvm;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
+    var translator = rusholme.backend.grin_to_llvm.GrinTranslator.init(arena_alloc);
+    defer translator.deinit();
+
+    translator.prepareGlobalTagTable(all_grin) catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: LLVM tag table construction failed: {}\n", .{err});
+        try stderr.flush();
+        std.process.exit(1);
+    };
+
+    // ── Per-module LLVM translation ───────────────────────────────────────
+    var llvm_modules = std.ArrayListUnmanaged(llvm.Module){};
+    for (module_order, per_module_grin) |mod_name, grin_prog| {
+        const llvm_mod = translator.translateModuleGrin(mod_name, grin_prog) catch |err| {
+            var stderr_buf: [4096]u8 = undefined;
+            var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+            const stderr = &stderr_fw.interface;
+            try stderr.print("rhc: LLVM codegen failed for GraalVM module '{s}': {}\n", .{ mod_name, err });
+            try stderr.flush();
+            std.process.exit(1);
+        };
+        try llvm_modules.append(arena_alloc, llvm_mod);
+    }
+
+    // ── In-process bitcode linking ──────────────────────────────────────
+    const linked_mod: llvm.Module = if (llvm_modules.items.len == 1)
+        llvm_modules.items[0]
+    else blk: {
+        const dest = llvm_modules.items[0];
+        for (llvm_modules.items[1..]) |src| {
+            llvm.linkModules(dest, src) catch |err| {
+                var stderr_buf: [4096]u8 = undefined;
+                var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+                const stderr = &stderr_fw.interface;
+                try stderr.print("rhc: LLVM bitcode linking failed: {}\n", .{err});
+                try stderr.flush();
+                std.process.exit(1);
+            };
+        }
+        break :blk dest;
+    };
+
+    // ── Set native target layout ────────────────────────────────────────
+    // GraalVM's Sulong accepts bitcode compiled for the host architecture.
+    const machine = llvm.createNativeTargetMachine() catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: failed to create target machine: {}\n", .{err});
+        try stderr.flush();
+        std.process.exit(1);
+    };
+    defer llvm.disposeTargetMachine(machine);
+
+    llvm.setModuleDataLayout(linked_mod, machine);
+    llvm.setModuleTriple(linked_mod);
+
+    // ── In-process RTS + compiler-rt bitcode linking ───────────────────
+    // Parse the pre-built RTS and compiler-rt bitcode from disk and merge
+    // them into the program module using LLVM's in-process linker.  This
+    // avoids shelling out to llvm-link (which can fail on bitcode produced
+    // by a different LLVM build — e.g. Zig's embedded LLVM vs Nix LLVM).
+    const graalvm_rts_bc_path = getGraalvmRtsBcPath();
+    const rts_mod = llvm.parseBitcodeFile(graalvm_rts_bc_path) catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: failed to load RTS bitcode '{s}': {}\n", .{ graalvm_rts_bc_path, err });
+        try stderr.flush();
+        std.process.exit(1);
+    };
+
+    llvm.linkModules(linked_mod, rts_mod) catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: failed to link RTS bitcode: {}\n", .{err});
+        try stderr.flush();
+        std.process.exit(1);
+    };
+
+    const graalvm_compiler_rt_bc_path = getGraalvmCompilerRtBcPath();
+    const compiler_rt_mod = llvm.parseBitcodeFile(graalvm_compiler_rt_bc_path) catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: failed to load compiler-rt bitcode '{s}': {}\n", .{ graalvm_compiler_rt_bc_path, err });
+        try stderr.flush();
+        std.process.exit(1);
+    };
+
+    llvm.linkModules(linked_mod, compiler_rt_mod) catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: failed to link compiler-rt bitcode: {}\n", .{err});
+        try stderr.flush();
+        std.process.exit(1);
+    };
+
+    // ── Write final LLVM IR ────────────────────────────────────────────
+    // We emit textual IR (.ll) rather than bitcode (.bc) because Zig
+    // embeds its own LLVM build whose bitcode format may be incompatible
+    // with the system's lli/llvm-link (even at the same version number).
+    // Textual IR is portable across builds and lli accepts it directly.
+    const final_ll_path = try std.fmt.allocPrint(arena_alloc, "{s}.ll", .{output_name});
+    llvm.writeIRToFile(linked_mod, final_ll_path) catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: failed to write LLVM IR: {}\n", .{err});
+        try stderr.flush();
+        std.process.exit(1);
+    };
 }
 
 /// Emit WebAssembly binary via the WASM backend.
