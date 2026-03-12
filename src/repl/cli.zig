@@ -218,18 +218,25 @@ fn handleCommand(io: Io, line: []const u8, allocator: Allocator, session: *Sessi
         }
 
         const result = typequery.typeOf(allocator, session, expr) catch |err| {
-            switch (err) {
-                error.OutOfMemory => {
-                    writeStdout(io, "Error: Out of memory during type query\n") catch {};
-                },
-                error.CompilationFailed => {
-                    writeStdout(io, "Error: Failed to compile expression for type query\n") catch {};
-                },
-                else => {
-                    var buf: [256]u8 = undefined;
-                    const msg = std.fmt.bufPrint(&buf, "Error: Type query failed ({s})\n", .{@errorName(err)}) catch "Error: Type query failed\n";
-                    writeStdout(io, msg) catch {};
-                },
+            // Diagnostics have been saved to session.last_diagnostics by typeOf.
+            // Render them if any exist.
+            if (session.last_diagnostics.items.len > 0) {
+                renderDiagnostics(io, allocator, session, session.last_diagnostics.items);
+            } else {
+                // No diagnostics - show a generic error message
+                switch (err) {
+                    error.OutOfMemory => {
+                        writeStdout(io, "Error: Out of memory during type query\n") catch {};
+                    },
+                    error.CompilationFailed => {
+                        writeStdout(io, "Error: Failed to compile expression for type query\n") catch {};
+                    },
+                    else => {
+                        var buf: [256]u8 = undefined;
+                        const msg = std.fmt.bufPrint(&buf, "Error: Type query failed ({s})\n", .{@errorName(err)}) catch "Error: Type query failed\n";
+                        writeStdout(io, msg) catch {};
+                    },
+                }
             }
             return true;
         };

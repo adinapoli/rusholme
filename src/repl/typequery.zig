@@ -18,7 +18,10 @@ const Session = @import("session.zig").Session;
 const pipeline = @import("pipeline.zig").Pipeline;
 const htype_mod = @import("../typechecker/htype.zig");
 const env_mod = @import("../typechecker/env.zig");
-const DiagnosticCollector = @import("../diagnostics/diagnostic.zig").DiagnosticCollector;
+const diag_mod = @import("../diagnostics/diagnostic.zig");
+const DiagnosticCollector = diag_mod.DiagnosticCollector;
+const Diagnostic = diag_mod.Diagnostic;
+const Note = diag_mod.Note;
 
 pub const TypeQueryResult = struct {
     /// The inferred type scheme (polymorphic or monomorphic).
@@ -42,6 +45,15 @@ pub fn typeOf(
 ) !TypeQueryResult {
     _ = alloc;
 
+    // Clear previous diagnostics - free their message allocations first
+    for (session.last_diagnostics.items) |diag| {
+        session.allocator.free(diag.message);
+        if (diag.notes.len > 0) {
+            session.allocator.free(diag.notes);
+        }
+    }
+    session.last_diagnostics.clearRetainingCapacity();
+
     // 1. Push transactional scope frames BEFORE compilation
     session.rename_env.scope.push() catch return error.OutOfMemory;
     session.ty_env.push() catch {
@@ -63,6 +75,31 @@ pub fn typeOf(
         &session.accumulated_arities,
         &session.accumulated_con_map,
     ) catch |err| {
+        // Capture compilation context for diagnostic rendering.
+        session.last_source = session.pipeline.last_source;
+        session.last_input = expr;
+        session.last_input_kind = session.pipeline.last_input_kind;
+
+        // Save diagnostics to session before returning error so callers can render them.
+        // Note: we need to dupe the message allocation since diags will be deinitialized.
+        for (diags.diagnostics.items) |diag| {
+            session.last_diagnostics.append(session.allocator, .{
+                .severity = diag.severity,
+                .code = diag.code,
+                .span = diag.span,
+                .message = session.allocator.dupe(u8, diag.message) catch {
+                    // Rollback and return error if we can't save diagnostics
+                    session.ty_env.pop();
+                    session.rename_env.scope.pop();
+                    return err;
+                },
+                .notes = if (diag.notes.len > 0)
+                    session.allocator.dupe(Note, diag.notes) catch &.{}
+                else
+                    &.{},
+            }) catch {};
+        }
+
         // Rollback: pop the scope frames to discard partial bindings
         session.ty_env.pop();
         session.rename_env.scope.pop();
@@ -74,10 +111,16 @@ pub fn typeOf(
     // so the first def in the program should be the expression binding.
     // IMPORTANT: Lookup must happen BEFORE rollback.
     if (compile.program.defs.len == 0) {
+        // Rollback before returning
+        session.ty_env.pop();
+        session.rename_env.scope.pop();
         return error.CompilationFailed;
     }
     const def = compile.program.defs[0];
     const scheme = session.ty_env.lookupScheme(def.name.unique) orelse {
+        // Rollback before returning
+        session.ty_env.pop();
+        session.rename_env.scope.pop();
         return error.CompilationFailed;
     };
 
@@ -159,4 +202,26 @@ test "typequery: polymorphic constructor type (#508)" {
     const cons_result = try typeOf(alloc, &session, "Cons");
     defer alloc.free(cons_result.display);
     try testing.expectEqualStrings("Cons :: forall a. a -> List a -> List a", cons_result.display);
+}
+
+test "typequery: type error diagnostics captured (#514)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = try Session.init(alloc, testing.io);
+    defer session.deinit();
+
+    // Define two different types
+    _ = try session.processInput("data A = MkA");
+    _ = try session.processInput("data B = MkB");
+
+    // Try to type an expression with a type error:
+    // \f -> (f MkA, f MkB) should fail because f can't accept both A and B
+    const result = typeOf(alloc, &session, "\\f -> (f MkA, f MkB)");
+    try testing.expectError(error.CompilationFailed, result);
+
+    // The key fix: diagnostics should be captured in session.last_diagnostics
+    // so the caller can render them instead of showing a generic error message
+    try testing.expect(session.last_diagnostics.items.len > 0);
 }

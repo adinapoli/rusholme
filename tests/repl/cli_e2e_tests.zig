@@ -230,3 +230,16 @@ test "cli e2e: function declaration is silent" {
     // which is also acceptable (EOF after one input).
     try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
 }
+
+test "cli e2e: :type shows error diagnostics on type error (#514)" {
+    // When :type encounters a type error, it should show the actual
+    // type error diagnostics, not a generic "Failed to compile" message.
+    // This test verifies that diagnostics are captured and rendered.
+    const result = try runRepl(testing.allocator, ":type undefinedVar\n");
+    defer result.deinit(testing.allocator);
+
+    // Should show a specific error about the undefined variable,
+    // not just "Failed to compile expression for type query"
+    try expectContains(result.stderr, "variable not in scope");
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+}
