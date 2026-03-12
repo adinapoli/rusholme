@@ -13,6 +13,7 @@ const llvm_c = @cImport({
     @cInclude("llvm-c/IRReader.h");
     @cInclude("llvm-c/Linker.h");
     @cInclude("llvm-c/BitWriter.h");
+    @cInclude("llvm-c/BitReader.h");
     @cInclude("llvm-c/Orc.h");
     @cInclude("llvm-c/LLJIT.h");
     @cInclude("llvm-c/OrcEE.h");
@@ -440,6 +441,84 @@ pub fn writeBitcodeToFile(module: Module, path: []const u8) TargetError!void {
 
     if (llvm_c.LLVMWriteBitcodeToFile(module, path_c) != 0) {
         return error.EmitFailed;
+    }
+}
+
+/// Parse an LLVM bitcode file from disk into an in-memory module.
+///
+/// The returned module is created in a fresh LLVM context.  It can be
+/// merged into another module via `linkModules` — LLVM handles
+/// cross-context linking transparently.
+///
+/// The caller does **not** need to dispose the module explicitly if it
+/// will be consumed by `linkModules` (which disposes the source).
+pub fn parseBitcodeFile(path: []const u8) TargetError!Module {
+    const path_c = tryToNullTerminated(path);
+    defer std.heap.c_allocator.free(path_c);
+
+    var mem_buf: llvm_c.LLVMMemoryBufferRef = null;
+    var err_msg: [*c]u8 = null;
+
+    if (llvm_c.LLVMCreateMemoryBufferWithContentsOfFile(path_c, &mem_buf, &err_msg) != 0) {
+        if (err_msg) |msg| llvm_c.LLVMDisposeMessage(msg);
+        return error.EmitFailed;
+    }
+
+    var module: llvm_c.LLVMModuleRef = null;
+    if (llvm_c.LLVMParseBitcode2(mem_buf, &module) != 0) {
+        // LLVMParseBitcode2 takes ownership of mem_buf even on failure.
+        return error.EmitFailed;
+    }
+
+    return module orelse error.EmitFailed;
+}
+
+/// Write an LLVM module to a textual IR file (.ll).
+///
+/// Textual IR is portable across different LLVM builds of the same major
+/// version, unlike bitcode which can have binary format incompatibilities
+/// between builds (e.g. Zig's embedded LLVM vs a system LLVM package).
+pub fn writeIRToFile(module: Module, path: []const u8) TargetError!void {
+    const path_c = tryToNullTerminated(path);
+    defer std.heap.c_allocator.free(path_c);
+
+    var err_msg: [*c]u8 = null;
+    if (llvm_c.LLVMPrintModuleToFile(module, path_c, &err_msg) != 0) {
+        if (err_msg) |msg| llvm_c.LLVMDisposeMessage(msg);
+        return error.EmitFailed;
+    }
+}
+
+/// Strip `target-cpu` and `target-features` string attributes from every
+/// function in the module.
+///
+/// When Zig compiles the RTS and compiler-rt to bitcode, it stamps each
+/// function with the host CPU's full feature set (e.g. `target-cpu="znver5"`
+/// with hundreds of `+`/`-` features).  After in-process linking, these
+/// attributes survive into the final textual IR.  The system `lli` may use
+/// a slightly different LLVM build that does not recognise every feature
+/// name, producing noisy warnings like `'-amx-avx512' is not a recognized
+/// feature for this target (ignoring feature)`.
+///
+/// Stripping these attributes is safe because `lli` interprets/JITs the IR
+/// for the host anyway — it does not need compile-time target hints.
+pub fn stripTargetAttributes(module: Module) void {
+    const attrs_to_strip = [_][]const u8{ "target-cpu", "target-features" };
+    // LLVMAttributeFunctionIndex is defined as (unsigned)-1 in the C header.
+    // Zig's @cImport cannot represent the negative-to-unsigned cast, so we
+    // use the equivalent bit pattern directly.
+    const function_index: llvm_c.LLVMAttributeIndex = ~@as(llvm_c.LLVMAttributeIndex, 0);
+
+    var func = llvm_c.LLVMGetFirstFunction(module);
+    while (func != null) : (func = llvm_c.LLVMGetNextFunction(func)) {
+        for (attrs_to_strip) |attr_name| {
+            llvm_c.LLVMRemoveStringAttributeAtIndex(
+                func,
+                function_index,
+                attr_name.ptr,
+                @intCast(attr_name.len),
+            );
+        }
     }
 }
 

@@ -167,6 +167,60 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(wasm_compiler_rt_lib);
 
     // ═══════════════════════════════════════════════════════════════════════
+    // GraalVM RTS LLVM Bitcode
+    // ═══════════════════════════════════════════════════════════════════════
+    // The same src/rts/ source is compiled for the native target but emitted
+    // as LLVM bitcode (.bc) instead of a static library (.a).  This bitcode
+    // is merged with program bitcode via llvm-link so that lli can execute
+    // the result without undefined rts_* symbols.
+    //
+    // We use a baseline CPU model (no host-specific features) so the emitted
+    // IR does not contain target-features strings (e.g. +amx-avx512) that
+    // the system lli may not recognise, avoiding noisy warnings.
+    const graalvm_target = b.resolveTargetQuery(.{
+        .cpu_model = .baseline,
+    });
+    const graalvm_rts_lib = b.addLibrary(.{
+        .name = "rts_graalvm",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/rts/root.zig"),
+            .target = graalvm_target,
+            .optimize = optimize,
+            .pic = true,
+        }),
+    });
+    const graalvm_rts_bc = graalvm_rts_lib.getEmittedLlvmBc();
+    // Install the bitcode to zig-out/lib/rts_graalvm.bc so the CLI can
+    // find it at runtime (path baked in via @embedFile, same as librts.a).
+    const install_graalvm_bc = b.addInstallLibFile(graalvm_rts_bc, "rts_graalvm.bc");
+    b.getInstallStep().dependOn(&install_graalvm_bc.step);
+
+    // compiler-rt as LLVM bitcode for GraalVM.
+    //
+    // The Zig RTS references compiler-rt builtins (__zig_probe_stack,
+    // __divti3, etc.) that are normally linked by the system linker.
+    // When running via lli, these symbols must be present in the merged
+    // bitcode.  We compile compiler_rt.zig for the native target and
+    // emit its bitcode alongside the RTS bitcode.
+    const graalvm_compiler_rt_lib = b.addLibrary(.{
+        .name = "compiler_rt_graalvm",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = .{ .cwd_relative = compiler_rt_zig_path },
+            .target = graalvm_target,
+            .optimize = .ReleaseSmall,
+            .pic = true,
+        }),
+    });
+    const graalvm_compiler_rt_bc = graalvm_compiler_rt_lib.getEmittedLlvmBc();
+    const install_graalvm_compiler_rt_bc = b.addInstallLibFile(
+        graalvm_compiler_rt_bc,
+        "compiler_rt_graalvm.bc",
+    );
+    b.getInstallStep().dependOn(&install_graalvm_compiler_rt_bc.step);
+
+    // ═══════════════════════════════════════════════════════════════════════
     // CLI Executable with RTS Library Paths
     // ═══════════════════════════════════════════════════════════════════════
     // Expose both RTS library paths as build options so the CLI can find them
@@ -200,6 +254,28 @@ pub fn build(b: *std.Build) void {
     const wasm_compiler_rt_path_file = wasm_compiler_rt_path.add(
         "path.txt",
         wasm_compiler_rt_lib_path_option,
+    );
+
+    const graalvm_rts_bc_path_option = b.option(
+        []const u8,
+        "graalvm-rts-bc-path",
+        "Path to GraalVM RTS bitcode (.bc)",
+    ) orelse b.getInstallPath(.lib, "rts_graalvm.bc");
+    const graalvm_rts_bc_path_wf = b.addNamedWriteFiles("graalvm_rts_bc_path");
+    const graalvm_rts_bc_path_file = graalvm_rts_bc_path_wf.add(
+        "path.txt",
+        graalvm_rts_bc_path_option,
+    );
+
+    const graalvm_compiler_rt_bc_path_option = b.option(
+        []const u8,
+        "graalvm-compiler-rt-bc-path",
+        "Path to GraalVM compiler-rt bitcode (.bc)",
+    ) orelse b.getInstallPath(.lib, "compiler_rt_graalvm.bc");
+    const graalvm_compiler_rt_bc_path_wf = b.addNamedWriteFiles("graalvm_compiler_rt_bc_path");
+    const graalvm_compiler_rt_bc_path_file = graalvm_compiler_rt_bc_path_wf.add(
+        "path.txt",
+        graalvm_compiler_rt_bc_path_option,
     );
 
     // Here we define an executable. An executable needs to have a root module
@@ -253,6 +329,12 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addAnonymousImport("wasm_compiler_rt_lib_path", .{
         .root_source_file = wasm_compiler_rt_path_file,
+    });
+    exe.root_module.addAnonymousImport("graalvm_rts_bc_path", .{
+        .root_source_file = graalvm_rts_bc_path_file,
+    });
+    exe.root_module.addAnonymousImport("graalvm_compiler_rt_bc_path", .{
+        .root_source_file = graalvm_compiler_rt_bc_path_file,
     });
 
     // This declares intent for the executable to be installed into the
