@@ -259,3 +259,7 @@ test "e2e: e2e_008_higher_order" {
 test "e2e: e2e_009_infinite_recursion" {
     try testE2e(std.testing.allocator, "e2e_009_infinite_recursion");
 }
+
+test "e2e: e2e_010_lazy_let" {
+    try testE2e(std.testing.allocator, "e2e_010_lazy_let");
+}

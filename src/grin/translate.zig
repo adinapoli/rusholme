@@ -883,10 +883,35 @@ fn wrapWithLazyBindsForCon(
     return try wrapWithPendingBinds(ctx, result, eager_binds.items);
 }
 
+/// Chain a store and update into: `store_expr >>= \bind_var -> update_expr`.
+/// Used by the Rec let path to store a thunk then update a placeholder.
+fn chainStoreUpdate(
+    ctx: *TranslateCtx,
+    store_expr: *GrinExpr,
+    bind_var: GrinName,
+    update_expr: *GrinExpr,
+) !*GrinExpr {
+    const bind = try ctx.alloc.create(GrinExpr);
+    bind.* = .{ .Bind = .{
+        .lhs = store_expr,
+        .pat = .{ .Var = bind_var },
+        .rhs = update_expr,
+    } };
+    return bind;
+}
+
 /// Translate a let binding.
-/// Note: let bindings are currently eager — the RHS is fully evaluated before
-/// the body.  Haskell semantics require lazy let (call-by-need).
-/// tracked in: https://github.com/adinapoli/rusholme/issues/516
+///
+/// Non-recursive let bindings are lazy: when the RHS is a function
+/// application of a known top-level function, it is suspended as an
+/// F-tagged thunk (`store (Ffunc [args])`). The thunk is only forced
+/// when the bound variable is scrutinised by a `case` expression.
+///
+/// Simple values (Var, Lit, ValTag) and constructor nodes are not
+/// thunked — they are already in WHNF or need heap allocation
+/// respectively. Higher-order applications (where the function is a
+/// parameter variable) are also kept eager since F-tag dispatch
+/// requires a statically known function name.
 fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr {
     switch (let_expr.bind) {
         .NonRec => |pair| {
@@ -909,10 +934,15 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
             //     Constructor nodes live on the heap in GRIN; case
             //     expressions fetch them via heap pointers.
             //
-            //   Complex sub-expressions:
+            //   App of known top-level function (lazy):
+            //     `store (Ffunc [args]) >>= \x -> body`
+            //     Suspended as an F-tagged thunk — only forced when x
+            //     is scrutinised at a case site.
+            //
+            //   Other complex sub-expressions:
             //     `rhs >>= \x -> body`
-            //     The RHS is already a monadic GRIN expression (e.g. App,
-            //     Store, Bind chain) whose result is bound to x.
+            //     Kept eager — higher-order applications and control
+            //     flow (Case, Bind chains) are evaluated immediately.
             const rhs_expr = try translateExpr(ctx, pair.rhs);
 
             const lhs_expr: *GrinExpr = blk: {
@@ -931,8 +961,23 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
                         }
                         break :blk e;
                     },
+                    .App => |app| {
+                        // Function application: wrap as lazy thunk if the
+                        // function is a known top-level definition.
+                        if (ctx.getFunctionArity(app.name) != null) {
+                            const ftag = GrinTag{ .tag_type = .{ .Fun = {} }, .name = app.name };
+                            const e = try ctx.alloc.create(GrinExpr);
+                            e.* = .{ .Store = .{ .ConstTagNode = .{
+                                .tag = ftag,
+                                .fields = app.args,
+                            } } };
+                            break :blk e;
+                        }
+                        // Higher-order application: evaluate eagerly.
+                        break :blk rhs_expr;
+                    },
                     else => {
-                        // Complex RHS (App, Bind, Case, etc.) — already a
+                        // Other complex RHS (Bind, Case, etc.) — already a
                         // monadic expression whose result we bind directly.
                         break :blk rhs_expr;
                     },
@@ -974,79 +1019,178 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
                 placeholders[i] = try ctx.mapBinder(&pairs[i].binder);
             }
 
-            // Create placeholder stores for each binder (storing unit placeholders)
+            // Create placeholder stores for each binder (storing unit placeholders).
+            // Each placeholder is allocated on the heap and its heap pointer
+            // is bound to the binder name.
+            //
+            // For N placeholders, we build:
+            //   store () >>= \p_a ->
+            //   store () >>= \p_b ->
+            //   ...rest...
+            //
+            // We build this inside-out: start from the innermost expression
+            // (Step 2 + body) and wrap stores around it. But since Steps 2
+            // and 3 need the placeholder names to already be in the var_map
+            // (done above via mapBinder), we build the chain bottom-up.
+            //
+            // Strategy: build a linked list of (store, binder) pairs, then
+            // in Step 3 wrap them around the final expression.
             var current_expr: ?*GrinExpr = null;
 
-            // Step 1: Allocate all placeholders
-            for (placeholders) |p| {
+            // Step 1: Build the placeholder allocation chain.
+            // Each `store () >>= \p_i -> next` allocates a heap cell and
+            // binds the pointer to `p_i`.
+            //
+            // We chain left-to-right: for the first placeholder, we just
+            // record `store ()` as the LHS; subsequent placeholders chain
+            // via Bind. The final chain will be connected to Step 2 + body
+            // in Step 3.
+            //
+            // Build: store () >>= \p_0 -> store () >>= \p_1 -> ... -> <rest>
+            // We construct this as a list of (store, name) pairs and fold
+            // them in Step 3. For now, build the leftmost prefix.
+            const store_binds = try ctx.alloc.alloc(struct { store: *GrinExpr, name: GrinName }, placeholders.len);
+            defer ctx.alloc.free(store_binds);
+
+            for (placeholders, 0..) |p, idx| {
                 const store_expr = try ctx.alloc.create(GrinExpr);
                 store_expr.* = .{ .Store = .{ .Unit = {} } };
-
-                const placeholder_expr = if (current_expr) |_|
-                    // Chain: prev >>= \p_placeholder -> store Unit
-                    try ctx.alloc.create(GrinExpr)
-                else
-                    store_expr;
-
-                if (current_expr) |prev_expr| {
-                    placeholder_expr.* = .{ .Bind = .{
-                        .lhs = prev_expr,
-                        .pat = .{ .Var = p },
-                        .rhs = store_expr,
-                    } };
-                }
-
-                current_expr = placeholder_expr;
+                store_binds[idx] = .{ .store = store_expr, .name = p };
             }
 
-            // Step 2: Backpatch each binding with its real RHS
+            // Step 2: Backpatch each binding with its real RHS.
+            //
+            // For App expressions calling known top-level functions, we
+            // store them as F-tagged thunks (lazy). The thunk node is
+            // stored on the heap and the placeholder is updated to point
+            // to it. For simple Return values, we update directly.
+            // For other complex expressions, we evaluate into a temp var
+            // first, then update.
             for (pairs, 0..) |pair, i| {
-                // Translate the RHS expression
                 const rhs_expr = try translateExpr(ctx, pair.rhs);
 
-                // For Update, we need a Val, not an Expr.
-                // If RHS is a simple Return, extract its value.
-                // Otherwise, we'd need to bind and use the variable.
-                // For now, assume RHS can be converted to a value.
-                const rhs_val = try exprToVal(rhs_expr);
+                switch (rhs_expr.*) {
+                    .App => |app| {
+                        if (ctx.getFunctionArity(app.name) != null) {
+                            // Known function: store as lazy F-tagged thunk,
+                            // then update the placeholder with the thunk pointer.
+                            const ftag = GrinTag{ .tag_type = .{ .Fun = {} }, .name = app.name };
+                            const store_thunk = try ctx.alloc.create(GrinExpr);
+                            store_thunk.* = .{ .Store = .{ .ConstTagNode = .{
+                                .tag = ftag,
+                                .fields = app.args,
+                            } } };
 
-                // Create the update expression: update placeholder_i rhs_val
+                            const thunk_var = try ctx.freshName("thunk");
+                            const update_expr = try ctx.alloc.create(GrinExpr);
+                            update_expr.* = .{ .Update = .{
+                                .ptr = placeholders[i],
+                                .val = .{ .Var = thunk_var },
+                            } };
+
+                            // store (Ffunc [args]) >>= \thunk_var -> update p_i thunk_var
+                            const store_update = try chainStoreUpdate(ctx, store_thunk, thunk_var, update_expr);
+
+                            if (current_expr) |prev| {
+                                const bind_chain = try ctx.alloc.create(GrinExpr);
+                                bind_chain.* = .{ .Bind = .{
+                                    .lhs = prev,
+                                    .pat = .{ .Var = try ctx.freshName("_") },
+                                    .rhs = store_update,
+                                } };
+                                current_expr = bind_chain;
+                            } else {
+                                current_expr = store_update;
+                            }
+                            continue;
+                        }
+                        // Higher-order app: fall through to complex-expr path.
+                    },
+                    .Return => {
+                        // Simple value: update placeholder directly.
+                        const rhs_val = try exprToVal(rhs_expr);
+                        const update_expr = try ctx.alloc.create(GrinExpr);
+                        update_expr.* = .{ .Update = .{
+                            .ptr = placeholders[i],
+                            .val = rhs_val,
+                        } };
+
+                        if (current_expr) |prev| {
+                            const bind_update = try ctx.alloc.create(GrinExpr);
+                            bind_update.* = .{ .Bind = .{
+                                .lhs = prev,
+                                .pat = .{ .Var = try ctx.freshName("_") },
+                                .rhs = update_expr,
+                            } };
+                            current_expr = bind_update;
+                        }
+                        continue;
+                    },
+                    else => {},
+                }
+
+                // Complex expression (higher-order app, Case, Bind, etc.):
+                // evaluate into a temp var, then update the placeholder.
+                const temp_var = try ctx.freshName("rec_rhs");
                 const update_expr = try ctx.alloc.create(GrinExpr);
                 update_expr.* = .{ .Update = .{
                     .ptr = placeholders[i],
-                    .val = rhs_val,
+                    .val = .{ .Var = temp_var },
                 } };
 
-                // Chain the update after previous binds, bind _ to continue
-                const discard_var = try ctx.freshName("_");
+                // rhs_expr >>= \temp_var -> update p_i temp_var
+                const bind_rhs = try ctx.alloc.create(GrinExpr);
+                bind_rhs.* = .{ .Bind = .{
+                    .lhs = rhs_expr,
+                    .pat = .{ .Var = temp_var },
+                    .rhs = update_expr,
+                } };
 
                 if (current_expr) |prev| {
-                    const bind_update = try ctx.alloc.create(GrinExpr);
-                    bind_update.* = .{ .Bind = .{
+                    const bind_chain = try ctx.alloc.create(GrinExpr);
+                    bind_chain.* = .{ .Bind = .{
                         .lhs = prev,
-                        .pat = .{ .Var = discard_var },
-                        .rhs = update_expr,
+                        .pat = .{ .Var = try ctx.freshName("_") },
+                        .rhs = bind_rhs,
                     } };
-                    current_expr = bind_update;
+                    current_expr = bind_chain;
+                } else {
+                    current_expr = bind_rhs;
                 }
             }
 
-            // Step 3: Translate the body with binders substituted by placeholders
+            // Step 3: Translate the body and assemble the full expression.
             const body_expr = try translateExpr(ctx, let_expr.body);
 
-            // Finish the chain by binding the body as the final RHS
-            if (current_expr) |prev| {
-                const final_bind = try ctx.alloc.create(GrinExpr);
-                final_bind.* = .{ .Bind = .{
-                    .lhs = prev,
+            // Connect the backpatch chain (Step 2) to the body.
+            var inner = body_expr;
+            if (current_expr) |backpatch| {
+                const bind_body = try ctx.alloc.create(GrinExpr);
+                bind_body.* = .{ .Bind = .{
+                    .lhs = backpatch,
                     .pat = .{ .Var = try ctx.freshName("_") },
                     .rhs = body_expr,
                 } };
-                return final_bind;
+                inner = bind_body;
             }
 
-            // Fallback if no bindings (shouldn't happen with Rec)
-            return body_expr;
+            // Wrap placeholder allocations (Step 1) around the inner
+            // expression, right-to-left:
+            //   store () >>= \p_0 -> store () >>= \p_1 -> ... -> inner
+            var idx = store_binds.len;
+            while (idx > 0) {
+                idx -= 1;
+                const sb = store_binds[idx];
+                const bind_expr = try ctx.alloc.create(GrinExpr);
+                bind_expr.* = .{ .Bind = .{
+                    .lhs = sb.store,
+                    .pat = .{ .Var = sb.name },
+                    .rhs = inner,
+                } };
+                inner = bind_expr;
+            }
+
+            return inner;
         },
     }
 }
