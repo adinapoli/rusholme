@@ -37,7 +37,7 @@ pipeline:
 Haskell Source → Parse → Typecheck/Desugar → Core → GRIN → Backend
                                                       ├─→ C
                                                       ├─→ JavaScript
-                                                      └─→ LLVM (native, Wasm, GraalVM)
+                                                      └─→ LLVM (native, Wasm, JIT/lli)
 ```
 
 Key design choices:
@@ -182,7 +182,7 @@ https://github.com/WebAssembly/component-tools) to integrate with your
 front-end build system. Runtime execution integration is tracked in issue #471;
 module linking is tracked in issue #472.
 
-**GraalVM / lli** — `rhc build --backend graalvm hello.hs`
+**JIT / lli** — `rhc build --backend jit hello.hs`
 
 ```bash
 # Clone and build on Linux
@@ -191,7 +191,7 @@ cd rusholme
 nix develop
 
 # Compile Haskell to LLVM IR for lli
-zig build run -- build --backend graalvm hello.hs
+zig build run -- build --backend jit hello.hs
 
 # The .ll file is now ready
 $ ls -la hello.ll
@@ -202,15 +202,15 @@ $ lli hello.ll
 Hello from Rusholme!
 ```
 
-The GraalVM backend compiles Haskell to LLVM textual IR (`.ll`) via the same
+The JIT backend compiles Haskell to LLVM textual IR (`.ll`) via the same
 GRIN-to-LLVM pipeline as the native backend, but instead of emitting a native
 object file and linking an executable, it merges the program IR with the
 runtime system and compiler-rt bitcode in-process and writes a single
 portable `.ll` file. This file can be executed directly by `lli` (the LLVM
-interpreter/JIT compiler) or GraalVM's Sulong engine.
+interpreter/JIT compiler).
 
 This backend is useful for rapid prototyping (no link step), debugging the
-generated IR, and running Haskell programs on GraalVM's polyglot platform.
+generated IR, and quick iteration without a native link step.
 
 ## Development
 
