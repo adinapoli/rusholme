@@ -69,6 +69,10 @@ pub const JitEngine = struct {
     /// Buffer for formatting the entry point name as a null-terminated
     /// C string for LLVM symbol lookup.
     entry_name_buf: [64]u8 = undefined,
+    /// GRIN defs from prior `addDeclarations` calls. Accumulated so
+    /// that expression compilation can scan them for F-tag registration,
+    /// enabling `forceValueToWhnf` to handle thunks from any session.
+    accumulated_grin_defs: std.ArrayListUnmanaged(grin_ast.Def) = .{},
 
     /// Create a new JIT engine backed by LLVM ORC LLJIT.
     pub fn init(allocator: Allocator) JitError!JitEngine {
@@ -93,6 +97,7 @@ pub const JitEngine = struct {
 
     /// Destroy the JIT engine and release all JIT'd code.
     pub fn deinit(self: *JitEngine) void {
+        self.accumulated_grin_defs.deinit(self.allocator);
         if (self.jit) |jit| {
             const err = c.LLVMOrcDisposeLLJIT(jit);
             if (err != null) c.LLVMConsumeError(err);
@@ -105,6 +110,12 @@ pub const JitEngine = struct {
     /// expressions can reference user-defined functions and data types.
     pub fn addDeclarations(self: *JitEngine, program: *const grin_ast.Program) JitError!void {
         if (program.defs.len == 0) return;
+
+        // Accumulate defs for tag scanning in future expression compilations.
+        for (program.defs) |def| {
+            self.accumulated_grin_defs.append(self.allocator, def) catch
+                return JitError.OutOfMemory;
+        }
 
         var translator = GrinTranslator.init(self.allocator);
         defer translator.deinit();
@@ -155,6 +166,9 @@ pub const JitEngine = struct {
         var translator = GrinTranslator.init(self.allocator);
         defer translator.deinit();
         translator.repl_entry_point = entry_name;
+        // Seed with accumulated defs from prior declaration sessions so
+        // that the tag table includes F-tags for all known functions.
+        translator.extra_tag_defs = self.accumulated_grin_defs.items;
 
         const ir_text = translator.translateProgram(patched_program) catch {
             return JitError.TranslationFailed;

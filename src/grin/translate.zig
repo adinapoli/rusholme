@@ -19,6 +19,7 @@
 const std = @import("std");
 const core = @import("../core/ast.zig");
 const grin = @import("ast.zig");
+const PrimOp = @import("primop.zig").PrimOp;
 const FieldType = grin.FieldType;
 
 const CoreExpr = core.Expr;
@@ -770,10 +771,9 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
         .args = grin_args,
     } };
 
-    // Note: function arguments are eagerly evaluated here. Haskell semantics
-    // require lazy arguments (call-by-need).
-    // tracked in: https://github.com/adinapoli/rusholme/issues/517
-    return try wrapWithPendingBinds(ctx, grin_app, pending_binds.items);
+    // Wrap function arguments lazily for user-defined functions.
+    // Primops and prelude functions remain eager.
+    return try wrapWithLazyBindsForFunc(ctx, grin_app, pending_binds.items);
 }
 
 /// Wrap an expression in Bind chains for pending complex argument sub-expressions.
@@ -806,6 +806,87 @@ fn wrapWithPendingBinds(
         } };
         result = bind_expr;
     }
+    return result;
+}
+
+/// Wrap an inner expression with lazy thunk stores for function arguments.
+///
+/// In Haskell, function call arguments are lazy (call-by-need):
+/// `f (g x)` does not evaluate `g x` — it stores a thunk that captures the
+/// function and its arguments. This function replaces eager binds with F-tagged
+/// stores for `App` expressions where the function is a known top-level definition:
+///
+///   -- Eager (old):              -- Lazy (new):
+///   arg <- g x                   arg <- store (Fg [x])
+///   f arg                        f arg
+///
+/// For primops and prelude functions, arguments remain eager since the evaluator
+/// expects fully evaluated values. Higher-order applications (where the function
+/// is a parameter variable) also remain eager since F-tag dispatch requires a
+/// statically known function name in the function table.
+fn wrapWithLazyBindsForFunc(
+    ctx: *TranslateCtx,
+    inner: *GrinExpr,
+    pending_binds: []const PendingBind,
+) anyerror!*GrinExpr {
+    if (pending_binds.len == 0) return inner;
+
+    // Check if the inner expression is a primop application.
+    // If so, keep all arguments eager since primops expect evaluated values.
+    const is_primop_app = switch (inner.*) {
+        .App => |app| PrimOp.fromString(app.name.base) != null or PrimOp.fromPreludeName(app.name.base) != null,
+        else => false,
+    };
+
+    if (is_primop_app) {
+        // Primop application: keep all arguments eager.
+        return try wrapWithPendingBinds(ctx, inner, pending_binds);
+    }
+
+    var result = inner;
+    var i: usize = pending_binds.len;
+    while (i > 0) {
+        i -= 1;
+        const pb = pending_binds[i];
+
+        const lhs = switch (pb.complex_expr.*) {
+            .App => |app| b: {
+                // Only wrap as a lazy thunk if the function is a known
+                // top-level definition with correct arity. Higher-order
+                // applications (where the function is a parameter variable)
+                // cannot be thunked because F-tag dispatch requires a
+                // statically known function name in the function table.
+                if (ctx.getFunctionArity(app.name)) |arity| {
+                    if (app.args.len == arity) {
+                        // Fully-saturated application: store as lazy thunk
+                        const ftag = GrinTag{ .tag_type = .{ .Fun = {} }, .name = app.name };
+                        const store_expr = try ctx.alloc.create(GrinExpr);
+                        // Copy the arguments into a new allocation for the heap node
+                        const stored_node = try ctx.alloc.alloc(GrinVal, app.args.len);
+                        @memcpy(stored_node, app.args);
+                        store_expr.* = .{ .Store = .{ .ConstTagNode = .{
+                            .tag = ftag,
+                            .fields = stored_node,
+                        } } };
+                        break :b store_expr;
+                    }
+                }
+                // Evaluate eagerly (partial/over-saturated or higher-order)
+                // tracked in: https://github.com/adinapoli/rusholme/issues/546
+                break :b pb.complex_expr;
+            },
+            else => pb.complex_expr,
+        };
+
+        const bind_expr = try ctx.alloc.create(GrinExpr);
+        bind_expr.* = .{ .Bind = .{
+            .lhs = lhs,
+            .pat = .{ .Var = pb.fresh_var },
+            .rhs = result,
+        } };
+        result = bind_expr;
+    }
+
     return result;
 }
 

@@ -248,6 +248,10 @@ test "e2e: e2e_006_peano" {
     try testE2e(std.testing.allocator, "e2e_006_peano");
 }
 
+test "e2e: e2e_011_lazy_function_arguments (#517)" {
+    try testE2e(std.testing.allocator, "e2e_011_lazy_function_arguments");
+}
+
 test "e2e: e2e_007_inductive_list" {
     try testE2e(std.testing.allocator, "e2e_007_inductive_list");
 }

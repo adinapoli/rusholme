@@ -485,7 +485,7 @@ pub const GrinEvaluator = struct {
                 // top-level function reference (e.g. `identity` passed as a
                 // higher-order argument). Return the Var as-is so the App
                 // handler can resolve it through the function table.
-                if (self.funcs.contains(name)) Val{ .Var = name } else return error.UnboundVariable,
+                if (self.funcs.contains(name)) Val{ .Var = name } else error.UnboundVariable,
             .Unit => Val{ .Unit = {} },
             .Lit => |lit| Val{ .Lit = lit },
             .ValTag => |tag| Val{ .ValTag = tag },
@@ -548,8 +548,12 @@ pub const GrinEvaluator = struct {
                     try self.env.pushScope();
                     errdefer self.env.popScope();
 
+                    // Resolve captured arguments before binding. Thunk fields
+                    // may contain Var references to lazy let-bound variables
+                    // that need environment lookup before use.
                     for (thunk.captured, def.params) |arg, param| {
-                        try self.env.bind(param, arg);
+                        const resolved_arg = try self.resolveVal(&arg);
+                        try self.env.bind(param, resolved_arg);
                     }
 
                     const result = try self.eval(def.body);
@@ -596,7 +600,13 @@ pub const GrinEvaluator = struct {
     /// Evaluate a GRIN expression and return the resulting value.
     pub fn eval(self: *GrinEvaluator, expr: *const ast.Expr) EvalError!Val {
         return switch (expr.*) {
-            .Return => |v| self.resolveVal(@constCast(&v)),
+            .Return => |v| {
+                const resolved = try self.resolveVal(@constCast(&v));
+                // Force heap pointers to WHNF before returning.
+                // When a function returns a lazy thunk (F-tagged heap node),
+                // it must be forced so callers receive the actual value.
+                return self.forceVal(resolved);
+            },
 
             .Store => |v| b: {
                 // Allocate the value on the heap, return a HeapPtr
