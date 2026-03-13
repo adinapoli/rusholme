@@ -1,7 +1,7 @@
 # Rusholme Roadmap
 
 > Auto-generated from GitHub issues. Each issue links to its tracker.
-> **Starting points** (zero dependencies): #1✓, #2✓, #17✓, #22✓, #24✓, #27✓, #53✓, #85✓, #527, #530, #62⚡, #66, #68, #107✓
+> **Starting points** (zero dependencies): #1✓, #2✓, #17✓, #22✓, #24✓, #27✓, #53✓, #85✓, #527✓, #530, #62⚡, #66, #68, #107✓
 
 **Architecture Decisions:**
 - **#0001**: PrimOps and RTS Architecture — defines the contract between compiler and runtime via ~15-30 primitive operations. See `docs/decisions/0001-primops-and-rts-architecture.md`.
@@ -404,7 +404,7 @@
 |---|-------|------|--------|
 | [#502](https://github.com/adinapoli/rusholme/issues/502) | Simple peano number program segfaults | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
 | [#516](https://github.com/adinapoli/rusholme/issues/516) | Lazy let bindings (call-by-need for let-bound variables) | [#502](https://github.com/adinapoli/rusholme/issues/502) | :green_circle: |
-| [#517](https://github.com/adinapoli/rusholme/issues/517) | Lazy function arguments (thunk non-constructor call arguments) | [#516](https://github.com/adinapoli/rusholme/issues/516) | :yellow_circle: |
+| [#517](https://github.com/adinapoli/rusholme/issues/517) | Lazy function arguments (thunk non-constructor call arguments) | [#516](https://github.com/adinapoli/rusholme/issues/516) | :green_circle: |
 | [#518](https://github.com/adinapoli/rusholme/issues/518) | Lazy non-App constructor arguments (Case/Bind chain thunking) | [#517](https://github.com/adinapoli/rusholme/issues/517) | :white_circle: |
 | [#545](https://github.com/adinapoli/rusholme/issues/545) | LLVM backend: force F-tagged thunks in native compiler path | [#517](https://github.com/adinapoli/rusholme/issues/517) | :white_circle: |
 | [#546](https://github.com/adinapoli/rusholme/issues/546) | Lazy arguments for partial/over-saturated/higher-order applications | [#517](https://github.com/adinapoli/rusholme/issues/517) | :white_circle: |
@@ -438,7 +438,7 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#527](https://github.com/adinapoli/rusholme/issues/527) | Implement `foreign import prim` syntax and compilation | — | :green_circle: |
-| [#528](https://github.com/adinapoli/rusholme/issues/528) | Write `lib/Prelude.hs` with basic types and functions (no type classes) | [#527](https://github.com/adinapoli/rusholme/issues/527) | :yellow_circle: |
+| [#528](https://github.com/adinapoli/rusholme/issues/528) | Write `lib/Prelude.hs` with basic types and functions (no type classes) | [#527](https://github.com/adinapoli/rusholme/issues/527) | :green_circle: |
 | [#529](https://github.com/adinapoli/rusholme/issues/529) | Bootstrap Prelude: compile `lib/Prelude.hs` and wire into implicit import | [#527](https://github.com/adinapoli/rusholme/issues/527), [#528](https://github.com/adinapoli/rusholme/issues/528) | :white_circle: |
 | [#530](https://github.com/adinapoli/rusholme/issues/530) | Implement dictionary-passing translation for type classes | — | :white_circle: |
 | [#531](https://github.com/adinapoli/rusholme/issues/531) | Add type class definitions and instances to `lib/Prelude.hs` | [#528](https://github.com/adinapoli/rusholme/issues/528), [#529](https://github.com/adinapoli/rusholme/issues/529), [#530](https://github.com/adinapoli/rusholme/issues/530) | :white_circle: |
@@ -483,6 +483,7 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | [#75](https://github.com/adinapoli/rusholme/issues/75) | Implement basic REPL loop (read-eval-print with interpreter) | [#50](https://github.com/adinapoli/rusholme/issues/50), [#51](https://github.com/adinapoli/rusholme/issues/51) | :green_circle: |
 | [#76](https://github.com/adinapoli/rusholme/issues/76) | Implement REPL auto-completion and multi-line input | [#75](https://github.com/adinapoli/rusholme/issues/75) | :white_circle: |
 | [#487](https://github.com/adinapoli/rusholme/issues/487) | REPL stdin reader drops first byte of subsequent lines in piped mode | [#75](https://github.com/adinapoli/rusholme/issues/75) | :white_circle: |
+| [#514](https://github.com/adinapoli/rusholme/issues/514) | Show type error diagnostics in REPL :type command | [#75](https://github.com/adinapoli/rusholme/issues/75) | :green_circle: |
 
 ### Epic: Multi-Backend Architecture
 
