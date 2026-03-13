@@ -267,3 +267,27 @@ test "e2e: e2e_010_lazy_let" {
 test "e2e: e2e_011_foreign_import_prim" {
     try testE2e(std.testing.allocator, "e2e_011_foreign_import_prim");
 }
+
+test "e2e: e2e_012_prelude_bool" {
+    try testE2e(std.testing.allocator, "e2e_012_prelude_bool");
+}
+
+test "e2e: e2e_013_prelude_arithmetic" {
+    try testE2e(std.testing.allocator, "e2e_013_prelude_arithmetic");
+}
+
+test "e2e: e2e_014_prelude_comparison" {
+    try testE2e(std.testing.allocator, "e2e_014_prelude_comparison");
+}
+
+test "e2e: e2e_015_prelude_higher_order" {
+    try testE2e(std.testing.allocator, "e2e_015_prelude_higher_order");
+}
+
+test "e2e: e2e_016_prelude_maybe_either" {
+    try testE2e(std.testing.allocator, "e2e_016_prelude_maybe_either");
+}
+
+test "e2e: e2e_017_prelude_list" {
+    try testE2e(std.testing.allocator, "e2e_017_prelude_list");
+}

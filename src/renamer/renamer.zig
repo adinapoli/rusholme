@@ -262,6 +262,7 @@ pub const RenameEnv = struct {
         // (though often they are special syntactic forms).
         // Since we have a unified namespace, we prefer the data constructor for (:)
         try self.scope.bind("(:)", Known.Con.Cons);
+        try self.scope.bind(":", Known.Con.Cons);
         try self.scope.bind("(,)", Known.Con.Tuple2);
     }
 };
