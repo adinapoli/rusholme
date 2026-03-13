@@ -140,6 +140,19 @@ pub const LayoutProcessor = struct {
             return tok;
         }
 
+        // Track explicit delimiters to suppress layout inside them.
+        // Per Haskell 2010 §2.7, layout rules don't apply inside explicit delimiter pairs.
+        switch (tok.token) {
+            .open_paren, .open_bracket => try self.delimiter_stack.append(self.allocator, tok.token),
+            .close_paren, .close_bracket => {
+                // Pop regardless of match - parser will handle mismatches
+                if (self.delimiter_stack.items.len > 0) {
+                    _ = self.delimiter_stack.pop();
+                }
+            },
+            else => {},
+        }
+
         // 4. Handle Module-level layout.
         if (self.first_token) {
             self.first_token = false;
