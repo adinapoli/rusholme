@@ -229,6 +229,7 @@ test "should_compile: sc044_vtt_parser" { try testShouldCompile(std.testing.allo
 test "should_compile: sc045_mutual_recursive_let" { try testShouldCompile(std.testing.allocator, "sc045_mutual_recursive_let"); }
 test "should_compile: sc046_multi_equation_adt" { try testShouldCompile(std.testing.allocator, "sc046_multi_equation_adt"); }
 test "should_compile: sc047_foreign_import_prim" { try testShouldCompile(std.testing.allocator, "sc047_foreign_import_prim"); }
+test "should_compile: sc048_prelude" { try testShouldCompile(std.testing.allocator, "sc048_prelude"); }
 
 // ── should_fail test declarations ─────────────────────────────────────────
 
