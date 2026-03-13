@@ -219,6 +219,20 @@ pub const LayoutProcessor = struct {
         if (tok.token != .kw_in) {
             const n = tok.span.start.column;
             while (self.peekContext()) |ctx| {
+                // Skip layout processing when inside explicit delimiters.
+                // Per Haskell 2010 §2.7, layout rules don't apply inside parentheses/brackets.
+                // Stack-based design allows future extension to quasi-quotes, TH, etc.
+                if (self.delimiter_stack.items.len > 0) {
+                    // Just clear the just_opened flag if needed
+                    if (self.peekContext()) |inner_ctx| {
+                        if (n > inner_ctx.column or inner_ctx.kind == .explicit) {
+                            self.context_just_opened = false;
+                        }
+                    }
+                    // Return token normally - no virtual tokens injected
+                    return tok;
+                }
+
                 if (ctx.kind == .explicit) break; // Explicit context — never auto-closed here
                 if (n == ctx.column) {
                     // Same column: insert a virtual semicolon (case 5).
