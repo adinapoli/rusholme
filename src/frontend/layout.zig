@@ -61,6 +61,11 @@ pub const LayoutProcessor = struct {
     diagnostics: ?*diag_mod.DiagnosticCollector,
     // Track when we're inside a pragma {-# ... #-}. Pragmas are transparent to layout.
     inside_pragma: bool,
+    // Stack to track explicit delimiter depth (parentheses, brackets, etc.).
+    // Per Haskell 2010 §2.7, layout rules don't apply inside explicit delimiters.
+    // This is a stack (not just a counter) to allow future extension to quasi-quotes,
+    // Template Haskell, and other delimiter types.
+    delimiter_stack: std.ArrayListUnmanaged(Token),
 
     pub fn init(allocator: std.mem.Allocator, lexer: *Lexer) LayoutProcessor {
         return .{
@@ -77,6 +82,7 @@ pub const LayoutProcessor = struct {
             .last_token_was_virtual_delimiter = false,
             .diagnostics = null,
             .inside_pragma = false,
+            .delimiter_stack = .empty,
         };
     }
 
@@ -89,6 +95,7 @@ pub const LayoutProcessor = struct {
         }
         self.stack.deinit(self.allocator);
         self.pending.deinit(self.allocator);
+        self.delimiter_stack.deinit(self.allocator);
     }
 
     /// Set the diagnostic collector for this layout processor.
