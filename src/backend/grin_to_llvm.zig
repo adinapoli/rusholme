@@ -618,6 +618,15 @@ pub const GrinTranslator = struct {
         }
         // Link TypeEnv to the tag table for field type lookups.
         self.type_env.setTagTable(&self.tag_table);
+
+        // Emit __rhc_force(ptr) → ptr once the tag table is complete.
+        // User-defined function Returns call this to force thunks to WHNF.
+        // Only emitted for whole-program (non-REPL) compilation — the REPL
+        // uses inline forceValueToWhnf at the entry-point return instead.
+        if (self.tag_table.fun_tags.count() > 0 and self.repl_entry_point == null) {
+            try self.emitForceFunction();
+        }
+
         for (program.defs) |def| {
             try self.translateDef(def);
         }
@@ -770,7 +779,13 @@ pub const GrinTranslator = struct {
                             _ = llvm.buildRet(self.builder, val);
                         }
                     } else {
-                        _ = llvm.buildRet(self.builder, val);
+                        // Non-REPL function: force thunks before returning.
+                        const val_kind2 = c.LLVMGetTypeKind(c.LLVMTypeOf(val));
+                        const forced = if (val_kind2 == c.LLVMPointerTypeKind)
+                            self.callForceIfNeeded(val)
+                        else
+                            val;
+                        _ = llvm.buildRet(self.builder, forced);
                     }
                 } else {
                     if (is_repl_entry) {
@@ -1692,6 +1707,13 @@ pub const GrinTranslator = struct {
                     }
                 } else if (!is_native_main) {
                     // Non-main, non-REPL functions return ptr.
+                    // Force any F-tagged thunks to WHNF before returning
+                    // so that callers always receive evaluated values.
+                    if (is_ptr) {
+                        const forced = self.callForceIfNeeded(llvm_val);
+                        _ = llvm.buildRet(self.builder, forced);
+                        return;
+                    }
                     // Main returns i32 so no conversion needed — it falls
                     // through to the default buildRet below.
                     if (is_int) {
@@ -1748,6 +1770,213 @@ pub const GrinTranslator = struct {
         const written = std.fmt.bufPrint(&self.name_buf, "{s}_{d}", .{ name.base, name.unique.value }) catch "";
         self.name_buf[written.len] = 0;
         return self.name_buf[0..written.len :0];
+    }
+
+    // ── Standalone __rhc_force function ──────────────────────────────────
+    //
+    // The whole-program compiler emits a single `__rhc_force(ptr) → ptr`
+    // function that forces a heap pointer to WHNF.  User-defined function
+    // Returns call it instead of inlining the eval loop at every return
+    // site, keeping code size under control.
+    //
+    // The REPL path continues to use the inline `forceValueToWhnf` because
+    // it needs cross-session tag accumulation via `extra_tag_defs`.
+
+    /// Emit the `__rhc_force` function into the current module.
+    ///
+    /// Must be called after the tag table is fully populated (i.e. after
+    /// `buildTagTable` and any `scanExprForTags` calls).  The function
+    /// contains the same eval loop as `forceValueToWhnf` but as a real
+    /// callable function rather than inlined IR.
+    fn emitForceFunction(self: *GrinTranslator) TranslationError!void {
+        const ptr_ty = ptrType();
+        const i64_ty = llvm.i64Type();
+        const header_ty = nodeHeaderType();
+        const rts_load_fn = declareRtsLoadField(self.module);
+        const rts_store_fn = declareRtsStoreField(self.module);
+
+        // fn __rhc_force(ptr) -> ptr
+        var param_types = [_]llvm.Type{ptr_ty};
+        const fn_type = llvm.functionType(ptr_ty, &param_types, false);
+        const func = llvm.addFunction(self.module, "__rhc_force", fn_type);
+
+        // Save and restore builder/function state so translateDef is not
+        // affected by our temporary positioning.
+        const saved_func = self.current_func;
+        const saved_bb = c.LLVMGetInsertBlock(self.builder);
+        defer {
+            self.current_func = saved_func;
+            if (saved_bb != null) llvm.positionBuilderAtEnd(self.builder, saved_bb);
+        }
+        self.current_func = func;
+
+        const param = c.LLVMGetParam(func, 0);
+        const entry_bb = llvm.appendBasicBlock(func, "entry");
+        const eval_bb = c.LLVMAppendBasicBlock(func, "eval");
+        const check_bb = c.LLVMAppendBasicBlock(func, "check");
+        const done_bb = c.LLVMAppendBasicBlock(func, "done");
+
+        // ── entry: branch to eval loop ─────────────────────────────────
+        llvm.positionBuilderAtEnd(self.builder, entry_bb);
+        _ = c.LLVMBuildBr(self.builder, eval_bb);
+
+        // ── eval: phi + heap-pointer guard ─────────────────────────────
+        llvm.positionBuilderAtEnd(self.builder, eval_bb);
+        const phi = c.LLVMBuildPhi(self.builder, ptr_ty, "cur");
+
+        // Runtime guard: only dereference if the pointer looks like a
+        // valid heap node (aligned to 8 bytes AND above page zero).
+        // Raw integers stored via inttoptr (e.g. 42) fail this check.
+        const ptr_as_int = c.LLVMBuildPtrToInt(self.builder, phi, i64_ty, "ptr_int");
+        const align_bits = c.LLVMBuildAnd(self.builder, ptr_as_int, c.LLVMConstInt(i64_ty, 7, 0), "align");
+        const is_aligned = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, align_bits, c.LLVMConstInt(i64_ty, 0, 0), "aligned");
+        const is_above_min = c.LLVMBuildICmp(self.builder, c.LLVMIntUGT, ptr_as_int, c.LLVMConstInt(i64_ty, 4096, 0), "above_min");
+        const is_heap_ptr = c.LLVMBuildAnd(self.builder, is_aligned, is_above_min, "is_heap");
+        _ = c.LLVMBuildCondBr(self.builder, is_heap_ptr, check_bb, done_bb);
+
+        // ── check: tag load + switch ───────────────────────────────────
+        llvm.positionBuilderAtEnd(self.builder, check_bb);
+        var tag_idx = [_]llvm.Value{
+            c.LLVMConstInt(llvm.i32Type(), 0, 0),
+            c.LLVMConstInt(llvm.i32Type(), 0, 0),
+        };
+        const tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, phi, &tag_idx, 2, "tag_gep");
+        const tag_val = c.LLVMBuildLoad2(self.builder, i64_ty, tag_gep, "tag");
+
+        const n_cases = @as(u32, @intCast(self.tag_table.fun_tags.count())) + 1;
+        const sw = c.LLVMBuildSwitch(self.builder, tag_val, done_bb, n_cases);
+
+        // ── Ind case: follow indirection ───────────────────────────────
+        const ind_bb = c.LLVMAppendBasicBlock(func, "ind");
+        c.LLVMAddCase(sw, c.LLVMConstInt(i64_ty, 0x101, 0), ind_bb);
+
+        llvm.positionBuilderAtEnd(self.builder, ind_bb);
+        var ind_load_args = [_]llvm.Value{
+            phi,
+            c.LLVMConstInt(llvm.i32Type(), 0, 0),
+        };
+        const ind_target_i64 = c.LLVMBuildCall2(
+            self.builder,
+            llvm.getFunctionType(rts_load_fn),
+            rts_load_fn,
+            &ind_load_args,
+            2,
+            "ind_target",
+        );
+        const ind_target = c.LLVMBuildIntToPtr(self.builder, ind_target_i64, ptr_ty, "ind_ptr");
+        _ = c.LLVMBuildBr(self.builder, eval_bb);
+
+        // ── Phi incoming values ────────────────────────────────────────
+        var phi_vals = std.ArrayListUnmanaged(llvm.Value){};
+        defer phi_vals.deinit(self.allocator);
+        var phi_bbs = std.ArrayListUnmanaged(llvm.BasicBlock){};
+        defer phi_bbs.deinit(self.allocator);
+
+        phi_vals.append(self.allocator, param) catch return error.OutOfMemory;
+        phi_bbs.append(self.allocator, entry_bb) catch return error.OutOfMemory;
+        phi_vals.append(self.allocator, ind_target) catch return error.OutOfMemory;
+        phi_bbs.append(self.allocator, ind_bb) catch return error.OutOfMemory;
+
+        // ── F-tag cases: force thunk ───────────────────────────────────
+        var ftag_iter = self.tag_table.fun_tags.iterator();
+        while (ftag_iter.next()) |ftag_entry| {
+            const ftag_unique = ftag_entry.key_ptr.*;
+            const ftag_disc = self.tag_table.discriminants.get(ftag_unique) orelse continue;
+            const ftag_name = self.tag_table.fun_tag_names.get(ftag_unique) orelse continue;
+            const ftag_n_fields = self.tag_table.field_counts.get(ftag_unique) orelse 0;
+
+            const ftag_bb = c.LLVMAppendBasicBlock(func, "ftag");
+            c.LLVMAddCase(sw, c.LLVMConstInt(i64_ty, @bitCast(ftag_disc), 0), ftag_bb);
+
+            llvm.positionBuilderAtEnd(self.builder, ftag_bb);
+
+            // Load captured arguments from thunk fields.
+            var call_args: [8]llvm.Value = undefined;
+            const n_args = @min(ftag_n_fields, 8);
+            for (0..n_args) |fi| {
+                var fld_args = [_]llvm.Value{
+                    phi,
+                    c.LLVMConstInt(llvm.i32Type(), @intCast(fi), 0),
+                };
+                const loaded = c.LLVMBuildCall2(
+                    self.builder,
+                    llvm.getFunctionType(rts_load_fn),
+                    rts_load_fn,
+                    &fld_args,
+                    2,
+                    "arg",
+                );
+                call_args[fi] = c.LLVMBuildIntToPtr(self.builder, loaded, ptr_ty, "arg_ptr");
+            }
+
+            // Call the thunk's function.
+            const fn_name_z = self.formatName(ftag_name);
+            var fn_param_types: [8]llvm.Type = undefined;
+            for (0..n_args) |pi| fn_param_types[pi] = ptr_ty;
+            const callee_type = llvm.functionType(ptr_ty, fn_param_types[0..n_args], false);
+            const callee = c.LLVMGetNamedFunction(self.module, fn_name_z) orelse
+                llvm.addFunction(self.module, fn_name_z, callee_type);
+            const result = c.LLVMBuildCall2(
+                self.builder,
+                callee_type,
+                callee,
+                @ptrCast(&call_args),
+                @intCast(n_args),
+                "result",
+            );
+
+            // Memoize: overwrite thunk with Ind → result.
+            const upd_tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, phi, &tag_idx, 2, "upd_tag");
+            _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(i64_ty, 0x101, 0), upd_tag_gep);
+            const result_u64 = c.LLVMBuildPtrToInt(self.builder, result, i64_ty, "upd_u64");
+            var upd_args = [_]llvm.Value{
+                phi,
+                c.LLVMConstInt(llvm.i32Type(), 0, 0),
+                result_u64,
+            };
+            _ = c.LLVMBuildCall2(
+                self.builder,
+                llvm.getFunctionType(rts_store_fn),
+                rts_store_fn,
+                &upd_args,
+                3,
+                "",
+            );
+
+            _ = c.LLVMBuildBr(self.builder, eval_bb);
+
+            phi_vals.append(self.allocator, result) catch return error.OutOfMemory;
+            phi_bbs.append(self.allocator, ftag_bb) catch return error.OutOfMemory;
+        }
+
+        // Wire up phi.
+        c.LLVMAddIncoming(
+            phi,
+            @ptrCast(phi_vals.items.ptr),
+            @ptrCast(phi_bbs.items.ptr),
+            @intCast(phi_vals.items.len),
+        );
+
+        // ── done: return WHNF value ────────────────────────────────────
+        llvm.positionBuilderAtEnd(self.builder, done_bb);
+        _ = llvm.buildRet(self.builder, phi);
+    }
+
+    /// Emit a call to `__rhc_force` if the module contains F-tags.
+    /// Returns the forced pointer value, or the original value unchanged
+    /// if no F-tags exist (i.e. `__rhc_force` was never emitted).
+    fn callForceIfNeeded(self: *GrinTranslator, val: llvm.Value) llvm.Value {
+        if (self.tag_table.fun_tags.count() == 0) return val;
+        const force_fn = c.LLVMGetNamedFunction(self.module, "__rhc_force") orelse return val;
+        var args = [_]llvm.Value{val};
+        return c.LLVMBuildCall2(
+            self.builder,
+            llvm.getFunctionType(force_fn),
+            force_fn,
+            &args,
+            1,
+            "forced",
+        );
     }
 
     /// Force a heap pointer to WHNF by following indirections and forcing
