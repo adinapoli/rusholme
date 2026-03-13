@@ -106,6 +106,10 @@ const TranslateCtx = struct {
     con_map: std.AutoHashMapUnmanaged(u64, u32),
     // Counter for generating fresh GRIN variable names.
     name_counter: u64 = 0,
+    // Lambda-lifted helper functions generated during translation.
+    // Non-App complex expressions in constructor arguments are lifted into
+    // helper functions so they can be suspended as F-tagged thunks (issue #518).
+    lifted_defs: std.ArrayListUnmanaged(GrinDef) = .{},
 
     pub fn init(alloc: std.mem.Allocator) TranslateCtx {
         return .{
@@ -120,6 +124,7 @@ const TranslateCtx = struct {
         self.var_map.deinit(self.alloc);
         self.arity_map.deinit(self.alloc);
         self.con_map.deinit(self.alloc);
+        self.lifted_defs.deinit(self.alloc);
     }
 
     /// Return true if the given unique belongs to a known data constructor.
@@ -366,6 +371,12 @@ pub fn translateProgram(
                 }
             },
         }
+    }
+
+    // Append any lambda-lifted helper functions generated during translation
+    // (e.g., thunk wrappers for non-App constructor arguments, issue #518).
+    for (ctx.lifted_defs.items) |lifted| {
+        try defs.append(alloc, lifted);
     }
 
     const defs_slice = try defs.toOwnedSlice(alloc);
@@ -892,19 +903,159 @@ fn wrapWithLazyBindsForFunc(
     return result;
 }
 
+// ── Free Variable Analysis for GRIN Expressions ─────────────────────────
+//
+// Used by the ad-hoc lambda lifter in wrapWithLazyBindsForCon (issue #518)
+// to determine which variables a non-App complex expression captures.
+
+/// Unique-keyed set for collecting free variables.
+const UniqueSet = std.AutoHashMapUnmanaged(u64, void);
+
+/// Record variables bound by a GRIN value pattern (Bind LHS).
+fn collectBoundFromVal(alloc: std.mem.Allocator, val: *const GrinVal, bound: *UniqueSet) !void {
+    switch (val.*) {
+        .Var => |name| try bound.put(alloc, name.unique.value, {}),
+        .ConstTagNode => |ctn| {
+            for (ctn.fields) |field| {
+                switch (field) {
+                    .Var => |name| try bound.put(alloc, name.unique.value, {}),
+                    else => {},
+                }
+            }
+        },
+        .VarTagNode => |vtn| {
+            try bound.put(alloc, vtn.tag_var.unique.value, {});
+            for (vtn.fields) |field| {
+                switch (field) {
+                    .Var => |name| try bound.put(alloc, name.unique.value, {}),
+                    else => {},
+                }
+            }
+        },
+        .Unit, .Lit, .ValTag => {},
+    }
+}
+
+/// Record variables bound by a case pattern.
+fn collectBoundFromPat(alloc: std.mem.Allocator, pat: GrinCPat, bound: *UniqueSet) !void {
+    switch (pat) {
+        .NodePat => |np| {
+            for (np.fields) |name| {
+                try bound.put(alloc, name.unique.value, {});
+            }
+        },
+        .LitPat, .TagPat, .DefaultPat => {},
+    }
+}
+
+/// Check whether a GRIN expression involves genuine computation (Case
+/// dispatch, function application) as opposed to simple constructor
+/// construction (Store/Bind chains that produce WHNF values).
+///
+/// Used by wrapWithLazyBindsForCon to decide whether a non-App complex
+/// expression should be lambda-lifted into a thunk (true) or kept eager
+/// (false). Constructor store chains are already in WHNF and don't benefit
+/// from thunking.
+fn exprInvolvesComputation(expr: *const GrinExpr) bool {
+    return switch (expr.*) {
+        .Case => true,
+        .App => true,
+        .Bind => |bind| exprInvolvesComputation(bind.lhs) or exprInvolvesComputation(bind.rhs),
+        .Block => |inner| exprInvolvesComputation(inner),
+        // Store, Fetch, Update, Return are simple operations.
+        .Store, .Fetch, .Update, .Return => false,
+    };
+}
+
+/// Collect free variables in a GRIN expression.
+/// Returns a set of unique IDs that are referenced but not locally bound.
+fn collectFreeVarsExpr(alloc: std.mem.Allocator, expr: *const GrinExpr, bound: *const UniqueSet, free: *UniqueSet) !void {
+    switch (expr.*) {
+        .Bind => |bind| {
+            // Collect free vars from the LHS.
+            try collectFreeVarsExpr(alloc, bind.lhs, bound, free);
+            // The pattern binds new variables for the RHS.
+            var inner_bound = try bound.clone(alloc);
+            defer inner_bound.deinit(alloc);
+            try collectBoundFromVal(alloc, &bind.pat, &inner_bound);
+            try collectFreeVarsExpr(alloc, bind.rhs, &inner_bound, free);
+        },
+        .Case => |case| {
+            try collectFreeVarsVal(alloc, case.scrutinee, bound, free);
+            for (case.alts) |alt| {
+                var inner_bound = try bound.clone(alloc);
+                defer inner_bound.deinit(alloc);
+                try collectBoundFromPat(alloc, alt.pat, &inner_bound);
+                try collectFreeVarsExpr(alloc, alt.body, &inner_bound, free);
+            }
+        },
+        .App => |app| {
+            // The function name itself is a reference (unless it's a known
+            // top-level def, in which case it's not captured — but we collect
+            // it anyway; the caller filters via arity_map).
+            if (!bound.contains(app.name.unique.value)) {
+                try free.put(alloc, app.name.unique.value, {});
+            }
+            for (app.args) |arg| {
+                try collectFreeVarsVal(alloc, arg, bound, free);
+            }
+        },
+        .Return => |val| try collectFreeVarsVal(alloc, val, bound, free),
+        .Store => |val| try collectFreeVarsVal(alloc, val, bound, free),
+        .Fetch => |fetch| {
+            if (!bound.contains(fetch.ptr.unique.value)) {
+                try free.put(alloc, fetch.ptr.unique.value, {});
+            }
+        },
+        .Update => |upd| {
+            if (!bound.contains(upd.ptr.unique.value)) {
+                try free.put(alloc, upd.ptr.unique.value, {});
+            }
+            try collectFreeVarsVal(alloc, upd.val, bound, free);
+        },
+        .Block => |inner| try collectFreeVarsExpr(alloc, inner, bound, free),
+    }
+}
+
+/// Collect free variable references from a GRIN value.
+fn collectFreeVarsVal(alloc: std.mem.Allocator, val: GrinVal, bound: *const UniqueSet, free: *UniqueSet) !void {
+    switch (val) {
+        .Var => |name| {
+            if (!bound.contains(name.unique.value)) {
+                try free.put(alloc, name.unique.value, {});
+            }
+        },
+        .ConstTagNode => |ctn| {
+            for (ctn.fields) |field| {
+                try collectFreeVarsVal(alloc, field, bound, free);
+            }
+        },
+        .VarTagNode => |vtn| {
+            if (!bound.contains(vtn.tag_var.unique.value)) {
+                try free.put(alloc, vtn.tag_var.unique.value, {});
+            }
+            for (vtn.fields) |field| {
+                try collectFreeVarsVal(alloc, field, bound, free);
+            }
+        },
+        .ValTag, .Unit, .Lit => {},
+    }
+}
+
 /// Wrap an inner expression with lazy thunk stores for constructor arguments.
 ///
 /// In Haskell, constructor arguments are lazy: `Succ (double x)` does not
 /// evaluate `double x` — it stores a thunk that captures the function and
-/// its arguments.  This function replaces eager binds with F-tagged stores
-/// for `App` complex expressions:
+/// its arguments.  This function replaces eager binds with F-tagged stores:
 ///
-///   -- Eager (old):              -- Lazy (new):
-///   arg <- double x              arg <- store (Fdouble [x])
-///   store (CSucc [arg])          store (CSucc [arg])
+///   -- App arguments (direct thunk):
+///   arg <- double x              →  arg <- store (Fdouble [x])
+///   store (CSucc [arg])             store (CSucc [arg])
 ///
-/// Non-App complex expressions (Case, Bind chains) are kept eager since
-/// they represent control flow that must be resolved immediately.
+///   -- Non-App arguments (lambda-lifted thunk, issue #518):
+///   arg <- case x of ...         →  arg <- store (F_thunk_0 [x])
+///   store (CSucc [arg])             store (CSucc [arg])
+///   (where _thunk_0 x = case x of ... is a lifted helper function)
 fn wrapWithLazyBindsForCon(
     ctx: *TranslateCtx,
     inner: *GrinExpr,
@@ -953,9 +1104,78 @@ fn wrapWithLazyBindsForCon(
                 }
             },
             else => {
-                // Non-App complex expression: keep eager evaluation.
-                // tracked in: https://github.com/adinapoli/rusholme/issues/518
-                try eager_binds.append(ctx.alloc, pb);
+                // Non-App complex expression. Distinguish:
+                //
+                // - Store/Bind chains (nested constructor applications):
+                //   already produce WHNF values — keep eager.
+                //
+                // - Case expressions and Bind chains rooted in Case:
+                //   represent genuine computation — lambda-lift into a
+                //   helper function and suspend as an F-tagged thunk
+                //   (issue #518).
+                if (exprInvolvesComputation(pb.complex_expr)) {
+                    // Lambda-lift: compute free variables, generate helper.
+                    var bound_set = UniqueSet{};
+                    defer bound_set.deinit(ctx.alloc);
+                    var free_set = UniqueSet{};
+                    defer free_set.deinit(ctx.alloc);
+
+                    try collectFreeVarsExpr(ctx.alloc, pb.complex_expr, &bound_set, &free_set);
+
+                    // Filter: remove top-level functions and constructors
+                    // (they are global, not captured in the thunk).
+                    var free_vars = std.ArrayListUnmanaged(GrinName){};
+                    defer free_vars.deinit(ctx.alloc);
+
+                    var fv_iter = free_set.iterator();
+                    while (fv_iter.next()) |entry| {
+                        const uid = entry.key_ptr.*;
+                        if (ctx.arity_map.contains(uid)) continue;
+                        if (ctx.con_map.contains(uid)) continue;
+                        // Resolve the unique back to its GrinName via var_map.
+                        if (ctx.var_map.get(uid)) |name| {
+                            try free_vars.append(ctx.alloc, name);
+                        }
+                    }
+
+                    // Generate helper function: _thunk_N fv1 fv2 ... = <expr>
+                    const helper_name = try ctx.freshName("_thunk");
+                    const params = try ctx.alloc.alloc(GrinName, free_vars.items.len);
+                    const capture_vals = try ctx.alloc.alloc(GrinVal, free_vars.items.len);
+                    for (free_vars.items, 0..) |fv, j| {
+                        // The helper's parameter names match the captured variables
+                        // so the body expression (which references them by unique)
+                        // resolves correctly.
+                        params[j] = fv;
+                        capture_vals[j] = .{ .Var = fv };
+                    }
+
+                    const helper_def = GrinDef{
+                        .name = helper_name,
+                        .params = params,
+                        .body = pb.complex_expr,
+                    };
+                    try ctx.lifted_defs.append(ctx.alloc, helper_def);
+                    try ctx.arity_map.put(ctx.alloc, helper_name.unique.value, @intCast(params.len));
+
+                    // Emit: store (F_thunk_N [fv1, fv2, ...])
+                    const ftag = GrinTag{ .tag_type = .{ .Fun = {} }, .name = helper_name };
+                    const store_expr = try ctx.alloc.create(GrinExpr);
+                    store_expr.* = .{ .Store = .{ .ConstTagNode = .{
+                        .tag = ftag,
+                        .fields = capture_vals,
+                    } } };
+                    const bind_expr = try ctx.alloc.create(GrinExpr);
+                    bind_expr.* = .{ .Bind = .{
+                        .lhs = store_expr,
+                        .pat = .{ .Var = pb.fresh_var },
+                        .rhs = result,
+                    } };
+                    result = bind_expr;
+                } else {
+                    // Store/Bind chain producing a constructor: keep eager.
+                    try eager_binds.append(ctx.alloc, pb);
+                }
             },
         }
     }
@@ -2546,4 +2766,213 @@ test "translateProgram: external 0-arity function produces App not Return Var" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "wrapWithLazyBindsForCon: Case arg lambda-lifted into thunk (#518)" {
+    // Core: data Wrap = MkWrap Int
+    //       f x = MkWrap (case x of { 0 -> 42; _ -> 99 })
+    //
+    // Expected GRIN:
+    //   f x =
+    //     arg <- store (F_thunk [x])     -- Case lifted to helper
+    //     store (CMkWrap [arg])
+    //
+    //   _thunk x =                        -- lifted helper
+    //     case x of { ... }
+    //
+    // The Case expression should NOT be evaluated eagerly; it should be
+    // suspended as an F-tagged thunk via ad-hoc lambda lifting.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Data constructor: MkWrap :: Int -> Wrap (1 field)
+    const mkwrap_name = grin.Name{ .base = "MkWrap", .unique = .{ .value = 500 } };
+    const wrap_ty = core.CoreType{ .TyCon = .{
+        .name = grin.Name{ .base = "Wrap", .unique = .{ .value = 503 } },
+        .args = &.{},
+    } };
+    const int_ty = core.CoreType{ .TyCon = .{
+        .name = grin.Name{ .base = "Int", .unique = .{ .value = 600 } },
+        .args = &.{},
+    } };
+    const arg_ty = try alloc.create(core.CoreType);
+    arg_ty.* = int_ty;
+    const res_ty = try alloc.create(core.CoreType);
+    res_ty.* = wrap_ty;
+    const mkwrap_ty = core.CoreType{ .FunTy = .{ .arg = arg_ty, .res = res_ty } };
+
+    const mkwrap_id = core.Id{
+        .name = mkwrap_name,
+        .ty = mkwrap_ty,
+        .span = undefined,
+    };
+
+    const x_id = core.Id{
+        .name = grin.Name{ .base = "x", .unique = .{ .value = 501 } },
+        .ty = undefined,
+        .span = undefined,
+    };
+
+    const f_id = core.Id{
+        .name = grin.Name{ .base = "f", .unique = .{ .value = 502 } },
+        .ty = undefined,
+        .span = undefined,
+    };
+
+    // Build: case x of { 0 -> 42; _ -> 99 }
+    const x_var_scrutinee = try alloc.create(CoreExpr);
+    x_var_scrutinee.* = .{ .Var = x_id };
+
+    const lit_42 = try alloc.create(CoreExpr);
+    lit_42.* = .{ .Lit = .{ .val = .{ .Int = 42 }, .span = undefined } };
+
+    const lit_99 = try alloc.create(CoreExpr);
+    lit_99.* = .{ .Lit = .{ .val = .{ .Int = 99 }, .span = undefined } };
+
+    const case_expr = try alloc.create(CoreExpr);
+    case_expr.* = .{ .Case = .{
+        .scrutinee = x_var_scrutinee,
+        .binder = x_id,
+        .ty = .{ .TyCon = .{ .name = grin.Name{ .base = "Int", .unique = .{ .value = 600 } }, .args = &.{} } },
+        .alts = &.{
+            .{ .con = .{ .LitAlt = .{ .Int = 0 } }, .binders = &.{}, .body = lit_42 },
+            .{ .con = .Default, .binders = &.{}, .body = lit_99 },
+        },
+        .span = undefined,
+    } };
+
+    // Build: MkWrap (case x of ...)  -- constructor application
+    const mkwrap_var = try alloc.create(CoreExpr);
+    mkwrap_var.* = .{ .Var = mkwrap_id };
+
+    const app_expr = try alloc.create(CoreExpr);
+    app_expr.* = .{ .App = .{ .fn_expr = mkwrap_var, .arg = case_expr, .span = undefined } };
+
+    // Build: \x -> MkWrap (case x of ...)
+    const lam_x = try alloc.create(CoreExpr);
+    lam_x.* = .{ .Lam = .{ .binder = x_id, .body = app_expr, .span = undefined } };
+
+    const bind_pair = CoreBindPair{
+        .binder = f_id,
+        .rhs = lam_x,
+    };
+
+    // Data declaration for MkWrap (1 constructor, 1 field)
+    const data_decl = core.CoreDataDecl{
+        .name = grin.Name{ .base = "Wrap", .unique = .{ .value = 503 } },
+        .tyvars = &.{},
+        .constructors = &.{mkwrap_id},
+        .span = undefined,
+    };
+
+    const core_prog = CoreProgram{
+        .data_decls = &.{data_decl},
+        .binds = &.{.{ .NonRec = bind_pair }},
+    };
+
+    const grin_prog = try translateProgram(alloc, core_prog, null, null);
+
+    // Should have 2 defs: f and the lifted thunk helper.
+    try testing.expectEqual(@as(usize, 2), grin_prog.defs.len);
+
+    const f_def = grin_prog.defs[0];
+    try testing.expectEqualStrings("f", f_def.name.base);
+    try testing.expectEqual(@as(usize, 1), f_def.params.len);
+
+    // The body of f should be a Bind chain:
+    //   store (F_thunk [x]) >>= \arg -> store (CMkWrap [arg])
+    // The outermost Bind's LHS should be a Store with an F-tag (thunk).
+    switch (f_def.body.*) {
+        .Bind => |bind| {
+            switch (bind.lhs.*) {
+                .Store => |store_val| {
+                    switch (store_val) {
+                        .ConstTagNode => |ctn| {
+                            // Should be an F-tag (function thunk)
+                            switch (ctn.tag.tag_type) {
+                                .Fun => {},
+                                else => return error.TestUnexpectedResult,
+                            }
+                            try testing.expectEqualStrings("_thunk", ctn.tag.name.base);
+                            // Should capture x as free variable
+                            try testing.expectEqual(@as(usize, 1), ctn.fields.len);
+                            switch (ctn.fields[0]) {
+                                .Var => |v| try testing.expectEqualStrings("x", v.base),
+                                else => return error.TestUnexpectedResult,
+                            }
+                        },
+                        else => return error.TestUnexpectedResult,
+                    }
+                },
+                else => return error.TestUnexpectedResult,
+            }
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    // The lifted helper should be the second def.
+    const thunk_def = grin_prog.defs[1];
+    try testing.expectEqualStrings("_thunk", thunk_def.name.base);
+    // Should have 1 parameter (captured x).
+    try testing.expectEqual(@as(usize, 1), thunk_def.params.len);
+    try testing.expectEqualStrings("x", thunk_def.params[0].base);
+    // The body should be a Case expression.
+    switch (thunk_def.body.*) {
+        .Case => {},
+        // Bind chain containing a Case is also acceptable
+        .Bind => |bind| {
+            switch (bind.rhs.*) {
+                .Case => {},
+                else => return error.TestUnexpectedResult,
+            }
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "exprInvolvesComputation: distinguishes values from computation (#518)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const dummy_name = GrinName{ .base = "x", .unique = .{ .value = 0 } };
+
+    // Store → no computation (constructor allocation)
+    const store_expr = try alloc.create(GrinExpr);
+    store_expr.* = .{ .Store = .{ .Var = dummy_name } };
+    try testing.expect(!exprInvolvesComputation(store_expr));
+
+    // Return → no computation
+    const return_expr = try alloc.create(GrinExpr);
+    return_expr.* = .{ .Return = .{ .Var = dummy_name } };
+    try testing.expect(!exprInvolvesComputation(return_expr));
+
+    // Case → computation
+    const case_expr = try alloc.create(GrinExpr);
+    case_expr.* = .{ .Case = .{ .scrutinee = .{ .Var = dummy_name }, .alts = &.{} } };
+    try testing.expect(exprInvolvesComputation(case_expr));
+
+    // App → computation
+    const app_expr = try alloc.create(GrinExpr);
+    app_expr.* = .{ .App = .{ .name = dummy_name, .args = &.{} } };
+    try testing.expect(exprInvolvesComputation(app_expr));
+
+    // Bind(Store, Return) → no computation (constructor chain)
+    const bind_store = try alloc.create(GrinExpr);
+    bind_store.* = .{ .Bind = .{
+        .lhs = store_expr,
+        .pat = .{ .Var = dummy_name },
+        .rhs = return_expr,
+    } };
+    try testing.expect(!exprInvolvesComputation(bind_store));
+
+    // Bind(Store, Case) → computation (case in RHS)
+    const bind_case = try alloc.create(GrinExpr);
+    bind_case.* = .{ .Bind = .{
+        .lhs = store_expr,
+        .pat = .{ .Var = dummy_name },
+        .rhs = case_expr,
+    } };
+    try testing.expect(exprInvolvesComputation(bind_case));
 }
