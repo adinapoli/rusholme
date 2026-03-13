@@ -238,6 +238,10 @@
 | [#256](https://github.com/adinapoli/rusholme/issues/256) | parser: support quasi-quotation syntax ([name\| ... \|]) | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
 | [#316](https://github.com/adinapoli/rusholme/issues/316) | Add validation for duplicate record field names in data types | [#135](https://github.com/adinapoli/rusholme/issues/135) | :green_circle: |
 | [#444](https://github.com/adinapoli/rusholme/issues/444) | Refactor parseImportHeaders to eliminate redundant parsing | [#29](https://github.com/adinapoli/rusholme/issues/29) | :white_circle: |
+| [#538](https://github.com/adinapoli/rusholme/issues/538) | Parser cannot handle `(-)` in export lists | [#29](https://github.com/adinapoli/rusholme/issues/29) | :white_circle: |
+| [#539](https://github.com/adinapoli/rusholme/issues/539) | Parser cannot handle infix operator definitions with parenthesized patterns | [#29](https://github.com/adinapoli/rusholme/issues/29), [#31](https://github.com/adinapoli/rusholme/issues/31) | :white_circle: |
+| [#540](https://github.com/adinapoli/rusholme/issues/540) | Parser cannot handle multiple consecutive parenthesized cons patterns | [#31](https://github.com/adinapoli/rusholme/issues/31) | :white_circle: |
+| [#543](https://github.com/adinapoli/rusholme/issues/543) | Layout processor injects virtual tokens inside parenthesized contexts | [#26](https://github.com/adinapoli/rusholme/issues/26) | :white_circle: |
 
 ### CLI
 
@@ -291,6 +295,7 @@
 | [#304](https://github.com/adinapoli/rusholme/issues/304) | Unifier: fix rigid type (skolem) unification | [#36](https://github.com/adinapoli/rusholme/issues/36) | :green_circle: |
 | [#37](https://github.com/adinapoli/rusholme/issues/37) | Implement type class resolution and dictionary passing | [#36](https://github.com/adinapoli/rusholme/issues/36), [#153](https://github.com/adinapoli/rusholme/issues/153) | :green_circle: |
 | [#38](https://github.com/adinapoli/rusholme/issues/38) | Implement desugarer / elaborator (typed AST → Core IR) | [#36](https://github.com/adinapoli/rusholme/issues/36), [#153](https://github.com/adinapoli/rusholme/issues/153) | :green_circle: |
+| [#541](https://github.com/adinapoli/rusholme/issues/541) | User-defined operators not resolved when used in expressions | [#149](https://github.com/adinapoli/rusholme/issues/149) | :white_circle: |
 
 ### Epic [#5](https://github.com/adinapoli/rusholme/issues/5): Core IR (System F_C)
 
@@ -350,6 +355,7 @@
 | [#343](https://github.com/adinapoli/rusholme/issues/343) | Implement heap operation PrimOps (MutVar) | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
 | [#344](https://github.com/adinapoli/rusholme/issues/344) | Implement FFI bridge (ccall PrimOp) | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
 | [#387](https://github.com/adinapoli/rusholme/issues/387) | Implement proper write() for runtime IO primitives | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
+| [#542](https://github.com/adinapoli/rusholme/issues/542) | Add missing RTS implementations for neg_Int, abs_Int, quot_Int, rem_Int | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
 
 ### Epic [#280](https://github.com/adinapoli/rusholme/issues/280): Rusholme Run-Time System (RTS)
 
@@ -420,8 +426,8 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#527](https://github.com/adinapoli/rusholme/issues/527) | Implement `foreign import prim` syntax and compilation | — | :white_circle: |
-| [#528](https://github.com/adinapoli/rusholme/issues/528) | Write `lib/Prelude.hs` with basic types and functions (no type classes) | [#527](https://github.com/adinapoli/rusholme/issues/527) | :white_circle: |
+| [#527](https://github.com/adinapoli/rusholme/issues/527) | Implement `foreign import prim` syntax and compilation | — | :green_circle: |
+| [#528](https://github.com/adinapoli/rusholme/issues/528) | Write `lib/Prelude.hs` with basic types and functions (no type classes) | [#527](https://github.com/adinapoli/rusholme/issues/527) | :yellow_circle: |
 | [#529](https://github.com/adinapoli/rusholme/issues/529) | Bootstrap Prelude: compile `lib/Prelude.hs` and wire into implicit import | [#527](https://github.com/adinapoli/rusholme/issues/527), [#528](https://github.com/adinapoli/rusholme/issues/528) | :white_circle: |
 | [#530](https://github.com/adinapoli/rusholme/issues/530) | Implement dictionary-passing translation for type classes | — | :white_circle: |
 | [#531](https://github.com/adinapoli/rusholme/issues/531) | Add type class definitions and instances to `lib/Prelude.hs` | [#528](https://github.com/adinapoli/rusholme/issues/528), [#529](https://github.com/adinapoli/rusholme/issues/529), [#530](https://github.com/adinapoli/rusholme/issues/530) | :white_circle: |
