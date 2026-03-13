@@ -396,6 +396,16 @@ pub const RDecl = union(enum) {
     InstanceDecl: RInstanceDecl,
     /// Data declaration (algebraic data type).
     DataDecl: RDataDecl,
+    /// Foreign primitive import: `foreign import prim "op_name" binding :: Type`.
+    ForeignPrim: struct {
+        /// The renamed Haskell binding name (with unique ID).
+        name: Name,
+        /// The raw PrimOp string name (e.g., "add_Int").
+        primop_name: []const u8,
+        /// The declared type signature (AST-level, not yet elaborated).
+        type: ast.Type,
+        span: SourceSpan,
+    },
 };
 
 /// A renamed data constructor declaration.
@@ -545,6 +555,12 @@ pub fn rename(module: ast.Module, env: *RenameEnv) !RenamedModule {
                 // Type signatures don't introduce new binders at pass 1;
                 // their names will be looked up in pass 2.
                 _ = ts;
+            },
+            .Foreign => |fd| {
+                // Foreign imports introduce a new top-level binding.
+                const n = env.freshName(fd.binding_name);
+                try env.scope.bind(fd.binding_name, n);
+                try top_names.put(env.alloc, fd.binding_name, n);
             },
             .Class => |cd| {
                 // Register class name in scope.
@@ -844,6 +860,30 @@ fn renameDecl(
                 .constructors = try rcons.toOwnedSlice(env.alloc),
                 .span = dd.span,
                 .selectors = selectors,
+            } };
+        },
+        .Foreign => |fd| blk: {
+            // Only `prim` calling convention is supported; others are deferred.
+            if (!std.mem.eql(u8, fd.calling_convention, "prim")) {
+                const msg = try std.fmt.allocPrint(
+                    env.alloc,
+                    "unsupported foreign calling convention: `{s}` (only `prim` is supported)",
+                    .{fd.calling_convention},
+                );
+                try env.diags.emit(env.alloc, .{
+                    .severity = .@"error",
+                    .code = .parse_error,
+                    .span = fd.span,
+                    .message = msg,
+                });
+                break :blk null;
+            }
+            const name = env.scope.lookup(fd.binding_name) orelse env.freshName(fd.binding_name);
+            break :blk RDecl{ .ForeignPrim = .{
+                .name = name,
+                .primop_name = fd.foreign_name,
+                .type = fd.type,
+                .span = fd.span,
             } };
         },
         else => null,

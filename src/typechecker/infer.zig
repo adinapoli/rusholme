@@ -1063,6 +1063,7 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                     .ClassDecl => {},
                     .InstanceDecl => {},
                     .DataDecl => {},
+                    .ForeignPrim => {}, // Cannot appear in let blocks
                 }
             }
 
@@ -1116,6 +1117,7 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                     .ClassDecl => {},
                     .InstanceDecl => {},
                     .DataDecl => {},
+                    .ForeignPrim => {}, // Cannot appear in let blocks
                 }
             }
 
@@ -1654,6 +1656,9 @@ fn inferLetDecl(
         .DataDecl => {
             // Data declarations are handled separately during module inference.
         },
+        .ForeignPrim => {
+            // Foreign prim declarations are handled in inferModule, not here.
+        },
     }
 }
 
@@ -1713,20 +1718,34 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
     defer sigs.deinit(ctx.alloc);
 
     for (module.declarations) |decl| {
-        if (decl != .TypeSig) continue;
-        const ts = decl.TypeSig;
+        if (decl == .TypeSig) {
+            const ts = decl.TypeSig;
 
-        // Skolemise the signature: top-level forall binders become rigids.
-        // This enables bidirectional checking where the signature enforces
-        // rigidity of type variables (not just metavariables).
-        const skolem_result = try skolemiseSignature(ts.type, ctx);
+            // Skolemise the signature: top-level forall binders become rigids.
+            // This enables bidirectional checking where the signature enforces
+            // rigidity of type variables (not just metavariables).
+            const skolem_result = try skolemiseSignature(ts.type, ctx);
 
-        // Bind for all names in the signature (Haskell allows multiple names per signature)
-        for (ts.names) |name| {
-            try sigs.put(ctx.alloc, name.unique, .{
-                .name = name,
+            // Bind for all names in the signature (Haskell allows multiple names per signature)
+            for (ts.names) |name| {
+                try sigs.put(ctx.alloc, name.unique, .{
+                    .name = name,
+                    .ty = skolem_result.ty,
+                    .loc = ts.span,
+                    .skolem_ids = skolem_result.skolem_ids,
+                });
+            }
+        } else if (decl == .ForeignPrim) {
+            const fp = decl.ForeignPrim;
+
+            // Foreign prim declarations carry their own type signature.
+            // Skolemise and register it in the same sigs map as TypeSig.
+            const skolem_result = try skolemiseSignature(fp.type, ctx);
+
+            try sigs.put(ctx.alloc, fp.name.unique, .{
+                .name = fp.name,
                 .ty = skolem_result.ty,
-                .loc = ts.span,
+                .loc = fp.span,
                 .skolem_ids = skolem_result.skolem_ids,
             });
         }
@@ -1756,6 +1775,14 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
             .TypeSig => {},
             .ClassDecl => {}, // Classes are handled separately
             .InstanceDecl => {}, // Instances are handled separately
+            .ForeignPrim => |fp| {
+                // Foreign prim declarations have a mandatory type signature.
+                // Allocate a fresh meta and bind it, just like FunBind.
+                const node = try ctx.freshMeta();
+                try ctx.env.bindMono(fp.name, node.*);
+                try ctx.local_binders.put(ctx.alloc, fp.name.unique, node);
+                try top_metas.put(ctx.alloc, fp.name.unique, node);
+            },
             .DataDecl => |dd| {
                 var scope_dd = TypeVarMap{};
                 defer scope_dd.deinit(ctx.alloc);
@@ -1876,6 +1903,19 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
             .ClassDecl => {}, // Classes are handled separately (class registration)
             .InstanceDecl => {}, // Instances are handled separately (instance resolution)
             .DataDecl => {},
+            .ForeignPrim => |fp| {
+                // Foreign prim has no body to infer — just unify the meta
+                // with the skolemised signature and build the type scheme.
+                const fun_node = top_metas.get(fp.name.unique) orelse continue;
+                const sig_entry = sigs.get(fp.name.unique) orelse continue;
+                try ctx.unifyNow(fun_node, sig_entry.ty, fp.span);
+                const scheme = TyScheme{
+                    .binders = sig_entry.skolem_ids,
+                    .constraints = &.{},
+                    .body = sig_entry.ty.*,
+                };
+                try ctx.env.bind(fp.name, scheme);
+            },
         }
     }
 

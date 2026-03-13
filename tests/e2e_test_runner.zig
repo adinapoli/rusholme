@@ -263,3 +263,7 @@ test "e2e: e2e_009_infinite_recursion" {
 test "e2e: e2e_010_lazy_let" {
     try testE2e(std.testing.allocator, "e2e_010_lazy_let");
 }
+
+test "e2e: e2e_011_foreign_import_prim" {
+    try testE2e(std.testing.allocator, "e2e_011_foreign_import_prim");
+}
