@@ -64,24 +64,71 @@ pub const ClassConstraint = class_env_mod.ClassConstraint;
 
 // ── Constraint ─────────────────────────────────────────────────────────
 
-/// An equality constraint emitted by the typechecker: `lhs ~ rhs`.
+/// A constraint emitted by the typechecker for the solver to discharge.
 ///
-/// `span` records the source location of the expression that caused this
-/// constraint to be generated.  The solver uses it to produce diagnostics
-/// pointing at the right place in the source.
+/// Two variants:
+/// - `Eq`: equality constraint `lhs ~ rhs` (Robinson unification).
+/// - `Class`: class constraint `ClassName ty` (instance resolution).
 ///
-/// Both `lhs` and `rhs` are stored by value here; the solver takes pointers
-/// to the copies it holds in the constraint slice so that metavar bindings
-/// written by the unifier are visible through those pointers.  Callers must
-/// ensure that any `HType` nodes referenced transitively (via `Fun.arg`,
-/// `Con.args`, etc.) are allocated on an arena that outlives the solve call.
-///
-/// TODO(#37): This struct will become a union(Enum) for Eq/Class constraints.
-pub const Constraint = struct {
+/// Both `lhs`/`rhs` (for Eq) and `ty` (for Class) are stored by value;
+/// the solver takes pointers to the copies it holds in the constraint
+/// slice so that metavar bindings written by the unifier are visible
+/// through those pointers.  Callers must ensure that any `HType` nodes
+/// referenced transitively are allocated on an arena that outlives the
+/// solve call.
+
+/// Payload for equality constraints: `lhs ~ rhs`.
+pub const EqConstraint = struct {
     lhs: HType,
     rhs: HType,
-    /// Source location of the expression that generated this constraint.
     span: SourceSpan,
+};
+
+/// Payload for class constraints: `ClassName ty`.
+pub const ClassConstraintPayload = struct {
+    class_name: class_env_mod.Name,
+    ty: HType,
+    span: SourceSpan,
+    /// Filled by the solver after resolution. Null means unresolved.
+    evidence: ?*const DictEvidence = null,
+};
+
+pub const Constraint = union(enum) {
+    /// Equality constraint: `lhs ~ rhs`.
+    Eq: EqConstraint,
+    /// Class constraint: `ClassName ty`.
+    Class: ClassConstraintPayload,
+};
+
+// ── DictEvidence ───────────────────────────────────────────────────────
+
+/// Evidence for how a class constraint was satisfied.
+///
+/// Produced by the solver during class constraint resolution and consumed
+/// by the desugarer to generate dictionary-passing Core code.
+pub const DictEvidence = union(enum) {
+    /// Satisfied by a concrete instance dictionary value.
+    /// E.g., `Eq Int` is satisfied by `dict$Eq$Int`.
+    instance: struct {
+        class_name: class_env_mod.Name,
+        head_ty: HType,
+        /// Sub-evidence for instance context constraints.
+        /// E.g., `instance Eq a => Eq [a]` needs evidence for `Eq a`.
+        context_evidence: []const DictEvidence,
+    },
+    /// Satisfied by a dictionary parameter of the enclosing function.
+    /// E.g., in `elem :: Eq a => ...`, the `Eq a` constraint is a parameter.
+    param: struct {
+        param_index: u32,
+        class_name: class_env_mod.Name,
+    },
+    /// Satisfied by extracting a superclass dictionary.
+    /// E.g., `Eq` from an `Ord` dictionary via a superclass selector.
+    superclass: struct {
+        class_name: class_env_mod.Name,
+        sub_evidence: *const DictEvidence,
+        super_index: u32,
+    },
 };
 
 // ── Solver ─────────────────────────────────────────────────────────────
@@ -109,96 +156,216 @@ pub fn solve(
     diags: *DiagnosticCollector,
     class_env: ?*const ClassEnv,
 ) std.mem.Allocator.Error!void {
-    _ = class_env;  // TODO(#37): Use class_env for class constraint resolution
     for (constraints) |*c| {
-        unify_mod.unify(alloc, &c.lhs, &c.rhs) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.TypeMismatch,
-            error.RigidMismatch,
-            => {
-                const te = TypeError{ .mismatch = .{
-                    .lhs = c.lhs,
-                    .rhs = c.rhs,
-                } };
-                const msg = try type_error_mod.format(alloc, te);
-                try diags.emit(alloc, .{
-                    .severity = .@"error",
-                    .code = .type_error,
-                    .span = c.span,
-                    .message = msg,
-                    .payload = DiagnosticPayload{ .type_error = te },
-                });
+        switch (c.*) {
+            .Class => |*cc| {
+                try solveClassConstraint(cc, alloc, diags, class_env);
             },
-            error.InfiniteType => {
-                // Extract the metavar from the lhs (should be a Meta)
-                const meta = if (c.lhs.chase() == .Meta)
-                    c.lhs.Meta
-                else
-                    blk: {
-                        // If lhs isn't a Meta, try rhs
-                        if (c.rhs.chase() == .Meta) break :blk c.rhs.Meta;
-                        // Fallback: create a placeholder (this shouldn't happen in normal operation)
-                        break :blk MetaVar{ .id = 0, .ref = null };
-                    };
-                const te = TypeError{ .infinite_type = .{
-                    .meta = meta,
-                    .ty = c.rhs,
-                } };
-                const msg = try type_error_mod.format(alloc, te);
-                try diags.emit(alloc, .{
-                    .severity = .@"error",
-                    .code = .type_error,
-                    .span = c.span,
-                    .message = msg,
-                    .payload = DiagnosticPayload{ .type_error = te },
-                });
+            .Eq => |*eq| {
+                try solveEqConstraint(eq, alloc, diags);
             },
-            error.InfiniteTypeCycle => {
-                // A cycle was detected in the metavariable chain.
-                // Extract the metavar ID for better error reporting.
-                const meta_id = if (c.lhs.chase() == .Meta)
-                    c.lhs.Meta.id
-                else
-                    blk: {
-                        if (c.rhs.chase() == .Meta) break :blk c.rhs.Meta.id;
-                        break :blk 0;
-                    };
-                const te = TypeError{ .infinite_type_cycle = .{
-                    .meta_id = meta_id,
-                } };
-                const msg = try type_error_mod.format(alloc, te);
-                try diags.emit(alloc, .{
-                    .severity = .@"error",
-                    .code = .type_error,
-                    .span = c.span,
-                    .message = msg,
-                    .payload = DiagnosticPayload{ .type_error = te },
-                });
-            },
-            error.ArityMismatch => {
-                // For M1, we don't have detailed arity info from the unifier,
-                // so we use a generic payload. The message still provides
-                // useful information.
-                const unknown_name = @import("../naming/unique.zig").Name{
-                    .base = "<type>",
-                    .unique = .{ .value = 0 },
-                };
-                const te = TypeError{ .arity_mismatch = .{
-                    .name = unknown_name,
-                    .expected = 0,
-                    .got = 0,
-                } };
-                const msg = "type constructor arity mismatch";
-                try diags.emit(alloc, .{
-                    .severity = .@"error",
-                    .code = .type_error,
-                    .span = c.span,
-                    .message = msg,
-                    .payload = DiagnosticPayload{ .type_error = te },
-                });
-            },
-        };
+        }
     }
+}
+
+/// Solve a class constraint by looking up instances in the ClassEnv.
+fn solveClassConstraint(
+    cc: *ClassConstraintPayload,
+    alloc: std.mem.Allocator,
+    diags: *DiagnosticCollector,
+    class_env: ?*const ClassEnv,
+) std.mem.Allocator.Error!void {
+    const env = class_env orelse return; // No ClassEnv → cannot resolve
+    const chased = cc.ty.chase();
+
+    // If the type is a rigid (polymorphic context), the constraint becomes
+    // a dictionary parameter — evidence is recorded as `param`. The param
+    // index is not known here; it will be assigned by the caller based on
+    // the constraint's position in the function's constraint list.
+    switch (chased) {
+        .Rigid => {
+            // Polymorphic: will become a dictionary parameter.
+            // The caller (inferModule) assigns param indices.
+            return;
+        },
+        .Meta => {
+            // Unsolved meta — ambiguous type. Defer to later or emit diagnostic.
+            return;
+        },
+        else => {},
+    }
+
+    // Concrete type: look up matching instances.
+    const instances = env.lookupInstances(cc.class_name.unique.value);
+    var match_count: usize = 0;
+    var matched_instance: ?class_env_mod.InstanceInfo = null;
+    for (instances) |inst| {
+        // Simple matching: check if the instance head matches the constraint type.
+        // For now, we do structural equality on the chased types.
+        // A full implementation would use unification-based matching.
+        if (htypeMatchesHead(chased, inst.head)) {
+            match_count += 1;
+            matched_instance = inst;
+        }
+    }
+
+    if (match_count == 0) {
+        const te = TypeError{ .missing_instance = .{
+            .class_name = cc.class_name,
+            .ty = chased,
+        } };
+        const msg = try type_error_mod.format(alloc, te);
+        try diags.emit(alloc, .{
+            .severity = .@"error",
+            .code = .type_error,
+            .span = cc.span,
+            .message = msg,
+            .payload = DiagnosticPayload{ .type_error = te },
+        });
+        return;
+    }
+
+    if (match_count > 1) {
+        const te = TypeError{ .overlapping_instances = .{
+            .class_name = cc.class_name,
+            .ty = chased,
+        } };
+        const msg = try type_error_mod.format(alloc, te);
+        try diags.emit(alloc, .{
+            .severity = .@"error",
+            .code = .type_error,
+            .span = cc.span,
+            .message = msg,
+            .payload = DiagnosticPayload{ .type_error = te },
+        });
+        return;
+    }
+
+    // Exactly one match — record the evidence.
+    if (matched_instance) |inst| {
+        const ev = try alloc.create(DictEvidence);
+        ev.* = .{ .instance = .{
+            .class_name = cc.class_name,
+            .head_ty = chased,
+            .context_evidence = &.{}, // TODO: resolve context constraints recursively
+        } };
+        cc.evidence = ev;
+
+        // If the instance has context constraints, they should be emitted
+        // as new wanted constraints. For now, we defer recursive resolution.
+        _ = inst;
+    }
+}
+
+/// Check if an HType matches an instance head (simple structural match).
+///
+/// For M1 scope, we match on constructor names. A full implementation
+/// would use unification to handle parametric instance heads like `Eq [a]`.
+fn htypeMatchesHead(ty: HType, head: HType) bool {
+    const chased_ty = ty.chase();
+    const chased_head = head.chase();
+    return switch (chased_ty) {
+        .Con => |tc| switch (chased_head) {
+            .Con => |hc| tc.name.unique.value == hc.name.unique.value,
+            else => false,
+        },
+        else => false,
+    };
+}
+
+/// Solve an equality constraint via Robinson unification.
+fn solveEqConstraint(
+    c: *EqConstraint,
+    alloc: std.mem.Allocator,
+    diags: *DiagnosticCollector,
+) std.mem.Allocator.Error!void {
+    unify_mod.unify(alloc, &c.lhs, &c.rhs) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.TypeMismatch,
+        error.RigidMismatch,
+        => {
+            const te = TypeError{ .mismatch = .{
+                .lhs = c.lhs,
+                .rhs = c.rhs,
+            } };
+            const msg = try type_error_mod.format(alloc, te);
+            try diags.emit(alloc, .{
+                .severity = .@"error",
+                .code = .type_error,
+                .span = c.span,
+                .message = msg,
+                .payload = DiagnosticPayload{ .type_error = te },
+            });
+        },
+        error.InfiniteType => {
+            // Extract the metavar from the lhs (should be a Meta)
+            const meta = if (c.lhs.chase() == .Meta)
+                c.lhs.Meta
+            else
+                blk: {
+                    // If lhs isn't a Meta, try rhs
+                    if (c.rhs.chase() == .Meta) break :blk c.rhs.Meta;
+                    // Fallback: create a placeholder (this shouldn't happen in normal operation)
+                    break :blk MetaVar{ .id = 0, .ref = null };
+                };
+            const te = TypeError{ .infinite_type = .{
+                .meta = meta,
+                .ty = c.rhs,
+            } };
+            const msg = try type_error_mod.format(alloc, te);
+            try diags.emit(alloc, .{
+                .severity = .@"error",
+                .code = .type_error,
+                .span = c.span,
+                .message = msg,
+                .payload = DiagnosticPayload{ .type_error = te },
+            });
+        },
+        error.InfiniteTypeCycle => {
+            // A cycle was detected in the metavariable chain.
+            // Extract the metavar ID for better error reporting.
+            const meta_id = if (c.lhs.chase() == .Meta)
+                c.lhs.Meta.id
+            else
+                blk: {
+                    if (c.rhs.chase() == .Meta) break :blk c.rhs.Meta.id;
+                    break :blk 0;
+                };
+            const te = TypeError{ .infinite_type_cycle = .{
+                .meta_id = meta_id,
+            } };
+            const msg = try type_error_mod.format(alloc, te);
+            try diags.emit(alloc, .{
+                .severity = .@"error",
+                .code = .type_error,
+                .span = c.span,
+                .message = msg,
+                .payload = DiagnosticPayload{ .type_error = te },
+            });
+        },
+        error.ArityMismatch => {
+            // For M1, we don't have detailed arity info from the unifier,
+            // so we use a generic payload. The message still provides
+            // useful information.
+            const unknown_name = @import("../naming/unique.zig").Name{
+                .base = "<type>",
+                .unique = .{ .value = 0 },
+            };
+            const te = TypeError{ .arity_mismatch = .{
+                .name = unknown_name,
+                .expected = 0,
+                .got = 0,
+            } };
+            const msg = "type constructor arity mismatch";
+            try diags.emit(alloc, .{
+                .severity = .@"error",
+                .code = .type_error,
+                .span = c.span,
+                .message = msg,
+                .payload = DiagnosticPayload{ .type_error = te },
+            });
+        },
+    };
 }
 
 // ── Diagnostic message formatting ──────────────────────────────────────
@@ -259,11 +426,11 @@ test "solve: single Int ~ Int constraint succeeds" {
     var diags = DiagnosticCollector.init();
     defer diags.deinit(arena.allocator());
 
-    var constraints = [_]Constraint{.{
+    var constraints = [_]Constraint{.{ .Eq = .{
         .lhs = con0("Int", 0),
         .rhs = con0("Int", 0),
         .span = testSpan(),
-    }};
+    } }};
     try solve(&constraints, arena.allocator(), &diags, null);
     try testing.expect(!diags.hasErrors());
 }
@@ -277,16 +444,16 @@ test "solve: ?0 ~ Int solves metavar" {
 
     var supply = MetaVarSupply{};
     const mv = supply.fresh();
-    var constraints = [_]Constraint{.{
+    var constraints = [_]Constraint{.{ .Eq = .{
         .lhs = HType{ .Meta = mv },
         .rhs = con0("Int", 0),
         .span = testSpan(),
-    }};
+    } }};
     try solve(&constraints, alloc, &diags, null);
     try testing.expect(!diags.hasErrors());
 
     // The metavar in the constraint should now be solved to Int.
-    const chased = constraints[0].lhs.chase();
+    const chased = constraints[0].Eq.lhs.chase();
     try testing.expect(chased == .Con);
     try testing.expectEqualStrings("Int", chased.Con.name.base);
 }
@@ -302,14 +469,14 @@ test "solve: multiple independent constraints all solved" {
     const mv0 = supply.fresh();
     const mv1 = supply.fresh();
     var constraints = [_]Constraint{
-        .{ .lhs = HType{ .Meta = mv0 }, .rhs = con0("Int", 0), .span = testSpan() },
-        .{ .lhs = HType{ .Meta = mv1 }, .rhs = con0("Bool", 1), .span = testSpan() },
+        .{ .Eq = .{ .lhs = HType{ .Meta = mv0 }, .rhs = con0("Int", 0), .span = testSpan() } },
+        .{ .Eq = .{ .lhs = HType{ .Meta = mv1 }, .rhs = con0("Bool", 1), .span = testSpan() } },
     };
     try solve(&constraints, alloc, &diags, null);
     try testing.expect(!diags.hasErrors());
 
-    try testing.expectEqualStrings("Int", constraints[0].lhs.chase().Con.name.base);
-    try testing.expectEqualStrings("Bool", constraints[1].lhs.chase().Con.name.base);
+    try testing.expectEqualStrings("Int", constraints[0].Eq.lhs.chase().Con.name.base);
+    try testing.expectEqualStrings("Bool", constraints[1].Eq.lhs.chase().Con.name.base);
 }
 
 // ── solve: failure cases ───────────────────────────────────────────────
@@ -321,11 +488,11 @@ test "solve: Int ~ Bool emits TypeMismatch diagnostic" {
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
 
-    var constraints = [_]Constraint{.{
+    var constraints = [_]Constraint{.{ .Eq = .{
         .lhs = con0("Int", 0),
         .rhs = con0("Bool", 1),
         .span = testSpan(),
-    }};
+    } }};
     try solve(&constraints, alloc, &diags, null);
     try testing.expect(diags.hasErrors());
     try testing.expectEqual(@as(usize, 1), diags.errorCount());
@@ -343,11 +510,11 @@ test "solve: ?0 ~ [?0] emits InfiniteType diagnostic" {
     const mv = supply.fresh();
     const meta_ty = HType{ .Meta = mv };
     const args = [_]HType{meta_ty};
-    var constraints = [_]Constraint{.{
+    var constraints = [_]Constraint{.{ .Eq = .{
         .lhs = meta_ty,
         .rhs = HType{ .Con = .{ .name = testName("[]", 99), .args = &args } },
         .span = testSpan(),
-    }};
+    } }};
     try solve(&constraints, alloc, &diags, null);
     try testing.expect(diags.hasErrors());
     // Message should mention "occurs check"
@@ -382,8 +549,8 @@ test "solve: conflicting constraints both reported" {
     var unit_ty = con0("()", 99);
 
     var constraints = [_]Constraint{
-        .{ .lhs = HType{ .Fun = .{ .arg = shared, .res = &unit_ty } }, .rhs = HType{ .Fun = .{ .arg = try dupCon0(alloc, "Int", 0), .res = &unit_ty } }, .span = testSpan() },
-        .{ .lhs = HType{ .Fun = .{ .arg = shared, .res = &unit_ty } }, .rhs = HType{ .Fun = .{ .arg = try dupCon0(alloc, "Bool", 1), .res = &unit_ty } }, .span = testSpan() },
+        .{ .Eq = .{ .lhs = HType{ .Fun = .{ .arg = shared, .res = &unit_ty } }, .rhs = HType{ .Fun = .{ .arg = try dupCon0(alloc, "Int", 0), .res = &unit_ty } }, .span = testSpan() } },
+        .{ .Eq = .{ .lhs = HType{ .Fun = .{ .arg = shared, .res = &unit_ty } }, .rhs = HType{ .Fun = .{ .arg = try dupCon0(alloc, "Bool", 1), .res = &unit_ty } }, .span = testSpan() } },
     };
     try solve(&constraints, alloc, &diags, null);
     try testing.expect(diags.hasErrors());
@@ -402,11 +569,11 @@ test "solve: diagnostic carries correct source span" {
         SourcePos.init(1, 42, 5),
         SourcePos.init(1, 42, 12),
     );
-    var constraints = [_]Constraint{.{
+    var constraints = [_]Constraint{.{ .Eq = .{
         .lhs = con0("Int", 0),
         .rhs = con0("Bool", 1),
         .span = span,
-    }};
+    } }};
     try solve(&constraints, alloc, &diags, null);
     try testing.expect(diags.hasErrors());
     try testing.expectEqual(@as(u32, 42), diags.diagnostics.items[0].span.start.line);
@@ -471,11 +638,11 @@ test "solver: type mismatch diagnostic carries structured payload" {
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
 
-    var constraints = [_]Constraint{.{
+    var constraints = [_]Constraint{.{ .Eq = .{
         .lhs = con0("Int", 0),
         .rhs = con0("Bool", 1),
         .span = testSpan(),
-    }};
+    } }};
     try solve(&constraints, alloc, &diags, null);
     try testing.expect(diags.hasErrors());
     try testing.expectEqual(@as(usize, 1), diags.errorCount());
@@ -506,11 +673,11 @@ test "solver: infinite type diagnostic carries structured payload" {
     const mv = supply.fresh();
     const meta_ty = HType{ .Meta = mv };
     const args = [_]HType{meta_ty};
-    var constraints = [_]Constraint{.{
+    var constraints = [_]Constraint{.{ .Eq = .{
         .lhs = meta_ty,
         .rhs = HType{ .Con = .{ .name = testName("[]", 99), .args = &args } },
         .span = testSpan(),
-    }};
+    } }};
     try solve(&constraints, alloc, &diags, null);
     try testing.expect(diags.hasErrors());
 
@@ -525,4 +692,158 @@ test "solver: infinite type diagnostic carries structured payload" {
             try testing.expect(it.ty == .Con);
         },
     }
+}
+
+// ── Class constraint resolution tests ──────────────────────────────────
+
+const Known = @import("../naming/known.zig");
+
+test "solve: class constraint with matching instance resolves to evidence" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    // Set up a ClassEnv with class Eq and instance Eq Int.
+    var class_env = ClassEnv.init(alloc);
+    defer class_env.deinit();
+
+    try class_env.addClass(.{
+        .name = Known.Class.Eq,
+        .tyvar = 5000,
+        .superclasses = &.{},
+        .methods = &.{},
+    });
+    try class_env.addInstance(.{
+        .class_name = Known.Class.Eq,
+        .head = con0("Int", Known.Type.Int.unique.value),
+        .context = &.{},
+        .span = testSpan(),
+    });
+
+    // Constraint: Eq Int
+    var constraints = [_]Constraint{.{ .Class = .{
+        .class_name = Known.Class.Eq,
+        .ty = con0("Int", Known.Type.Int.unique.value),
+        .span = testSpan(),
+    } }};
+
+    try solve(&constraints, alloc, &diags, &class_env);
+    try testing.expect(!diags.hasErrors());
+    // Evidence should be filled in.
+    try testing.expect(constraints[0].Class.evidence != null);
+    try testing.expect(constraints[0].Class.evidence.?.* == .instance);
+}
+
+test "solve: class constraint with no matching instance emits missing_instance" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    // Set up ClassEnv with class Eq but NO instances.
+    var class_env = ClassEnv.init(alloc);
+    defer class_env.deinit();
+
+    try class_env.addClass(.{
+        .name = Known.Class.Eq,
+        .tyvar = 5000,
+        .superclasses = &.{},
+        .methods = &.{},
+    });
+
+    // Constraint: Eq Int (no instance exists)
+    var constraints = [_]Constraint{.{ .Class = .{
+        .class_name = Known.Class.Eq,
+        .ty = con0("Int", Known.Type.Int.unique.value),
+        .span = testSpan(),
+    } }};
+
+    try solve(&constraints, alloc, &diags, &class_env);
+    try testing.expect(diags.hasErrors());
+    try testing.expectEqual(@as(usize, 1), diags.errorCount());
+    // Should mention "no instance"
+    try testing.expect(std.mem.indexOf(u8, diags.diagnostics.items[0].message, "no instance") != null);
+}
+
+test "solve: class constraint with rigid type defers (no error)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var class_env = ClassEnv.init(alloc);
+    defer class_env.deinit();
+
+    try class_env.addClass(.{
+        .name = Known.Class.Eq,
+        .tyvar = 5000,
+        .superclasses = &.{},
+        .methods = &.{},
+    });
+
+    // Constraint: Eq a (rigid — should defer, not error)
+    var constraints = [_]Constraint{.{ .Class = .{
+        .class_name = Known.Class.Eq,
+        .ty = HType{ .Rigid = testName("a", 42) },
+        .span = testSpan(),
+    } }};
+
+    try solve(&constraints, alloc, &diags, &class_env);
+    try testing.expect(!diags.hasErrors());
+    // No evidence assigned for rigid — it becomes a dictionary parameter.
+    try testing.expect(constraints[0].Class.evidence == null);
+}
+
+test "solve: mixed Eq and Class constraints both resolved" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var class_env = ClassEnv.init(alloc);
+    defer class_env.deinit();
+
+    try class_env.addClass(.{
+        .name = Known.Class.Eq,
+        .tyvar = 5000,
+        .superclasses = &.{},
+        .methods = &.{},
+    });
+    try class_env.addInstance(.{
+        .class_name = Known.Class.Eq,
+        .head = con0("Int", Known.Type.Int.unique.value),
+        .context = &.{},
+        .span = testSpan(),
+    });
+
+    var supply = MetaVarSupply{};
+    const mv = supply.fresh();
+
+    var constraints = [_]Constraint{
+        // Equality: ?0 ~ Int
+        .{ .Eq = .{
+            .lhs = HType{ .Meta = mv },
+            .rhs = con0("Int", Known.Type.Int.unique.value),
+            .span = testSpan(),
+        } },
+        // Class: Eq Int
+        .{ .Class = .{
+            .class_name = Known.Class.Eq,
+            .ty = con0("Int", Known.Type.Int.unique.value),
+            .span = testSpan(),
+        } },
+    };
+
+    try solve(&constraints, alloc, &diags, &class_env);
+    try testing.expect(!diags.hasErrors());
+
+    // Equality solved
+    try testing.expectEqualStrings("Int", constraints[0].Eq.lhs.chase().Con.name.base);
+    // Class constraint has evidence
+    try testing.expect(constraints[1].Class.evidence != null);
 }

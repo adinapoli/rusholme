@@ -264,6 +264,18 @@ pub const RenameEnv = struct {
         try self.scope.bind("(:)", Known.Con.Cons);
         try self.scope.bind(":", Known.Con.Cons);
         try self.scope.bind("(,)", Known.Con.Tuple2);
+
+        // Type classes (stable IDs for dictionary-passing translation)
+        try self.scope.bind("Eq", Known.Class.Eq);
+        try self.scope.bind("Ord", Known.Class.Ord);
+        try self.scope.bind("Show", Known.Class.Show);
+        try self.scope.bind("Read", Known.Class.Read);
+        try self.scope.bind("Num", Known.Class.Num);
+        try self.scope.bind("Enum", Known.Class.Enum);
+        try self.scope.bind("Bounded", Known.Class.Bounded);
+        try self.scope.bind("Monad", Known.Class.Monad);
+        try self.scope.bind("Functor", Known.Class.Functor);
+        try self.scope.bind("Applicative", Known.Class.Applicative);
     }
 };
 

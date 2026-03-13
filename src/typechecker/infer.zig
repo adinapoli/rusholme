@@ -78,6 +78,7 @@ const htype_mod = @import("htype.zig");
 const env_mod = @import("env.zig");
 const unify_mod = @import("unify.zig");
 const solver_mod = @import("solver.zig");
+const class_env_mod = @import("class_env.zig");
 const renamer_mod = @import("../renamer/renamer.zig");
 const diag_mod = @import("../diagnostics/diagnostic.zig");
 const span_mod = @import("../diagnostics/span.zig");
@@ -90,6 +91,11 @@ pub const MetaVarSupply = htype_mod.MetaVarSupply;
 pub const TyScheme = env_mod.TyScheme;
 pub const TyEnv = env_mod.TyEnv;
 pub const Constraint = solver_mod.Constraint;
+pub const ClassEnv = class_env_mod.ClassEnv;
+pub const ClassInfo = class_env_mod.ClassInfo;
+pub const MethodInfo = class_env_mod.MethodInfo;
+pub const InstanceInfo = class_env_mod.InstanceInfo;
+pub const ClassConstraint = class_env_mod.ClassConstraint;
 pub const DiagnosticCollector = diag_mod.DiagnosticCollector;
 pub const DiagnosticCode = diag_mod.DiagnosticCode;
 pub const Severity = diag_mod.Severity;
@@ -132,6 +138,14 @@ pub const InferCtx = struct {
     /// Nullable because it's only set during module inference, not in unit tests.
     type_con_names: ?*const std.StringHashMapUnmanaged(Name) = null,
 
+    /// Class and instance environment, populated from ClassDecl/InstanceDecl
+    /// in Pass 0b of `inferModule`. Used for class constraint resolution.
+    class_env: ClassEnv,
+
+    /// Accumulated class constraints from polymorphic scheme instantiation.
+    /// Filled during inference (Var case) and solved at the end of `inferModule`.
+    wanted_constraints: std.ArrayListUnmanaged(solver_mod.Constraint) = .{},
+
     pub fn init(
         alloc: std.mem.Allocator,
         env: *TyEnv,
@@ -147,6 +161,7 @@ pub const InferCtx = struct {
             .diags = diags,
             .monad_type = null,
             .local_binders = .{},
+            .class_env = ClassEnv.init(alloc),
         };
     }
 
@@ -954,6 +969,15 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                 }
                 // Polymorphic: instantiate with fresh metavars.
                 const inst = try s.instantiate(ctx.alloc, ctx.mv_supply);
+                // Accumulate wanted class constraints for later resolution.
+                // Use the variable's source span (the use site) for diagnostics.
+                for (inst.wanted) |wc| {
+                    try ctx.wanted_constraints.append(ctx.alloc, .{ .Class = .{
+                        .class_name = wc.class_name,
+                        .ty = wc.ty,
+                        .span = v.span,
+                    } });
+                }
                 break :blk try ctx.alloc_ty(inst.ty);
             }
             const msg = try std.fmt.allocPrint(
@@ -1751,6 +1775,99 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
         }
     }
 
+    // Pass 0b: Register class declarations and instance declarations in ClassEnv.
+    //
+    // For each ClassDecl, we:
+    //   1. Create a rigid type variable for the class parameter
+    //   2. Convert each method's type signature to HType
+    //   3. Register the class in ClassEnv
+    //   4. Bind each method name in TyEnv with a constrained TyScheme
+    //
+    // For each InstanceDecl, we register it in ClassEnv for constraint resolution.
+    for (module.declarations) |decl| {
+        switch (decl) {
+            .ClassDecl => |cd| {
+                // Create a rigid for the class type variable.
+                const tyvar_rigid_name = ctx.u_supply.freshName(cd.tyvar.base);
+                const tyvar_id = tyvar_rigid_name.unique.value;
+                const tyvar_node = try ctx.alloc_ty(.{ .Rigid = tyvar_rigid_name });
+
+                // Build MethodInfo for each class method.
+                var method_infos = try ctx.alloc.alloc(MethodInfo, cd.methods.len);
+                for (cd.methods, 0..) |method, i| {
+                    // Convert the method type with the class tyvar in scope as a rigid.
+                    var method_scope = TypeVarMap{};
+                    defer method_scope.deinit(ctx.alloc);
+                    try method_scope.put(ctx.alloc, cd.tyvar.base, tyvar_node);
+                    const method_htype = try astTypeToHTypeWithScope(method.type, ctx, &method_scope);
+
+                    method_infos[i] = .{
+                        .name = method.name,
+                        .ty = method_htype.*,
+                        .has_default = method.default_impl != null,
+                    };
+
+                    // Register the method in TyEnv with a constrained TyScheme.
+                    // The scheme is: forall a. ClassName a => method_type
+                    const constraint = try ctx.alloc.alloc(ClassConstraint, 1);
+                    constraint[0] = .{
+                        .class_name = cd.name,
+                        .ty = .{ .Rigid = tyvar_rigid_name },
+                        .span = cd.span,
+                    };
+                    const binders = try ctx.alloc.alloc(u64, 1);
+                    binders[0] = tyvar_id;
+                    const scheme = TyScheme{
+                        .binders = binders,
+                        .constraints = constraint,
+                        .body = method_htype.*,
+                    };
+                    try ctx.env.bind(method.name, scheme);
+                }
+
+                // Convert superclass assertions to Names.
+                var superclass_names = try ctx.alloc.alloc(Name, cd.superclasses.len);
+                for (cd.superclasses, 0..) |sc, i| {
+                    superclass_names[i] = sc.class_name;
+                }
+
+                try ctx.class_env.addClass(.{
+                    .name = cd.name,
+                    .tyvar = tyvar_id,
+                    .superclasses = superclass_names,
+                    .methods = method_infos,
+                });
+            },
+            .InstanceDecl => |id_decl| {
+                // Convert the instance head type to HType.
+                const head_htype = try astTypeToHType(id_decl.instance_type, ctx);
+
+                // Convert context assertions to ClassConstraints.
+                var context = try ctx.alloc.alloc(ClassConstraint, id_decl.context.len);
+                for (id_decl.context, 0..) |assertion, i| {
+                    // Each assertion has one type argument (single-parameter classes).
+                    const asserted_ty = if (assertion.types.len > 0)
+                        try astTypeToHType(assertion.types[0], ctx)
+                    else
+                        try ctx.freshMeta();
+                    context[i] = .{
+                        .class_name = assertion.class_name,
+                        .ty = asserted_ty.*,
+                        .span = id_decl.span,
+                    };
+                }
+
+                try ctx.class_env.addInstance(.{
+                    .class_name = id_decl.class_name,
+                    .head = head_htype.*,
+                    .context = context,
+                    .span = id_decl.span,
+                });
+            },
+            else => {},
+        }
+    }
+
     // Snapshot env free metas before any top-level binders are added.
     // All top-level bindings are mutually recursive peers, so they share
     // this one snapshot for the active-variables check during generalisation.
@@ -1773,8 +1890,8 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
             },
             .PatBind => |pb| try assignPatMetas(ctx, pb.pattern, &top_metas),
             .TypeSig => {},
-            .ClassDecl => {}, // Classes are handled separately
-            .InstanceDecl => {}, // Instances are handled separately
+            .ClassDecl => {}, // Handled in Pass 0b
+            .InstanceDecl => {}, // Handled in Pass 0b
             .ForeignPrim => |fp| {
                 // Foreign prim declarations have a mandatory type signature.
                 // Allocate a fresh meta and bind it, just like FunBind.
@@ -1900,8 +2017,8 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
                 try ctx.unifyNow(rhs_ty, pat_ty, pb.span);
             },
             .TypeSig => {},
-            .ClassDecl => {}, // Classes are handled separately (class registration)
-            .InstanceDecl => {}, // Instances are handled separately (instance resolution)
+            .ClassDecl => {}, // Handled in Pass 0b
+            .InstanceDecl => {}, // Handled in Pass 0b
             .DataDecl => {},
             .ForeignPrim => |fp| {
                 // Foreign prim has no body to infer — just unify the meta
@@ -1919,12 +2036,30 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
         }
     }
 
+    // ── Solve class constraints ──────────────────────────────────────────
+    //
+    // After all expression types have been inferred (Pass 2), solve the
+    // accumulated class constraints.  This resolves instances and fills in
+    // DictEvidence on each Constraint.Class entry.
+    if (ctx.wanted_constraints.items.len > 0) {
+        try solver_mod.solve(
+            ctx.wanted_constraints.items,
+            ctx.alloc,
+            ctx.diags,
+            &ctx.class_env,
+        );
+    }
+
     // Build result.
     var result = ModuleTypes{
         .schemes = .{},
         .local_binders = ctx.local_binders,
+        .class_env = ctx.class_env,
+        .wanted_constraints = ctx.wanted_constraints,
     };
     ctx.local_binders = .{}; // Ownership passed to ModuleTypes
+    ctx.class_env = ClassEnv.init(ctx.alloc); // Ownership passed to ModuleTypes
+    ctx.wanted_constraints = .{}; // Ownership passed to ModuleTypes
 
     var it = top_metas.iterator();
     while (it.next()) |entry| {
@@ -2007,10 +2142,18 @@ fn assignPatMetas(
 pub const ModuleTypes = struct {
     schemes: std.AutoHashMapUnmanaged(naming_mod.Unique, TyScheme),
     local_binders: std.AutoHashMapUnmanaged(naming_mod.Unique, *HType),
+    /// Class and instance environment populated during type inference.
+    /// Consumed by the desugarer for dictionary-passing translation.
+    class_env: ClassEnv,
+    /// Solved class constraints with evidence.
+    /// The desugarer reads these to know which dictionary to pass at each call site.
+    wanted_constraints: std.ArrayListUnmanaged(solver_mod.Constraint) = .{},
 
     pub fn deinit(self: *ModuleTypes, alloc: std.mem.Allocator) void {
         self.schemes.deinit(alloc);
         self.local_binders.deinit(alloc);
+        self.class_env.deinit();
+        self.wanted_constraints.deinit(alloc);
     }
 
     pub fn get(self: *const ModuleTypes, unique: naming_mod.Unique) ?TyScheme {
