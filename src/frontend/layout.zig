@@ -574,6 +574,79 @@ test "Layout: let-in inside where — in does not close where context" {
     try expectToken(&layout, .eof);
 }
 
+test "Layout: export list with blank lines" {
+    // Regression test for #543 - blank lines inside parentheses should not
+    // trigger virtual token injection
+    const allocator = std.testing.allocator;
+    var lexer = Lexer.init(allocator,
+        \\module Foo(bar,baz,quux) where x = 1
+    , 0);
+    var layout = LayoutProcessor.init(allocator, &lexer);
+    defer layout.deinit();
+
+    // No v_open_brace because first token is `module` keyword
+    try expectToken(&layout, .kw_module);
+    try expectToken(&layout, Token{ .conid = "Foo" });
+    try expectToken(&layout, .open_paren);
+    try expectToken(&layout, Token{ .varid = "bar" });
+    try expectToken(&layout, .comma);
+    try expectToken(&layout, Token{ .varid = "baz" });
+    try expectToken(&layout, .comma);
+    try expectToken(&layout, Token{ .varid = "quux" });
+    try expectToken(&layout, .close_paren);
+    try expectToken(&layout, .kw_where);
+    try expectToken(&layout, .v_open_brace);
+    try expectToken(&layout, Token{ .varid = "x" });
+    try expectToken(&layout, .equals);
+    try expectToken(&layout, Token{ .lit_integer = 1 });
+    try expectToken(&layout, .v_close_brace);
+    try expectToken(&layout, .eof);
+}
+
+test "Layout: parenthesized expression with different indentation" {
+    const allocator = std.testing.allocator;
+    var lexer = Lexer.init(allocator,
+        \\main = (foo
+        \\  bar)
+    , 0);
+    var layout = LayoutProcessor.init(allocator, &lexer);
+    defer layout.deinit();
+
+    try expectToken(&layout, .v_open_brace);
+    try expectToken(&layout, Token{ .varid = "main" });
+    try expectToken(&layout, .equals);
+    try expectToken(&layout, .open_paren);
+    try expectToken(&layout, Token{ .varid = "foo" });
+    try expectToken(&layout, Token{ .varid = "bar" });
+    try expectToken(&layout, .close_paren);
+    try expectToken(&layout, .v_close_brace);
+    try expectToken(&layout, .eof);
+}
+
+test "Layout: nested parentheses with blank lines" {
+    const allocator = std.testing.allocator;
+    var lexer = Lexer.init(allocator,
+        \\main = ((foo
+        \\  bar)
+        \\    baz)
+    , 0);
+    var layout = LayoutProcessor.init(allocator, &lexer);
+    defer layout.deinit();
+
+    try expectToken(&layout, .v_open_brace);
+    try expectToken(&layout, Token{ .varid = "main" });
+    try expectToken(&layout, .equals);
+    try expectToken(&layout, .open_paren);
+    try expectToken(&layout, .open_paren);
+    try expectToken(&layout, Token{ .varid = "foo" });
+    try expectToken(&layout, Token{ .varid = "bar" });
+    try expectToken(&layout, .close_paren);
+    try expectToken(&layout, Token{ .varid = "baz" });
+    try expectToken(&layout, .close_paren);
+    try expectToken(&layout, .v_close_brace);
+    try expectToken(&layout, .eof);
+}
+
 fn expectToken(layout: *LayoutProcessor, expected: anytype) !void {
     const tok = try layout.nextToken();
     defer tok.token.deinit(layout.allocator);
