@@ -6,10 +6,12 @@ const htype_mod = @import("../typechecker/htype.zig");
 const env_mod = @import("../typechecker/env.zig");
 const Known = @import("../naming/known.zig");
 const naming_mod = @import("../naming/unique.zig");
+const primop_mod = @import("../grin/primop.zig");
 const Name = ast_mod.Name;
 const SourceSpan = ast_mod.SourceSpan;
 const SourcePos = ast_mod.SourcePos;
-const DiagnosticCollector = @import("../diagnostics/diagnostic.zig").DiagnosticCollector;
+const diag_mod = @import("../diagnostics/diagnostic.zig");
+const DiagnosticCollector = diag_mod.DiagnosticCollector;
 
 pub const DesugarCtx = struct {
     alloc: std.mem.Allocator,
@@ -186,6 +188,54 @@ pub fn desugarModule(
                     .span = dd.span,
                 });
             },
+            .ForeignPrim => |fp| {
+                // Validate the PrimOp name at compile time.
+                // Accept both raw PrimOp enum names (e.g. "add_Int") and
+                // Prelude-level names (e.g. "putStrLn" → putStrLn_).
+                const is_known = primop_mod.PrimOp.fromString(fp.primop_name) != null or
+                    primop_mod.PrimOp.fromPreludeName(fp.primop_name) != null;
+                if (!is_known) {
+                    const msg = try std.fmt.allocPrint(
+                        alloc,
+                        "unknown primitive operation: `{s}`",
+                        .{fp.primop_name},
+                    );
+                    try diags.emit(alloc, .{
+                        .severity = .@"error",
+                        .code = .unknown_primop,
+                        .span = fp.span,
+                        .message = msg,
+                    });
+                    continue;
+                }
+
+                const scheme = module_types.schemes.get(fp.name.unique) orelse continue;
+                const core_ty = try schemeToCore(alloc, scheme);
+
+                // Count the function arity from the type (number of top-level arrows).
+                const arity = countFunctionArity(core_ty);
+
+                // Use the raw source string as the Name.base for the inner call.
+                // The LLVM backend's PrimOpMapping dispatches on name.base strings
+                // (e.g. "putStrLn", "add_Int"), so we must preserve the exact string
+                // the user wrote in the foreign import declaration.
+                const primop_name = Name{
+                    .base = fp.primop_name,
+                    .unique = ctx.u_supply.fresh(),
+                };
+
+                // Build the lambda wrapper: \x1 -> \x2 -> ... -> primop x1 x2 ...
+                const bind = try buildPrimOpWrapper(
+                    alloc,
+                    &ctx,
+                    fp.name,
+                    primop_name,
+                    core_ty,
+                    arity,
+                    fp.span,
+                );
+                try binds.append(alloc, bind);
+            },
             else => {},
         }
     }
@@ -194,6 +244,138 @@ pub fn desugarModule(
         .data_decls = try data_decls.toOwnedSlice(alloc),
         .binds = try binds.toOwnedSlice(alloc),
     };
+}
+
+// ── Foreign import prim helpers ────────────────────────────────────────
+
+/// Count the number of top-level function arrows in a Core type.
+/// `Int -> Int -> Bool` has arity 2.
+/// `forall a. a -> a` has arity 1 (skips ForAllTy).
+fn countFunctionArity(ty: ast_mod.CoreType) u32 {
+    var count: u32 = 0;
+    var current = ty;
+    while (true) {
+        switch (current) {
+            .FunTy => |f| {
+                count += 1;
+                current = f.res.*;
+            },
+            .ForAllTy => |fa| {
+                current = fa.body.*;
+            },
+            else => break,
+        }
+    }
+    return count;
+}
+
+/// Build a Core lambda wrapper for a foreign import prim declaration.
+///
+/// For `foreign import prim "add_Int" primAddInt :: Int -> Int -> Int`,
+/// generates:
+///
+///   primAddInt = \x0 -> \x1 -> add_Int x0 x1
+///
+/// The inner `add_Int` uses the stable PrimOp Name from the registry,
+/// which the GRIN translator and LLVM backend already know how to handle.
+fn buildPrimOpWrapper(
+    alloc: std.mem.Allocator,
+    ctx: *DesugarCtx,
+    binding_name: Name,
+    primop_name: Name,
+    core_ty: ast_mod.CoreType,
+    arity: u32,
+    span: SourceSpan,
+) !ast_mod.Bind {
+    // Collect parameter types by walking the FunTy chain.
+    var param_types = std.ArrayListUnmanaged(ast_mod.CoreType){};
+    defer param_types.deinit(alloc);
+    var result_ty = core_ty;
+    // Skip ForAllTy wrappers.
+    while (result_ty == .ForAllTy) {
+        result_ty = result_ty.ForAllTy.body.*;
+    }
+    for (0..arity) |_| {
+        switch (result_ty) {
+            .FunTy => |f| {
+                try param_types.append(alloc, f.arg.*);
+                result_ty = f.res.*;
+            },
+            else => break,
+        }
+    }
+
+    // Generate fresh parameter names and Ids.
+    var param_ids = try alloc.alloc(ast_mod.Id, arity);
+    for (0..arity) |i| {
+        const param_name = ctx.u_supply.freshName("x");
+        const param_ty = if (i < param_types.items.len)
+            param_types.items[i]
+        else
+            ast_mod.CoreType{ .TyCon = .{
+                .name = Name{ .base = "Any", .unique = .{ .value = 0 } },
+                .args = &.{},
+            } };
+        param_ids[i] = ast_mod.Id{
+            .name = param_name,
+            .ty = param_ty,
+            .span = span,
+        };
+    }
+
+    // Build the innermost expression: primop_name x0 x1 ... xN
+    // Core uses curried application: App(App(primop, x0), x1)
+    var primop_id = ast_mod.Id{
+        .name = primop_name,
+        .ty = core_ty,
+        .span = span,
+    };
+    var body_ptr = try alloc.create(ast_mod.Expr);
+    body_ptr.* = .{ .Var = primop_id };
+
+    for (param_ids) |param| {
+        const arg_ptr = try alloc.create(ast_mod.Expr);
+        arg_ptr.* = .{ .Var = param };
+
+        const new_body = try alloc.create(ast_mod.Expr);
+        new_body.* = .{ .App = .{
+            .fn_expr = body_ptr,
+            .arg = arg_ptr,
+            .span = span,
+        } };
+        body_ptr = new_body;
+
+        // Update primop_id type for the next application (strip one FunTy).
+        switch (primop_id.ty) {
+            .FunTy => |f| primop_id.ty = f.res.*,
+            else => {},
+        }
+    }
+
+    // Wrap in lambdas: \x0 -> \x1 -> ... -> body
+    // Build from inside out (last parameter first).
+    var i: usize = arity;
+    while (i > 0) {
+        i -= 1;
+        const lam_body = body_ptr;
+        body_ptr = try alloc.create(ast_mod.Expr);
+        body_ptr.* = .{ .Lam = .{
+            .binder = param_ids[i],
+            .body = lam_body,
+            .span = span,
+        } };
+    }
+
+    const binder_id = ast_mod.Id{
+        .name = binding_name,
+        .ty = core_ty,
+        .span = span,
+    };
+
+    return .{ .NonRec = .{
+        .binder = binder_id,
+        .rhs = body_ptr,
+    } };
 }
 
 fn desugarRhs(ctx: *DesugarCtx, rhs: renamer_mod.RRhs) !ast_mod.Expr {

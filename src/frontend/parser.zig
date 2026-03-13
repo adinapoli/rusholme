@@ -859,6 +859,7 @@ pub const Parser = struct {
     fn parseTopDecl(self: *Parser) ParseError!?ast_mod.Decl {
         const tag = try self.peekTag();
         return switch (tag) {
+            .kw_foreign => try self.parseForeignDecl(),
             .kw_data => try self.parseDataDecl(),
             .kw_newtype => try self.parseNewtypeDecl(),
             .kw_type => try self.parseTypeAliasDecl(),
@@ -1794,6 +1795,48 @@ pub const Parser = struct {
     }
 
     // ── Default declaration ────────────────────────────────────────────
+
+    // ── Foreign declarations ───────────────────────────────────────────
+
+    /// Parse a foreign declaration (Haskell 2010 §8.4, extended with `prim`).
+    ///
+    /// Grammar:
+    ///   foreign import <calling_convention> "<foreign_name>" <binding_name> :: <type>
+    ///
+    /// Where:
+    ///   <calling_convention> = varid (e.g., "prim", "ccall")
+    ///   <foreign_name>       = string literal
+    ///   <binding_name>       = varid
+    fn parseForeignDecl(self: *Parser) ParseError!?ast_mod.Decl {
+        const start = (try self.expect(.kw_foreign)).span;
+
+        // Expect `import` keyword.
+        _ = try self.expect(.kw_import);
+
+        // Calling convention is a regular identifier (e.g., prim, ccall).
+        const conv_tok = try self.expect(.varid);
+        const calling_convention = conv_tok.token.varid;
+
+        // The foreign entity name is a string literal (e.g., "add_Int").
+        const name_tok = try self.expect(.lit_string);
+        const foreign_name = name_tok.token.lit_string;
+
+        // The Haskell binding name (e.g., primAddInt).
+        const binding_tok = try self.expect(.varid);
+        const binding_name = binding_tok.token.varid;
+
+        // Expect `::` and parse the type signature.
+        _ = try self.expect(.dcolon);
+        const ty = try self.parseType();
+
+        return .{ .Foreign = .{
+            .calling_convention = calling_convention,
+            .foreign_name = foreign_name,
+            .binding_name = binding_name,
+            .type = ty,
+            .span = self.spanFrom(start),
+        } };
+    }
 
     fn parseDefaultDecl(self: *Parser) ParseError!?ast_mod.Decl {
         const start = (try self.expect(.kw_default)).span;

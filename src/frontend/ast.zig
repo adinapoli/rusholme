@@ -238,10 +238,23 @@ pub const DerivingStrategy = enum {
     Anyclass,
 };
 
-/// Foreign function interface declaration
+/// Foreign function interface declaration.
+///
+/// Represents `foreign import <convention> "<foreign_name>" <binding_name> :: <type>`.
+///
+/// Currently supported conventions:
+///   - `prim`: calls a compiler-known PrimOp (see `src/grin/primop.zig`)
+///
+/// Future conventions (not yet implemented):
+///   - `ccall`: calls a C function via FFI
 pub const ForeignDecl = struct {
+    /// Calling convention identifier (e.g., "prim", "ccall").
     calling_convention: []const u8,
-    name: []const u8,
+    /// The foreign entity name from the string literal (e.g., "add_Int").
+    foreign_name: []const u8,
+    /// The Haskell binding name introduced by this declaration (e.g., "primAddInt").
+    binding_name: []const u8,
+    /// The declared type signature.
     type: Type,
     span: SourceSpan,
 };

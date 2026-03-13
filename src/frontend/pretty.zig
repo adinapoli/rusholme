@@ -465,8 +465,10 @@ pub const PrettyPrinter = struct {
         try self.writeIndent();
         try self.write("foreign import ");
         try self.write(fd.calling_convention);
-        try self.writeByte(' ');
-        try self.write(fd.name);
+        try self.write(" \"");
+        try self.write(fd.foreign_name);
+        try self.write("\" ");
+        try self.write(fd.binding_name);
         try self.write(" :: ");
         try self.printType(fd.type);
     }

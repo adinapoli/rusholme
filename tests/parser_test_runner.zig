@@ -228,6 +228,7 @@ test "should_compile: sc043_infix_constructors_in_types" { try testShouldCompile
 test "should_compile: sc044_vtt_parser" { try testShouldCompile(std.testing.allocator, "sc044_vtt_parser"); }
 test "should_compile: sc045_mutual_recursive_let" { try testShouldCompile(std.testing.allocator, "sc045_mutual_recursive_let"); }
 test "should_compile: sc046_multi_equation_adt" { try testShouldCompile(std.testing.allocator, "sc046_multi_equation_adt"); }
+test "should_compile: sc047_foreign_import_prim" { try testShouldCompile(std.testing.allocator, "sc047_foreign_import_prim"); }
 
 // ── should_fail test declarations ─────────────────────────────────────────
 
@@ -250,3 +251,4 @@ test "should_fail: sf016_import_bad_syntax" { try testShouldFail(std.testing.all
 test "should_fail: sf017_forall_no_dot" { try testShouldFail(std.testing.allocator, "sf017_forall_no_dot"); }
 test "should_fail: sf018_unclosed_string" { try testShouldFail(std.testing.allocator, "sf018_unclosed_string"); }
 test "should_fail: sf019_missing_module_name" { try testShouldFail(std.testing.allocator, "sf019_missing_module_name"); }
+test "should_fail: sf020_foreign_missing_type" { try testShouldFail(std.testing.allocator, "sf020_foreign_missing_type"); }
