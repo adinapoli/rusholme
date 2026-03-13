@@ -694,7 +694,7 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
                     .rhs = return_expr,
                 } };
 
-                return try wrapWithPendingBinds(ctx, bind_expr, pending_binds.items);
+                return try wrapWithLazyBindsForFunc(ctx, bind_expr, pending_binds.items);
             } else if (arg_count > arity) {
                 // Over-application: use App for saturated part, chain apply calls
                 // Example: (f x) y z (arity=1, args=3) ->
@@ -749,7 +749,7 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
                     .rhs = return_expr,
                 } };
 
-                return try wrapWithPendingBinds(ctx, final_bind, pending_binds.items);
+                return try wrapWithLazyBindsForFunc(ctx, final_bind, pending_binds.items);
             }
         }
     }
@@ -871,8 +871,10 @@ fn wrapWithLazyBindsForFunc(
                         break :b store_expr;
                     }
                 }
-                // Evaluate eagerly (partial/over-saturated or higher-order)
-                // tracked in: https://github.com/adinapoli/rusholme/issues/546
+                // Higher-order application (function is a parameter variable):
+                // evaluate eagerly since F-tag dispatch requires a statically
+                // known function name.
+                // tracked in: https://github.com/adinapoli/rusholme/issues/551
                 break :b pb.complex_expr;
             },
             else => pb.complex_expr,

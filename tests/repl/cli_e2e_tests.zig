@@ -262,3 +262,24 @@ test "cli e2e: nested lazy function calls work correctly (#517)" {
     // tracked in: https://github.com/adinapoli/rusholme/issues/487
     return;
 }
+
+test "cli e2e: partial application arguments are lazy (#546)" {
+    // add x y = x + y; addOne = add 1; addOne (error "unused")
+    //
+    // The partial application `add 1` produces a PAP. When the PAP
+    // is applied to `error "unused"`, the argument should be wrapped
+    // as a lazy thunk rather than evaluated eagerly.
+    // Blocked on multi-line REPL stdin.
+    // tracked in: https://github.com/adinapoli/rusholme/issues/487
+    return;
+}
+
+test "cli e2e: over-saturated application arguments are lazy (#546)" {
+    // myConst x _ = x; apply f x = f x; apply myConst "hello" (error "unused")
+    //
+    // Over-saturated calls chain through apply. Arguments passed to the
+    // saturated sub-call should be wrapped as lazy thunks.
+    // Blocked on multi-line REPL stdin.
+    // tracked in: https://github.com/adinapoli/rusholme/issues/487
+    return;
+}
