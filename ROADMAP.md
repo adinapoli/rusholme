@@ -1,7 +1,7 @@
 # Rusholme Roadmap
 
 > Auto-generated from GitHub issues. Each issue links to its tracker.
-> **Starting points** (zero dependencies): #1✓, #2✓, #17✓, #22✓, #24✓, #27✓, #53✓, #85✓, #58, #62⚡, #66, #68, #107✓
+> **Starting points** (zero dependencies): #1✓, #2✓, #17✓, #22✓, #24✓, #27✓, #53✓, #85✓, #527, #530, #62⚡, #66, #68, #107✓
 
 **Architecture Decisions:**
 - **#0001**: PrimOps and RTS Architecture — defines the contract between compiler and runtime via ~15-30 primitive operations. See `docs/decisions/0001-primops-and-rts-architecture.md`.
@@ -409,19 +409,22 @@
 | [#443](https://github.com/adinapoli/rusholme/issues/443) | Introduce LanguageExtension EnumSet and module parse cache | [#368](https://github.com/adinapoli/rusholme/issues/368) | :green_circle: |
 | [#371](https://github.com/adinapoli/rusholme/issues/371) | Implement recompilation avoidance via `.rhi` fingerprinting | [#366](https://github.com/adinapoli/rusholme/issues/366), [#368](https://github.com/adinapoli/rusholme/issues/368) | :green_circle: |
 | [#456](https://github.com/adinapoli/rusholme/issues/456) | 371 follow-up: enable full end-to-end caching once per-module .bc artifacts land | [#371](https://github.com/adinapoli/rusholme/issues/371), [#436](https://github.com/adinapoli/rusholme/issues/436) | :white_circle: |
-| [#370](https://github.com/adinapoli/rusholme/issues/370) | Bootstrap Prelude from Haskell source | [#368](https://github.com/adinapoli/rusholme/issues/368), [#58](https://github.com/adinapoli/rusholme/issues/58), [#59](https://github.com/adinapoli/rusholme/issues/59) | :white_circle: |
+| ~~[#370](https://github.com/adinapoli/rusholme/issues/370)~~ | ~~Bootstrap Prelude from Haskell source~~ (superseded by [#529](https://github.com/adinapoli/rusholme/issues/529)) | — | :green_circle: |
 | [#436](https://github.com/adinapoli/rusholme/issues/436) | design: use LLVM bitcode (`.bc`) as per-module backend artifact | [#366](https://github.com/adinapoli/rusholme/issues/366), [#368](https://github.com/adinapoli/rusholme/issues/368) | :green_circle: |
 | [#433](https://github.com/adinapoli/rusholme/issues/433) | Research: Definition-level inter-module dependency graph (beyond `.hs-boot`) | [#366](https://github.com/adinapoli/rusholme/issues/366), [#367](https://github.com/adinapoli/rusholme/issues/367), [#368](https://github.com/adinapoli/rusholme/issues/368) | :green_circle: |
 | [#453](https://github.com/adinapoli/rusholme/issues/453) | backend: .bc artifacts use path-inferred name instead of declared module name | [#436](https://github.com/adinapoli/rusholme/issues/436) | :white_circle: |
 
-### Epic [#10](https://github.com/adinapoli/rusholme/issues/10): Minimal Prelude
+### Epic [#10](https://github.com/adinapoli/rusholme/issues/10): Bootstrap Self-Compiled Prelude
+
+Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded — that work was delivered under other PRs. The new goal is a real `lib/Prelude.hs` compiled by Rusholme itself.
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#58](https://github.com/adinapoli/rusholme/issues/58) | Research: Survey existing minimal Preludes from teaching compilers | — | :white_circle: |
-| [#59](https://github.com/adinapoli/rusholme/issues/59) | Implement Prelude basic types (Bool, Int, Char, Maybe, Either, IO, lists, tuples) | [#58](https://github.com/adinapoli/rusholme/issues/58), [#38](https://github.com/adinapoli/rusholme/issues/38) | :white_circle: |
-| [#60](https://github.com/adinapoli/rusholme/issues/60) | Implement Prelude type classes (Eq, Ord, Show, Read, Num, Monad) | [#59](https://github.com/adinapoli/rusholme/issues/59), [#37](https://github.com/adinapoli/rusholme/issues/37) | :white_circle: |
-| [#61](https://github.com/adinapoli/rusholme/issues/61) | Implement Prelude core functions (id, const, map, filter, foldr, foldl, etc.) | [#60](https://github.com/adinapoli/rusholme/issues/60) | :white_circle: |
+| [#527](https://github.com/adinapoli/rusholme/issues/527) | Implement `foreign import prim` syntax and compilation | — | :white_circle: |
+| [#528](https://github.com/adinapoli/rusholme/issues/528) | Write `lib/Prelude.hs` with basic types and functions (no type classes) | [#527](https://github.com/adinapoli/rusholme/issues/527) | :white_circle: |
+| [#529](https://github.com/adinapoli/rusholme/issues/529) | Bootstrap Prelude: compile `lib/Prelude.hs` and wire into implicit import | [#527](https://github.com/adinapoli/rusholme/issues/527), [#528](https://github.com/adinapoli/rusholme/issues/528) | :white_circle: |
+| [#530](https://github.com/adinapoli/rusholme/issues/530) | Implement dictionary-passing translation for type classes | — | :white_circle: |
+| [#531](https://github.com/adinapoli/rusholme/issues/531) | Add type class definitions and instances to `lib/Prelude.hs` | [#528](https://github.com/adinapoli/rusholme/issues/528), [#529](https://github.com/adinapoli/rusholme/issues/529), [#530](https://github.com/adinapoli/rusholme/issues/530) | :white_circle: |
 
 ### Epic [#14](https://github.com/adinapoli/rusholme/issues/14): Memory Management (Arena → Immix GC)
 
