@@ -243,3 +243,22 @@ test "cli e2e: :type shows error diagnostics on type error (#514)" {
     try expectContains(result.stderr, "variable not in scope");
     try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
 }
+
+test "cli e2e: lazy function arguments do not evaluate unused arguments (#517)" {
+    // const x _ = x
+    // putStrLn (const "hello" (error "foo"))
+    //
+    // With lazy evaluation, the error thunk should never be forced.
+    // Blocked on multi-line REPL stdin.
+    // tracked in: https://github.com/adinapoli/rusholme/issues/487
+    return;
+}
+
+test "cli e2e: nested lazy function calls work correctly (#517)" {
+    // wrap x = x; apply x = wrap (wrap x); apply 42
+    //
+    // Nested lazy thunks should force correctly, returning 42.
+    // Blocked on multi-line REPL stdin.
+    // tracked in: https://github.com/adinapoli/rusholme/issues/487
+    return;
+}

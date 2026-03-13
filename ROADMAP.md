@@ -398,6 +398,17 @@
 | [#381](https://github.com/adinapoli/rusholme/issues/381) | Epic: GRIN to LLVM Translation - Compiler Path to M1 | [#55](https://github.com/adinapoli/rusholme/issues/55) | :white_circle: |
 | [#396](https://github.com/adinapoli/rusholme/issues/396) | Research: Zig LLVM bitcode compatibility with llvm-link | [#57](https://github.com/adinapoli/rusholme/issues/57) | :white_circle: |
 
+### Epic [#515](https://github.com/adinapoli/rusholme/issues/515): Support Laziness (Call-by-Need Evaluation)
+
+| # | Issue | Deps | Status |
+|---|-------|------|--------|
+| [#502](https://github.com/adinapoli/rusholme/issues/502) | Simple peano number program segfaults | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
+| [#516](https://github.com/adinapoli/rusholme/issues/516) | Lazy let bindings (call-by-need for let-bound variables) | [#502](https://github.com/adinapoli/rusholme/issues/502) | :green_circle: |
+| [#517](https://github.com/adinapoli/rusholme/issues/517) | Lazy function arguments (thunk non-constructor call arguments) | [#516](https://github.com/adinapoli/rusholme/issues/516) | :yellow_circle: |
+| [#518](https://github.com/adinapoli/rusholme/issues/518) | Lazy non-App constructor arguments (Case/Bind chain thunking) | [#517](https://github.com/adinapoli/rusholme/issues/517) | :white_circle: |
+| [#545](https://github.com/adinapoli/rusholme/issues/545) | LLVM backend: force F-tagged thunks in native compiler path | [#517](https://github.com/adinapoli/rusholme/issues/517) | :white_circle: |
+| [#546](https://github.com/adinapoli/rusholme/issues/546) | Lazy arguments for partial/over-saturated/higher-order applications | [#517](https://github.com/adinapoli/rusholme/issues/517) | :white_circle: |
+
 ---
 
 ## M2: Basic Programs
