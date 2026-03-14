@@ -428,6 +428,77 @@ fn desugarClassDecl(
             .rhs = lam_expr,
         } });
     }
+
+    // ── 3. Default method bindings ────────────────────────────────────
+    //
+    // For each method with `has_default == true` and a non-null default_impl,
+    // generate:
+    //   default$ClassName$methodName = \dict -> \x1 -> ... -> body
+    //
+    // where `body` is the compiled default implementation. The dict parameter
+    // allows the instance desugarer to reference this binding and pass the
+    // instance dictionary when a method is not explicitly provided.
+
+    for (cd.methods) |method| {
+        const default_impl = method.default_impl orelse continue;
+        if (default_impl.len == 0) continue;
+
+        const default_name = Name{
+            .base = try std.fmt.allocPrint(alloc, "default${s}${s}", .{ cd.name.base, method.name.base }),
+            .unique = ctx.u_supply.fresh(),
+        };
+
+        // Compile the default method body using the pattern match compiler.
+        // The default body is a slice of RMatch equations (same as FunBind).
+        const method_htype = class_info.methods[0].ty; // Placeholder — use method's own type
+        var method_core_ty: ast_mod.CoreType = undefined;
+
+        // Find the correct method info by name.
+        for (class_info.methods) |mi| {
+            if (mi.name.unique.value == method.name.unique.value) {
+                method_core_ty = try mi.ty.toCore(alloc);
+                break;
+            }
+        } else {
+            method_core_ty = try method_htype.toCore(alloc);
+        }
+
+        const body_expr = try desugarMatch(ctx, default_impl, method_core_ty);
+
+        // Wrap with a dictionary lambda: \dict -> body
+        const dict_param_name = Name{
+            .base = "dict",
+            .unique = ctx.u_supply.fresh(),
+        };
+        const dict_param_ty = ast_mod.CoreType{
+            .TyCon = .{ .name = dict_tycon_name, .args = &.{} },
+        };
+        const dict_param_id = ast_mod.Id{
+            .name = dict_param_name,
+            .ty = dict_param_ty,
+            .span = cd.span,
+        };
+
+        const lam_default = try alloc.create(ast_mod.Expr);
+        lam_default.* = ast_mod.Expr{
+            .Lam = .{
+                .binder = dict_param_id,
+                .body = body_expr,
+                .span = cd.span,
+            },
+        };
+
+        const default_id = ast_mod.Id{
+            .name = default_name,
+            .ty = method_core_ty,
+            .span = cd.span,
+        };
+
+        try binds.append(alloc, .{ .NonRec = .{
+            .binder = default_id,
+            .rhs = lam_default,
+        } });
+    }
 }
 
 /// Desugar an instance declaration into a dictionary value binding.
@@ -483,10 +554,12 @@ fn desugarInstanceDecl(
                 method_exprs[i] = try desugarMatch(ctx, binding.equations, method_core_ty);
             }
         } else if (method.has_default) {
-            // Use a placeholder for default methods.
-            // Full default method compilation is tracked as a follow-up issue.
-            const placeholder = try alloc.create(ast_mod.Expr);
-            placeholder.* = ast_mod.Expr{
+            // Apply the compiled default method to the instance dictionary.
+            // E.g., for `(/=)` with no instance binding:
+            //   default$Eq$/= dict$Eq$Int
+            // The default method was compiled in desugarClassDecl (section 3).
+            const default_fn = try alloc.create(ast_mod.Expr);
+            default_fn.* = ast_mod.Expr{
                 .Var = ast_mod.Id{
                     .name = Name{
                         .base = try std.fmt.allocPrint(alloc, "default${s}${s}", .{ id_decl.class_name.base, method.name.base }),
@@ -496,7 +569,24 @@ fn desugarInstanceDecl(
                     .span = id_decl.span,
                 },
             };
-            method_exprs[i] = placeholder;
+            // Apply the default function to the instance dictionary.
+            const dict_ref = try alloc.create(ast_mod.Expr);
+            dict_ref.* = ast_mod.Expr{
+                .Var = ast_mod.Id{
+                    .name = dict_name,
+                    .ty = ast_mod.CoreType{ .TyCon = .{ .name = dict_con_name, .args = &.{} } },
+                    .span = id_decl.span,
+                },
+            };
+            const app = try alloc.create(ast_mod.Expr);
+            app.* = ast_mod.Expr{
+                .App = .{
+                    .fn_expr = default_fn,
+                    .arg = dict_ref,
+                    .span = id_decl.span,
+                },
+            };
+            method_exprs[i] = app;
         } else {
             // Missing method with no default — emit diagnostic.
             const msg = try std.fmt.allocPrint(
