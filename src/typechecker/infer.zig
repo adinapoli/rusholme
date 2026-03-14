@@ -1037,11 +1037,14 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                 const inst = try s.instantiate(ctx.alloc, ctx.mv_supply);
                 // Accumulate wanted class constraints for later resolution.
                 // Use the variable's source span (the use site) for diagnostics.
+                // Record the variable's unique so the desugarer can key evidence
+                // back to this specific call site.
                 for (inst.wanted) |wc| {
                     try ctx.wanted_constraints.append(ctx.alloc, .{ .Class = .{
                         .class_name = wc.class_name,
                         .ty = wc.ty,
                         .span = v.span,
+                        .var_unique = v.name.unique,
                     } });
                 }
                 break :blk try ctx.alloc_ty(inst.ty);

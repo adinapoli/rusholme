@@ -24,6 +24,70 @@ pub const DesugarCtx = struct {
     /// binders, etc.). Each synthetic binder must get a globally unique ID so
     /// that the GRIN translator can distinguish them in its `var_map`.
     u_supply: *naming_mod.UniqueSupply,
+
+    /// Maps `(class_unique, head_type_base_name)` → dictionary `Name`.
+    /// Populated by `desugarInstanceDecl`, queried by `buildDictExpr`
+    /// when translating `DictEvidence.instance` to a Core variable reference.
+    dict_names: DictNameMap = .empty,
+
+    /// Evidence map built from solved constraints. Keyed by
+    /// `(var_unique, class_name_unique)` → list of `DictEvidence` pointers.
+    /// Multiple constraints for the same variable can arise from multiple
+    /// class constraints (e.g., `(Eq a, Ord a) =>`).
+    evidence_map: EvidenceMap = .empty,
+
+    pub const DictNameKey = struct {
+        class_unique: u64,
+        head_name: []const u8,
+    };
+
+    pub const DictNameMap = std.ArrayHashMapUnmanaged(
+        DictNameKey,
+        Name,
+        struct {
+            pub fn hash(_: @This(), key: DictNameKey) u32 {
+                var h = std.hash.Wyhash.init(0);
+                h.update(std.mem.asBytes(&key.class_unique));
+                h.update(key.head_name);
+                return @truncate(h.final());
+            }
+            pub fn eql(_: @This(), a: DictNameKey, b: DictNameKey, _: usize) bool {
+                return a.class_unique == b.class_unique and std.mem.eql(u8, a.head_name, b.head_name);
+            }
+        },
+        true,
+    );
+
+    /// Key for the evidence map: identifies a constraint by the use-site
+    /// variable and the class.
+    pub const EvidenceKey = struct {
+        var_unique: u64,
+        span_start_line: u32,
+        span_start_col: u32,
+        class_unique: u64,
+    };
+
+    pub const EvidenceMap = std.ArrayHashMapUnmanaged(
+        EvidenceKey,
+        *const solver_mod.DictEvidence,
+        struct {
+            pub fn hash(_: @This(), key: EvidenceKey) u32 {
+                var h = std.hash.Wyhash.init(0);
+                h.update(std.mem.asBytes(&key.var_unique));
+                h.update(std.mem.asBytes(&key.span_start_line));
+                h.update(std.mem.asBytes(&key.span_start_col));
+                h.update(std.mem.asBytes(&key.class_unique));
+                return @truncate(h.final());
+            }
+            pub fn eql(_: @This(), a: EvidenceKey, b: EvidenceKey, _: usize) bool {
+                return a.var_unique == b.var_unique and
+                    a.span_start_line == b.span_start_line and
+                    a.span_start_col == b.span_start_col and
+                    a.class_unique == b.class_unique;
+            }
+        },
+        true,
+    );
 };
 
 // Synthetic span for desugared constructs
@@ -67,14 +131,36 @@ pub fn desugarModule(
         .u_supply = u_supply,
     };
 
+    // Build evidence map from solved constraints so the expression desugarer
+    // can look up dictionary evidence for each variable use site.
+    try buildEvidenceMap(&ctx);
+
     var binds = std.ArrayListUnmanaged(ast_mod.Bind){};
     errdefer binds.deinit(alloc);
 
     var data_decls = std.ArrayListUnmanaged(ast_mod.CoreDataDecl){};
     errdefer data_decls.deinit(alloc);
 
+    // Pass 1: Process class and instance declarations first.
+    // This populates ctx.dict_names so that dictionary evidence resolution
+    // in Pass 2 can find the correct dictionary names.
     for (module.declarations) |decl| {
         switch (decl) {
+            .ClassDecl => |cd| {
+                try desugarClassDecl(&ctx, cd, &data_decls, &binds);
+            },
+            .InstanceDecl => |id_decl| {
+                try desugarInstanceDecl(&ctx, id_decl, &binds);
+            },
+            else => {},
+        }
+    }
+
+    // Pass 2: Process all other declarations (FunBind, PatBind, DataDecl, etc.).
+    for (module.declarations) |decl| {
+        switch (decl) {
+            .ClassDecl => {}, // Handled in Pass 1
+            .InstanceDecl => {}, // Handled in Pass 1
             .FunBind => |fb| {
                 const scheme = module_types.schemes.get(fb.name.unique) orelse continue;
                 const core_ty = try schemeToCore(alloc, scheme);
@@ -98,9 +184,11 @@ pub fn desugarModule(
 
                 if (needs_match_compiler) {
                     const p_body = try desugarMatch(&ctx, fb.equations, core_ty);
+                    // Wrap with dictionary lambdas if the function is constrained.
+                    const wrapped_body = try wrapWithDictLambdas(&ctx, scheme, p_body, fb.span);
                     try binds.append(alloc, .{ .NonRec = .{
                         .binder = binder_id,
-                        .rhs = p_body,
+                        .rhs = wrapped_body,
                     } });
                 } else if (fb.equations.len > 0) {
                     const eq = fb.equations[0];
@@ -133,12 +221,14 @@ pub fn desugarModule(
                         }
                     }
 
-                    const p_body = try alloc.create(ast_mod.Expr);
-                    p_body.* = body;
+                    // Wrap with dictionary lambdas if the function is constrained.
+                    const body_ptr = try alloc.create(ast_mod.Expr);
+                    body_ptr.* = body;
+                    const wrapped = try wrapWithDictLambdas(&ctx, scheme, body_ptr, fb.span);
 
                     try binds.append(alloc, .{ .NonRec = .{
                         .binder = binder_id,
-                        .rhs = p_body,
+                        .rhs = wrapped,
                     } });
                 }
             },
@@ -237,12 +327,6 @@ pub fn desugarModule(
                     fp.span,
                 );
                 try binds.append(alloc, bind);
-            },
-            .ClassDecl => |cd| {
-                try desugarClassDecl(&ctx, cd, &data_decls, &binds);
-            },
-            .InstanceDecl => |id_decl| {
-                try desugarInstanceDecl(&ctx, id_decl, &binds);
             },
             .TypeSig => {},
         }
@@ -526,6 +610,13 @@ fn desugarInstanceDecl(
         .unique = ctx.u_supply.fresh(),
     };
 
+    // Register in the dict_names map so call-site evidence resolution can
+    // find the dictionary name for this (class, head_type) pair.
+    try ctx.dict_names.put(alloc, .{
+        .class_unique = id_decl.class_name.unique.value,
+        .head_name = head_name,
+    }, dict_name);
+
     // Build the dictionary value: MkDict$Class method1_impl method2_impl ...
     // For each method in class declaration order, find the binding in the instance.
     // If not found and the class has a default, use a placeholder.
@@ -666,6 +757,213 @@ fn instanceHeadName(alloc: std.mem.Allocator, ty: @import("../frontend/ast.zig")
         .Var => |name| try alloc.dupe(u8, name),
         .Fun, .Forall, .IParam => try alloc.dupe(u8, "Unknown"),
     };
+}
+
+// ── Dictionary-passing helpers ─────────────────────────────────────────
+
+/// Build the evidence map from solved constraints in `ModuleTypes`.
+///
+/// Iterates over `wanted_constraints` and for each `Class` constraint that
+/// has both a `var_unique` and resolved `evidence`, inserts an entry keyed
+/// by `(var_unique, span_start, class_unique)`.
+fn buildEvidenceMap(ctx: *DesugarCtx) std.mem.Allocator.Error!void {
+    for (ctx.types.wanted_constraints.items) |c| {
+        switch (c) {
+            .Class => |cc| {
+                const ev = cc.evidence orelse continue;
+                const vu = cc.var_unique orelse continue;
+                try ctx.evidence_map.put(ctx.alloc, .{
+                    .var_unique = vu.value,
+                    .span_start_line = cc.span.start.line,
+                    .span_start_col = cc.span.start.column,
+                    .class_unique = cc.class_name.unique.value,
+                }, ev);
+            },
+            .Eq => {},
+        }
+    }
+}
+
+/// Wrap a function body with dictionary lambda parameters for each class
+/// constraint in the function's type scheme.
+///
+/// For `f :: Eq a => a -> Bool`, this transforms `\x -> body` into
+/// `\dict$Eq -> \x -> body`, where `dict$Eq` is a fresh binder for the
+/// Eq dictionary parameter.
+fn wrapWithDictLambdas(
+    ctx: *DesugarCtx,
+    scheme: env_mod.TyScheme,
+    body: *const ast_mod.Expr,
+    span: SourceSpan,
+) std.mem.Allocator.Error!*const ast_mod.Expr {
+    if (scheme.constraints.len == 0) return body;
+
+    const alloc = ctx.alloc;
+    var current: *const ast_mod.Expr = body;
+
+    // Wrap in reverse order so the first constraint is the outermost lambda.
+    var i = scheme.constraints.len;
+    while (i > 0) {
+        i -= 1;
+        const constraint = scheme.constraints[i];
+
+        // Generate a fresh name for the dictionary parameter.
+        const dict_param_name = Name{
+            .base = try std.fmt.allocPrint(alloc, "dict${s}", .{constraint.class_name.base}),
+            .unique = ctx.u_supply.fresh(),
+        };
+
+        // The dictionary parameter type is a placeholder.
+        // A full implementation would compute the proper dictionary type.
+        const dict_ty = ast_mod.CoreType{ .TyCon = .{
+            .name = Name{
+                .base = try std.fmt.allocPrint(alloc, "Dict${s}", .{constraint.class_name.base}),
+                .unique = .{ .value = 0 },
+            },
+            .args = &.{},
+        } };
+
+        const wrapped = try alloc.create(ast_mod.Expr);
+        wrapped.* = .{ .Lam = .{
+            .binder = .{ .name = dict_param_name, .ty = dict_ty, .span = span },
+            .body = current,
+            .span = span,
+        } };
+        current = wrapped;
+    }
+
+    return current;
+}
+
+/// Convert a `DictEvidence` to a Core expression.
+///
+/// - `instance`: looks up the dictionary name from `ctx.dict_names` and
+///   returns a `Var` reference.
+/// - `param`: returns a `Var` referencing the enclosing function's
+///   dictionary parameter (identified by class name).
+/// - `superclass`: not yet implemented (tracked by #558).
+fn buildDictExpr(
+    ctx: *DesugarCtx,
+    evidence: *const solver_mod.DictEvidence,
+    span: SourceSpan,
+) std.mem.Allocator.Error!*const ast_mod.Expr {
+    const alloc = ctx.alloc;
+    switch (evidence.*) {
+        .instance => |inst| {
+            // Look up the dictionary name by (class, head_type_name).
+            const head_name = htypeHeadName(inst.head_ty);
+            const dict_name = ctx.dict_names.get(.{
+                .class_unique = inst.class_name.unique.value,
+                .head_name = head_name,
+            });
+
+            if (dict_name) |dn| {
+                const node = try alloc.create(ast_mod.Expr);
+                const dict_ty = ast_mod.CoreType{ .TyCon = .{
+                    .name = Name{
+                        .base = try std.fmt.allocPrint(alloc, "Dict${s}", .{inst.class_name.base}),
+                        .unique = .{ .value = 0 },
+                    },
+                    .args = &.{},
+                } };
+                node.* = .{ .Var = .{ .name = dn, .ty = dict_ty, .span = span } };
+                return node;
+            } else {
+                // Dictionary not found — emit a placeholder.
+                // This can happen if the instance was not in scope.
+                const node = try alloc.create(ast_mod.Expr);
+                const name = Name{
+                    .base = try std.fmt.allocPrint(alloc, "dict${s}${s}", .{ inst.class_name.base, head_name }),
+                    .unique = ctx.u_supply.fresh(),
+                };
+                node.* = .{ .Var = .{
+                    .name = name,
+                    .ty = ast_mod.CoreType{ .TyCon = .{
+                        .name = Name{ .base = "Dict", .unique = .{ .value = 0 } },
+                        .args = &.{},
+                    } },
+                    .span = span,
+                } };
+                return node;
+            }
+        },
+        .param => |p| {
+            // Reference the dictionary parameter of the enclosing function.
+            const node = try alloc.create(ast_mod.Expr);
+            const dict_param_name = Name{
+                .base = try std.fmt.allocPrint(alloc, "dict${s}", .{p.class_name.base}),
+                .unique = .{ .value = 0 }, // Placeholder — the actual unique is assigned by wrapWithDictLambdas
+            };
+            node.* = .{ .Var = .{
+                .name = dict_param_name,
+                .ty = ast_mod.CoreType{ .TyCon = .{
+                    .name = Name{
+                        .base = try std.fmt.allocPrint(alloc, "Dict${s}", .{p.class_name.base}),
+                        .unique = .{ .value = 0 },
+                    },
+                    .args = &.{},
+                } },
+                .span = span,
+            } };
+            return node;
+        },
+        .superclass => {
+            // tracked in: https://github.com/adinapoli/rusholme/issues/558
+            // For now, emit a placeholder that will fail at a later stage.
+            const node = try alloc.create(ast_mod.Expr);
+            node.* = .{ .Var = .{
+                .name = Name{ .base = "superclass_dict_placeholder", .unique = ctx.u_supply.fresh() },
+                .ty = ast_mod.CoreType{ .TyCon = .{
+                    .name = Name{ .base = "Dict", .unique = .{ .value = 0 } },
+                    .args = &.{},
+                } },
+                .span = span,
+            } };
+            return node;
+        },
+    }
+}
+
+/// Extract a base name from an HType for dictionary name lookup.
+/// Maps concrete types to their base name string (e.g. `Con(Int)` → "Int").
+fn htypeHeadName(ty: htype_mod.HType) []const u8 {
+    const chased = ty.chase();
+    return switch (chased) {
+        .Con => |c| c.name.base,
+        .Rigid => |r| r.base,
+        .AppTy => |a| htypeHeadName(a.head.*),
+        .Meta => "Meta",
+        .Fun => "Fun",
+        .ForAll => "ForAll",
+    };
+}
+
+/// Look up all solved evidence entries for a given variable use site.
+///
+/// Returns the evidence entries keyed by `(var_unique, span)` that match
+/// the given variable and span. Used by `desugarExpr` to find which
+/// dictionary arguments to insert at a method call site.
+fn findEvidenceForVar(
+    ctx: *const DesugarCtx,
+    var_unique: u64,
+    span: SourceSpan,
+    scheme: env_mod.TyScheme,
+) std.mem.Allocator.Error![]const *const solver_mod.DictEvidence {
+    if (scheme.constraints.len == 0) return &.{};
+
+    var result = std.ArrayListUnmanaged(*const solver_mod.DictEvidence){};
+    for (scheme.constraints) |constraint| {
+        const key = DesugarCtx.EvidenceKey{
+            .var_unique = var_unique,
+            .span_start_line = span.start.line,
+            .span_start_col = span.start.column,
+            .class_unique = constraint.class_name.unique.value,
+        };
+        if (ctx.evidence_map.get(key)) |ev| {
+            try result.append(ctx.alloc, ev);
+        }
+    }
+    return try result.toOwnedSlice(ctx.alloc);
 }
 
 // ── Foreign import prim helpers ────────────────────────────────────────
@@ -928,6 +1226,26 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
             } else if (ctx.types.schemes.get(v.name.unique)) |scheme| {
                 const ty = try schemeToCore(alloc, scheme);
                 node.* = .{ .Var = .{ .name = v.name, .ty = ty, .span = v.span } };
+
+                // If this variable has class constraints, look up the solved
+                // evidence and wrap the variable in App nodes with dictionary
+                // arguments.
+                const evidences = try findEvidenceForVar(ctx, v.name.unique.value, v.span, scheme);
+                if (evidences.len > 0) {
+                    var current: *const ast_mod.Expr = node;
+                    for (evidences) |ev| {
+                        const dict_arg = try buildDictExpr(ctx, ev, v.span);
+                        const app_node = try alloc.create(ast_mod.Expr);
+                        app_node.* = .{ .App = .{
+                            .fn_expr = current,
+                            .arg = dict_arg,
+                            .span = v.span,
+                        } };
+                        current = app_node;
+                    }
+                    // Overwrite the node with the final App chain.
+                    node.* = current.*;
+                }
             } else {
                 std.debug.panic("Variable {s} (id {d}) not found in type definitions", .{ v.name.base, v.name.unique.value });
             }
