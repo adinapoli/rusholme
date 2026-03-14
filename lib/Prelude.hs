@@ -5,7 +5,12 @@ module Prelude
     , not, (&&), (||), otherwise
     , (+), (-), (*), negate, abs, div, mod
     , (==), (/=), (<), (>), (<=), (>=)
-    , id, const
+    , id, const, flip, (.), ($)
+    , head, tail, null, length
+    , map, filter, foldr, foldl
+    , (++), reverse, concat
+    , take, drop
+    , maybe, fromMaybe, either
     , putStrLn, putStr
     , error
     ) where
@@ -54,6 +59,9 @@ infixl 7 *, `div`, `mod`
 infix  4 ==, /=, <, >, <=, >=
 infixr 3 &&
 infixr 2 ||
+infixr 9 .
+infixr 0 $
+infixr 5 ++
 
 -- ========================================================================
 -- Identity and const
@@ -149,9 +157,87 @@ mod = primRemInt
 (>=) = primGeInt
 
 -- ========================================================================
--- Polymorphic list, tuple, and higher-order functions are omitted for now
--- because the GRIN→LLVM backend cannot yet compile them (produces
--- unresolvable linker symbols for (:), unknown_func, scrut, etc.).
--- These will be re-added when the backend supports polymorphic codegen.
--- Tracked in: https://github.com/adinapoli/rusholme/issues/573
+-- Higher-order combinators
 -- ========================================================================
+
+flip :: (a -> b -> c) -> b -> a -> c
+flip f x y = f y x
+
+(.) :: (b -> c) -> (a -> b) -> a -> c
+(.) f g x = f (g x)
+
+($) :: (a -> b) -> a -> b
+f $ x = f x
+
+-- ========================================================================
+-- List functions
+-- ========================================================================
+
+head :: [a] -> a
+head (x:_) = x
+
+tail :: [a] -> [a]
+tail (_:xs) = xs
+
+null :: [a] -> Bool
+null []    = True
+null (_:_) = False
+
+length :: [a] -> Int
+length []     = 0
+length (_:xs) = 1 + length xs
+
+map :: (a -> b) -> [a] -> [b]
+map _ []     = []
+map f (x:xs) = f x : map f xs
+
+filter :: (a -> Bool) -> [a] -> [a]
+filter _ []     = []
+filter p (x:xs) = if p x then x : filter p xs else filter p xs
+
+foldr :: (a -> b -> b) -> b -> [a] -> b
+foldr _ z []     = z
+foldr f z (x:xs) = f x (foldr f z xs)
+
+foldl :: (b -> a -> b) -> b -> [a] -> b
+foldl _ z []     = z
+foldl f z (x:xs) = foldl f (f z x) xs
+
+(++) :: [a] -> [a] -> [a]
+(++) []     ys = ys
+(++) (x:xs) ys = x : (++) xs ys
+
+reverse :: [a] -> [a]
+reverse xs = revAcc xs []
+
+revAcc :: [a] -> [a] -> [a]
+revAcc []     acc = acc
+revAcc (x:xs) acc = revAcc xs (x : acc)
+
+concat :: [[a]] -> [a]
+concat []       = []
+concat (xs:xss) = (++) xs (concat xss)
+
+take :: Int -> [a] -> [a]
+take _ []     = []
+take n (x:xs) = if n <= 0 then [] else x : take (n - 1) xs
+
+drop :: Int -> [a] -> [a]
+drop _ []     = []
+drop n xxs = if n <= 0 then xxs else case xxs of { (_:xs) -> drop (n - 1) xs; [] -> [] }
+
+-- ========================================================================
+-- Maybe / Either functions
+-- ========================================================================
+
+maybe :: b -> (a -> b) -> Maybe a -> b
+maybe n _ Nothing  = n
+maybe _ f (Just x) = f x
+
+fromMaybe :: a -> Maybe a -> a
+fromMaybe d Nothing  = d
+fromMaybe _ (Just x) = x
+
+either :: (a -> c) -> (b -> c) -> Either a b -> c
+either f _ (Left x)  = f x
+either _ g (Right y) = g y
