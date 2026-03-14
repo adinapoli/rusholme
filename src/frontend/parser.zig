@@ -973,6 +973,13 @@ pub const Parser = struct {
             }
         }
 
+        // ── Not an ( op ) form. If we still have open_paren, it's a pattern binding.
+        // (Haskell 2010 §4.4.3: funlhs → pat varop pat). 
+        // Fallback to PatBindDecl which handles: (x:xs) ++ ys = ...
+        if (try self.check(.open_paren)) {
+            return try self.parsePatBindDecl();
+        }
+
         const start = try self.currentSpan();
         const name_tok = try self.expect(.varid);
         const name = name_tok.token.varid;
@@ -3424,17 +3431,45 @@ pub const Parser = struct {
             }
         }
 
-        // Handle infix constructor pattern: x : xs, True && True
-        // Look for operator symbols
-        if (self.isAtomPattern(pat) and try self.isInfixOp()) {
-            const tok = try self.advance();
-            const op_name = Parser.getOpName(tok.token);
-            const right_pat = try self.parsePattern();
-            return .{ .InfixCon = .{
-                .left = try self.allocNode(ast_mod.Pattern, pat),
-                .con = .{ .name = op_name, .span = tok.span },
-                .right = try self.allocNode(ast_mod.Pattern, right_pat),
-            } };
+        // Handle infix constructor pattern: x : xs, True && True, x `myOp` n
+        // Look for operator symbols OR backtick-quoted names
+        if (self.isAtomPattern(pat)) {
+            if (try self.check(.backtick)) {
+                // Backtick-quoted infix pattern: x `myOp` n
+                _ = try self.advance(); // consume opening backtick
+                const op_tok = try self.peek();
+                const op_name: []const u8 = switch (std.meta.activeTag(op_tok.token)) {
+                    .varid => blk: {
+                        _ = try self.advance();
+                        break :blk op_tok.token.varid;
+                    },
+                    .conid => blk: {
+                        _ = try self.advance();
+                        break :blk op_tok.token.conid;
+                    },
+                    else => {
+                        try self.emitErrorMsg(op_tok.span, "expected identifier in backtick infix pattern");
+                        return error.UnexpectedToken;
+                    },
+                };
+                _ = try self.expect(.backtick); // consume closing backtick
+                const right_pat = try self.parsePattern();
+                return .{ .InfixCon = .{
+                    .left = try self.allocNode(ast_mod.Pattern, pat),
+                    .con = .{ .name = op_name, .span = op_tok.span },
+                    .right = try self.allocNode(ast_mod.Pattern, right_pat),
+                } };
+            } else if (try self.isInfixOp()) {
+                // Symbol operator: x : xs
+                const tok = try self.advance();
+                const op_name = Parser.getOpName(tok.token);
+                const right_pat = try self.parsePattern();
+                return .{ .InfixCon = .{
+                    .left = try self.allocNode(ast_mod.Pattern, pat),
+                    .con = .{ .name = op_name, .span = tok.span },
+                    .right = try self.allocNode(ast_mod.Pattern, right_pat),
+                } };
+            }
         }
 
         return pat;
