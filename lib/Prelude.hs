@@ -153,5 +153,5 @@ mod = primRemInt
 -- because the GRIN→LLVM backend cannot yet compile them (produces
 -- unresolvable linker symbols for (:), unknown_func, scrut, etc.).
 -- These will be re-added when the backend supports polymorphic codegen.
--- Tracked in: https://github.com/adinapoli/rusholme/issues/569
+-- Tracked in: https://github.com/adinapoli/rusholme/issues/573
 -- ========================================================================
