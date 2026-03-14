@@ -397,6 +397,7 @@
 | [#447](https://github.com/adinapoli/rusholme/issues/447) | LLVM backend: undefined reference to RTS functions during linking | [#57](https://github.com/adinapoli/rusholme/issues/57) | :green_circle: |
 | [#381](https://github.com/adinapoli/rusholme/issues/381) | Epic: GRIN to LLVM Translation - Compiler Path to M1 | [#55](https://github.com/adinapoli/rusholme/issues/55) | :white_circle: |
 | [#396](https://github.com/adinapoli/rusholme/issues/396) | Research: Zig LLVM bitcode compatibility with llvm-link | [#57](https://github.com/adinapoli/rusholme/issues/57) | :white_circle: |
+| [#572](https://github.com/adinapoli/rusholme/issues/572) | Implement tuple codegen in GRIN-to-LLVM backend | [#381](https://github.com/adinapoli/rusholme/issues/381) | :white_circle: |
 
 ### Epic [#515](https://github.com/adinapoli/rusholme/issues/515): Support Laziness (Call-by-Need Evaluation)
 
