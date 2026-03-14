@@ -422,6 +422,60 @@ fn solveMetaInTree(node: *HType, target_id: u32, rigid: *HType) void {
 /// Used when converting `ast.Type` with bound type variables.
 const TypeVarMap = std.StringHashMapUnmanaged(*HType);
 
+/// Build a function type from arg and result pointers (no value copies).
+/// Guarantees that arg and res are pointer-shared with their original sources.
+fn makeFunType(
+    alloc: std.mem.Allocator,
+    arg: *HType,
+    res: *HType,
+) std.mem.Allocator.Error!*HType {
+    const node = try alloc.create(HType);
+    node.* = .{ .Fun = .{ .arg = arg, .res = res } };
+    return node;
+}
+
+/// Build a list type from element pointer (no value copy).
+/// Guarantees that elem remains pointer-shared with its source.
+fn makeListType(alloc: std.mem.Allocator, elem: *HType) std.mem.Allocator.Error!*HType {
+    const args_slice = try alloc.create([1]*HType);
+    args_slice.* = .{elem};  // elem stays as pointer
+    const node = try alloc.create(HType);
+    node.* = .{ .Con = .{ .name = Known.Type.List, .args = args_slice } };
+    return node;
+}
+
+/// Build a type application from head and argument pointers.
+/// Guarantees pointer sharing for head and args.
+fn makeAppType(
+    alloc: std.mem.Allocator,
+    head: *HType,
+    args: []const *HType,
+) std.mem.Allocator.Error!*HType {
+    const args_vals = try alloc.alloc(HType, args.len);
+    for (args_vals, args) |*val, arg_ptr| {
+        val.* = arg_ptr.*;  // Value copy only for the slice indices, pointers remain valid
+    }
+    const node = try alloc.create(HType);
+    node.* = .{ .Con = .{ .name = head.Con.name, .args = args_vals } };
+    return node;
+}
+
+/// Build a tuple type from element pointers.
+/// Guarantees pointer sharing for all element types.
+fn makeTupleType(
+    alloc: std.mem.Allocator,
+    name: Name,
+    elem_ptrs: []const *HType,
+) std.mem.Allocator.Error!*HType {
+    const args_vals = try alloc.alloc(HType, elem_ptrs.len);
+    for (args_vals, elem_ptrs) |*val, arg_ptr| {
+        val.* = arg_ptr.*;  // Value copy only for slice indices, pointers remain valid
+    }
+    const node = try alloc.create(HType);
+    node.* = .{ .Con = .{ .name = name, .args = args_vals } };
+    return node;
+}
+
 /// Convert an `ast.Type` annotation to an arena-allocated `*HType`.
 ///
 /// Handles type variables via the provided map: if a variable is already in the map,
