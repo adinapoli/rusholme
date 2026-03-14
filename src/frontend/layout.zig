@@ -61,6 +61,11 @@ pub const LayoutProcessor = struct {
     diagnostics: ?*diag_mod.DiagnosticCollector,
     // Track when we're inside a pragma {-# ... #-}. Pragmas are transparent to layout.
     inside_pragma: bool,
+    // Stack to track explicit delimiter depth (parentheses, brackets, etc.).
+    // Per Haskell 2010 §2.7, layout rules don't apply inside explicit delimiters.
+    // This is a stack (not just a counter) to allow future extension to quasi-quotes,
+    // Template Haskell, and other delimiter types.
+    delimiter_stack: std.ArrayListUnmanaged(Token),
 
     pub fn init(allocator: std.mem.Allocator, lexer: *Lexer) LayoutProcessor {
         return .{
@@ -77,6 +82,7 @@ pub const LayoutProcessor = struct {
             .last_token_was_virtual_delimiter = false,
             .diagnostics = null,
             .inside_pragma = false,
+            .delimiter_stack = .empty,
         };
     }
 
@@ -89,6 +95,7 @@ pub const LayoutProcessor = struct {
         }
         self.stack.deinit(self.allocator);
         self.pending.deinit(self.allocator);
+        self.delimiter_stack.deinit(self.allocator);
     }
 
     /// Set the diagnostic collector for this layout processor.
@@ -106,6 +113,8 @@ pub const LayoutProcessor = struct {
                 self.layout_pending = true;
                 self.pending_kind = if (p.token == .kw_let) .let_binding else .block;
             }
+            // Update delimiter stack for tokens returning from pending queue.
+            try self.updateDelimiterStack(p.token);
             return p;
         }
 
@@ -123,15 +132,25 @@ pub const LayoutProcessor = struct {
         // Track when we're inside a pragma and pass through all tokens unchanged.
         if (tok.token == .pragma_open) {
             self.inside_pragma = true;
+            try self.updateDelimiterStack(tok.token);
             return tok;
         }
         if (tok.token == .pragma_close) {
             self.inside_pragma = false;
+            try self.updateDelimiterStack(tok.token);
             return tok;
         }
         if (self.inside_pragma) {
+            try self.updateDelimiterStack(tok.token);
             return tok;
         }
+
+        // Track explicit delimiters to suppress layout inside them.
+        // Per Haskell 2010 §2.7, layout rules don't apply inside explicit delimiter pairs.
+        // IMPORTANT: We compute skip_layout BEFORE modifying the stack, but we only
+        // modify the stack when we're certain we'll return the token (not defer it).
+        // This is handled by updateDelimiterStack() called at return points.
+        const skip_layout = self.delimiter_stack.items.len > 0;
 
         // 4. Handle Module-level layout.
         if (self.first_token) {
@@ -147,18 +166,21 @@ pub const LayoutProcessor = struct {
         if (tok.token == .open_brace) {
             self.layout_pending = false;
             try self.pushContext(.{ .column = 0, .kind = .explicit });
+            try self.updateDelimiterStack(tok.token);
             return tok;
         }
         if (tok.token == .close_brace) {
             if (self.peekContext()) |ctx| {
                 if (ctx.kind == .explicit) {
                     _ = self.popContext();
+                    try self.updateDelimiterStack(tok.token);
                     return tok;
                 }
             }
             // If we see '}' but the top of stack is not explicit, it might be a parse error
             // or an implicit context closure handled via the '<' rule of Section 10.3.
             // But usually, an explicit '}' must match an explicit '{'.
+            try self.updateDelimiterStack(tok.token);
             return tok;
         }
 
@@ -199,6 +221,21 @@ pub const LayoutProcessor = struct {
         if (tok.token != .kw_in) {
             const n = tok.span.start.column;
             while (self.peekContext()) |ctx| {
+                // Skip layout processing when inside explicit delimiters.
+                // Per Haskell 2010 §2.7, layout rules don't apply inside parentheses/brackets.
+                // We check `skip_layout` which includes closing delimiters themselves.
+                if (skip_layout) {
+                    // Just clear the just_opened flag if needed
+                    if (self.peekContext()) |inner_ctx| {
+                        if (n > inner_ctx.column or inner_ctx.kind == .explicit) {
+                            self.context_just_opened = false;
+                        }
+                    }
+                    // Return token normally - no virtual tokens injected
+                    try self.updateDelimiterStack(tok.token);
+                    return tok;
+                }
+
                 if (ctx.kind == .explicit) break; // Explicit context — never auto-closed here
                 if (n == ctx.column) {
                     // Same column: insert a virtual semicolon (case 5).
@@ -236,6 +273,7 @@ pub const LayoutProcessor = struct {
             self.layout_pending = true;
             // Record which keyword triggered this context so we can track kind.
             self.pending_kind = if (tok.token == .kw_let) .let_binding else .block;
+            try self.updateDelimiterStack(tok.token);
             return tok;
         }
 
@@ -273,8 +311,11 @@ pub const LayoutProcessor = struct {
             }
             if (self.pending.items.len > 0) {
                 try self.pending.append(self.allocator, tok);
-                return self.pending.orderedRemove(0);
+                const result = self.pending.orderedRemove(0);
+                try self.updateDelimiterStack(result.token);
+                return result;
             }
+            try self.updateDelimiterStack(tok.token);
             return tok;
         }
 
@@ -297,6 +338,7 @@ pub const LayoutProcessor = struct {
         // Track token line for layout validation on next token
         self.last_token_line = tok.span.start.line;
 
+        try self.updateDelimiterStack(tok.token);
         return tok;
     }
 
@@ -341,6 +383,22 @@ pub const LayoutProcessor = struct {
             return self.pending.orderedRemove(0);
         }
         return eof_tok;
+    }
+
+    /// Update delimiter stack for a token we're about to return.
+    /// This MUST only be called when we're certain the token will be returned,
+    /// not when it might be deferred to pending/peeked_token.
+    fn updateDelimiterStack(self: *LayoutProcessor, tok: Token) !void {
+        switch (tok) {
+            .open_paren, .open_bracket => try self.delimiter_stack.append(self.allocator, tok),
+            .close_paren, .close_bracket => {
+                // Pop regardless of match - parser will handle mismatches
+                if (self.delimiter_stack.items.len > 0) {
+                    _ = self.delimiter_stack.pop();
+                }
+            },
+            else => {},
+        }
     }
 
     /// Check if a token is an operator that cannot start a new declaration.
@@ -536,6 +594,111 @@ test "Layout: let-in inside where — in does not close where context" {
     try expectToken(&layout, Token{ .varid = "b" });
     // EOF closes where and module contexts
     try expectToken(&layout, .v_close_brace); // close where context
+    try expectToken(&layout, .v_close_brace); // close module context
+    try expectToken(&layout, .eof);
+}
+
+test "Layout: export list with blank lines" {
+    // Regression test for #543 - blank lines inside parentheses should not
+    // trigger virtual token injection
+    const allocator = std.testing.allocator;
+    var lexer = Lexer.init(allocator,
+        \\module Foo(bar,baz,quux) where x = 1
+    , 0);
+    var layout = LayoutProcessor.init(allocator, &lexer);
+    defer layout.deinit();
+
+    // No v_open_brace because first token is `module` keyword
+    try expectToken(&layout, .kw_module);
+    try expectToken(&layout, Token{ .conid = "Foo" });
+    try expectToken(&layout, .open_paren);
+    try expectToken(&layout, Token{ .varid = "bar" });
+    try expectToken(&layout, .comma);
+    try expectToken(&layout, Token{ .varid = "baz" });
+    try expectToken(&layout, .comma);
+    try expectToken(&layout, Token{ .varid = "quux" });
+    try expectToken(&layout, .close_paren);
+    try expectToken(&layout, .kw_where);
+    try expectToken(&layout, .v_open_brace);
+    try expectToken(&layout, Token{ .varid = "x" });
+    try expectToken(&layout, .equals);
+    try expectToken(&layout, Token{ .lit_integer = 1 });
+    try expectToken(&layout, .v_close_brace);
+    try expectToken(&layout, .eof);
+}
+
+test "Layout: parenthesized expression with different indentation" {
+    const allocator = std.testing.allocator;
+    var lexer = Lexer.init(allocator,
+        \\main = (foo
+        \\  bar)
+    , 0);
+    var layout = LayoutProcessor.init(allocator, &lexer);
+    defer layout.deinit();
+
+    try expectToken(&layout, .v_open_brace);
+    try expectToken(&layout, Token{ .varid = "main" });
+    try expectToken(&layout, .equals);
+    try expectToken(&layout, .open_paren);
+    try expectToken(&layout, Token{ .varid = "foo" });
+    try expectToken(&layout, Token{ .varid = "bar" });
+    try expectToken(&layout, .close_paren);
+    try expectToken(&layout, .v_close_brace);
+    try expectToken(&layout, .eof);
+}
+
+test "Layout: nested parentheses with blank lines" {
+    const allocator = std.testing.allocator;
+    var lexer = Lexer.init(allocator,
+        \\main = ((foo
+        \\  bar)
+        \\    baz)
+    , 0);
+    var layout = LayoutProcessor.init(allocator, &lexer);
+    defer layout.deinit();
+
+    try expectToken(&layout, .v_open_brace);
+    try expectToken(&layout, Token{ .varid = "main" });
+    try expectToken(&layout, .equals);
+    try expectToken(&layout, .open_paren);
+    try expectToken(&layout, .open_paren);
+    try expectToken(&layout, Token{ .varid = "foo" });
+    try expectToken(&layout, Token{ .varid = "bar" });
+    try expectToken(&layout, .close_paren);
+    try expectToken(&layout, Token{ .varid = "baz" });
+    try expectToken(&layout, .close_paren);
+    try expectToken(&layout, .v_close_brace);
+    try expectToken(&layout, .eof);
+}
+
+test "Layout: case with list patterns" {
+    // Regression test - list patterns should not interfere with layout
+    const allocator = std.testing.allocator;
+    var lexer = Lexer.init(allocator,
+        \\f xs = case xs of
+        \\  [] -> "empty"
+        \\  x -> x
+    , 0);
+    var layout = LayoutProcessor.init(allocator, &lexer);
+    defer layout.deinit();
+
+    try expectToken(&layout, .v_open_brace);
+    try expectToken(&layout, Token{ .varid = "f" });
+    try expectToken(&layout, Token{ .varid = "xs" });
+    try expectToken(&layout, .equals);
+    try expectToken(&layout, .kw_case);
+    try expectToken(&layout, Token{ .varid = "xs" });
+    try expectToken(&layout, .kw_of);
+    try expectToken(&layout, .v_open_brace); // layout context from 'of'
+    try expectToken(&layout, .open_bracket);
+    try expectToken(&layout, .close_bracket);
+    try expectToken(&layout, .arrow_right);
+    try expectToken(&layout, Token{ .lit_string = "empty" });
+    try expectToken(&layout, .v_semi); // semicolon before next pattern
+    try expectToken(&layout, Token{ .varid = "x" });
+    try expectToken(&layout, .arrow_right);
+    try expectToken(&layout, Token{ .varid = "x" });
+    try expectToken(&layout, .v_close_brace); // close 'of' context
     try expectToken(&layout, .v_close_brace); // close module context
     try expectToken(&layout, .eof);
 }

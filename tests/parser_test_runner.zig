@@ -238,9 +238,10 @@ test "should_compile: sc045_mutual_recursive_let" { try testShouldCompile(std.te
 test "should_compile: sc046_multi_equation_adt" { try testShouldCompile(std.testing.allocator, "sc046_multi_equation_adt"); }
 test "should_compile: sc047_foreign_import_prim" { try testShouldCompile(std.testing.allocator, "sc047_foreign_import_prim"); }
 test "should_compile: sc048_prelude" { try testShouldCompile(std.testing.allocator, "sc048_prelude"); }
-test "should_compile: sc049_no_fixity" { try testShouldCompile(std.testing.allocator, "sc049_no_fixity"); }
-test "should_compile: sc049_minimal" { try testShouldCompile(std.testing.allocator, "sc049_minimal"); }
+test "should_compile: sc049_export_list_blank_lines" { try testShouldCompile(std.testing.allocator, "sc049_export_list_blank_lines"); }
 test "should_compile: sc049_infix_op_definitions" { try testShouldCompile(std.testing.allocator, "sc049_infix_op_definitions"); }
+test "should_compile: sc049_minimal" { try testShouldCompile(std.testing.allocator, "sc049_minimal"); }
+test "should_compile: sc049_no_fixity" { try testShouldCompile(std.testing.allocator, "sc049_no_fixity"); }
 
 // ── should_fail test declarations ─────────────────────────────────────────
 
