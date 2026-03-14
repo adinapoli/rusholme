@@ -99,7 +99,15 @@ fn tryParse(allocator: std.mem.Allocator, comptime path: []const u8) !bool {
 
     _ = parser.parseModule() catch return false;
 
-    return !diags.hasErrors();
+    const has_errors = diags.hasErrors();
+    if (has_errors) {
+        const errors = try diags.getAll(aa);
+        std.debug.print("  Diagnostics for {s}:\n", .{path});
+        for (errors) |err| {
+            std.debug.print("    {s}\n", .{err.message});
+        }
+    }
+    return !has_errors;
 }
 
 // ── should_compile ────────────────────────────────────────────────────────
@@ -230,6 +238,9 @@ test "should_compile: sc045_mutual_recursive_let" { try testShouldCompile(std.te
 test "should_compile: sc046_multi_equation_adt" { try testShouldCompile(std.testing.allocator, "sc046_multi_equation_adt"); }
 test "should_compile: sc047_foreign_import_prim" { try testShouldCompile(std.testing.allocator, "sc047_foreign_import_prim"); }
 test "should_compile: sc048_prelude" { try testShouldCompile(std.testing.allocator, "sc048_prelude"); }
+test "should_compile: sc049_no_fixity" { try testShouldCompile(std.testing.allocator, "sc049_no_fixity"); }
+test "should_compile: sc049_minimal" { try testShouldCompile(std.testing.allocator, "sc049_minimal"); }
+test "should_compile: sc049_infix_op_definitions" { try testShouldCompile(std.testing.allocator, "sc049_infix_op_definitions"); }
 
 // ── should_fail test declarations ─────────────────────────────────────────
 
