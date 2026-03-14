@@ -442,7 +442,7 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | [#527](https://github.com/adinapoli/rusholme/issues/527) | Implement `foreign import prim` syntax and compilation | — | :green_circle: |
 | [#528](https://github.com/adinapoli/rusholme/issues/528) | Write `lib/Prelude.hs` with basic types and functions (no type classes) | [#527](https://github.com/adinapoli/rusholme/issues/527) | :green_circle: |
 | [#529](https://github.com/adinapoli/rusholme/issues/529) | Bootstrap Prelude: compile `lib/Prelude.hs` and wire into implicit import | [#527](https://github.com/adinapoli/rusholme/issues/527), [#528](https://github.com/adinapoli/rusholme/issues/528) | :white_circle: |
-| [#530](https://github.com/adinapoli/rusholme/issues/530) | Implement dictionary-passing translation for type classes | — | :yellow_circle: |
+| [#530](https://github.com/adinapoli/rusholme/issues/530) | Implement dictionary-passing translation for type classes | — | :green_circle: |
 | [#531](https://github.com/adinapoli/rusholme/issues/531) | Add type class definitions and instances to `lib/Prelude.hs` | [#528](https://github.com/adinapoli/rusholme/issues/528), [#529](https://github.com/adinapoli/rusholme/issues/529), [#530](https://github.com/adinapoli/rusholme/issues/530) | :white_circle: |
 
 ### Epic [#14](https://github.com/adinapoli/rusholme/issues/14): Memory Management (Arena → Immix GC)
