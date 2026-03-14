@@ -576,20 +576,10 @@ pub fn rename(module: ast.Module, env: *RenameEnv) !RenamedModule {
                 try top_names.put(env.alloc, fd.binding_name, n);
             },
             .Class => |cd| {
-                // Register class name in scope.
-                if (env.scope.boundInCurrentFrame(cd.class_name)) {
-                    const msg = try std.fmt.allocPrint(
-                        env.alloc,
-                        "duplicate class: `{s}`",
-                        .{cd.class_name},
-                    );
-                    try env.diags.emit(env.alloc, .{
-                        .severity = .@"error",
-                        .code = .duplicate_definition,
-                        .span = cd.span,
-                        .message = msg,
-                    });
-                } else {
+                // Register class name in scope, reusing the existing
+                // name if already bound (e.g. from populateBuiltins for
+                // well-known classes like Eq, Ord, Show).
+                if (!env.scope.boundInCurrentFrame(cd.class_name)) {
                     const n = env.freshName(cd.class_name);
                     try env.scope.bind(cd.class_name, n);
                     try top_names.put(env.alloc, cd.class_name, n);
@@ -770,8 +760,19 @@ fn renameDecl(
             } };
         },
         .Instance => |inst| blk: {
-            // Resolve class name.
-            const class_name = try env.resolve(inst.constructor_type.Con.name, inst.span);
+            // Decompose the instance head (e.g. App(Con("Eq"), Con("Int")))
+            // into a class name and an instance type.
+            const decomposed = decomposeInstanceHead(inst.constructor_type) orelse {
+                try env.diags.emit(env.alloc, .{
+                    .severity = .@"error",
+                    .code = .parse_error,
+                    .span = inst.span,
+                    .message = "invalid instance head: expected 'Class Type'",
+                });
+                break :blk null;
+            };
+            const class_name = try env.resolve(decomposed.class_name, inst.span);
+            const instance_type = decomposed.instance_type;
 
             // Rename context constraints.
             var ras = std.ArrayListUnmanaged(RAssertion){};
@@ -802,7 +803,7 @@ fn renameDecl(
 
             break :blk RDecl{ .InstanceDecl = .{
                 .class_name = class_name,
-                .instance_type = inst.constructor_type,
+                .instance_type = instance_type,
                 .context = try ras.toOwnedSlice(env.alloc),
                 .bindings = try rbs.toOwnedSlice(env.alloc),
                 .span = inst.span,
@@ -901,6 +902,47 @@ fn renameDecl(
         },
         else => null,
     };
+}
+
+// ── Instance head decomposition ────────────────────────────────────────
+
+/// Decompose an instance head type (e.g. `App(Con("Eq"), Con("Int"))`) into
+/// the class name string and the instance type. Handles simple applications
+/// like `Eq Int`, `Eq [a]`, `Eq (Maybe a)`.
+fn decomposeInstanceHead(ty: ast.Type) ?struct { class_name: []const u8, instance_type: ast.Type } {
+    switch (ty) {
+        // Type application: `Eq Int` → App([Con("Eq"), Con("Int")])
+        // The first element is the class name, the rest form the instance type.
+        .App => |parts| {
+            if (parts.len < 2) return null;
+            // The first element should be the class name (a bare Con).
+            const class_name = switch (parts[0].*) {
+                .Con => |con| con.name,
+                else => return null,
+            };
+            // For simple instances like `Eq Int`, the instance type is parts[1].
+            // For multi-param instances like `Eq (Maybe a)`, parts[1] is the full type.
+            if (parts.len == 2) {
+                return .{
+                    .class_name = class_name,
+                    .instance_type = parts[1].*,
+                };
+            }
+            // Multi-arg: reconstruct as nested App (not yet needed but safe).
+            return .{
+                .class_name = class_name,
+                .instance_type = .{ .App = parts[1..] },
+            };
+        },
+        // Bare constructor: `instance Eq` (no instance type — malformed but handle gracefully)
+        .Con => |con| {
+            return .{
+                .class_name = con.name,
+                .instance_type = ty,
+            };
+        },
+        else => return null,
+    }
 }
 
 // ── Match / RHS renaming ───────────────────────────────────────────────
