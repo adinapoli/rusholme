@@ -7,6 +7,8 @@ const env_mod = @import("../typechecker/env.zig");
 const Known = @import("../naming/known.zig");
 const naming_mod = @import("../naming/unique.zig");
 const primop_mod = @import("../grin/primop.zig");
+const class_env_mod = @import("../typechecker/class_env.zig");
+const solver_mod = @import("../typechecker/solver.zig");
 const Name = ast_mod.Name;
 const SourceSpan = ast_mod.SourceSpan;
 const SourcePos = ast_mod.SourcePos;
@@ -236,13 +238,343 @@ pub fn desugarModule(
                 );
                 try binds.append(alloc, bind);
             },
-            else => {},
+            .ClassDecl => |cd| {
+                try desugarClassDecl(&ctx, cd, &data_decls, &binds);
+            },
+            .InstanceDecl => |id_decl| {
+                try desugarInstanceDecl(&ctx, id_decl, &binds);
+            },
+            .TypeSig => {},
         }
     }
 
     return ast_mod.CoreProgram{
         .data_decls = try data_decls.toOwnedSlice(alloc),
         .binds = try binds.toOwnedSlice(alloc),
+    };
+}
+
+// ── Type class desugaring ──────────────────────────────────────────────
+//
+// Dictionary-passing translation (Wadler & Blott 1989).
+//
+// For each class declaration, we generate:
+//   1. A dictionary data type:  data Dict$Eq a = MkDict$Eq (method types...)
+//   2. Selector functions:      (==) = \dict -> case dict of MkDict$Eq f0 f1 -> f0
+//
+// For each instance declaration, we generate:
+//   1. A dictionary value:      dict$Eq$Int = MkDict$Eq primEqInt ...
+
+/// Desugar a class declaration into a dictionary data type and method selectors.
+fn desugarClassDecl(
+    ctx: *DesugarCtx,
+    cd: renamer_mod.RClassDecl,
+    data_decls: *std.ArrayListUnmanaged(ast_mod.CoreDataDecl),
+    binds: *std.ArrayListUnmanaged(ast_mod.Bind),
+) std.mem.Allocator.Error!void {
+    const alloc = ctx.alloc;
+    const class_env = &ctx.types.class_env;
+
+    // Look up the class info populated during type inference (Pass 0b).
+    const class_info = class_env.lookupClass(cd.name.unique.value) orelse return;
+
+    // ── 1. Dictionary data type ───────────────────────────────────────
+    //
+    // data Dict$Eq a = MkDict$Eq (method_type_1) (method_type_2) ...
+
+    const dict_tycon_name = Name{
+        .base = try std.fmt.allocPrint(alloc, "Dict${s}", .{cd.name.base}),
+        .unique = ctx.u_supply.fresh(),
+    };
+    const dict_con_name = Name{
+        .base = try std.fmt.allocPrint(alloc, "MkDict${s}", .{cd.name.base}),
+        .unique = ctx.u_supply.fresh(),
+    };
+
+    // Build the constructor type: method_1_ty -> method_2_ty -> ... -> Dict$Class a
+    // We use a placeholder CoreType for the dictionary type itself.
+    const tyvar_name = Name{ .base = cd.tyvar.base, .unique = cd.tyvar.unique };
+    const dict_result_ty = ast_mod.CoreType{
+        .TyCon = .{
+            .name = dict_tycon_name,
+            .args = try alloc.dupe(ast_mod.CoreType, &.{ast_mod.CoreType{ .TyVar = tyvar_name }}),
+        },
+    };
+
+    // Build constructor type: field1 -> field2 -> ... -> Dict$Class a
+    var con_ty: ast_mod.CoreType = dict_result_ty;
+    {
+        var i = class_info.methods.len;
+        while (i > 0) {
+            i -= 1;
+            const method_htype = class_info.methods[i].ty;
+            const method_core_ty = try method_htype.toCore(alloc);
+            const p_arg = try alloc.create(ast_mod.CoreType);
+            p_arg.* = method_core_ty;
+            const p_res = try alloc.create(ast_mod.CoreType);
+            p_res.* = con_ty;
+            con_ty = ast_mod.CoreType{ .FunTy = .{ .arg = p_arg, .res = p_res } };
+        }
+    }
+
+    // Wrap in forall for the class tyvar.
+    const fa_body = try alloc.create(ast_mod.CoreType);
+    fa_body.* = con_ty;
+    con_ty = ast_mod.CoreType{ .ForAllTy = .{ .binder = tyvar_name, .body = fa_body } };
+
+    const con_id = ast_mod.Id{
+        .name = dict_con_name,
+        .ty = con_ty,
+        .span = cd.span,
+    };
+
+    try data_decls.append(alloc, .{
+        .name = dict_tycon_name,
+        .tyvars = try alloc.dupe(Name, &.{tyvar_name}),
+        .constructors = try alloc.dupe(ast_mod.Id, &.{con_id}),
+        .span = cd.span,
+    });
+
+    // ── 2. Method selector functions ──────────────────────────────────
+    //
+    // For each method at index `i`:
+    //   method_i = \dict -> case dict of { MkDict$Class f0 f1 ... -> fi }
+    //
+    // The selector uses the ORIGINAL method Name so downstream references
+    // (from user code) resolve correctly.
+
+    for (class_info.methods, 0..) |method, method_idx| {
+        // Build field binders for the case alternative
+        var field_binders = try alloc.alloc(ast_mod.Id, class_info.methods.len);
+        for (class_info.methods, 0..) |m, j| {
+            const field_name = Name{
+                .base = try std.fmt.allocPrint(alloc, "f{d}", .{j}),
+                .unique = ctx.u_supply.fresh(),
+            };
+            field_binders[j] = ast_mod.Id{
+                .name = field_name,
+                .ty = try m.ty.toCore(alloc),
+                .span = cd.span,
+            };
+        }
+
+        // The body of the case alternative: just reference field_i
+        const selected_field = try alloc.create(ast_mod.Expr);
+        selected_field.* = ast_mod.Expr{ .Var = field_binders[method_idx] };
+
+        // The case alternative: MkDict$Class f0 f1 ... -> f_i
+        const alt = ast_mod.Alt{
+            .con = .{ .DataAlt = dict_con_name },
+            .binders = field_binders,
+            .body = selected_field,
+        };
+
+        // The dict parameter binder
+        const dict_param_name = Name{
+            .base = "dict",
+            .unique = ctx.u_supply.fresh(),
+        };
+
+        // Dict type for the parameter (use a placeholder — not critical for GRIN)
+        const dict_param_ty = ast_mod.CoreType{
+            .TyCon = .{ .name = dict_tycon_name, .args = &.{} },
+        };
+        const dict_param_id = ast_mod.Id{
+            .name = dict_param_name,
+            .ty = dict_param_ty,
+            .span = cd.span,
+        };
+
+        // Scrutinee: the dict parameter variable
+        const scrutinee = try alloc.create(ast_mod.Expr);
+        scrutinee.* = ast_mod.Expr{ .Var = dict_param_id };
+
+        // Case expression
+        const case_expr = try alloc.create(ast_mod.Expr);
+        case_expr.* = ast_mod.Expr{
+            .Case = .{
+                .scrutinee = scrutinee,
+                .binder = dict_param_id,
+                .ty = try method.ty.toCore(alloc),
+                .alts = try alloc.dupe(ast_mod.Alt, &.{alt}),
+                .span = cd.span,
+            },
+        };
+
+        // Lambda: \dict -> case dict of ...
+        const lam_expr = try alloc.create(ast_mod.Expr);
+        lam_expr.* = ast_mod.Expr{
+            .Lam = .{
+                .binder = dict_param_id,
+                .body = case_expr,
+                .span = cd.span,
+            },
+        };
+
+        // The selector binding uses the original method name.
+        const selector_ty = if (ctx.types.schemes.get(method.name.unique)) |method_scheme|
+            try schemeToCore(alloc, method_scheme)
+        else
+            try method.ty.toCore(alloc);
+
+        const selector_id = ast_mod.Id{
+            .name = method.name,
+            .ty = selector_ty,
+            .span = cd.span,
+        };
+
+        try binds.append(alloc, .{ .NonRec = .{
+            .binder = selector_id,
+            .rhs = lam_expr,
+        } });
+    }
+}
+
+/// Desugar an instance declaration into a dictionary value binding.
+fn desugarInstanceDecl(
+    ctx: *DesugarCtx,
+    id_decl: renamer_mod.RInstanceDecl,
+    binds: *std.ArrayListUnmanaged(ast_mod.Bind),
+) std.mem.Allocator.Error!void {
+    const alloc = ctx.alloc;
+    const class_env = &ctx.types.class_env;
+
+    // Look up the class to know method order.
+    const class_info = class_env.lookupClass(id_decl.class_name.unique.value) orelse return;
+
+    // Find the dictionary constructor name.  Convention: MkDict$<ClassName>.
+    const dict_con_name = Name{
+        .base = try std.fmt.allocPrint(alloc, "MkDict${s}", .{id_decl.class_name.base}),
+        .unique = ctx.u_supply.fresh(),
+    };
+
+    // Build an instance dictionary name.  Convention: dict$<ClassName>$<HeadType>.
+    const head_name = try instanceHeadName(alloc, id_decl.instance_type);
+    const dict_name = Name{
+        .base = try std.fmt.allocPrint(alloc, "dict${s}${s}", .{ id_decl.class_name.base, head_name }),
+        .unique = ctx.u_supply.fresh(),
+    };
+
+    // Build the dictionary value: MkDict$Class method1_impl method2_impl ...
+    // For each method in class declaration order, find the binding in the instance.
+    // If not found and the class has a default, use a placeholder.
+    var method_exprs = try alloc.alloc(*const ast_mod.Expr, class_info.methods.len);
+    for (class_info.methods, 0..) |method, i| {
+        // Look for this method in the instance bindings
+        var found_binding: ?renamer_mod.RInstanceBinding = null;
+        for (id_decl.bindings) |binding| {
+            if (binding.name.unique.value == method.name.unique.value) {
+                found_binding = binding;
+                break;
+            }
+        }
+
+        if (found_binding) |binding| {
+            // Desugar the instance method body
+            if (binding.equations.len == 1 and binding.equations[0].patterns.len == 0) {
+                // Simple case: no patterns, just an RHS
+                const body = try alloc.create(ast_mod.Expr);
+                body.* = try desugarRhs(ctx, binding.equations[0].rhs);
+                method_exprs[i] = body;
+            } else {
+                // Use the pattern match compiler for multi-equation / pattern methods
+                const method_scheme = ctx.types.schemes.get(method.name.unique) orelse continue;
+                const method_core_ty = try schemeToCore(alloc, method_scheme);
+                method_exprs[i] = try desugarMatch(ctx, binding.equations, method_core_ty);
+            }
+        } else if (method.has_default) {
+            // Use a placeholder for default methods.
+            // Full default method compilation is tracked as a follow-up issue.
+            const placeholder = try alloc.create(ast_mod.Expr);
+            placeholder.* = ast_mod.Expr{
+                .Var = ast_mod.Id{
+                    .name = Name{
+                        .base = try std.fmt.allocPrint(alloc, "default${s}${s}", .{ id_decl.class_name.base, method.name.base }),
+                        .unique = ctx.u_supply.fresh(),
+                    },
+                    .ty = try method.ty.toCore(alloc),
+                    .span = id_decl.span,
+                },
+            };
+            method_exprs[i] = placeholder;
+        } else {
+            // Missing method with no default — emit diagnostic.
+            const msg = try std.fmt.allocPrint(
+                alloc,
+                "missing method `{s}` in instance `{s} {s}`",
+                .{ method.name.base, id_decl.class_name.base, head_name },
+            );
+            try ctx.diags.emit(alloc, .{
+                .severity = .@"error",
+                .code = .type_error,
+                .span = id_decl.span,
+                .message = msg,
+            });
+            // Use error expression as placeholder
+            const err_expr = try alloc.create(ast_mod.Expr);
+            err_expr.* = ast_mod.Expr{
+                .Var = ast_mod.Id{
+                    .name = Known.Fn.@"error",
+                    .ty = try method.ty.toCore(alloc),
+                    .span = id_decl.span,
+                },
+            };
+            method_exprs[i] = err_expr;
+        }
+    }
+
+    // Build: MkDict$Class method1 method2 ...
+    // This is a chain of App nodes: ((MkDict$Class m1) m2) ...
+    const con_ty = ast_mod.CoreType{ .TyCon = .{ .name = dict_con_name, .args = &.{} } };
+    var dict_expr: *const ast_mod.Expr = blk: {
+        const p = try alloc.create(ast_mod.Expr);
+        p.* = ast_mod.Expr{
+            .Var = ast_mod.Id{
+                .name = dict_con_name,
+                .ty = con_ty,
+                .span = id_decl.span,
+            },
+        };
+        break :blk p;
+    };
+
+    for (method_exprs) |method_expr| {
+        const app = try alloc.create(ast_mod.Expr);
+        app.* = ast_mod.Expr{
+            .App = .{
+                .fn_expr = dict_expr,
+                .arg = method_expr,
+                .span = id_decl.span,
+            },
+        };
+        dict_expr = app;
+    }
+
+    // The dictionary binding type (placeholder — not critical for GRIN translation).
+    const dict_ty = ast_mod.CoreType{ .TyCon = .{ .name = dict_con_name, .args = &.{} } };
+    const dict_id = ast_mod.Id{
+        .name = dict_name,
+        .ty = dict_ty,
+        .span = id_decl.span,
+    };
+
+    try binds.append(alloc, .{ .NonRec = .{
+        .binder = dict_id,
+        .rhs = dict_expr,
+    } });
+}
+
+/// Extract a string name from an instance head type for dictionary naming.
+/// E.g., `Int` → "Int", `[a]` → "List", `(a, b)` → "Tuple2".
+fn instanceHeadName(alloc: std.mem.Allocator, ty: @import("../frontend/ast.zig").Type) std.mem.Allocator.Error![]const u8 {
+    return switch (ty) {
+        .Con => |qname| try alloc.dupe(u8, qname.name),
+        .App => |parts| if (parts.len > 0) instanceHeadName(alloc, parts[0].*) else try alloc.dupe(u8, "Unknown"),
+        .List => try alloc.dupe(u8, "List"),
+        .Tuple => try alloc.dupe(u8, "Tuple"),
+        .Paren => |inner| instanceHeadName(alloc, inner.*),
+        .Var => |name| try alloc.dupe(u8, name),
+        .Fun, .Forall, .IParam => try alloc.dupe(u8, "Unknown"),
     };
 }
 
@@ -1615,6 +1947,7 @@ test "desugarMatch: Tier 1 literal and wildcard" {
     var types = infer_mod.ModuleTypes{
         .schemes = .{},
         .local_binders = .{},
+        .class_env = infer_mod.ClassEnv.init(alloc),
     };
     defer types.deinit(alloc);
 
@@ -1698,6 +2031,7 @@ test "desugarExpr: Var and Lit" {
     var types = infer_mod.ModuleTypes{
         .schemes = .{},
         .local_binders = .{},
+        .class_env = infer_mod.ClassEnv.init(alloc),
     };
     defer types.deinit(alloc);
 
@@ -1745,6 +2079,7 @@ test "desugarExpr: List desugars to Cons/Nil chain" {
     var types = infer_mod.ModuleTypes{
         .schemes = .{},
         .local_binders = .{},
+        .class_env = infer_mod.ClassEnv.init(alloc),
     };
     defer types.deinit(alloc);
 
@@ -1852,6 +2187,7 @@ test "desugarExpr: Paren unwraps inner expression" {
     var types = infer_mod.ModuleTypes{
         .schemes = .{},
         .local_binders = .{},
+        .class_env = infer_mod.ClassEnv.init(alloc),
     };
     defer types.deinit(alloc);
 
@@ -1906,7 +2242,7 @@ test "desugarMatch: Tier 2 constructor pattern with Var sub-pattern" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var types = infer_mod.ModuleTypes{ .schemes = .{}, .local_binders = .{} };
+    var types = infer_mod.ModuleTypes{ .schemes = .{}, .local_binders = .{}, .class_env = infer_mod.ClassEnv.init(alloc) };
     defer types.deinit(alloc);
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
@@ -1973,7 +2309,7 @@ test "desugarMatch: Tier 2 as-pattern" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var types = infer_mod.ModuleTypes{ .schemes = .{}, .local_binders = .{} };
+    var types = infer_mod.ModuleTypes{ .schemes = .{}, .local_binders = .{}, .class_env = infer_mod.ClassEnv.init(alloc) };
     defer types.deinit(alloc);
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
@@ -2038,7 +2374,7 @@ test "desugarMatch: Tier 2 tuple pattern" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var types = infer_mod.ModuleTypes{ .schemes = .{}, .local_binders = .{} };
+    var types = infer_mod.ModuleTypes{ .schemes = .{}, .local_binders = .{}, .class_env = infer_mod.ClassEnv.init(alloc) };
     defer types.deinit(alloc);
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
@@ -2086,7 +2422,7 @@ test "desugarMatch: empty list pattern []" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var types = infer_mod.ModuleTypes{ .schemes = .{}, .local_binders = .{} };
+    var types = infer_mod.ModuleTypes{ .schemes = .{}, .local_binders = .{}, .class_env = infer_mod.ClassEnv.init(alloc) };
     defer types.deinit(alloc);
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
@@ -2134,7 +2470,7 @@ test "desugarMatch: non-empty list pattern [x, y]" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var types = infer_mod.ModuleTypes{ .schemes = .{}, .local_binders = .{} };
+    var types = infer_mod.ModuleTypes{ .schemes = .{}, .local_binders = .{}, .class_env = infer_mod.ClassEnv.init(alloc) };
     defer types.deinit(alloc);
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
@@ -2187,7 +2523,7 @@ test "desugarRhs: simple boolean guard" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var types = infer_mod.ModuleTypes{ .schemes = .{}, .local_binders = .{} };
+    var types = infer_mod.ModuleTypes{ .schemes = .{}, .local_binders = .{}, .class_env = infer_mod.ClassEnv.init(alloc) };
     defer types.deinit(alloc);
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
@@ -2244,7 +2580,7 @@ test "desugarRhs: otherwise-only guard is transparent" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var types = infer_mod.ModuleTypes{ .schemes = .{}, .local_binders = .{} };
+    var types = infer_mod.ModuleTypes{ .schemes = .{}, .local_binders = .{}, .class_env = infer_mod.ClassEnv.init(alloc) };
     defer types.deinit(alloc);
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
