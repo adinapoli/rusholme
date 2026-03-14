@@ -574,6 +574,9 @@ const TypeSigEntry = struct {
     /// `skolemiseSignature`.  These become the `TyScheme.binders` directly,
     /// bypassing `generalisePtr`.
     skolem_ids: []const u64,
+    /// Class constraints from the type signature (e.g. `Eq a =>`).
+    /// These become `TyScheme.constraints` directly.
+    constraints: []const ClassConstraint,
 };
 
 // ── Skolemisation ──────────────────────────────────────────────────────
@@ -586,6 +589,10 @@ const SkolemiseResult = struct {
     /// Unique IDs of the fresh rigid (skolem) variables, in binder order.
     /// These become `TyScheme.binders` directly.
     skolem_ids: []const u64,
+    /// Class constraints from the type signature's context (e.g. `Eq a =>`).
+    /// Converted from AST `Assertion`s to `ClassConstraint`s with resolved
+    /// class names and skolemised type arguments.
+    constraints: []const ClassConstraint,
 };
 
 /// Skolemise a type signature for bidirectional signature checking.
@@ -623,12 +630,26 @@ fn skolemiseSignature(
                 try scope.put(ctx.alloc, tv, rigid_node);
                 try skolem_ids.append(ctx.alloc, rigid_name.unique.value);
             }
+
+            // Convert context assertions to ClassConstraints.
+            const constraints = try convertContextToConstraints(
+                fa.context,
+                ctx,
+                &scope,
+                // Use a zero span; the caller should attach a proper span if needed.
+                span_mod.SourceSpan.init(
+                    span_mod.SourcePos.init(1, 1, 1),
+                    span_mod.SourcePos.init(1, 1, 1),
+                ),
+            );
+
             // Convert body with skolems in scope.  Nested foralls are handled
             // by the Forall case in astTypeToHTypeWithScope (producing ForAll nodes).
             const body = try astTypeToHTypeWithScope(fa.type.*, ctx, &scope);
             return .{
                 .ty = body,
                 .skolem_ids = try skolem_ids.toOwnedSlice(ctx.alloc),
+                .constraints = constraints,
             };
         },
         else => {
@@ -649,9 +670,54 @@ fn skolemiseSignature(
             return .{
                 .ty = ty,
                 .skolem_ids = try skolem_ids.toOwnedSlice(ctx.alloc),
+                .constraints = &.{},
             };
         },
     }
+}
+
+/// Convert an optional AST `Context` (from a type signature's `forall ... =>`)
+/// to a slice of `ClassConstraint`s suitable for `TyScheme.constraints`.
+///
+/// Each `Assertion` in the context is resolved:
+/// - The class name string is looked up in the `ClassEnv` to obtain the
+///   proper `Name` with its unique ID.
+/// - The assertion's type arguments are converted to `HType` using the
+///   provided scope (which maps type variable strings to skolem rigids).
+///
+/// If a class name is not found in the `ClassEnv`, the assertion is
+/// silently skipped.  This avoids hard errors during signature processing
+/// for classes that may not yet be in scope (the constraint solver will
+/// catch unresolvable constraints later).
+fn convertContextToConstraints(
+    context: ?@import("../frontend/ast.zig").Context,
+    ctx: *InferCtx,
+    scope: *TypeVarMap,
+    span: SourceSpan,
+) std.mem.Allocator.Error![]const ClassConstraint {
+    const ctx_ = context orelse return &.{};
+    if (ctx_.constraints.len == 0) return &.{};
+
+    var result = std.ArrayListUnmanaged(ClassConstraint){};
+    for (ctx_.constraints) |assertion| {
+        // Look up the class name in ClassEnv to get the resolved Name.
+        const class_info = ctx.class_env.lookupClassByBaseName(assertion.class_name) orelse
+            continue;
+
+        // Convert the first type argument (single-parameter classes only).
+        const asserted_ty = if (assertion.types.len > 0)
+            try astTypeToHTypeWithScope(assertion.types[0], ctx, scope)
+        else
+            try ctx.freshMeta();
+
+        try result.append(ctx.alloc, .{
+            .class_name = class_info.name,
+            .ty = asserted_ty.*,
+            .span = span,
+        });
+    }
+
+    return try result.toOwnedSlice(ctx.alloc);
 }
 
 /// Collect free type variable names from an AST `Type`.
@@ -1122,7 +1188,7 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                             // work for all instantiations of the skolemised variables.
                             const scheme = TyScheme{
                                 .binders = s.skolem_ids,
-                                .constraints = &.{},
+                                .constraints = s.constraints,
                                 .body = s.ty.*,
                             };
                             try ctx.env.bind(fb.name, scheme);
@@ -1595,6 +1661,7 @@ fn collectLetSigs(
                 .ty = skolem_result.ty,
                 .loc = ts.span,
                 .skolem_ids = skolem_result.skolem_ids,
+                .constraints = skolem_result.constraints,
             });
         }
     }
@@ -1654,7 +1721,7 @@ fn inferLetDecl(
                 // generalising metavariables.
                 const scheme = TyScheme{
                     .binders = s.skolem_ids,
-                    .constraints = &.{},
+                    .constraints = s.constraints,
                     .body = s.ty.*,
                 };
                 try ctx.env.bind(fb.name, scheme);
@@ -1757,6 +1824,7 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
                     .ty = skolem_result.ty,
                     .loc = ts.span,
                     .skolem_ids = skolem_result.skolem_ids,
+                    .constraints = skolem_result.constraints,
                 });
             }
         } else if (decl == .ForeignPrim) {
@@ -1771,6 +1839,7 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
                 .ty = skolem_result.ty,
                 .loc = fp.span,
                 .skolem_ids = skolem_result.skolem_ids,
+                .constraints = skolem_result.constraints,
             });
         }
     }
@@ -2001,7 +2070,7 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
                     // work for all instantiations of the skolemised variables.
                     const scheme = TyScheme{
                         .binders = s.skolem_ids,
-                        .constraints = &.{},
+                        .constraints = s.constraints,
                         .body = s.ty.*,
                     };
                     try ctx.env.bind(fb.name, scheme);
@@ -2028,7 +2097,7 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
                 try ctx.unifyNow(fun_node, sig_entry.ty, fp.span);
                 const scheme = TyScheme{
                     .binders = sig_entry.skolem_ids,
-                    .constraints = &.{},
+                    .constraints = sig_entry.constraints,
                     .body = sig_entry.ty.*,
                 };
                 try ctx.env.bind(fp.name, scheme);
@@ -2797,6 +2866,161 @@ test "infer: if True then 1 else 2 has type Int" {
     const chased = ty.chase();
     try testing.expect(chased == .Con);
     try testing.expectEqualStrings("Int", chased.Con.name.base);
+}
+
+// ── Class constraint in type signature tests ─────────────────────────
+
+test "skolemiseSignature: forall with Eq constraint produces ClassConstraint" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = try TyEnv.init(alloc);
+    defer env.deinit();
+    var mv = MetaVarSupply{};
+    var us = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
+
+    // Register the Eq class in ClassEnv so lookupClassByBaseName finds it.
+    const eq_method = class_env_mod.MethodInfo{
+        .name = Known.Fn.putStrLn, // placeholder
+        .ty = HType{ .Con = .{ .name = Known.Type.Bool, .args = &.{} } },
+        .has_default = false,
+    };
+    try ctx.class_env.addClass(.{
+        .name = Known.Class.Eq,
+        .tyvar = 5000,
+        .superclasses = &.{},
+        .methods = &.{eq_method},
+    });
+
+    const AstType = @import("../frontend/ast.zig").Type;
+
+    // Construct: forall a. Eq a => a -> Bool
+    const a_ptr = try alloc.create(AstType);
+    a_ptr.* = AstType{ .Var = "a" };
+
+    const bool_ptr = try alloc.create(AstType);
+    bool_ptr.* = AstType{ .Con = .{ .name = "Bool", .module_name = null, .span = testSpan() } };
+
+    const fun_args = try alloc.alloc(*const AstType, 2);
+    fun_args[0] = a_ptr;
+    fun_args[1] = bool_ptr;
+
+    const body_type = AstType{ .Fun = fun_args };
+
+    // Build the assertion: Eq a
+    const assertion_types = try alloc.alloc(AstType, 1);
+    assertion_types[0] = AstType{ .Var = "a" };
+    const assertions = try alloc.alloc(@import("../frontend/ast.zig").Assertion, 1);
+    assertions[0] = .{ .class_name = "Eq", .types = assertion_types };
+
+    const forall_type = AstType{ .Forall = .{
+        .tyvars = &.{"a"},
+        .context = .{ .constraints = assertions },
+        .type = &body_type,
+    } };
+
+    const result = try skolemiseSignature(forall_type, &ctx);
+
+    // Should have 1 skolem binder.
+    try testing.expectEqual(@as(usize, 1), result.skolem_ids.len);
+
+    // Should have 1 class constraint.
+    try testing.expectEqual(@as(usize, 1), result.constraints.len);
+
+    // The constraint should be for Eq.
+    try testing.expectEqualStrings("Eq", result.constraints[0].class_name.base);
+
+    // The constrained type should be a Rigid matching the skolem.
+    try testing.expect(result.constraints[0].ty == .Rigid);
+    try testing.expectEqual(result.skolem_ids[0], result.constraints[0].ty.Rigid.unique.value);
+}
+
+test "skolemiseSignature: forall without context has empty constraints" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = try TyEnv.init(alloc);
+    defer env.deinit();
+    var mv = MetaVarSupply{};
+    var us = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
+
+    const AstType = @import("../frontend/ast.zig").Type;
+
+    // Construct: forall a. a -> a (no context)
+    const a_ptr = try alloc.create(AstType);
+    a_ptr.* = AstType{ .Var = "a" };
+
+    const fun_args = try alloc.alloc(*const AstType, 2);
+    fun_args[0] = a_ptr;
+    fun_args[1] = a_ptr;
+
+    const body_type = AstType{ .Fun = fun_args };
+    const forall_type = AstType{ .Forall = .{
+        .tyvars = &.{"a"},
+        .context = null,
+        .type = &body_type,
+    } };
+
+    const result = try skolemiseSignature(forall_type, &ctx);
+
+    // Should have 1 skolem, 0 constraints.
+    try testing.expectEqual(@as(usize, 1), result.skolem_ids.len);
+    try testing.expectEqual(@as(usize, 0), result.constraints.len);
+}
+
+test "skolemiseSignature: unknown class in context is silently skipped" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = try TyEnv.init(alloc);
+    defer env.deinit();
+    var mv = MetaVarSupply{};
+    var us = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
+    // Do NOT register any class — ClassEnv is empty.
+
+    const AstType = @import("../frontend/ast.zig").Type;
+
+    // Construct: forall a. Eq a => a -> a
+    const a_ptr = try alloc.create(AstType);
+    a_ptr.* = AstType{ .Var = "a" };
+
+    const fun_args = try alloc.alloc(*const AstType, 2);
+    fun_args[0] = a_ptr;
+    fun_args[1] = a_ptr;
+
+    const body_type = AstType{ .Fun = fun_args };
+
+    const assertion_types = try alloc.alloc(AstType, 1);
+    assertion_types[0] = AstType{ .Var = "a" };
+    const assertions = try alloc.alloc(@import("../frontend/ast.zig").Assertion, 1);
+    assertions[0] = .{ .class_name = "Eq", .types = assertion_types };
+
+    const forall_type = AstType{ .Forall = .{
+        .tyvars = &.{"a"},
+        .context = .{ .constraints = assertions },
+        .type = &body_type,
+    } };
+
+    const result = try skolemiseSignature(forall_type, &ctx);
+
+    // Should have 1 skolem, 0 constraints (Eq not in ClassEnv → skipped).
+    try testing.expectEqual(@as(usize, 1), result.skolem_ids.len);
+    try testing.expectEqual(@as(usize, 0), result.constraints.len);
 }
 
 // ── Skolemisation tests ─────────────────────────────────────────────────

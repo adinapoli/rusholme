@@ -154,6 +154,22 @@ pub const ClassEnv = struct {
         return &.{};
     }
 
+    /// Look up a class by its base name (e.g. "Eq").
+    ///
+    /// This is used by `skolemiseSignature` to resolve string class names
+    /// from parsed `Assertion`s (in user-written type signatures) to the
+    /// `Name` with the correct unique ID.  Returns `null` if no class
+    /// with that base name has been registered.
+    pub fn lookupClassByBaseName(self: *const ClassEnv, base_name: []const u8) ?ClassInfo {
+        var it = self.classes.iterator();
+        while (it.next()) |entry| {
+            if (std.mem.eql(u8, entry.value_ptr.name.base, base_name)) {
+                return entry.value_ptr.*;
+            }
+        }
+        return null;
+    }
+
     /// Return the superclass names for a given class, or empty if not found.
     pub fn superclasses(self: *const ClassEnv, class_unique: u64) []const Name {
         if (self.classes.get(class_unique)) |info| {
@@ -256,4 +272,29 @@ test "ClassEnv: lookup missing class returns null" {
     defer env.deinit();
 
     try testing.expect(env.lookupClass(999) == null);
+}
+
+test "ClassEnv: lookupClassByBaseName finds registered class" {
+    var env = ClassEnv.init(testing.allocator);
+    defer env.deinit();
+
+    try env.addClass(.{
+        .name = Known.Class.Eq,
+        .tyvar = 5000,
+        .superclasses = &.{},
+        .methods = &.{},
+    });
+
+    const info = env.lookupClassByBaseName("Eq");
+    try testing.expect(info != null);
+    try testing.expectEqualStrings("Eq", info.?.name.base);
+    try testing.expectEqual(Known.Class.Eq.unique.value, info.?.name.unique.value);
+}
+
+test "ClassEnv: lookupClassByBaseName returns null for unknown class" {
+    var env = ClassEnv.init(testing.allocator);
+    defer env.deinit();
+
+    try testing.expect(env.lookupClassByBaseName("Eq") == null);
+    try testing.expect(env.lookupClassByBaseName("") == null);
 }
