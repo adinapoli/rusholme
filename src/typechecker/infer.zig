@@ -422,6 +422,68 @@ fn solveMetaInTree(node: *HType, target_id: u32, rigid: *HType) void {
 /// Used when converting `ast.Type` with bound type variables.
 const TypeVarMap = std.StringHashMapUnmanaged(*HType);
 
+/// Build a function type from arg and result pointers.
+/// Copies HType structs by value, preserving internal pointer references.
+fn makeFunType(
+    alloc: std.mem.Allocator,
+    arg: *HType,
+    res: *HType,
+) std.mem.Allocator.Error!*HType {
+    const node = try alloc.create(HType);
+    node.* = .{ .Fun = .{ .arg = arg, .res = res } };
+    return node;
+}
+
+/// Build a list type from element pointer.
+/// Copies HType structs by value, preserving internal pointer references.
+/// Follows the pattern used in `astTypeToHTypeWithScope` for List.
+fn makeListType(alloc: std.mem.Allocator, elem: *HType) std.mem.Allocator.Error!*HType {
+    const args = try alloc.dupe(HType, &.{elem.*});
+    const node = try alloc.create(HType);
+    node.* = .{ .Con = .{ .name = Known.Type.List, .args = args } };
+    return node;
+}
+
+/// Build a type application from head and argument pointers.
+/// Copies HType structs by value, preserving internal pointer references.
+///
+/// PRECONDITION: `head.*` must be `HType.Con` (a type constructor).
+/// This function is only used when the head is known to be a constructor
+/// (e.g., in `astTypeToHTypeWithScope` where we check `if (head.* != .Con)` first).
+fn makeAppType(
+    alloc: std.mem.Allocator,
+    head: *HType,
+    args: []const *HType,
+) std.mem.Allocator.Error!*HType {
+    // Precondition: head must be a Con (type constructor)
+    if (head.* != .Con) {
+        @panic("makeAppType precondition failed: head.* must be Con");
+    }
+    const args_vals = try alloc.alloc(HType, args.len);
+    for (args_vals, args) |*val, arg_ptr| {
+        val.* = arg_ptr.*;
+    }
+    const node = try alloc.create(HType);
+    node.* = .{ .Con = .{ .name = head.Con.name, .args = args_vals } };
+    return node;
+}
+
+/// Build a tuple type from element pointers.
+/// Copies HType structs by value, preserving internal pointer references.
+fn makeTupleType(
+    alloc: std.mem.Allocator,
+    name: Name,
+    elem_ptrs: []const *HType,
+) std.mem.Allocator.Error!*HType {
+    const args_vals = try alloc.alloc(HType, elem_ptrs.len);
+    for (args_vals, elem_ptrs) |*val, arg_ptr| {
+        val.* = arg_ptr.*;
+    }
+    const node = try alloc.create(HType);
+    node.* = .{ .Con = .{ .name = name, .args = args_vals } };
+    return node;
+}
+
 /// Convert an `ast.Type` annotation to an arena-allocated `*HType`.
 ///
 /// Handles type variables via the provided map: if a variable is already in the map,
@@ -455,16 +517,15 @@ fn astTypeToHTypeWithScope(
         },
         .Fun => |parts| blk: {
             if (parts.len < 2) break :blk ctx.freshMeta();
+
+            // Build from right to left using pointers throughout
             var result = try astTypeToHTypeWithScope(parts[parts.len - 1].*, ctx, scope);
             var i = parts.len - 1;
             while (i > 0) {
                 i -= 1;
                 const arg_p = try astTypeToHTypeWithScope(parts[i].*, ctx, scope);
-                const res_p = try ctx.alloc.create(HType);
-                res_p.* = result.*;
-                const node = try ctx.alloc.create(HType);
-                node.* = HType{ .Fun = .{ .arg = arg_p, .res = res_p } };
-                result = node;
+                // Use helper, no value copy
+                result = try makeFunType(ctx.alloc, arg_p, result);
             }
             break :blk result;
         },

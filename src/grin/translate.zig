@@ -21,6 +21,7 @@ const core = @import("../core/ast.zig");
 const grin = @import("ast.zig");
 const PrimOp = @import("primop.zig").PrimOp;
 const FieldType = grin.FieldType;
+const Known = @import("../naming/known.zig");
 
 const CoreExpr = core.Expr;
 const CoreBind = core.Bind;
@@ -247,6 +248,30 @@ fn buildConMap(alloc: std.mem.Allocator, core_prog: CoreProgram) !std.AutoHashMa
     return con_map;
 }
 
+/// Seed the constructor map with builtin constructors that are magic
+/// (no `data` declaration in user code). Only constructors that never
+/// appear in a `data` declaration are seeded here: (), [], (:), (,), (,,).
+///
+/// Constructors like True, False, Nothing, Just, Left, Right are NOT
+/// included because they DO have `data` declarations in the Prelude
+/// (e.g. `data Bool = False | True`) and enter con_map naturally
+/// through buildConMap. Using getOrPut so data_decl entries take precedence.
+fn seedBuiltinConstructors(alloc: std.mem.Allocator, con_map: *std.AutoHashMapUnmanaged(u64, u32)) !void {
+    const builtins = [_]struct { unique: u64, fields: u32 }{
+        .{ .unique = Known.Con.Unit.unique.value, .fields = 0 }, // ()
+        .{ .unique = Known.Con.Nil.unique.value, .fields = 0 }, // []
+        .{ .unique = Known.Con.Cons.unique.value, .fields = 2 }, // (:)
+        .{ .unique = Known.Con.Tuple2.unique.value, .fields = 2 }, // (,)
+        .{ .unique = Known.Con.Tuple3.unique.value, .fields = 3 }, // (,,)
+    };
+    for (builtins) |b| {
+        const gop = try con_map.getOrPut(alloc, b.unique);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = b.fields;
+        }
+    }
+}
+
 /// Count the value-level field count of a constructor type by counting
 /// leading FunTy arrows, stripping ForAllTy quantifiers first.
 pub fn countConFields(ty: CoreType) u32 {
@@ -329,6 +354,9 @@ pub fn translateProgram(
     while (con_iter.next()) |entry| {
         try ctx.con_map.put(alloc, entry.key_ptr.*, entry.value_ptr.*);
     }
+
+    // Seed with builtin constructors that have no `data` declaration.
+    try seedBuiltinConstructors(alloc, &ctx.con_map);
 
     // Seed with external constructor map (from REPL session's prior data declarations).
     // Local entries take precedence — only add externals not already present.
@@ -571,29 +599,37 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
         else => null,
     };
 
-    // Translate the function head.
-    const translated_fn = try translateExpr(ctx, fn_expr);
-
     const FnNameAndArity = struct {
         name: ?GrinName,
         arity: ?u32,
     };
 
-    const fn_name_and_arity = blk: {
-        switch (translated_fn.*) {
-            .Return => |v| {
-                switch (v) {
-                    .Var => |name| {
-                        const arity = ctx.getFunctionArity(name);
-                        break :blk FnNameAndArity{
-                            .name = name,
-                            .arity = arity,
-                        };
+    // Extract the function name and arity directly from the Core Var,
+    // bypassing translateExpr.  This avoids the problem where translateExpr
+    // emits App(name, []) for arity-0 functions (eta-reduced definitions
+    // like `error = primError`), which would break the name extraction
+    // that expects Return(Var(...)).
+    const fn_name_and_arity: FnNameAndArity = blk: {
+        switch (fn_expr.*) {
+            .Var => |v| {
+                const grin_name = try ctx.getCoreVar(v.name);
+                const arity = ctx.getFunctionArity(grin_name);
+                break :blk FnNameAndArity{ .name = grin_name, .arity = arity };
+            },
+            else => {
+                // Non-Var function head — fall back to translateExpr.
+                const translated_fn = try translateExpr(ctx, fn_expr);
+                switch (translated_fn.*) {
+                    .Return => |v| switch (v) {
+                        .Var => |nm| break :blk FnNameAndArity{
+                            .name = nm,
+                            .arity = ctx.getFunctionArity(nm),
+                        },
+                        else => break :blk FnNameAndArity{ .name = null, .arity = null },
                     },
                     else => break :blk FnNameAndArity{ .name = null, .arity = null },
                 }
             },
-            else => break :blk FnNameAndArity{ .name = null, .arity = null },
         }
     };
 
@@ -683,13 +719,16 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
             const arg_count = @as(u32, @intCast(args.items.len));
 
             if (arg_count < arity) {
-                // Partial application: create a P-tagged node
-                // Example: map f (arity=2, args=1) -> store (P(1)map [f])
-
-                // Create the partial application node with P-tag
+                // Partial application: create a P-tagged node.
+                // Example: map f (arity=2, args=1) -> store (P(1):map [f])
+                //
+                // The Partial tag carries the number of MISSING arguments.
+                // The LLVM backend can compile ConstTagNode directly (unlike
+                // VarTagNode, which is unsupported).
+                const missing: u32 = arity - arg_count;
                 const store_expr = try ctx.alloc.create(GrinExpr);
-                store_expr.* = .{ .Store = .{ .VarTagNode = .{
-                    .tag_var = fn_name,
+                store_expr.* = .{ .Store = .{ .ConstTagNode = .{
+                    .tag = GrinTag{ .tag_type = .{ .Partial = missing }, .name = fn_name },
                     .fields = grin_args,
                 } } };
 
@@ -1501,13 +1540,14 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
 /// Translate a case expression.
 fn translateCase(ctx: *TranslateCtx, case_expr: *const CoreCase) anyerror!*GrinExpr {
     // case scrutinee of { alts }
-    // becomes: fetch scrutinee >>= \val -> case val of { alts }
-    // Note: eval call would be inserted by #315 (eval/apply generation)
-    // For now, we just fetch and case directly.
+    //
+    // For simple scrutinees (Var, Lit): case val of { alts }
+    // For complex scrutinees (App, Case, etc.):
+    //   scrut_N <- <complex expr>
+    //   case scrut_N of { alts }
 
-    const scrutinee_val = try translateScrutinee(ctx, case_expr.scrutinee);
+    const scrut_result = try translateScrutinee(ctx, case_expr.scrutinee);
 
-    // Translate the case binder.
     // Translate case alternatives.
     var alts = try ctx.alloc.alloc(GrinAlt, case_expr.alts.len);
     for (case_expr.alts, 0..) |alt, i| {
@@ -1517,30 +1557,50 @@ fn translateCase(ctx: *TranslateCtx, case_expr: *const CoreCase) anyerror!*GrinE
     // Create the case expression.
     const case_grin = try ctx.alloc.create(GrinExpr);
     case_grin.* = .{ .Case = .{
-        .scrutinee = scrutinee_val,
+        .scrutinee = scrut_result.val,
         .alts = alts,
     } };
+
+    // If there's a binding (complex scrutinee), wrap in Bind.
+    if (scrut_result.binding) |binding_expr| {
+        const bind = try ctx.alloc.create(GrinExpr);
+        bind.* = .{ .Bind = .{
+            .lhs = binding_expr,
+            .pat = scrut_result.val,
+            .rhs = case_grin,
+        } };
+        return bind;
+    }
 
     return case_grin;
 }
 
-/// Translate a case scrutinee to a value.
-fn translateScrutinee(ctx: *TranslateCtx, scrutinee: *const CoreExpr) !GrinVal {
-    // Simple case: variable or literal.
-    // For MVP, handle Var and Lit only.
+/// Result of translating a case scrutinee.
+const ScrutineeResult = struct {
+    /// The GRIN value to use in the Case expression.
+    val: GrinVal,
+    /// If non-null, a complex expression that must be bound to `val`
+    /// before the Case expression via a Bind.
+    binding: ?*GrinExpr,
+};
+
+/// Translate a case scrutinee to a value, with optional binding for
+/// complex expressions (ANF conversion).
+fn translateScrutinee(ctx: *TranslateCtx, scrutinee: *const CoreExpr) !ScrutineeResult {
     switch (scrutinee.*) {
         .Var => |v| {
             const grin_name = try ctx.getCoreVar(v.name);
-            return .{ .Var = grin_name };
+            return .{ .val = .{ .Var = grin_name }, .binding = null };
         },
         .Lit => |l| {
-            return .{ .Lit = translateLiteral(l.val) };
+            return .{ .val = .{ .Lit = translateLiteral(l.val) }, .binding = null };
         },
         else => {
-            // Complex scrutinee expression.
-            // For MVP, use a placeholder variable.
+            // Complex scrutinee: translate the expression and bind to a
+            // fresh variable so the Case has a simple value to match on.
+            const complex_expr = try translateExpr(ctx, scrutinee);
             const fresh = try ctx.freshName("scrut");
-            return .{ .Var = fresh };
+            return .{ .val = .{ .Var = fresh }, .binding = complex_expr };
         },
     }
 }

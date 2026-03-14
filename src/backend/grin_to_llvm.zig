@@ -283,11 +283,23 @@ const TagTable = struct {
         self.fun_tag_names.deinit(alloc);
     }
 
+    /// Compute a composite key that encodes both the tag's unique ID and
+    /// its tag type (Con/Fun/Partial). This prevents collisions between
+    /// e.g. F:map and C:map or P(1):map sharing the same discriminant.
+    fn tagKey(tag: grin.Tag) u64 {
+        const base = tag.name.unique.value;
+        return switch (tag.tag_type) {
+            .Con => base,
+            .Fun => base | (1 << 62),
+            .Partial => base | (2 << 62),
+        };
+    }
+
     /// Register a tag with the given field count.
     /// If already registered, this is a no-op (idempotent).
     /// F-tags (Fun) are also recorded in the fun_tags set for eval dispatch.
     fn register(self: *TagTable, alloc: std.mem.Allocator, tag: grin.Tag, n_fields: u32) !void {
-        const key = tag.name.unique.value;
+        const key = tagKey(tag);
         if (self.discriminants.contains(key)) return;
         try self.discriminants.put(alloc, key, self.next);
         try self.field_counts.put(alloc, key, n_fields);
@@ -305,17 +317,17 @@ const TagTable = struct {
 
     /// Return the discriminant for a constructor, or null if unknown.
     fn discriminant(self: *const TagTable, tag: grin.Tag) ?i64 {
-        return self.discriminants.get(tag.name.unique.value);
+        return self.discriminants.get(tagKey(tag));
     }
 
     /// Return the field count for a constructor, or null if unknown.
     fn fieldCount(self: *const TagTable, tag: grin.Tag) ?u32 {
-        return self.field_counts.get(tag.name.unique.value);
+        return self.field_counts.get(tagKey(tag));
     }
 
     /// Return field types for a constructor, or null if unknown.
     fn fieldTypes(self: *const TagTable, tag: grin.Tag) ?[]const FieldType {
-        return self.field_types.get(tag.name.unique.value);
+        return self.field_types.get(tagKey(tag));
     }
 
     /// Return true if the named variable is a known nullary constructor.
