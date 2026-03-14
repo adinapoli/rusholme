@@ -235,6 +235,87 @@ pub const CompileEnv = struct {
         }
     }
 
+    /// Seed a `RenameEnv` with exported names only from modules that the
+    /// current module imports.  This respects `NoImplicitPrelude` — if a
+    /// module doesn't import Prelude, Prelude's names are not seeded.
+    pub fn seedRenamerFromImports(
+        self: *const CompileEnv,
+        env: *renamer_mod.RenameEnv,
+        imports: []const ast_mod.ImportDecl,
+    ) std.mem.Allocator.Error!void {
+        for (imports) |imp| {
+            const iface = self.ifaces.get(imp.module_name) orelse continue;
+            try seedRenamerFromIface(env, iface);
+        }
+    }
+
+    /// Seed a `TyEnv` with type schemes only from modules that the current
+    /// module imports.
+    pub fn seedTyEnvFromImports(
+        self: *const CompileEnv,
+        ty_env: *env_mod.TyEnv,
+        imports: []const ast_mod.ImportDecl,
+    ) std.mem.Allocator.Error!void {
+        for (imports) |imp| {
+            const iface = self.ifaces.get(imp.module_name) orelse continue;
+            try seedTyEnvFromIface(ty_env, iface);
+        }
+    }
+
+    /// Seed a `RenameEnv` from a single module interface.
+    fn seedRenamerFromIface(
+        env: *renamer_mod.RenameEnv,
+        iface: ModIface,
+    ) std.mem.Allocator.Error!void {
+        for (iface.values) |ev| {
+            const name = Name{
+                .base = ev.name,
+                .unique = .{ .value = ev.unique },
+            };
+            try env.scope.bind(ev.name, name);
+        }
+        for (iface.data_decls) |dd| {
+            const ty_name = Name{
+                .base = dd.name,
+                .unique = .{ .value = dd.unique },
+            };
+            try env.scope.bind(dd.name, ty_name);
+            for (dd.constructors) |con| {
+                const con_name = Name{
+                    .base = con.name,
+                    .unique = .{ .value = con.unique },
+                };
+                try env.scope.bind(con.name, con_name);
+            }
+        }
+    }
+
+    /// Seed a `TyEnv` from a single module interface.
+    fn seedTyEnvFromIface(
+        ty_env: *env_mod.TyEnv,
+        iface: ModIface,
+    ) std.mem.Allocator.Error!void {
+        for (iface.values) |ev| {
+            const name = Name{
+                .base = ev.name,
+                .unique = .{ .value = ev.unique },
+            };
+            const scheme = try deserialiseTyScheme(ty_env.alloc, ev.scheme);
+            try ty_env.bind(name, scheme);
+        }
+        for (iface.data_decls) |dd| {
+            for (dd.constructors) |con| {
+                const con_name = Name{
+                    .base = con.name,
+                    .unique = .{ .value = con.unique },
+                };
+                const core_ty = try con.ty.toCoreType(ty_env.alloc);
+                const hty = try coreTypeToHType(ty_env.alloc, core_ty);
+                try ty_env.bindMono(con_name, hty);
+            }
+        }
+    }
+
     // ── Single-module compilation ─────────────────────────────────────────
 
     /// Run the full front-end pipeline for a single source file and register
@@ -287,16 +368,16 @@ pub const CompileEnv = struct {
         // ── Rename ───────────────────────────────────────────────────────
         var rename_env = try renamer_mod.RenameEnv.init(self.alloc, &self.u_supply, &self.diags);
         defer rename_env.deinit();
-        // Seed with names from upstream modules.
-        try self.seedRenamer(&rename_env);
+        // Seed with names from imported modules only (not all compiled modules).
+        try self.seedRenamerFromImports(&rename_env, module.imports);
         const renamed = try renamer_mod.rename(module, &rename_env);
         if (self.diags.hasErrors()) return null;
 
         // ── Typecheck ────────────────────────────────────────────────────
         var ty_env = try env_mod.TyEnv.init(self.alloc);
         try env_mod.initBuiltins(&ty_env, self.alloc, &self.u_supply);
-        // Seed with types from upstream modules.
-        try self.seedTyEnv(&ty_env);
+        // Seed with types from imported modules only.
+        try self.seedTyEnvFromImports(&ty_env, module.imports);
 
         var infer_ctx = infer_mod.InferCtx.init(
             self.alloc,

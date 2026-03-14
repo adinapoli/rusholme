@@ -278,6 +278,16 @@ pub fn build(b: *std.Build) void {
         jit_compiler_rt_bc_path_option,
     );
 
+    // Prelude source path: baked in at compile time so the compiler can
+    // find lib/Prelude.hs at runtime for implicit Prelude compilation.
+    const prelude_path_option = b.option(
+        []const u8,
+        "prelude-path",
+        "Path to lib/Prelude.hs",
+    ) orelse b.getInstallPath(.@"prefix", "lib/Prelude.hs");
+    const prelude_path_wf = b.addNamedWriteFiles("prelude_path");
+    const prelude_path_file = prelude_path_wf.add("path.txt", prelude_path_option);
+
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
@@ -336,12 +346,19 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addAnonymousImport("jit_compiler_rt_bc_path", .{
         .root_source_file = jit_compiler_rt_bc_path_file,
     });
+    exe.root_module.addAnonymousImport("prelude_path", .{
+        .root_source_file = prelude_path_file,
+    });
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
     // step). By default the install prefix is `zig-out/` but can be overridden
     // by passing `--prefix` or `-p`.
     b.installArtifact(exe);
+
+    // Install the Prelude source file alongside the binary so the compiler
+    // can find it at runtime via the baked-in prelude_path.
+    b.installFile("lib/Prelude.hs", "lib/Prelude.hs");
 
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).

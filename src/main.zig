@@ -65,6 +65,12 @@ fn getJitCompilerRtBcPath() []const u8 {
     return @embedFile("jit_compiler_rt_bc_path");
 }
 
+/// Get the path to the Prelude source file baked in at compile time.
+/// Returns the path to lib/Prelude.hs that is compiled before user modules.
+fn getPreludePath() []const u8 {
+    return @embedFile("prelude_path");
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -711,7 +717,47 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
 
     const compile_env_mod = rusholme.modules.compile_env;
     var source_modules: std.ArrayListUnmanaged(compile_env_mod.SourceModule) = .{};
-    for (file_paths, 0..) |fp, idx| {
+
+    // ── Auto-prepend Prelude unless the user explicitly passed it ────────
+    // Check if any user-provided file is the Prelude module.
+    var user_provides_prelude = false;
+    for (file_paths) |fp| {
+        const mod_name = try rusholme.modules.module_graph.inferModuleName(arena_alloc, fp);
+        if (std.mem.eql(u8, mod_name, "Prelude")) {
+            user_provides_prelude = true;
+            break;
+        }
+    }
+
+    // File ID 0 is reserved for the Prelude; user modules start at 1.
+    var next_file_id: u32 = 0;
+
+    if (!user_provides_prelude) {
+        const prelude_path = getPreludePath();
+        if (readSourceFile(arena_alloc, io, prelude_path)) |prelude_source| {
+            try source_modules.append(arena_alloc, .{
+                .module_name = "Prelude",
+                .source = prelude_source,
+                .file_id = next_file_id,
+                .source_path = prelude_path,
+            });
+            next_file_id += 1;
+        } else |err| {
+            // Prelude not found is non-fatal in development; warn and continue
+            // without implicit Prelude compilation. User modules will still
+            // get built-in names from populateBuiltins/initBuiltins.
+            var stderr_buf: [4096]u8 = undefined;
+            var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+            const stderr = &stderr_fw.interface;
+            switch (err) {
+                error.FileNotFound => try stderr.print("rhc: warning: Prelude not found at '{s}'; using built-in names only\n", .{prelude_path}),
+                else => try stderr.print("rhc: warning: cannot read Prelude '{s}': {}; using built-in names only\n", .{ prelude_path, err }),
+            }
+            try stderr.flush();
+        }
+    }
+
+    for (file_paths) |fp| {
         const source = readSourceFile(arena_alloc, io, fp) catch |err| {
             var stderr_buf: [4096]u8 = undefined;
             var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
@@ -728,8 +774,9 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
         try source_modules.append(arena_alloc, .{
             .module_name = mod_name,
             .source = source,
-            .file_id = @intCast(idx),
+            .file_id = next_file_id,
         });
+        next_file_id += 1;
     }
 
     var session_result = try compile_env_mod.compileProgram(arena_alloc, io, source_modules.items);
