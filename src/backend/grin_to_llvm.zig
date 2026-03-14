@@ -125,6 +125,10 @@ const PrimOpMapping = struct {
         if (std.mem.eql(u8, name.base, "add_Int")) return .{ .instruction = .{ .add = {} } };
         if (std.mem.eql(u8, name.base, "sub_Int")) return .{ .instruction = .{ .sub = {} } };
         if (std.mem.eql(u8, name.base, "mul_Int")) return .{ .instruction = .{ .mul = {} } };
+        if (std.mem.eql(u8, name.base, "neg_Int")) return .{ .instruction = .{ .neg = {} } };
+        if (std.mem.eql(u8, name.base, "abs_Int")) return .{ .instruction = .{ .abs = {} } };
+        if (std.mem.eql(u8, name.base, "quot_Int")) return .{ .instruction = .{ .sdiv = {} } };
+        if (std.mem.eql(u8, name.base, "rem_Int")) return .{ .instruction = .{ .srem = {} } };
         if (std.mem.eql(u8, name.base, "div#")) return .{ .instruction = .{ .sdiv = {} } };
         if (std.mem.eql(u8, name.base, "mod#")) return .{ .instruction = .{ .srem = {} } };
         if (std.mem.eql(u8, name.base, "quot#")) return .{ .instruction = .{ .sdiv = {} } };
@@ -203,6 +207,9 @@ const LLVMInstruction = union(enum) {
     mul: void,
     sdiv: void,
     srem: void,
+    /// Unary arithmetic instructions
+    neg: void,
+    abs: void,
     /// Comparison instructions (icmp)
     eq: void,
     ne: void,
@@ -1113,6 +1120,31 @@ pub const GrinTranslator = struct {
             return;
         }
 
+        // Unary instructions (neg_Int, abs_Int)
+        if (instr == .neg or instr == .abs) {
+            if (args.len < 1) return error.UnsupportedGrinVal;
+            const operand = try self.translateValToLlvm(args[0]);
+            const result = switch (instr) {
+                .neg => c.LLVMBuildNeg(self.builder, operand, "neg"),
+                .abs => blk: {
+                    // abs(x) = x >= 0 ? x : -x
+                    const zero = c.LLVMConstInt(llvm.i64Type(), 0, 0);
+                    const is_neg = c.LLVMBuildICmp(
+                        self.builder,
+                        @as(c_uint, @bitCast(c.LLVMIntSLT)),
+                        operand,
+                        zero,
+                        "is_neg",
+                    );
+                    const negated = c.LLVMBuildNeg(self.builder, operand, "negated");
+                    break :blk c.LLVMBuildSelect(self.builder, is_neg, negated, operand, "abs");
+                },
+                else => unreachable,
+            };
+            _ = result;
+            return;
+        }
+
         if (args.len < 2) return error.UnsupportedGrinVal;
 
         const lhs = try self.translateValToLlvm(args[0]);
@@ -1130,6 +1162,7 @@ pub const GrinTranslator = struct {
             .sle => c.LLVMBuildICmp(self.builder, @as(c_uint, @bitCast(c.LLVMIntSLE)), lhs, rhs, "sle"),
             .sgt => c.LLVMBuildICmp(self.builder, @as(c_uint, @bitCast(c.LLVMIntSGT)), lhs, rhs, "sgt"),
             .sge => c.LLVMBuildICmp(self.builder, @as(c_uint, @bitCast(c.LLVMIntSGE)), lhs, rhs, "sge"),
+            .neg, .abs => unreachable, // handled above
             .seq => unreachable, // handled above
         };
         _ = result;

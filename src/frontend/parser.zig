@@ -765,8 +765,10 @@ pub const Parser = struct {
             const tok = try self.advance();
             return .{ .Var = tok.token.varid };
         }
-        // ( varsym ) or ( consym ) — operator export
-        // Haskell 2010 §5.2: exports include operator names in parentheses
+        // ( varsym ) or ( consym ) or ( - ) — operator export
+        // Haskell 2010 §5.2: exports include operator names in parentheses.
+        // The `-` (minus) operator is tokenized as a reserved symbol rather
+        // than a varsym, so we handle it explicitly.
         if (try self.check(.open_paren)) {
             _ = try self.advance();
             const op_tok = try self.peek();
@@ -778,6 +780,18 @@ pub const Parser = struct {
                 .consym => blk: {
                     _ = try self.advance();
                     break :blk op_tok.token.consym;
+                },
+                .minus => blk: {
+                    _ = try self.advance();
+                    break :blk "-";
+                },
+                .bang => blk: {
+                    _ = try self.advance();
+                    break :blk "!";
+                },
+                .dot => blk: {
+                    _ = try self.advance();
+                    break :blk ".";
                 },
                 else => {
                     try self.emitErrorMsg(op_tok.span, "expected operator symbol in export list");
@@ -1112,6 +1126,30 @@ pub const Parser = struct {
         const start = try self.currentSpan();
         const pat = try self.parsePattern();
 
+        // Haskell 2010 §4.4.3: funlhs → pat varop pat
+        // If the pattern is an InfixCon whose operator is a variable-level
+        // operator (not starting with ':'), this is actually an infix function
+        // definition, e.g. `True && x = x` defines `(&&)`.
+        // Constructor operators (starting with ':') remain as pattern bindings.
+        if (pat == .InfixCon and !isConOp(pat.InfixCon.con.name)) {
+            const rhs = try self.parseRhs();
+            const where_clause = try self.parseWhereClause();
+            const eq = ast_mod.Match{
+                .patterns = try self.allocSlice(ast_mod.Pattern, &.{
+                    pat.InfixCon.left.*,
+                    pat.InfixCon.right.*,
+                }),
+                .rhs = rhs,
+                .where_clause = where_clause,
+                .span = self.spanFrom(start),
+            };
+            return .{ .FunBind = .{
+                .name = pat.InfixCon.con.name,
+                .equations = try self.allocSlice(ast_mod.Match, &.{eq}),
+                .span = self.spanFrom(start),
+            } };
+        }
+
         const rhs = if (try self.check(.pipe)) blk: {
             const guard_list = try self.parseGuardList();
             _ = try self.expect(.equals);
@@ -1136,6 +1174,13 @@ pub const Parser = struct {
             .where_clause = where_clause,
             .span = self.spanFrom(start),
         } };
+    }
+
+    /// Returns true if the given operator name is a constructor operator
+    /// (starts with ':'). In Haskell 2010, constructor operators are consyms
+    /// that begin with ':', e.g. `:`, `:.`, `:<>`.
+    fn isConOp(name: []const u8) bool {
+        return name.len > 0 and name[0] == ':';
     }
 
     /// Parse a guarded case alternative RHS: `| g1, g2, ... -> expr`.
@@ -3329,7 +3374,34 @@ pub const Parser = struct {
             } };
         }
 
-        const pat = try self.parseAtomicPattern();
+        var pat = try self.parseAtomicPattern();
+
+        // Constructor application: Con apat apat ...
+        // After parsing a bare constructor (Con with 0 args), greedily parse
+        // atomic argument patterns. This implements Haskell 2010 §3.17.2:
+        //   pat → gcon apat₁ … apatₖ   (arity gcon = k, k ≥ 1)
+        if (pat == .Con and pat.Con.args.len == 0) {
+            var args: std.ArrayListUnmanaged(ast_mod.Pattern) = .empty;
+            defer args.deinit(self.allocator);
+
+            while (try self.isPatternStart()) {
+                // Peek ahead to avoid consuming an infix operator's LHS.
+                // If the next pattern is followed by an infix op, stop here
+                // so the infix pattern handler below can deal with it.
+                const arg = try self.parseArgPattern();
+                try args.append(self.allocator, arg);
+            }
+
+            if (args.items.len > 0) {
+                const args_slice = try self.allocSlice(ast_mod.Pattern, args.items);
+                const end_span = args.items[args.items.len - 1].getSpan();
+                pat = .{ .Con = .{
+                    .name = pat.Con.name,
+                    .args = args_slice,
+                    .span = pat.Con.span.merge(end_span),
+                } };
+            }
+        }
 
         // Handle as-pattern: xs@(x:rest)
         if (try self.check(.at)) {
@@ -3399,7 +3471,12 @@ pub const Parser = struct {
         };
     }
 
-    /// Parse an atomic pattern (no as-pattern, no infix, no negation).
+    /// Parse an atomic pattern (apat in Haskell 2010 §3.17.2).
+    /// For constructors, this parses only the bare name (+ optional record syntax),
+    /// NOT positional arguments. Constructor application (e.g. `Just x`) is handled
+    /// by `parsePattern`, which calls this and then greedily parses apat arguments.
+    /// This distinction is critical for function bindings: in `f True x = ...`,
+    /// `True` and `x` are both apats — arguments to `f`, not `True`.
     fn parseAtomicPattern(self: *Parser) ParseError!ast_mod.Pattern {
         const start = try self.currentSpan();
 
@@ -3416,7 +3493,7 @@ pub const Parser = struct {
         const tag = try self.peekTag();
         return switch (tag) {
             .varid => try self.parseVarPattern(),
-            .conid => try self.parseConPattern(),
+            .conid => try self.parseBareConPattern(),
             .underscore => try self.parseWildPattern(),
             .lit_integer, .lit_char, .lit_string => try self.parseLitPattern(),
             .open_paren => try self.parseParenOrTuplePattern(),
@@ -3435,9 +3512,11 @@ pub const Parser = struct {
         return .{ .Var = .{ .name = tok.token.varid, .span = tok.span } };
     }
 
-    /// Parse constructor pattern: Just x, Nothing, True
-    /// Also handles record patterns: Point { x = a, y = b }
-    fn parseConPattern(self: *Parser) ParseError!ast_mod.Pattern {
+    /// Parse a bare constructor pattern: just the name, plus optional record syntax.
+    /// Does NOT parse positional arguments — that's handled by `parsePattern`.
+    /// Used by `parseAtomicPattern` to ensure function argument patterns (apat)
+    /// don't greedily consume following patterns as constructor arguments.
+    fn parseBareConPattern(self: *Parser) ParseError!ast_mod.Pattern {
         const tok = try self.expect(.conid);
 
         // Check for record pattern: Con { field = pat, ... }
@@ -3445,23 +3524,11 @@ pub const Parser = struct {
             return try self.parseRecordPat(tok.token.conid, tok.span);
         }
 
-        // Try to parse constructor arguments.
-        // Each argument is an apat (Haskell 2010 §3.17.2): atomic pattern
-        // with optional as-pattern suffix, but no infix constructors.
-        var args: std.ArrayListUnmanaged(ast_mod.Pattern) = .empty;
-        defer args.deinit(self.allocator);
-
-        while (try self.isPatternStart()) {
-            const arg = try self.parseArgPattern();
-            try args.append(self.allocator, arg);
-        }
-
-        const args_slice = try self.allocSlice(ast_mod.Pattern, args.items);
-        const end_span = if (args.items.len > 0) args.items[args.items.len - 1].getSpan() else tok.span;
+        // Return a bare constructor with no arguments.
         return .{ .Con = .{
             .name = .{ .name = tok.token.conid, .span = tok.span },
-            .args = args_slice,
-            .span = tok.span.merge(end_span),
+            .args = &.{},
+            .span = tok.span,
         } };
     }
 
