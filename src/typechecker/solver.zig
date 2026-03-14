@@ -168,6 +168,11 @@ pub fn solve(
     }
 }
 
+/// Maximum recursion depth for instance context constraint resolution.
+/// Prevents infinite loops from cyclic instance contexts (e.g. mutual
+/// superclass constraints or pathological instance chains).
+const max_context_depth: u32 = 64;
+
 /// Solve a class constraint by looking up instances in the ClassEnv.
 fn solveClassConstraint(
     cc: *ClassConstraintPayload,
@@ -175,6 +180,42 @@ fn solveClassConstraint(
     diags: *DiagnosticCollector,
     class_env: ?*const ClassEnv,
 ) std.mem.Allocator.Error!void {
+    return solveClassConstraintWithDepth(cc, alloc, diags, class_env, 0);
+}
+
+/// Solve a class constraint with a recursion depth counter.
+///
+/// When a matching instance has context constraints (e.g. `Eq a` from
+/// `instance Eq a => Eq [a]`), this function recursively resolves each
+/// context constraint by substituting the matched type for the instance's
+/// rigid type variable.  The resulting sub-evidence is stored in the
+/// `DictEvidence.instance.context_evidence` field.
+///
+/// The `depth` parameter guards against infinite recursion from cyclic
+/// instance contexts.
+fn solveClassConstraintWithDepth(
+    cc: *ClassConstraintPayload,
+    alloc: std.mem.Allocator,
+    diags: *DiagnosticCollector,
+    class_env: ?*const ClassEnv,
+    depth: u32,
+) std.mem.Allocator.Error!void {
+    if (depth >= max_context_depth) {
+        const te = TypeError{ .missing_instance = .{
+            .class_name = cc.class_name,
+            .ty = cc.ty.chase(),
+        } };
+        const msg = try type_error_mod.format(alloc, te);
+        try diags.emit(alloc, .{
+            .severity = .@"error",
+            .code = .type_error,
+            .span = cc.span,
+            .message = msg,
+            .payload = DiagnosticPayload{ .type_error = te },
+        });
+        return;
+    }
+
     const env = class_env orelse return; // No ClassEnv → cannot resolve
     const chased = cc.ty.chase();
 
@@ -199,13 +240,12 @@ fn solveClassConstraint(
     const instances = env.lookupInstances(cc.class_name.unique.value);
     var match_count: usize = 0;
     var matched_instance: ?class_env_mod.InstanceInfo = null;
+    var matched_subst: ?RigidSubst = null;
     for (instances) |inst| {
-        // Simple matching: check if the instance head matches the constraint type.
-        // For now, we do structural equality on the chased types.
-        // A full implementation would use unification-based matching.
-        if (htypeMatchesHead(chased, inst.head)) {
+        if (matchInstanceHead(alloc, chased, inst.head)) |subst| {
             match_count += 1;
             matched_instance = inst;
+            matched_subst = subst;
         }
     }
 
@@ -241,36 +281,195 @@ fn solveClassConstraint(
         return;
     }
 
-    // Exactly one match — record the evidence.
+    // Exactly one match — resolve context constraints and record evidence.
     if (matched_instance) |inst| {
+        var context_evidence: []const DictEvidence = &.{};
+
+        if (inst.context.len > 0) {
+            const subst = matched_subst orelse &.{};
+            const ctx_ev = try alloc.alloc(DictEvidence, inst.context.len);
+
+            for (inst.context, 0..) |ctx_constraint, i| {
+                // Apply the substitution to get the concrete type for this
+                // context constraint. E.g., for `instance Eq a => Eq [a]`
+                // matching `Eq [Int]`, substitute `a → Int` in `Eq a` to
+                // get `Eq Int`.
+                const substituted_ty = try applyRigidSubst(alloc, ctx_constraint.ty, subst);
+
+                // Build a sub-constraint and resolve it recursively.
+                var sub_cc = ClassConstraintPayload{
+                    .class_name = ctx_constraint.class_name,
+                    .ty = substituted_ty,
+                    .span = cc.span,
+                };
+                try solveClassConstraintWithDepth(&sub_cc, alloc, diags, class_env, depth + 1);
+
+                if (sub_cc.evidence) |sub_ev| {
+                    ctx_ev[i] = sub_ev.*;
+                } else {
+                    // Sub-constraint couldn't be resolved (diagnostic
+                    // already emitted by the recursive call). Use a
+                    // placeholder so we don't leave uninitialised memory.
+                    ctx_ev[i] = .{ .param = .{
+                        .param_index = 0,
+                        .class_name = ctx_constraint.class_name,
+                    } };
+                }
+            }
+            context_evidence = ctx_ev;
+        }
+
         const ev = try alloc.create(DictEvidence);
         ev.* = .{ .instance = .{
             .class_name = cc.class_name,
             .head_ty = chased,
-            .context_evidence = &.{}, // TODO: resolve context constraints recursively
+            .context_evidence = context_evidence,
         } };
         cc.evidence = ev;
-
-        // If the instance has context constraints, they should be emitted
-        // as new wanted constraints. For now, we defer recursive resolution.
-        _ = inst;
     }
 }
 
-/// Check if an HType matches an instance head (simple structural match).
+// ── Instance head matching with substitution ───────────────────────────
+
+/// A substitution from rigid type variable unique IDs to concrete HTypes.
+/// Produced by `matchInstanceHead` when a parametric instance head matches.
+const RigidSubstEntry = struct {
+    rigid_unique: u64,
+    ty: HType,
+};
+const RigidSubst = []const RigidSubstEntry;
+
+/// Match a constraint type against an instance head, returning the rigid
+/// variable substitution if they match.
 ///
-/// For M1 scope, we match on constructor names. A full implementation
-/// would use unification to handle parametric instance heads like `Eq [a]`.
-fn htypeMatchesHead(ty: HType, head: HType) bool {
-    const chased_ty = ty.chase();
-    const chased_head = head.chase();
-    return switch (chased_ty) {
-        .Con => |tc| switch (chased_head) {
-            .Con => |hc| tc.name.unique.value == hc.name.unique.value,
-            else => false,
+/// For simple instances like `instance Eq Int`:
+///   matchInstanceHead(Con(Int), Con(Int)) → empty substitution
+///
+/// For parametric instances like `instance Eq a => Eq [a]`:
+///   matchInstanceHead(Con([], [Con(Int)]), Con([], [Rigid(a)])) → [a → Int]
+///
+/// Returns `null` if the types don't match.
+fn matchInstanceHead(alloc: std.mem.Allocator, ty: HType, head: HType) ?RigidSubst {
+    var subst = std.ArrayListUnmanaged(RigidSubstEntry){};
+    if (matchInstanceHeadInner(alloc, ty.chase(), head.chase(), &subst)) {
+        return subst.toOwnedSlice(alloc) catch return null;
+    } else {
+        // Clean up on failure. Since we use an arena allocator in practice,
+        // this is mostly for correctness with testing allocators.
+        subst.deinit(alloc);
+        return null;
+    }
+}
+
+/// Recursive inner match: returns true if `ty` matches `head`, accumulating
+/// rigid variable bindings in `subst`.
+fn matchInstanceHeadInner(
+    alloc: std.mem.Allocator,
+    ty: HType,
+    head: HType,
+    subst: *std.ArrayListUnmanaged(RigidSubstEntry),
+) bool {
+    switch (head) {
+        // A rigid in the instance head is a pattern variable — matches any type.
+        .Rigid => |r| {
+            // Check for consistent binding: if this rigid was already bound,
+            // the new binding must agree.
+            for (subst.items) |entry| {
+                if (entry.rigid_unique == r.unique.value) {
+                    return htypeStructuralEq(ty, entry.ty);
+                }
+            }
+            subst.append(alloc, .{
+                .rigid_unique = r.unique.value,
+                .ty = ty,
+            }) catch return false;
+            return true;
         },
-        else => false,
-    };
+        .Con => |hc| switch (ty) {
+            .Con => |tc| {
+                if (tc.name.unique.value != hc.name.unique.value) return false;
+                if (tc.args.len != hc.args.len) return false;
+                for (tc.args, hc.args) |ta, ha| {
+                    if (!matchInstanceHeadInner(alloc, ta.chase(), ha.chase(), subst)) return false;
+                }
+                return true;
+            },
+            else => return false,
+        },
+        .Fun => |hf| switch (ty) {
+            .Fun => |tf| {
+                return matchInstanceHeadInner(alloc, tf.arg.chase(), hf.arg.chase(), subst) and
+                    matchInstanceHeadInner(alloc, tf.res.chase(), hf.res.chase(), subst);
+            },
+            else => return false,
+        },
+        else => return htypeStructuralEq(ty, head),
+    }
+}
+
+/// Structural equality check for HTypes (chased).
+fn htypeStructuralEq(a: HType, b: HType) bool {
+    switch (a) {
+        .Con => |ac| switch (b) {
+            .Con => |bc| {
+                if (ac.name.unique.value != bc.name.unique.value) return false;
+                if (ac.args.len != bc.args.len) return false;
+                for (ac.args, bc.args) |aa, ba| {
+                    if (!htypeStructuralEq(aa.chase(), ba.chase())) return false;
+                }
+                return true;
+            },
+            else => return false,
+        },
+        .Rigid => |ar| switch (b) {
+            .Rigid => |br| return ar.unique.value == br.unique.value,
+            else => return false,
+        },
+        .Fun => |af| switch (b) {
+            .Fun => |bf| {
+                return htypeStructuralEq(af.arg.chase(), bf.arg.chase()) and
+                    htypeStructuralEq(af.res.chase(), bf.res.chase());
+            },
+            else => return false,
+        },
+        .Meta => |am| switch (b) {
+            .Meta => |bm| return am.id == bm.id,
+            else => return false,
+        },
+        else => return false,
+    }
+}
+
+/// Apply a rigid variable substitution to an HType.
+///
+/// Replaces `Rigid(x)` nodes with the bound type from the substitution.
+/// Types not containing rigid variables are returned unchanged.
+fn applyRigidSubst(alloc: std.mem.Allocator, ty: HType, subst: RigidSubst) std.mem.Allocator.Error!HType {
+    const chased = ty.chase();
+    switch (chased) {
+        .Rigid => |r| {
+            for (subst) |entry| {
+                if (entry.rigid_unique == r.unique.value) return entry.ty;
+            }
+            return chased;
+        },
+        .Con => |c| {
+            if (c.args.len == 0) return chased;
+            const new_args = try alloc.alloc(HType, c.args.len);
+            for (c.args, 0..) |arg, i| {
+                new_args[i] = try applyRigidSubst(alloc, arg, subst);
+            }
+            return HType{ .Con = .{ .name = c.name, .args = new_args } };
+        },
+        .Fun => |f| {
+            const new_arg = try alloc.create(HType);
+            new_arg.* = try applyRigidSubst(alloc, f.arg.*, subst);
+            const new_res = try alloc.create(HType);
+            new_res.* = try applyRigidSubst(alloc, f.res.*, subst);
+            return HType{ .Fun = .{ .arg = new_arg, .res = new_res } };
+        },
+        else => return chased,
+    }
 }
 
 /// Solve an equality constraint via Robinson unification.
@@ -846,4 +1045,289 @@ test "solve: mixed Eq and Class constraints both resolved" {
     try testing.expectEqualStrings("Int", constraints[0].Eq.lhs.chase().Con.name.base);
     // Class constraint has evidence
     try testing.expect(constraints[1].Class.evidence != null);
+}
+
+// ── Recursive context resolution tests ─────────────────────────────────
+
+test "solve: parametric instance with context resolves recursively" {
+    // Setup: class Eq, instance Eq Int, instance Eq a => Eq [a]
+    // Constraint: Eq [Int]
+    // Expected: evidence = instance(Eq, [Int], [instance(Eq, Int, [])])
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var class_env = ClassEnv.init(alloc);
+    defer class_env.deinit();
+
+    try class_env.addClass(.{
+        .name = Known.Class.Eq,
+        .tyvar = 5000,
+        .superclasses = &.{},
+        .methods = &.{},
+    });
+
+    // instance Eq Int (no context)
+    try class_env.addInstance(.{
+        .class_name = Known.Class.Eq,
+        .head = con0("Int", Known.Type.Int.unique.value),
+        .context = &.{},
+        .span = testSpan(),
+    });
+
+    // instance Eq a => Eq [a]
+    // Head: Con([], [Rigid(a)])
+    const rigid_a = HType{ .Rigid = testName("a", 5000) };
+    const list_head_args = [_]HType{rigid_a};
+    const list_head = HType{ .Con = .{ .name = testName("[]", 99), .args = &list_head_args } };
+    const eq_a_context = [_]ClassConstraint{.{
+        .class_name = Known.Class.Eq,
+        .ty = rigid_a,
+        .span = testSpan(),
+    }};
+    try class_env.addInstance(.{
+        .class_name = Known.Class.Eq,
+        .head = list_head,
+        .context = &eq_a_context,
+        .span = testSpan(),
+    });
+
+    // Constraint: Eq [Int]
+    const list_int_args = [_]HType{con0("Int", Known.Type.Int.unique.value)};
+    var constraints = [_]Constraint{.{ .Class = .{
+        .class_name = Known.Class.Eq,
+        .ty = HType{ .Con = .{ .name = testName("[]", 99), .args = &list_int_args } },
+        .span = testSpan(),
+    } }};
+
+    try solve(&constraints, alloc, &diags, &class_env);
+    try testing.expect(!diags.hasErrors());
+
+    // Evidence should be filled in.
+    const ev = constraints[0].Class.evidence orelse return error.TestUnexpectedResult;
+    try testing.expect(ev.* == .instance);
+
+    // The instance evidence should have one context_evidence entry.
+    try testing.expectEqual(@as(usize, 1), ev.instance.context_evidence.len);
+
+    // The sub-evidence should be an instance for Eq Int.
+    const sub_ev = ev.instance.context_evidence[0];
+    try testing.expect(sub_ev == .instance);
+    try testing.expectEqualStrings("Eq", sub_ev.instance.class_name.base);
+    try testing.expectEqualStrings("Int", sub_ev.instance.head_ty.Con.name.base);
+}
+
+test "solve: parametric instance with missing context emits diagnostic" {
+    // Setup: class Eq, instance Eq a => Eq [a] (but NO instance Eq Bool)
+    // Constraint: Eq [Bool]
+    // Expected: missing instance Eq Bool
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var class_env = ClassEnv.init(alloc);
+    defer class_env.deinit();
+
+    try class_env.addClass(.{
+        .name = Known.Class.Eq,
+        .tyvar = 5000,
+        .superclasses = &.{},
+        .methods = &.{},
+    });
+
+    // instance Eq a => Eq [a] — but no base instances
+    const rigid_a = HType{ .Rigid = testName("a", 5000) };
+    const list_head_args = [_]HType{rigid_a};
+    const list_head = HType{ .Con = .{ .name = testName("[]", 99), .args = &list_head_args } };
+    const eq_a_context = [_]ClassConstraint{.{
+        .class_name = Known.Class.Eq,
+        .ty = rigid_a,
+        .span = testSpan(),
+    }};
+    try class_env.addInstance(.{
+        .class_name = Known.Class.Eq,
+        .head = list_head,
+        .context = &eq_a_context,
+        .span = testSpan(),
+    });
+
+    // Constraint: Eq [Bool] — no Eq Bool instance exists
+    const list_bool_args = [_]HType{con0("Bool", Known.Type.Bool.unique.value)};
+    var constraints = [_]Constraint{.{ .Class = .{
+        .class_name = Known.Class.Eq,
+        .ty = HType{ .Con = .{ .name = testName("[]", 99), .args = &list_bool_args } },
+        .span = testSpan(),
+    } }};
+
+    try solve(&constraints, alloc, &diags, &class_env);
+    // Should have a diagnostic for missing Eq Bool
+    try testing.expect(diags.hasErrors());
+    try testing.expectEqual(@as(usize, 1), diags.errorCount());
+    try testing.expect(std.mem.indexOf(u8, diags.diagnostics.items[0].message, "no instance") != null);
+}
+
+test "solve: nested parametric resolution (Eq [[Int]])" {
+    // Setup: class Eq, instance Eq Int, instance Eq a => Eq [a]
+    // Constraint: Eq [[Int]]
+    // Expected: instance(Eq, [[Int]], [instance(Eq, [Int], [instance(Eq, Int, [])])])
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var class_env = ClassEnv.init(alloc);
+    defer class_env.deinit();
+
+    try class_env.addClass(.{
+        .name = Known.Class.Eq,
+        .tyvar = 5000,
+        .superclasses = &.{},
+        .methods = &.{},
+    });
+
+    // instance Eq Int
+    try class_env.addInstance(.{
+        .class_name = Known.Class.Eq,
+        .head = con0("Int", Known.Type.Int.unique.value),
+        .context = &.{},
+        .span = testSpan(),
+    });
+
+    // instance Eq a => Eq [a]
+    const rigid_a = HType{ .Rigid = testName("a", 5000) };
+    const list_head_args = [_]HType{rigid_a};
+    const list_head = HType{ .Con = .{ .name = testName("[]", 99), .args = &list_head_args } };
+    const eq_a_context = [_]ClassConstraint{.{
+        .class_name = Known.Class.Eq,
+        .ty = rigid_a,
+        .span = testSpan(),
+    }};
+    try class_env.addInstance(.{
+        .class_name = Known.Class.Eq,
+        .head = list_head,
+        .context = &eq_a_context,
+        .span = testSpan(),
+    });
+
+    // Constraint: Eq [[Int]] — list of list of Int
+    const int_ty = con0("Int", Known.Type.Int.unique.value);
+    const list_int_args = [_]HType{int_ty};
+    const list_int = HType{ .Con = .{ .name = testName("[]", 99), .args = &list_int_args } };
+    const list_list_int_args = [_]HType{list_int};
+    var constraints = [_]Constraint{.{ .Class = .{
+        .class_name = Known.Class.Eq,
+        .ty = HType{ .Con = .{ .name = testName("[]", 99), .args = &list_list_int_args } },
+        .span = testSpan(),
+    } }};
+
+    try solve(&constraints, alloc, &diags, &class_env);
+    try testing.expect(!diags.hasErrors());
+
+    // Top-level: instance(Eq, [[Int]], context=[...])
+    const ev = constraints[0].Class.evidence orelse return error.TestUnexpectedResult;
+    try testing.expect(ev.* == .instance);
+    try testing.expectEqual(@as(usize, 1), ev.instance.context_evidence.len);
+
+    // Mid-level: instance(Eq, [Int], context=[...])
+    const mid_ev = ev.instance.context_evidence[0];
+    try testing.expect(mid_ev == .instance);
+    try testing.expectEqual(@as(usize, 1), mid_ev.instance.context_evidence.len);
+
+    // Leaf: instance(Eq, Int, context=[])
+    const leaf_ev = mid_ev.instance.context_evidence[0];
+    try testing.expect(leaf_ev == .instance);
+    try testing.expectEqualStrings("Int", leaf_ev.instance.head_ty.Con.name.base);
+    try testing.expectEqual(@as(usize, 0), leaf_ev.instance.context_evidence.len);
+}
+
+test "solve: matchInstanceHead returns substitution for parametric head" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Head: Con([], [Rigid(a)])   Type: Con([], [Con(Int)])
+    const rigid_a = HType{ .Rigid = testName("a", 5000) };
+    const head_args = [_]HType{rigid_a};
+    const head = HType{ .Con = .{ .name = testName("[]", 99), .args = &head_args } };
+    const ty_args = [_]HType{con0("Int", Known.Type.Int.unique.value)};
+    const ty = HType{ .Con = .{ .name = testName("[]", 99), .args = &ty_args } };
+
+    const subst = matchInstanceHead(alloc, ty, head) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), subst.len);
+    try testing.expectEqual(@as(u64, 5000), subst[0].rigid_unique);
+    try testing.expect(subst[0].ty == .Con);
+    try testing.expectEqualStrings("Int", subst[0].ty.Con.name.base);
+}
+
+test "solve: matchInstanceHead rejects mismatched constructor" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Head: Con([], [Rigid(a)])   Type: Con(Maybe, [Con(Int)])
+    const rigid_a = HType{ .Rigid = testName("a", 5000) };
+    const head_args = [_]HType{rigid_a};
+    const head = HType{ .Con = .{ .name = testName("[]", 99), .args = &head_args } };
+    const ty_args = [_]HType{con0("Int", Known.Type.Int.unique.value)};
+    const ty = HType{ .Con = .{ .name = testName("Maybe", 100), .args = &ty_args } };
+
+    try testing.expect(matchInstanceHead(alloc, ty, head) == null);
+}
+
+test "solve: applyRigidSubst replaces rigid variables" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const rigid_a = HType{ .Rigid = testName("a", 5000) };
+    const subst = [_]RigidSubstEntry{.{
+        .rigid_unique = 5000,
+        .ty = con0("Int", Known.Type.Int.unique.value),
+    }};
+
+    const result = try applyRigidSubst(alloc, rigid_a, &subst);
+    try testing.expect(result == .Con);
+    try testing.expectEqualStrings("Int", result.Con.name.base);
+}
+
+test "solve: applyRigidSubst leaves unbound rigids unchanged" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const rigid_b = HType{ .Rigid = testName("b", 6000) };
+    const subst = [_]RigidSubstEntry{.{
+        .rigid_unique = 5000,
+        .ty = con0("Int", Known.Type.Int.unique.value),
+    }};
+
+    const result = try applyRigidSubst(alloc, rigid_b, &subst);
+    try testing.expect(result == .Rigid);
+    try testing.expectEqual(@as(u64, 6000), result.Rigid.unique.value);
+}
+
+test "solve: applyRigidSubst substitutes inside Con args" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Type: Con([], [Rigid(a)])  →  Con([], [Con(Int)])
+    const rigid_a = HType{ .Rigid = testName("a", 5000) };
+    const list_a_args = [_]HType{rigid_a};
+    const list_a = HType{ .Con = .{ .name = testName("[]", 99), .args = &list_a_args } };
+    const subst = [_]RigidSubstEntry{.{
+        .rigid_unique = 5000,
+        .ty = con0("Int", Known.Type.Int.unique.value),
+    }};
+
+    const result = try applyRigidSubst(alloc, list_a, &subst);
+    try testing.expect(result == .Con);
+    try testing.expectEqual(@as(usize, 1), result.Con.args.len);
+    try testing.expect(result.Con.args[0] == .Con);
+    try testing.expectEqualStrings("Int", result.Con.args[0].Con.name.base);
 }
