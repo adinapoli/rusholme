@@ -46,6 +46,7 @@ const diag_mod = @import("../diagnostics/diagnostic.zig");
 const span_mod = @import("../diagnostics/span.zig");
 const type_error_mod = @import("type_error.zig");
 const class_env_mod = @import("class_env.zig");
+const naming_mod = @import("../naming/unique.zig");
 
 pub const HType = htype_mod.HType;
 pub const MetaVar = htype_mod.MetaVar;
@@ -89,6 +90,9 @@ pub const ClassConstraintPayload = struct {
     class_name: class_env_mod.Name,
     ty: HType,
     span: SourceSpan,
+    /// The unique ID of the variable whose instantiation emitted this
+    /// constraint. Used by the desugarer to key evidence back to call sites.
+    var_unique: ?naming_mod.Unique = null,
     /// Filled by the solver after resolution. Null means unresolved.
     evidence: ?*const DictEvidence = null,
 };
@@ -220,13 +224,18 @@ fn solveClassConstraintWithDepth(
     const chased = cc.ty.chase();
 
     // If the type is a rigid (polymorphic context), the constraint becomes
-    // a dictionary parameter — evidence is recorded as `param`. The param
-    // index is not known here; it will be assigned by the caller based on
-    // the constraint's position in the function's constraint list.
+    // a dictionary parameter — evidence is recorded as `param`.
     switch (chased) {
         .Rigid => {
             // Polymorphic: will become a dictionary parameter.
-            // The caller (inferModule) assigns param indices.
+            // The param_index is set to 0 here; the desugarer determines
+            // the actual index from the enclosing function's constraint list.
+            const ev = try alloc.create(DictEvidence);
+            ev.* = .{ .param = .{
+                .param_index = 0,
+                .class_name = cc.class_name,
+            } };
+            cc.evidence = ev;
             return;
         },
         .Meta => {
@@ -993,8 +1002,10 @@ test "solve: class constraint with rigid type defers (no error)" {
 
     try solve(&constraints, alloc, &diags, &class_env);
     try testing.expect(!diags.hasErrors());
-    // No evidence assigned for rigid — it becomes a dictionary parameter.
-    try testing.expect(constraints[0].Class.evidence == null);
+    // Rigid types get DictEvidence.param — they become dictionary parameters.
+    try testing.expect(constraints[0].Class.evidence != null);
+    try testing.expect(constraints[0].Class.evidence.?.* == .param);
+    try testing.expectEqualStrings("Eq", constraints[0].Class.evidence.?.param.class_name.base);
 }
 
 test "solve: mixed Eq and Class constraints both resolved" {
