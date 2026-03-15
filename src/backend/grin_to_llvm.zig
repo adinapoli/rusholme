@@ -1233,11 +1233,78 @@ pub const GrinTranslator = struct {
                 break :blk try self.translateStoreToValue(.{ .ConstTagNode = ctn }, "node") orelse
                     return error.UnsupportedGrinVal;
             },
-            .VarTagNode => {
-                // Variable-tag nodes appear in eval/apply stubs — not yet lowerable.
-                // tracked in: https://github.com/adinapoli/rusholme/issues/410
-                std.debug.print("UnsupportedGrinVal: VarTagNode not yet supported\n", .{});
-                return error.UnsupportedGrinVal;
+            .VarTagNode => |vtn| blk: {
+                // Variable-tag nodes represent partial applications.
+                // The tag_var is a function name, and fields are captured args.
+                // We allocate a heap node with P-tag (partial application marker)
+                // containing the function pointer and captured arguments.
+
+                // Get the function pointer for the tag variable
+                const fn_ptr = try self.translateValToLlvm(.{ .Var = vtn.tag_var });
+
+                // Allocate a partial application node:
+                // - First field: function pointer
+                // - Remaining fields: captured arguments
+                const n_fields: u32 = @intCast(vtn.fields.len + 1); // +1 for fn ptr
+                const ptag_disc: u64 = @as(u64, 0x500) << 48; // 'P' tag marker (partial)
+
+                const rts_alloc_fn = declareRtsAlloc(self.module);
+                var alloc_args = [_]llvm.Value{
+                    c.LLVMConstInt(llvm.i64Type(), @bitCast(ptag_disc), 0),
+                    c.LLVMConstInt(llvm.i32Type(), n_fields, 0),
+                };
+                const node_ptr = c.LLVMBuildCall2(
+                    self.builder,
+                    llvm.getFunctionType(rts_alloc_fn),
+                    rts_alloc_fn,
+                    &alloc_args,
+                    2,
+                    "partial_app",
+                );
+
+                // Store function pointer as first field
+                const rts_store_fn = declareRtsStoreField(self.module);
+                const fn_as_u64 = c.LLVMBuildPtrToInt(self.builder, fn_ptr, llvm.i64Type(), "fn_u64");
+                var store_args = [_]llvm.Value{
+                    node_ptr,
+                    c.LLVMConstInt(llvm.i32Type(), 0, 0),
+                    fn_as_u64,
+                };
+                _ = c.LLVMBuildCall2(
+                    self.builder,
+                    llvm.getFunctionType(rts_store_fn),
+                    rts_store_fn,
+                    &store_args,
+                    3,
+                    "",
+                );
+
+                // Store captured arguments as remaining fields
+                for (vtn.fields, 0..) |field, fi| {
+                    const raw_val = try self.translateValToLlvm(field);
+                    const field_ty = c.LLVMTypeOf(raw_val);
+                    const kind = c.LLVMGetTypeKind(field_ty);
+                    const is_ptr = kind == c.LLVMPointerTypeKind;
+                    const as_u64: llvm.Value = if (is_ptr)
+                        c.LLVMBuildPtrToInt(self.builder, raw_val, llvm.i64Type(), "arg_u64")
+                    else
+                        raw_val;
+                    var field_store_args = [_]llvm.Value{
+                        node_ptr,
+                        c.LLVMConstInt(llvm.i32Type(), @intCast(fi + 1), 0),
+                        as_u64,
+                    };
+                    _ = c.LLVMBuildCall2(
+                        self.builder,
+                        llvm.getFunctionType(rts_store_fn),
+                        rts_store_fn,
+                        &field_store_args,
+                        3,
+                        "",
+                    );
+                }
+
+                break :blk node_ptr;
             },
             .ValTag => |t| blk: {
                 // Bare tag value — emit its discriminant as i64.
