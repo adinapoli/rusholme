@@ -48,6 +48,9 @@ const translate_mod = @import("../grin/translate.zig");
 const grin_ast = @import("../grin/ast.zig");
 const core_ast = @import("../core/ast.zig");
 
+const class_env_mod = @import("../typechecker/class_env.zig");
+const ClassEnv = class_env_mod.ClassEnv;
+
 const ArityMap = std.AutoHashMapUnmanaged(u64, u32);
 const ConMap = std.AutoHashMapUnmanaged(u64, u32);
 
@@ -161,6 +164,11 @@ pub const CompileResult = struct {
     /// inputs, so that user-defined constructors are recognised
     /// across REPL interactions.
     core_data_decls: []const core_ast.CoreDataDecl,
+    /// Class and instance environment from this compilation.
+    /// The REPL session merges this into its persistent ClassEnv
+    /// on successful compilation, so that type class declarations
+    /// and instances accumulate across REPL inputs.
+    class_env: ClassEnv,
 };
 
 /// Errors that can occur during pipeline compilation.
@@ -257,6 +265,9 @@ pub const Pipeline = struct {
     const ModuleResult = struct {
         grin_prog: grin_ast.Program,
         core_data_decls: []const core_ast.CoreDataDecl,
+        /// Class and instance environment from this compilation.
+        /// Ownership is transferred to the caller (stolen from ModuleTypes).
+        class_env: ClassEnv,
     };
 
     pub fn compileModule(
@@ -270,6 +281,7 @@ pub const Pipeline = struct {
         diags: *DiagnosticCollector,
         external_arities: ?*const ArityMap,
         external_con_map: ?*const ConMap,
+        external_class_env: ?*const ClassEnv,
     ) CompileError!ModuleResult {
         const alloc = self.allocator;
 
@@ -303,33 +315,65 @@ pub const Pipeline = struct {
 
         // ── Typecheck ──────────────────────────────────────────────
         var infer_ctx = infer_mod.InferCtx.init(alloc, ty_env, mv_supply, u_supply, diags);
+
+        // Seed the InferCtx with classes/instances from prior REPL inputs
+        // so that instance declarations can reference previously-declared
+        // classes, and constraint resolution can find prior instances.
+        if (external_class_env) |ext_env| {
+            infer_ctx.class_env.mergeFrom(ext_env) catch {
+                return CompileError.OutOfMemory;
+            };
+        }
+
         var module_types = infer_mod.inferModule(&infer_ctx, renamed) catch {
             return CompileError.OutOfMemory;
         };
-        defer module_types.deinit(alloc);
-        if (diags.hasErrors()) return CompileError.CompilationFailed;
+        if (diags.hasErrors()) {
+            module_types.deinit(alloc);
+            return CompileError.CompilationFailed;
+        }
 
         // ── Desugar ────────────────────────────────────────────────
         const core_prog = desugar_mod.desugarModule(alloc, renamed, &module_types, diags, u_supply) catch {
+            module_types.deinit(alloc);
             return CompileError.OutOfMemory;
         };
-        if (diags.hasErrors()) return CompileError.CompilationFailed;
+        if (diags.hasErrors()) {
+            module_types.deinit(alloc);
+            return CompileError.CompilationFailed;
+        }
 
         // ── Lambda lift ────────────────────────────────────────────
         const core_lifted = lift_mod.lambdaLift(alloc, core_prog) catch {
+            module_types.deinit(alloc);
             return CompileError.OutOfMemory;
         };
-        if (diags.hasErrors()) return CompileError.CompilationFailed;
+        if (diags.hasErrors()) {
+            module_types.deinit(alloc);
+            return CompileError.CompilationFailed;
+        }
 
         // ── Translate to GRIN ──────────────────────────────────────
         const grin_prog = translate_mod.translateProgram(alloc, core_lifted, external_arities, external_con_map) catch {
+            module_types.deinit(alloc);
             return CompileError.OutOfMemory;
         };
-        if (diags.hasErrors()) return CompileError.CompilationFailed;
+        if (diags.hasErrors()) {
+            module_types.deinit(alloc);
+            return CompileError.CompilationFailed;
+        }
+
+        // Steal class_env from module_types before deinit — ownership
+        // transfers to the caller so the REPL session can accumulate
+        // class/instance declarations across inputs.
+        const result_class_env = module_types.class_env;
+        module_types.class_env = ClassEnv.init(alloc);
+        module_types.deinit(alloc);
 
         return .{
             .grin_prog = grin_prog,
             .core_data_decls = core_lifted.data_decls,
+            .class_env = result_class_env,
         };
     }
 
@@ -346,6 +390,7 @@ pub const Pipeline = struct {
         diags: *DiagnosticCollector,
         external_arities: ?*const ArityMap,
         external_con_map: ?*const ConMap,
+        external_class_env: ?*const ClassEnv,
     ) CompileError!CompileResult {
         const alloc = self.allocator;
         const file_id: FileId = 0;
@@ -374,10 +419,10 @@ pub const Pipeline = struct {
             var decl_diags = DiagnosticCollector.init();
             defer decl_diags.deinit(alloc);
 
-            if (self.compileModule(decl_source, file_id, u_supply, rename_env, ty_env, mv_supply, &decl_diags, external_arities, external_con_map)) |result| {
+            if (self.compileModule(decl_source, file_id, u_supply, rename_env, ty_env, mv_supply, &decl_diags, external_arities, external_con_map, external_class_env)) |result| {
                 // Copy any diagnostics from the attempt
                 try copyDiagnostics(alloc, &decl_diags, diags);
-                return .{ .program = result.grin_prog, .kind = decl_kind, .core_data_decls = result.core_data_decls };
+                return .{ .program = result.grin_prog, .kind = decl_kind, .core_data_decls = result.core_data_decls, .class_env = result.class_env };
             } else |_| {
                 // Declaration attempt failed — preserve its diagnostics
                 // before trying as expression
@@ -399,10 +444,10 @@ pub const Pipeline = struct {
             self.last_source = expr_source;
             self.last_input_kind = .expression;
 
-            if (self.compileModule(expr_source, file_id, u_supply, rename_env, ty_env, mv_supply, diags, external_arities, external_con_map)) |result| {
+            if (self.compileModule(expr_source, file_id, u_supply, rename_env, ty_env, mv_supply, diags, external_arities, external_con_map, external_class_env)) |result| {
                 // Expression succeeded — clear declaration diagnostics.
                 clearLeadingDiags(alloc, diags, decl_diag_count);
-                return .{ .program = result.grin_prog, .kind = .expression, .core_data_decls = result.core_data_decls };
+                return .{ .program = result.grin_prog, .kind = .expression, .core_data_decls = result.core_data_decls, .class_env = result.class_env };
             } else |_| {
                 // Both attempts failed. Keep whichever diagnostics came
                 // from the later pipeline stage (more informative).
@@ -461,6 +506,7 @@ test "pipeline: compile simple literal expression" {
         &diags,
         null,
         null,
+        null,
     );
 
     try testing.expect(result.program.defs.len > 0);
@@ -492,6 +538,7 @@ test "pipeline: compile data declaration" {
         &ty_env,
         &mv_supply,
         &diags,
+        null,
         null,
         null,
     );
@@ -526,6 +573,7 @@ test "pipeline: compile function declaration" {
         &ty_env,
         &mv_supply,
         &diags,
+        null,
         null,
         null,
     );
@@ -645,6 +693,7 @@ test "pipeline: handle let prefix in declarations" {
         &ty_env,
         &mv_supply,
         &diags,
+        null,
         null,
         null,
     );

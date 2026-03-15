@@ -74,6 +74,7 @@ pub fn typeOf(
         &diags,
         &session.accumulated_arities,
         &session.accumulated_con_map,
+        &session.accumulated_class_env,
     ) catch |err| {
         // Capture compilation context for diagnostic rendering.
         session.last_source = session.pipeline.last_source;

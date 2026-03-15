@@ -51,6 +51,8 @@ const Note = diag_mod.Note;
 
 const grin_ast = @import("../grin/ast.zig");
 const translate_mod = @import("../grin/translate.zig");
+const class_env_mod = @import("../typechecker/class_env.zig");
+const ClassEnv = class_env_mod.ClassEnv;
 
 // ── Result types ──────────────────────────────────────────────────────
 
@@ -139,6 +141,12 @@ pub const Session = struct {
     // (e.g. `Red` is treated as a nullary constructor, not a variable).
     accumulated_con_map: std.AutoHashMapUnmanaged(u64, u32),
 
+    // Accumulated class and instance declarations from successful inputs.
+    // Seeded into each new InferCtx so that type classes declared in prior
+    // REPL inputs are available for instance resolution and constraint
+    // solving in subsequent inputs.
+    accumulated_class_env: ClassEnv,
+
     /// Create a new REPL session with initialised compiler state.
     pub fn init(allocator: Allocator, io: std.Io) SessionError!Session {
         var u_supply = UniqueSupply{};
@@ -176,12 +184,14 @@ pub const Session = struct {
             .accumulated_defs = .{},
             .accumulated_arities = .{},
             .accumulated_con_map = .{},
+            .accumulated_class_env = ClassEnv.init(allocator),
         };
     }
 
     /// Release all session resources.
     pub fn deinit(self: *Session) void {
         // GrinEngine has no deinit; only JitEngine does.
+        self.accumulated_class_env.deinit();
         self.accumulated_con_map.deinit(self.allocator);
         self.accumulated_arities.deinit(self.allocator);
         self.last_diagnostics.deinit(self.allocator);
@@ -225,7 +235,7 @@ pub const Session = struct {
         var diags = DiagnosticCollector.init();
         defer diags.deinit(self.allocator);
 
-        const result = self.pipeline.compileInput(
+        var result = self.pipeline.compileInput(
             input,
             &self.u_supply,
             &self.rename_env,
@@ -234,6 +244,7 @@ pub const Session = struct {
             &diags,
             &self.accumulated_arities,
             &self.accumulated_con_map,
+            &self.accumulated_class_env,
         ) catch |err| {
             // Capture compilation context for diagnostic rendering.
             self.last_source = self.pipeline.last_source;
@@ -302,6 +313,17 @@ pub const Session = struct {
                     );
                 }
             }
+
+            // Replace the accumulated class env with the result's env.
+            // The result's class_env was seeded from accumulated_class_env
+            // before inference, so it contains all prior entries plus any
+            // new class/instance declarations from this input.  Swapping
+            // avoids the duplicate-instance problem that mergeFrom would
+            // cause (#557).
+            self.accumulated_class_env.deinit();
+            self.accumulated_class_env = result.class_env;
+            // Invalidate the stolen field so no one double-frees.
+            result.class_env = ClassEnv.init(self.allocator);
         }
 
         return .{
