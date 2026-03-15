@@ -947,7 +947,7 @@ pub fn inferPat(ctx: *InferCtx, sig_vars: ?*const TypeVarMap, pat: RPat) std.mem
         .Lit => |l| inferLit(l, ctx),
         .Wild => ctx.freshMeta(),
         .AsPat => |ap| blk: {
-            const inner_ty = try inferPat(ctx, ap.pat.*);
+            const inner_ty = try inferPat(ctx, sig_vars, ap.pat.*);
             try ctx.env.bindMono(ap.name, inner_ty.*);
             try ctx.local_binders.put(ctx.alloc, ap.name.unique, inner_ty);
             break :blk inner_ty;
@@ -965,7 +965,7 @@ pub fn inferPat(ctx: *InferCtx, sig_vars: ?*const TypeVarMap, pat: RPat) std.mem
             var inst_ty = try ctx.alloc_ty(inst_res.ty);
 
             for (c.args) |arg_pat| {
-                const arg_ty = try inferPat(ctx, arg_pat);
+                const arg_ty = try inferPat(ctx, sig_vars, arg_pat);
                 const fun_arg = try ctx.freshMeta();
                 const fun_res = try ctx.freshMeta();
                 const fun_node = try ctx.alloc_ty(HType{ .Fun = .{ .arg = fun_arg, .res = fun_res } });
@@ -983,7 +983,7 @@ pub fn inferPat(ctx: *InferCtx, sig_vars: ?*const TypeVarMap, pat: RPat) std.mem
 
             var elem_tys = std.ArrayListUnmanaged(HType){};
             for (pats) |p| {
-                const pt = try inferPat(ctx, p);
+                const pt = try inferPat(ctx, sig_vars, p);
                 try elem_tys.append(ctx.alloc, pt.*);
             }
             const args = try elem_tys.toOwnedSlice(ctx.alloc);
@@ -1000,7 +1000,7 @@ pub fn inferPat(ctx: *InferCtx, sig_vars: ?*const TypeVarMap, pat: RPat) std.mem
         .List => |pats| blk: {
             const elem_ty = try ctx.freshMeta();
             for (pats) |p| {
-                const pt = try inferPat(ctx, p);
+                const pt = try inferPat(ctx, sig_vars, p);
                 // Get span from pattern for better error messages
                 const pat_span = switch (p) {
                     .Var => |v| v.span,
@@ -1016,8 +1016,8 @@ pub fn inferPat(ctx: *InferCtx, sig_vars: ?*const TypeVarMap, pat: RPat) std.mem
             break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
         },
         .InfixCon => |ic| blk: {
-            const left_ty = try inferPat(ctx, ic.left.*);
-            const right_ty = try inferPat(ctx, ic.right.*);
+            const left_ty = try inferPat(ctx, sig_vars, ic.left.*);
+            const right_ty = try inferPat(ctx, sig_vars, ic.right.*);
             const elem_ty = try ctx.freshMeta();
             const list_args = try ctx.alloc.dupe(HType, &.{elem_ty.*});
             const list_ty = try ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = list_args } });
@@ -1026,7 +1026,7 @@ pub fn inferPat(ctx: *InferCtx, sig_vars: ?*const TypeVarMap, pat: RPat) std.mem
             break :blk list_ty;
         },
         .Negate => |inner| blk: {
-            const inner_ty = try inferPat(ctx, inner.*);
+            const inner_ty = try inferPat(ctx, sig_vars, inner.*);
             const int_node = try ctx.alloc_ty(intTy());
             // Get span from inner pattern
             const inner_span = switch (inner.*) {
@@ -1040,7 +1040,7 @@ pub fn inferPat(ctx: *InferCtx, sig_vars: ?*const TypeVarMap, pat: RPat) std.mem
             try ctx.unifyNow(inner_ty, int_node, inner_span);
             break :blk int_node;
         },
-        .Paren => |inner| inferPat(ctx, inner.*),
+        .Paren => |inner| inferPat(ctx, sig_vars, inner.*),
         .RecPat => |rp| blk: {
             // For M1, treat record patterns like constructor patterns
             // The constructor is looked up and each field pattern is inferred
@@ -1058,7 +1058,7 @@ pub fn inferPat(ctx: *InferCtx, sig_vars: ?*const TypeVarMap, pat: RPat) std.mem
             // Infer each field pattern
             for (rp.fields) |f| {
                 if (f.pat) |p| {
-                    const pat_ty = try inferPat(ctx, p.*);
+                    const pat_ty = try inferPat(ctx, sig_vars, p.*);
                     // For now, we can't do much with the field - we don't know
                     // the record's field types without more structural info.
                     // This is a limitation, but should allow basic patterns to work.
@@ -1249,7 +1249,8 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                         const sig_entry = sigs.get(fb.name.unique);
 
                         for (fb.equations) |eq| {
-                            const eq_ty = try inferMatch(ctx, eq);
+                            const sig_vars: ?*const TypeVarMap = if (sig_entry) |s| &s.rigid_map else null;
+                            const eq_ty = try inferMatch(ctx, sig_vars, eq);
 
                             if (sig_entry) |s| {
                                 // If there's a signature, unify the inferred type against it.
@@ -1284,7 +1285,7 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                     },
                     .PatBind => |pb| {
                         const rhs_ty = try inferRhs(ctx, pb.rhs);
-                        const pat_ty = try inferPat(ctx, pb.pattern);
+                        const pat_ty = try inferPat(ctx, null, pb.pattern);
                         try ctx.unifyNow(rhs_ty, pat_ty, pb.span);
                     },
                     .TypeSig => {},
@@ -1346,7 +1347,7 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
             for (c.alts) |alt| {
                 try ctx.env.push();
                 defer ctx.env.pop();
-                const pat_ty = try inferPat(ctx, alt.pattern);
+                const pat_ty = try inferPat(ctx, null, alt.pattern);
                 try ctx.unifyNow(scrut_ty, pat_ty, alt.span);
                 const rhs_ty = try inferRhs(ctx, alt.rhs);
                 try ctx.unifyNow(rhs_ty, result_ty, alt.span);
@@ -1648,7 +1649,7 @@ fn inferRhs(ctx: *InferCtx, rhs: RRhs) std.mem.Allocator.Error!*HType {
                         },
                         .PatGuard => |pg| {
                             const action_ty = try infer(ctx, pg.expr);
-                            const pat_ty = try inferPat(ctx, pg.pat);
+                            const pat_ty = try inferPat(ctx, null, pg.pat);
                             // Get span from pattern and expression
                             const action_span = getExprSpan(pg.expr);
                             const pat_span = getPatSpan(&pg.pat);
@@ -1673,7 +1674,7 @@ fn inferStmt(ctx: *InferCtx, stmt: RStmt) std.mem.Allocator.Error!*HType {
     return switch (stmt) {
         .Generator => |g| blk: {
             const action_ty = try infer(ctx, g.expr);
-            const pat_ty = try inferPat(ctx, g.pat);
+            const pat_ty = try inferPat(ctx, null, g.pat);
             const monad_pat = try monadTy(ctx, pat_ty);
             // Use action expression span for better diagnostics
             const action_span = getExprSpan(g.expr);
@@ -1788,8 +1789,9 @@ fn inferLetDecl(
             try ctx.env.bindMono(fb.name, fun_node.*);
 
             // Infer each equation and unify *through* fun_node.
+            const sig_vars: ?*const TypeVarMap = if (sig) |s| &s.rigid_map else null;
             for (fb.equations) |eq| {
-                const eq_ty = try inferMatch(ctx, eq);
+                const eq_ty = try inferMatch(ctx, sig_vars, eq);
                 try ctx.unifyNow(fun_node, eq_ty, fb.span);
             }
 
@@ -1817,7 +1819,7 @@ fn inferLetDecl(
         },
         .PatBind => |pb| {
             const rhs_ty = try inferRhs(ctx, pb.rhs);
-            const pat_ty = try inferPat(ctx, pb.pattern);
+            const pat_ty = try inferPat(ctx, if (sig) |s| &s.rigid_map else null, pb.pattern);
             try ctx.unifyNow(rhs_ty, pat_ty, pb.span);
         },
         .TypeSig => {
@@ -1849,7 +1851,7 @@ fn inferMatch(ctx: *InferCtx, sig_vars: ?*const TypeVarMap, match: RMatch) std.m
 
     var param_tys = std.ArrayListUnmanaged(*HType){};
     for (match.patterns) |pat| {
-        try param_tys.append(ctx.alloc, try inferPat(ctx, pat));
+        try param_tys.append(ctx.alloc, try inferPat(ctx, sig_vars, pat));
     }
 
     const rhs_ty = try inferRhs(ctx, match.rhs);
@@ -2134,7 +2136,8 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
                 const sig_entry = sigs.get(fb.name.unique);
 
                 for (fb.equations) |eq| {
-                    const eq_ty = try inferMatch(ctx, eq);
+                    const sig_vars: ?*const TypeVarMap = if (sig_entry) |s| &s.rigid_map else null;
+                    const eq_ty = try inferMatch(ctx, sig_vars, eq);
 
                     if (sig_entry) |s| {
                         // If there's a signature, unify the inferred type against it.
@@ -2169,7 +2172,7 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
             },
             .PatBind => |pb| {
                 const rhs_ty = try inferRhs(ctx, pb.rhs);
-                const pat_ty = try inferPat(ctx, pb.pattern);
+                const pat_ty = try inferPat(ctx, null, pb.pattern);
                 try ctx.unifyNow(rhs_ty, pat_ty, pb.span);
             },
             .TypeSig => {},
