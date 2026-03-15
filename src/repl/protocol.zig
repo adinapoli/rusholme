@@ -57,11 +57,18 @@ test "protocol: Status enum has expected variants" {
 // ── Operations ────────────────────────────────────────────────────────
 
 /// Evaluate a REPL input through the protocol.
+///
+/// Memory ownership:
+/// - On success: `value` is owned by the session and valid for the session's lifetime.
+/// - On failure: `value` is arena-allocated from the session's allocator and cleaned
+///   up when the session is deinitialized. Callers using arena allocation need not free.
 pub fn evaluate(allocator: Allocator, session: *Session, input: []const u8) !ProtocolResult {
+    _ = allocator; // Session allocator is used for all allocations
+
     // Delegate to Session.eval which handles expression vs declaration
     const session_result = session.eval(input) catch |err| {
         // On error, return error status with diagnostics
-        var diags = session.getDiagnosticsForInput(allocator, input) catch &.{};
+        var diags = session.getDiagnosticsForInput(session.allocator, input) catch &.{};
 
         // Build error result - if no diagnostics, capture what we can from the error
         if (diags.len > 0) {
@@ -74,7 +81,8 @@ pub fn evaluate(allocator: Allocator, session: *Session, input: []const u8) !Pro
 
         // No diagnostics available — format the error itself so the user
         // gets something more useful than a generic "evaluation failed".
-        const msg = std.fmt.allocPrint(allocator, "Runtime error: {s} while evaluating: {s}", .{ @errorName(err), input }) catch "evaluation failed";
+        // Use session allocator so cleanup happens at session deinit.
+        const msg = std.fmt.allocPrint(session.allocator, "Runtime error: {s} while evaluating: {s}", .{ @errorName(err), input }) catch "evaluation failed";
         return ProtocolResult{
             .status = .failed,
             .value = msg,
@@ -98,10 +106,17 @@ pub fn getDiagnostics(session: *Session) []const Diagnostic {
 }
 
 /// Get the type of a REPL expression through the protocol.
+///
+/// Memory ownership:
+/// - On success: `value` is owned by the session and valid for the session's lifetime.
+/// - On failure: `value` is arena-allocated from the session's allocator and cleaned
+///   up when the session is deinitialized. Callers using arena allocation need not free.
 pub fn typeOf(allocator: Allocator, session: *Session, input: []const u8) !ProtocolResult {
-    const query_result = typequery.typeOf(allocator, session, input) catch |err| {
+    _ = allocator; // Session allocator is used for all allocations
+
+    const query_result = typequery.typeOf(session.allocator, session, input) catch |err| {
         // On error, return error status with diagnostics
-        var diags = session.getDiagnosticsForInput(allocator, input) catch &.{};
+        var diags = session.getDiagnosticsForInput(session.allocator, input) catch &.{};
 
         // Get the first diagnostic's error message (or fall back to error name)
         if (diags.len > 0) {
@@ -112,7 +127,8 @@ pub fn typeOf(allocator: Allocator, session: *Session, input: []const u8) !Proto
             };
         }
 
-        const msg = std.fmt.allocPrint(allocator, "Type checking failed: {s}", .{@errorName(err)}) catch "type checking failed";
+        // Use session allocator so cleanup happens at session deinit.
+        const msg = std.fmt.allocPrint(session.allocator, "Type checking failed: {s}", .{@errorName(err)}) catch "type checking failed";
         return ProtocolResult{
             .status = .failed,
             .value = msg,
