@@ -53,6 +53,8 @@ const grin_ast = @import("../grin/ast.zig");
 const translate_mod = @import("../grin/translate.zig");
 const class_env_mod = @import("../typechecker/class_env.zig");
 const ClassEnv = class_env_mod.ClassEnv;
+const desugar_mod = @import("../core/desugar.zig");
+const DictNameMap = desugar_mod.DesugarCtx.DictNameMap;
 
 // ── Result types ──────────────────────────────────────────────────────
 
@@ -147,6 +149,12 @@ pub const Session = struct {
     // solving in subsequent inputs.
     accumulated_class_env: ClassEnv,
 
+    // Accumulated dictionary name mappings from desugaring.
+    // Maps (class_unique, head_type_name) → dictionary Name.
+    // Persisted so that dictionary evidence resolution in subsequent
+    // REPL inputs can find dictionaries declared in prior inputs (#578).
+    accumulated_dict_names: DictNameMap,
+
     /// Create a new REPL session with initialised compiler state.
     pub fn init(allocator: Allocator, io: std.Io) SessionError!Session {
         var u_supply = UniqueSupply{};
@@ -185,12 +193,14 @@ pub const Session = struct {
             .accumulated_arities = .{},
             .accumulated_con_map = .{},
             .accumulated_class_env = ClassEnv.init(allocator),
+            .accumulated_dict_names = .empty,
         };
     }
 
     /// Release all session resources.
     pub fn deinit(self: *Session) void {
         // GrinEngine has no deinit; only JitEngine does.
+        self.accumulated_dict_names.deinit(self.allocator);
         self.accumulated_class_env.deinit();
         self.accumulated_con_map.deinit(self.allocator);
         self.accumulated_arities.deinit(self.allocator);
@@ -245,6 +255,7 @@ pub const Session = struct {
             &self.accumulated_arities,
             &self.accumulated_con_map,
             &self.accumulated_class_env,
+            &self.accumulated_dict_names,
         ) catch |err| {
             // Capture compilation context for diagnostic rendering.
             self.last_source = self.pipeline.last_source;
@@ -324,6 +335,14 @@ pub const Session = struct {
             self.accumulated_class_env = result.class_env;
             // Invalidate the stolen field so no one double-frees.
             result.class_env = ClassEnv.init(self.allocator);
+
+            // Replace accumulated dict_names with the result's map.
+            // The result's dict_names was seeded from accumulated_dict_names
+            // before desugaring, so it contains all prior entries plus any
+            // new dictionary bindings from this input (#578).
+            self.accumulated_dict_names.deinit(self.allocator);
+            self.accumulated_dict_names = result.dict_names;
+            result.dict_names = .empty;
         }
 
         return .{

@@ -704,6 +704,41 @@ test "repl: multiple classes accumulate across inputs (#557)" {
     }
 }
 
+test "repl: typeclass method call across inputs compiles (#578)" {
+    // Regression test for #578: calling a typeclass method defined in a
+    // prior REPL input must compile without error. Previously this caused
+    // a segfault because:
+    //   1. dict_names were not persisted, so the desugarer assigned fresh
+    //      uniques to dictionary references, and
+    //   2. Zero-arity dictionary defs had void return type but were
+    //      forward-declared with ptr return type in expression modules.
+    //   3. Class method selectors were not eta-expanded, triggering
+    //      over-application to the undefined `apply` function.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Input 1: Define a custom class
+    _ = try session.processInput("class ShowIt a where\n  showIt :: a -> String");
+
+    // Input 2: Define a data type
+    _ = try session.processInput("data A = MkA");
+
+    // Input 3: Define an instance
+    _ = try session.processInput("instance ShowIt A where\n  showIt MkA = \"MkA\"");
+
+    // Input 4: Call the class method — previously segfaulted at 0x0.
+    // Verify that compilation succeeds (the expression is recognised).
+    const r4 = try session.processInput("showIt MkA");
+    try testing.expect(r4.compile.kind == .expression);
+    try testing.expect(r4.compile.program.defs.len > 0);
+}
+
 test "repl: load file with comments then evaluate main (issue #494)" {
     // Reproduces the browser REPL scenario with a file containing
     // comments and blank lines — typical of a real .hs file.

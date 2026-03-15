@@ -51,6 +51,8 @@ const core_ast = @import("../core/ast.zig");
 const class_env_mod = @import("../typechecker/class_env.zig");
 const ClassEnv = class_env_mod.ClassEnv;
 
+const DictNameMap = desugar_mod.DesugarCtx.DictNameMap;
+
 const ArityMap = std.AutoHashMapUnmanaged(u64, u32);
 const ConMap = std.AutoHashMapUnmanaged(u64, u32);
 
@@ -169,6 +171,11 @@ pub const CompileResult = struct {
     /// on successful compilation, so that type class declarations
     /// and instances accumulate across REPL inputs.
     class_env: ClassEnv,
+    /// Dictionary name map from desugaring. Maps
+    /// (class_unique, head_type_name) → dictionary Name.
+    /// The REPL session persists this so that dictionary evidence
+    /// resolution can find dictionaries from prior inputs (#578).
+    dict_names: DictNameMap,
 };
 
 /// Errors that can occur during pipeline compilation.
@@ -268,6 +275,8 @@ pub const Pipeline = struct {
         /// Class and instance environment from this compilation.
         /// Ownership is transferred to the caller (stolen from ModuleTypes).
         class_env: ClassEnv,
+        /// Dictionary name map from desugaring.
+        dict_names: DictNameMap,
     };
 
     pub fn compileModule(
@@ -282,6 +291,7 @@ pub const Pipeline = struct {
         external_arities: ?*const ArityMap,
         external_con_map: ?*const ConMap,
         external_class_env: ?*const ClassEnv,
+        external_dict_names: ?*const DictNameMap,
     ) CompileError!ModuleResult {
         const alloc = self.allocator;
 
@@ -334,7 +344,7 @@ pub const Pipeline = struct {
         }
 
         // ── Desugar ────────────────────────────────────────────────
-        const core_prog = desugar_mod.desugarModule(alloc, renamed, &module_types, diags, u_supply) catch {
+        const desugar_result = desugar_mod.desugarModule(alloc, renamed, &module_types, diags, u_supply, external_dict_names) catch {
             module_types.deinit(alloc);
             return CompileError.OutOfMemory;
         };
@@ -344,7 +354,7 @@ pub const Pipeline = struct {
         }
 
         // ── Lambda lift ────────────────────────────────────────────
-        const core_lifted = lift_mod.lambdaLift(alloc, core_prog) catch {
+        const core_lifted = lift_mod.lambdaLift(alloc, desugar_result.program) catch {
             module_types.deinit(alloc);
             return CompileError.OutOfMemory;
         };
@@ -374,6 +384,7 @@ pub const Pipeline = struct {
             .grin_prog = grin_prog,
             .core_data_decls = core_lifted.data_decls,
             .class_env = result_class_env,
+            .dict_names = desugar_result.dict_names,
         };
     }
 
@@ -391,6 +402,7 @@ pub const Pipeline = struct {
         external_arities: ?*const ArityMap,
         external_con_map: ?*const ConMap,
         external_class_env: ?*const ClassEnv,
+        external_dict_names: ?*const DictNameMap,
     ) CompileError!CompileResult {
         const alloc = self.allocator;
         const file_id: FileId = 0;
@@ -419,10 +431,10 @@ pub const Pipeline = struct {
             var decl_diags = DiagnosticCollector.init();
             defer decl_diags.deinit(alloc);
 
-            if (self.compileModule(decl_source, file_id, u_supply, rename_env, ty_env, mv_supply, &decl_diags, external_arities, external_con_map, external_class_env)) |result| {
+            if (self.compileModule(decl_source, file_id, u_supply, rename_env, ty_env, mv_supply, &decl_diags, external_arities, external_con_map, external_class_env, external_dict_names)) |result| {
                 // Copy any diagnostics from the attempt
                 try copyDiagnostics(alloc, &decl_diags, diags);
-                return .{ .program = result.grin_prog, .kind = decl_kind, .core_data_decls = result.core_data_decls, .class_env = result.class_env };
+                return .{ .program = result.grin_prog, .kind = decl_kind, .core_data_decls = result.core_data_decls, .class_env = result.class_env, .dict_names = result.dict_names };
             } else |_| {
                 // Declaration attempt failed — preserve its diagnostics
                 // before trying as expression
@@ -444,10 +456,10 @@ pub const Pipeline = struct {
             self.last_source = expr_source;
             self.last_input_kind = .expression;
 
-            if (self.compileModule(expr_source, file_id, u_supply, rename_env, ty_env, mv_supply, diags, external_arities, external_con_map, external_class_env)) |result| {
+            if (self.compileModule(expr_source, file_id, u_supply, rename_env, ty_env, mv_supply, diags, external_arities, external_con_map, external_class_env, external_dict_names)) |result| {
                 // Expression succeeded — clear declaration diagnostics.
                 clearLeadingDiags(alloc, diags, decl_diag_count);
-                return .{ .program = result.grin_prog, .kind = .expression, .core_data_decls = result.core_data_decls, .class_env = result.class_env };
+                return .{ .program = result.grin_prog, .kind = .expression, .core_data_decls = result.core_data_decls, .class_env = result.class_env, .dict_names = result.dict_names };
             } else |_| {
                 // Both attempts failed. Keep whichever diagnostics came
                 // from the later pipeline stage (more informative).
@@ -507,6 +519,7 @@ test "pipeline: compile simple literal expression" {
         null,
         null,
         null,
+        null,
     );
 
     try testing.expect(result.program.defs.len > 0);
@@ -538,6 +551,7 @@ test "pipeline: compile data declaration" {
         &ty_env,
         &mv_supply,
         &diags,
+        null,
         null,
         null,
         null,
@@ -573,6 +587,7 @@ test "pipeline: compile function declaration" {
         &ty_env,
         &mv_supply,
         &diags,
+        null,
         null,
         null,
         null,
@@ -693,6 +708,7 @@ test "pipeline: handle let prefix in declarations" {
         &ty_env,
         &mv_supply,
         &diags,
+        null,
         null,
         null,
         null,

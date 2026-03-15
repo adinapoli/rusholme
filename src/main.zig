@@ -457,7 +457,8 @@ fn cmdCore(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     }
 
     // ── Desugar ────────────────────────────────────────────────────────
-    const core_prog = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags, &u_supply);
+    const desugar_result = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags, &u_supply, null);
+    const core_prog = desugar_result.program;
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
@@ -542,7 +543,8 @@ fn cmdGrin(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     }
 
     // ── Desugar ────────────────────────────────────────────────────────
-    const core_prog = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags, &u_supply);
+    const desugar_result = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags, &u_supply, null);
+    const core_prog = desugar_result.program;
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
@@ -641,7 +643,8 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     }
 
     // ── Desugar ────────────────────────────────────────────────────────
-    const core_prog = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags, &u_supply);
+    const desugar_result = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags, &u_supply, null);
+    const core_prog = desugar_result.program;
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);

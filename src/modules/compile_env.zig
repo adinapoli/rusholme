@@ -391,13 +391,15 @@ pub const CompileEnv = struct {
         if (self.diags.hasErrors()) return null;
 
         // ── Desugar ──────────────────────────────────────────────────────
-        const core_prog = try desugar_mod.desugarModule(
+        const desugar_result = try desugar_mod.desugarModule(
             self.alloc,
             renamed,
             &module_types,
             &self.diags,
             &self.u_supply,
+            null,
         );
+        const core_prog = desugar_result.program;
         if (self.diags.hasErrors()) return null;
 
         // ── Build interface ───────────────────────────────────────────────

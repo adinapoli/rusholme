@@ -117,19 +117,40 @@ fn schemeToCore(alloc: std.mem.Allocator, scheme: env_mod.TyScheme) !ast_mod.Cor
     return ty;
 }
 
+/// Result of desugaring a module.
+pub const DesugarResult = struct {
+    /// The desugared Core program.
+    program: ast_mod.CoreProgram,
+    /// Dictionary name map accumulated during desugaring.
+    /// Maps (class_unique, head_type_name) → dictionary Name.
+    /// The REPL session persists this across inputs so that
+    /// dictionary evidence resolution can find dictionaries
+    /// declared in prior inputs (#578).
+    dict_names: DesugarCtx.DictNameMap,
+};
+
 pub fn desugarModule(
     alloc: std.mem.Allocator,
     module: renamer_mod.RenamedModule,
     module_types: *const infer_mod.ModuleTypes,
     diags: *DiagnosticCollector,
     u_supply: *naming_mod.UniqueSupply,
-) std.mem.Allocator.Error!ast_mod.CoreProgram {
+    external_dict_names: ?*const DesugarCtx.DictNameMap,
+) std.mem.Allocator.Error!DesugarResult {
     var ctx = DesugarCtx{
         .alloc = alloc,
         .types = module_types,
         .diags = diags,
         .u_supply = u_supply,
     };
+
+    // Seed with dictionary names from prior REPL inputs so that
+    // evidence resolution can find dictionaries declared earlier.
+    if (external_dict_names) |ext| {
+        for (ext.keys(), ext.values()) |key, val| {
+            try ctx.dict_names.put(alloc, key, val);
+        }
+    }
 
     // Build evidence map from solved constraints so the expression desugarer
     // can look up dictionary evidence for each variable use site.
@@ -332,9 +353,12 @@ pub fn desugarModule(
         }
     }
 
-    return ast_mod.CoreProgram{
-        .data_decls = try data_decls.toOwnedSlice(alloc),
-        .binds = try binds.toOwnedSlice(alloc),
+    return DesugarResult{
+        .program = ast_mod.CoreProgram{
+            .data_decls = try data_decls.toOwnedSlice(alloc),
+            .binds = try binds.toOwnedSlice(alloc),
+        },
+        .dict_names = ctx.dict_names,
     };
 }
 
@@ -442,15 +466,67 @@ fn desugarClassDecl(
             };
         }
 
-        // The body of the case alternative: just reference field_i
-        const selected_field = try alloc.create(ast_mod.Expr);
-        selected_field.* = ast_mod.Expr{ .Var = field_binders[method_idx] };
+        // Eta-expand the selector to the full method arity.
+        //
+        // Without eta-expansion, `showIt = \dict -> case dict of { ... -> f0 }`
+        // has arity 1 (just the dict param). But `showIt dict MkA` passes 2
+        // arguments, triggering the over-application path which emits a call
+        // to `apply` — a function that is not yet defined in the runtime.
+        //
+        // With eta-expansion: `showIt = \dict x0 -> case dict of { ... -> f0 x0 }`
+        // has arity 2, matching the call site and avoiding over-application.
+        // This is how GHC generates dictionary selectors.
 
-        // The case alternative: MkDict$Class f0 f1 ... -> f_i
+        // Count the method's own arity from its type (number of Fun arrows).
+        const method_arity = countFunArity(method.ty);
+
+        // Create fresh binders for the eta-expanded parameters.
+        var eta_binders = try alloc.alloc(ast_mod.Id, method_arity);
+        {
+            var remaining_ty = method.ty;
+            for (0..method_arity) |ei| {
+                const chased = remaining_ty.chase();
+                const arg_core_ty = switch (chased) {
+                    .Fun => |f| try f.arg.toCore(alloc),
+                    else => ast_mod.CoreType{ .TyCon = .{ .name = Known.Type.Unit, .args = &.{} } },
+                };
+                eta_binders[ei] = ast_mod.Id{
+                    .name = Name{
+                        .base = try std.fmt.allocPrint(alloc, "x{d}", .{ei}),
+                        .unique = ctx.u_supply.fresh(),
+                    },
+                    .ty = arg_core_ty,
+                    .span = cd.span,
+                };
+                remaining_ty = switch (chased) {
+                    .Fun => |f| f.res.*,
+                    else => remaining_ty,
+                };
+            }
+        }
+
+        // Build the case body: apply the extracted field to eta params.
+        // `f_i x0 x1 ...`
+        var case_body: *const ast_mod.Expr = blk: {
+            const v = try alloc.create(ast_mod.Expr);
+            v.* = ast_mod.Expr{ .Var = field_binders[method_idx] };
+            break :blk v;
+        };
+        for (eta_binders) |eb| {
+            const arg_expr = try alloc.create(ast_mod.Expr);
+            arg_expr.* = ast_mod.Expr{ .Var = eb };
+            const app_expr = try alloc.create(ast_mod.Expr);
+            app_expr.* = ast_mod.Expr{
+                .App = .{ .fn_expr = case_body, .arg = arg_expr, .span = cd.span },
+            };
+            case_body = app_expr;
+        }
+
+        // The case alternative: MkDict$Class f0 f1 ... -> f_i x0 x1 ...
         const alt = ast_mod.Alt{
             .con = .{ .DataAlt = dict_con_name },
             .binders = field_binders,
-            .body = selected_field,
+            .body = case_body,
         };
 
         // The dict parameter binder
@@ -473,24 +549,57 @@ fn desugarClassDecl(
         const scrutinee = try alloc.create(ast_mod.Expr);
         scrutinee.* = ast_mod.Expr{ .Var = dict_param_id };
 
+        // Result type is the return type after all eta params are applied.
+        const result_core_ty = blk: {
+            var ty = method.ty;
+            for (0..method_arity) |_| {
+                const chased = ty.chase();
+                ty = switch (chased) {
+                    .Fun => |f| f.res.*,
+                    else => break,
+                };
+            }
+            break :blk try ty.toCore(alloc);
+        };
+
         // Case expression
         const case_expr = try alloc.create(ast_mod.Expr);
         case_expr.* = ast_mod.Expr{
             .Case = .{
                 .scrutinee = scrutinee,
                 .binder = dict_param_id,
-                .ty = try method.ty.toCore(alloc),
+                .ty = result_core_ty,
                 .alts = try alloc.dupe(ast_mod.Alt, &.{alt}),
                 .span = cd.span,
             },
         };
 
-        // Lambda: \dict -> case dict of ...
+        // Build the lambda chain: \dict -> \x0 -> \x1 -> ... -> case ...
+        // Start from the innermost (case expr) and wrap with eta params
+        // from right to left, then add the dict param outermost.
+        var body_expr: *const ast_mod.Expr = case_expr;
+        {
+            var i = method_arity;
+            while (i > 0) {
+                i -= 1;
+                const lam = try alloc.create(ast_mod.Expr);
+                lam.* = ast_mod.Expr{
+                    .Lam = .{
+                        .binder = eta_binders[i],
+                        .body = body_expr,
+                        .span = cd.span,
+                    },
+                };
+                body_expr = lam;
+            }
+        }
+
+        // Outermost lambda: \dict -> ...
         const lam_expr = try alloc.create(ast_mod.Expr);
         lam_expr.* = ast_mod.Expr{
             .Lam = .{
                 .binder = dict_param_id,
-                .body = case_expr,
+                .body = body_expr,
                 .span = cd.span,
             },
         };
@@ -971,6 +1080,29 @@ fn findEvidenceForVar(
 /// Count the number of top-level function arrows in a Core type.
 /// `Int -> Int -> Bool` has arity 2.
 /// `forall a. a -> a` has arity 1 (skips ForAllTy).
+/// Count the number of `Fun` arrows in an HType.
+///
+/// For `a -> b -> c` this returns 2. Used to determine how many
+/// extra parameters a class method selector needs for eta-expansion.
+fn countFunArity(ty: htype_mod.HType) u32 {
+    var count: u32 = 0;
+    var current = ty;
+    while (true) {
+        const chased = current.chase();
+        switch (chased) {
+            .Fun => |f| {
+                count += 1;
+                current = f.res.*;
+            },
+            .ForAll => |fa| {
+                current = fa.body.*;
+            },
+            else => break,
+        }
+    }
+    return count;
+}
+
 fn countFunctionArity(ty: ast_mod.CoreType) u32 {
     var count: u32 = 0;
     var current = ty;
