@@ -151,7 +151,8 @@ fn pipelineToCore(allocator: std.mem.Allocator, source: []const u8) ![]const u8 
     if (diags.hasErrors()) return error.TypecheckError;
 
     // ── Desugar ──────────────────────────────────────────────────────────
-    const core_prog = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags, &u_supply);
+    const desugar_result = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags, &u_supply, null);
+    const core_prog = desugar_result.program;
     if (diags.hasErrors()) return error.DesugarError;
 
     // ── Pretty-print Core to a heap string ───────────────────────────────

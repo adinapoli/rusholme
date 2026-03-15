@@ -713,9 +713,15 @@ pub const GrinTranslator = struct {
         // this stage and all heap values are pointers.
         const is_entry = self.isEntryPoint(def.name.base);
         const is_repl_entry = if (self.repl_entry_point) |ep| std.mem.eql(u8, def.name.base, ep) else false;
+        const is_repl_mode = self.repl_entry_point != null;
         const has_params = def.params.len > 0;
         const value_type = if (is_entry) (if (is_repl_entry) llvm.i64Type() else llvm.i32Type()) else ptrType();
-        const ret_type = if (is_entry) value_type else if (has_params) value_type else llvm.voidType();
+        // In REPL mode, all non-entry functions (including zero-arity ones
+        // like dictionary bindings) return ptr so that cross-module forward
+        // declarations via the ORC linker match (#578).
+        // In batch mode, zero-arity non-entry functions return void (original
+        // behaviour) since the batch linker resolves them differently.
+        const ret_type = if (is_entry) value_type else if (has_params or is_repl_mode) value_type else llvm.voidType();
 
         // Parameter types: i32 for main (no params), ptr for all others.
         var param_types: [8]llvm.Type = undefined;
@@ -752,8 +758,12 @@ pub const GrinTranslator = struct {
         //   - REPL entry points return `i64` (raw value or heap pointer)
         //   - Native `main` falls through to the void/unit path below
         //
-        // See: https://github.com/adinapuli/rusholme/issues/449
-        if ((!is_entry and has_params) or is_repl_entry) {
+        // In REPL mode, zero-parameter functions (e.g. dictionary bindings
+        // like dict$ShowIt$A) must also return their value so cross-module
+        // references via the ORC linker work correctly (#578).
+        //
+        // See: https://github.com/adinapoli/rusholme/issues/449
+        if ((!is_entry and (has_params or is_repl_mode)) or is_repl_entry) {
             const body_val = try self.translateExprToValue(def.body, "result");
             const current_bb = c.LLVMGetInsertBlock(self.builder);
             if (current_bb != null and c.LLVMGetBasicBlockTerminator(current_bb) == null) {
