@@ -1832,7 +1832,7 @@ fn inferLetDecl(
 /// Infer the type of a single match equation `p₁ … pₙ = rhs`.
 ///
 /// Returns `τ₁ → … → τₙ → τ_rhs`.
-fn inferMatch(ctx: *InferCtx, match: RMatch) std.mem.Allocator.Error!*HType {
+fn inferMatch(ctx: *InferCtx, sig_vars: ?*const TypeVarMap, match: RMatch) std.mem.Allocator.Error!*HType {
     try ctx.env.push();
     defer ctx.env.pop();
 
