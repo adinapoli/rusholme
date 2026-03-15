@@ -688,7 +688,6 @@ fn skolemiseSignature(
 ) std.mem.Allocator.Error!SkolemiseResult {
     var skolem_ids = std.ArrayListUnmanaged(u64){};
     var scope = TypeVarMap{};
-    defer scope.deinit(ctx.alloc);
 
     switch (ast_ty) {
         .Forall => |fa| {
@@ -719,7 +718,7 @@ fn skolemiseSignature(
                 .ty = body,
                 .skolem_ids = try skolem_ids.toOwnedSlice(ctx.alloc),
                 .constraints = constraints,
-                .rigid_map = .{},
+                .rigid_map = scope,
             };
         },
         else => {
@@ -741,7 +740,7 @@ fn skolemiseSignature(
                 .ty = ty,
                 .skolem_ids = try skolem_ids.toOwnedSlice(ctx.alloc),
                 .constraints = &.{},
-                .rigid_map = .{},
+                .rigid_map = scope,
             };
         },
     }
