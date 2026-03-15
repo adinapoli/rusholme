@@ -654,6 +654,10 @@ const SkolemiseResult = struct {
     /// Converted from AST `Assertion`s to `ClassConstraint`s with resolved
     /// class names and skolemised type arguments.
     constraints: []const ClassConstraint,
+    /// Map from type variable names (e.g., "a", "b") to their rigid HType pointers.
+    /// Used during pattern inference to ensure pattern variables use the same
+    /// type variables from the signature instead of fresh metas.
+    rigid_map: TypeVarMap,
 };
 
 /// Skolemise a type signature for bidirectional signature checking.
@@ -711,6 +715,7 @@ fn skolemiseSignature(
                 .ty = body,
                 .skolem_ids = try skolem_ids.toOwnedSlice(ctx.alloc),
                 .constraints = constraints,
+                .rigid_map = .{},
             };
         },
         else => {
@@ -732,6 +737,7 @@ fn skolemiseSignature(
                 .ty = ty,
                 .skolem_ids = try skolem_ids.toOwnedSlice(ctx.alloc),
                 .constraints = &.{},
+                .rigid_map = .{},
             };
         },
     }
