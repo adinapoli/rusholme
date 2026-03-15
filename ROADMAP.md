@@ -398,6 +398,8 @@
 | [#381](https://github.com/adinapoli/rusholme/issues/381) | Epic: GRIN to LLVM Translation - Compiler Path to M1 | [#55](https://github.com/adinapoli/rusholme/issues/55) | :white_circle: |
 | [#396](https://github.com/adinapoli/rusholme/issues/396) | Research: Zig LLVM bitcode compatibility with llvm-link | [#57](https://github.com/adinapoli/rusholme/issues/57) | :white_circle: |
 | [#572](https://github.com/adinapoli/rusholme/issues/572) | Implement tuple codegen in GRIN-to-LLVM backend | [#381](https://github.com/adinapoli/rusholme/issues/381) | :white_circle: |
+| [#573](https://github.com/adinapoli/rusholme/issues/573) | GRIN backend: polymorphic Prelude functions produce broken codegen | [#529](https://github.com/adinapoli/rusholme/issues/529) | :white_circle: |
+| [#569](https://github.com/adinapoli/rusholme/issues/569) | GRIN/LLVM backend: support dictionary-passing in codegen | [#556](https://github.com/adinapoli/rusholme/issues/556) | :white_circle: |
 
 ### Epic [#515](https://github.com/adinapoli/rusholme/issues/515): Support Laziness (Call-by-Need Evaluation)
 
@@ -406,9 +408,9 @@
 | [#502](https://github.com/adinapoli/rusholme/issues/502) | Simple peano number program segfaults | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
 | [#516](https://github.com/adinapoli/rusholme/issues/516) | Lazy let bindings (call-by-need for let-bound variables) | [#502](https://github.com/adinapoli/rusholme/issues/502) | :green_circle: |
 | [#517](https://github.com/adinapoli/rusholme/issues/517) | Lazy function arguments (thunk non-constructor call arguments) | [#516](https://github.com/adinapoli/rusholme/issues/516) | :green_circle: |
-| [#518](https://github.com/adinapoli/rusholme/issues/518) | Lazy non-App constructor arguments (Case/Bind chain thunking) | [#517](https://github.com/adinapoli/rusholme/issues/517) | :yellow_circle: |
+| [#518](https://github.com/adinapoli/rusholme/issues/518) | Lazy non-App constructor arguments (Case/Bind chain thunking) | [#517](https://github.com/adinapoli/rusholme/issues/517) | :green_circle: |
 | [#545](https://github.com/adinapoli/rusholme/issues/545) | LLVM backend: force F-tagged thunks in native compiler path | [#517](https://github.com/adinapoli/rusholme/issues/517) | :green_circle: |
-| [#546](https://github.com/adinapoli/rusholme/issues/546) | Lazy arguments for partial/over-saturated/higher-order applications | [#517](https://github.com/adinapoli/rusholme/issues/517) | :yellow_circle: |
+| [#546](https://github.com/adinapoli/rusholme/issues/546) | Lazy arguments for partial/over-saturated/higher-order applications | [#517](https://github.com/adinapoli/rusholme/issues/517) | :green_circle: |
 | [#549](https://github.com/adinapoli/rusholme/issues/549) | Lazy wrapping for primop arguments | [#545](https://github.com/adinapoli/rusholme/issues/545) | :white_circle: |
 | [#551](https://github.com/adinapoli/rusholme/issues/551) | Lazy arguments for higher-order function applications | [#546](https://github.com/adinapoli/rusholme/issues/546) | :white_circle: |
 
@@ -444,13 +446,15 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | [#528](https://github.com/adinapoli/rusholme/issues/528) | Write `lib/Prelude.hs` with basic types and functions (no type classes) | [#527](https://github.com/adinapoli/rusholme/issues/527) | :green_circle: |
 | [#529](https://github.com/adinapoli/rusholme/issues/529) | Bootstrap Prelude: compile `lib/Prelude.hs` and wire into implicit import | [#527](https://github.com/adinapoli/rusholme/issues/527), [#528](https://github.com/adinapoli/rusholme/issues/528) | :green_circle: |
 | [#530](https://github.com/adinapoli/rusholme/issues/530) | Implement dictionary-passing translation for type classes | — | :green_circle: |
-| [#531](https://github.com/adinapoli/rusholme/issues/531) | Add type class definitions and instances to `lib/Prelude.hs` | [#528](https://github.com/adinapoli/rusholme/issues/528), [#529](https://github.com/adinapoli/rusholme/issues/529), [#530](https://github.com/adinapoli/rusholme/issues/530) | :yellow_circle: |
+| [#531](https://github.com/adinapoli/rusholme/issues/531) | Add type class definitions and instances to `lib/Prelude.hs` | [#528](https://github.com/adinapoli/rusholme/issues/528), [#529](https://github.com/adinapoli/rusholme/issues/529), [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#555](https://github.com/adinapoli/rusholme/issues/555) | Implement default method compilation for type classes | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#556](https://github.com/adinapoli/rusholme/issues/556) | Insert dictionary arguments at type class method call sites | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#557](https://github.com/adinapoli/rusholme/issues/557) | Persist ClassEnv across REPL inputs in session state | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#578](https://github.com/adinapoli/rusholme/issues/578) | Fix JIT segfault when calling typeclass methods across REPL inputs | [#557](https://github.com/adinapoli/rusholme/issues/557) | :yellow_circle: |
 | [#558](https://github.com/adinapoli/rusholme/issues/558) | Implement recursive instance context constraint resolution | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#559](https://github.com/adinapoli/rusholme/issues/559) | Support class constraints in user-written type signatures | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
+| [#566](https://github.com/adinapoli/rusholme/issues/566) | Typechecker: support declaration-order-independent inference | — | :white_circle: |
+| [#567](https://github.com/adinapoli/rusholme/issues/567) | Parser: support parenthesised-pattern LHS in function bindings | — | :white_circle: |
 
 ### Epic [#14](https://github.com/adinapoli/rusholme/issues/14): Memory Management (Arena → Immix GC)
 
