@@ -177,6 +177,34 @@ pub const ClassEnv = struct {
         }
         return &.{};
     }
+
+    /// Merge all classes and instances from `other` into `self`.
+    ///
+    /// Classes are copied by unique ID (existing entries are overwritten).
+    /// Instances are appended to the existing instance list for each class.
+    ///
+    /// Used by the REPL to seed a fresh `InferCtx.class_env` with
+    /// classes/instances accumulated from prior inputs, and to merge
+    /// newly-declared classes/instances back into the session state.
+    pub fn mergeFrom(self: *ClassEnv, other: *const ClassEnv) !void {
+        // Merge class declarations.
+        var class_it = other.classes.iterator();
+        while (class_it.next()) |entry| {
+            try self.classes.put(self.alloc, entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        // Merge instance declarations.
+        var inst_it = other.instances.iterator();
+        while (inst_it.next()) |entry| {
+            const gop = try self.instances.getOrPut(self.alloc, entry.key_ptr.*);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = .empty;
+            }
+            for (entry.value_ptr.items) |inst| {
+                try gop.value_ptr.append(self.alloc, inst);
+            }
+        }
+    }
 };
 
 // ── Tests ─────────────────────────────────────────────────────────────

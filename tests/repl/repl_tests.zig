@@ -592,6 +592,118 @@ test "repl: multi-declaration load then evaluate main (issue #494 reproducer)" {
     try testing.expectEqual(Status.silent, main_result.status);
 }
 
+// ── Test: ClassEnv persistence across REPL inputs (#557, #571) ────────
+
+test "repl: class declaration persists for instance in next input (#557)" {
+    // Regression test for #557: ClassEnv was not persisted across REPL
+    // inputs, so a class declared in one input was invisible to instance
+    // declarations in subsequent inputs. The fix seeds each new InferCtx
+    // from the session's accumulated ClassEnv.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Input 1: Define a custom class
+    const class_result = session.processInput("class Describe a where\n  describe :: a -> String");
+    if (class_result) |r| {
+        try testing.expect(r.compile.kind == .declaration);
+    } else |err| {
+        std.debug.panic("Class declaration failed: {}", .{err});
+    }
+
+    // Input 2: Define an instance of that class — this requires the
+    // class to be in the ClassEnv from the prior input.
+    const instance_result = session.processInput("instance Describe Bool where\n  describe True = \"yes\"\n  describe False = \"no\"");
+    if (instance_result) |r| {
+        try testing.expect(r.compile.kind == .declaration);
+    } else |err| {
+        std.debug.panic("Instance declaration failed (ClassEnv not persisted?): {}", .{err});
+    }
+}
+
+test "repl: class and instance in same input, used in next input (#557)" {
+    // Define a class and instance together, then use the class method
+    // in a subsequent expression. Tests that both the class and its
+    // instances are available for constraint solving in later inputs.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Input 1: Define class + instance together
+    const decl_result = session.processInput(
+        "class Describe a where\n  describe :: a -> String\n\ninstance Describe Bool where\n  describe True = \"yes\"\n  describe False = \"no\"",
+    );
+    if (decl_result) |r| {
+        try testing.expect(r.compile.kind == .declaration);
+    } else |err| {
+        std.debug.panic("Class+instance declaration failed: {}", .{err});
+    }
+
+    // Input 2: Use the class method — requires ClassEnv persistence
+    // so that the constraint solver can find the Describe Bool instance.
+    const expr_result = session.processInput("describe True");
+    if (expr_result) |r| {
+        try testing.expect(r.compile.kind == .expression);
+    } else |err| {
+        std.debug.panic("Expression using class method failed (ClassEnv not persisted?): {}", .{err});
+    }
+}
+
+test "repl: multiple classes accumulate across inputs (#557)" {
+    // Ensure that multiple class declarations across separate inputs
+    // all persist and don't overwrite each other.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Input 1: Define first class
+    const class1 = session.processInput("class Foo a where\n  foo :: a -> Int");
+    if (class1) |r| {
+        try testing.expect(r.compile.kind == .declaration);
+    } else |err| {
+        std.debug.panic("First class declaration failed: {}", .{err});
+    }
+
+    // Input 2: Define second class
+    const class2 = session.processInput("class Bar a where\n  bar :: a -> String");
+    if (class2) |r| {
+        try testing.expect(r.compile.kind == .declaration);
+    } else |err| {
+        std.debug.panic("Second class declaration failed: {}", .{err});
+    }
+
+    // Input 3: Instance for first class — must still be in ClassEnv
+    const inst1 = session.processInput("instance Foo Bool where\n  foo True = 1\n  foo False = 0");
+    if (inst1) |r| {
+        try testing.expect(r.compile.kind == .declaration);
+    } else |err| {
+        std.debug.panic("Instance for Foo failed (first class lost?): {}", .{err});
+    }
+
+    // Input 4: Instance for second class — must also still be in ClassEnv
+    const inst2 = session.processInput("instance Bar Bool where\n  bar True = \"true\"\n  bar False = \"false\"");
+    if (inst2) |r| {
+        try testing.expect(r.compile.kind == .declaration);
+    } else |err| {
+        std.debug.panic("Instance for Bar failed (second class lost?): {}", .{err});
+    }
+}
+
 test "repl: load file with comments then evaluate main (issue #494)" {
     // Reproduces the browser REPL scenario with a file containing
     // comments and blank lines — typical of a real .hs file.
