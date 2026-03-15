@@ -638,6 +638,10 @@ const TypeSigEntry = struct {
     /// Class constraints from the type signature (e.g. `Eq a =>`).
     /// These become `TyScheme.constraints` directly.
     constraints: []const ClassConstraint,
+    /// Map from type variable names to their rigid HType pointers from skolemisation.
+    /// Used during pattern inference to maintain type variable consistency across
+    /// patterns in the same signature.
+    rigid_map: TypeVarMap,
 };
 
 // ── Skolemisation ──────────────────────────────────────────────────────
@@ -1732,6 +1736,7 @@ fn collectLetSigs(
                 .loc = ts.span,
                 .skolem_ids = skolem_result.skolem_ids,
                 .constraints = skolem_result.constraints,
+                .rigid_map = skolem_result.rigid_map,
             });
         }
     }
@@ -1895,6 +1900,7 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
                     .loc = ts.span,
                     .skolem_ids = skolem_result.skolem_ids,
                     .constraints = skolem_result.constraints,
+                    .rigid_map = skolem_result.rigid_map,
                 });
             }
         } else if (decl == .ForeignPrim) {
@@ -1910,6 +1916,7 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
                 .loc = fp.span,
                 .skolem_ids = skolem_result.skolem_ids,
                 .constraints = skolem_result.constraints,
+                .rigid_map = skolem_result.rigid_map,
             });
         }
     }
