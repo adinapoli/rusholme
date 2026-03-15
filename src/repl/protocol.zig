@@ -29,6 +29,8 @@ pub const ProtocolResult = struct {
     /// Operation status.
     status: Status,
     /// Formatted result value (empty for errors and silent operations).
+    /// Always session-owned — valid for the session's lifetime. Callers
+    /// must not free this.
     value: []const u8,
     /// Diagnostics from the operation (empty on success).
     diagnostics: []const Diagnostic,
@@ -74,7 +76,9 @@ pub fn evaluate(allocator: Allocator, session: *Session, input: []const u8) !Pro
 
         // No diagnostics available — format the error itself so the user
         // gets something more useful than a generic "evaluation failed".
-        const msg = std.fmt.allocPrint(allocator, "Runtime error: {s} while evaluating: {s}", .{ @errorName(err), input }) catch "evaluation failed";
+        // Allocate via the session so the string has the same lifetime as
+        // all other ProtocolResult.value strings (session-owned, #503).
+        const msg = std.fmt.allocPrint(session.allocator, "Runtime error: {s} while evaluating: {s}", .{ @errorName(err), input }) catch "evaluation failed";
         return ProtocolResult{
             .status = .failed,
             .value = msg,
@@ -112,7 +116,9 @@ pub fn typeOf(allocator: Allocator, session: *Session, input: []const u8) !Proto
             };
         }
 
-        const msg = std.fmt.allocPrint(allocator, "Type checking failed: {s}", .{@errorName(err)}) catch "type checking failed";
+        // Allocate via the session so the string has the same lifetime as
+        // all other ProtocolResult.value strings (session-owned, #503).
+        const msg = std.fmt.allocPrint(session.allocator, "Type checking failed: {s}", .{@errorName(err)}) catch "type checking failed";
         return ProtocolResult{
             .status = .failed,
             .value = msg,
@@ -167,7 +173,28 @@ test "protocol: evaluate handles errors with diagnostics" {
     var session = try Session.init(alloc, testing_io);
     defer session.deinit();
 
-    // Error: undefined variable should return failed status
+    // Error: undefined variable should return failed status.
+    // The returned value is session-owned (allocated via session.allocator)
+    // and must not be freed by the caller (#503).
     const result = try evaluate(alloc, &session, "undefined_var");
     try testing.expectEqual(Status.failed, result.status);
+}
+
+test "protocol: error result value is session-owned and survives across calls" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = try Session.init(alloc, testing_io);
+    defer session.deinit();
+
+    // Trigger an error — the value string must be session-owned (#503).
+    const err_result = try evaluate(alloc, &session, "undefined_var");
+    try testing.expectEqual(Status.failed, err_result.status);
+
+    // A subsequent successful evaluation must not invalidate the error
+    // value, since both are session-owned with session lifetime.
+    const ok_result = try evaluate(alloc, &session, "42");
+    try testing.expectEqual(Status.success, ok_result.status);
+    try testing.expectEqualStrings("42", ok_result.value);
 }
