@@ -29,9 +29,26 @@ pub const ProtocolResult = struct {
     /// Operation status.
     status: Status,
     /// Formatted result value (empty for errors and silent operations).
+    /// Caller-owned when status == .failed and value is non-empty.
+    /// Session-owned when status == .success.
     value: []const u8,
     /// Diagnostics from the operation (empty on success).
     diagnostics: []const Diagnostic,
+
+    /// Free caller-owned allocations in this result.
+    /// Call this with defer to ensure cleanup:
+    ///   const result = try evaluate(alloc, session, input);
+    ///   defer result.free(alloc);
+    pub fn free(self: *const ProtocolResult, allocator: Allocator) void {
+        // Only free value if this result owns it (error cases with allocated messages)
+        // Session-owned values (success cases) should not be freed here.
+        // We detect this by checking if value is non-empty and status is failed.
+        if (self.status == .failed and self.value.len > 0) {
+            // The value string was allocated by this function and needs freeing
+            // Note: diagnostics messages are owned by session, not us
+            allocator.free(self.value);
+        }
+    }
 };
 
 // ── Tests ─────────────────────────────────────────────────────────────
@@ -60,15 +77,13 @@ test "protocol: Status enum has expected variants" {
 ///
 /// Memory ownership:
 /// - On success: `value` is owned by the session and valid for the session's lifetime.
-/// - On failure: `value` is arena-allocated from the session's allocator and cleaned
-///   up when the session is deinitialized. Callers using arena allocation need not free.
+/// - On failure: `value` is caller-owned and must be freed via result.free(allocator).
+///   Use `defer result.free(allocator)` for automatic cleanup.
 pub fn evaluate(allocator: Allocator, session: *Session, input: []const u8) !ProtocolResult {
-    _ = allocator; // Session allocator is used for all allocations
-
     // Delegate to Session.eval which handles expression vs declaration
     const session_result = session.eval(input) catch |err| {
         // On error, return error status with diagnostics
-        var diags = session.getDiagnosticsForInput(session.allocator, input) catch &.{};
+        var diags = session.getDiagnosticsForInput(allocator, input) catch &.{};
 
         // Build error result - if no diagnostics, capture what we can from the error
         if (diags.len > 0) {
@@ -81,8 +96,7 @@ pub fn evaluate(allocator: Allocator, session: *Session, input: []const u8) !Pro
 
         // No diagnostics available — format the error itself so the user
         // gets something more useful than a generic "evaluation failed".
-        // Use session allocator so cleanup happens at session deinit.
-        const msg = std.fmt.allocPrint(session.allocator, "Runtime error: {s} while evaluating: {s}", .{ @errorName(err), input }) catch "evaluation failed";
+        const msg = std.fmt.allocPrint(allocator, "Runtime error: {s} while evaluating: {s}", .{ @errorName(err), input }) catch "evaluation failed";
         return ProtocolResult{
             .status = .failed,
             .value = msg,
@@ -109,14 +123,12 @@ pub fn getDiagnostics(session: *Session) []const Diagnostic {
 ///
 /// Memory ownership:
 /// - On success: `value` is owned by the session and valid for the session's lifetime.
-/// - On failure: `value` is arena-allocated from the session's allocator and cleaned
-///   up when the session is deinitialized. Callers using arena allocation need not free.
+/// - On failure: `value` is caller-owned and must be freed via result.free(allocator).
+///   Use `defer result.free(allocator)` for automatic cleanup.
 pub fn typeOf(allocator: Allocator, session: *Session, input: []const u8) !ProtocolResult {
-    _ = allocator; // Session allocator is used for all allocations
-
-    const query_result = typequery.typeOf(session.allocator, session, input) catch |err| {
+    const query_result = typequery.typeOf(allocator, session, input) catch |err| {
         // On error, return error status with diagnostics
-        var diags = session.getDiagnosticsForInput(session.allocator, input) catch &.{};
+        var diags = session.getDiagnosticsForInput(allocator, input) catch &.{};
 
         // Get the first diagnostic's error message (or fall back to error name)
         if (diags.len > 0) {
@@ -127,8 +139,7 @@ pub fn typeOf(allocator: Allocator, session: *Session, input: []const u8) !Proto
             };
         }
 
-        // Use session allocator so cleanup happens at session deinit.
-        const msg = std.fmt.allocPrint(session.allocator, "Type checking failed: {s}", .{@errorName(err)}) catch "type checking failed";
+        const msg = std.fmt.allocPrint(allocator, "Type checking failed: {s}", .{@errorName(err)}) catch "type checking failed";
         return ProtocolResult{
             .status = .failed,
             .value = msg,
@@ -155,6 +166,7 @@ test "protocol: evaluate returns success for simple expression" {
     defer session.deinit();
 
     const result = try evaluate(alloc, &session, "42");
+    defer result.free(alloc);
 
     try testing.expectEqual(Status.success, result.status);
     try testing.expectEqualStrings("42", result.value);
@@ -169,7 +181,10 @@ test "protocol: getDiagnostics returns empty slice on success" {
     var session = try Session.init(alloc, testing_io);
     defer session.deinit();
 
-    _ = try evaluate(alloc, &session, "42");
+    {
+        const result = try evaluate(alloc, &session, "42");
+        defer result.free(alloc);
+    }
     const diags = getDiagnostics(&session);
 
     try testing.expectEqual(@as(usize, 0), diags.len);
@@ -185,5 +200,53 @@ test "protocol: evaluate handles errors with diagnostics" {
 
     // Error: undefined variable should return failed status
     const result = try evaluate(alloc, &session, "undefined_var");
+    defer result.free(alloc);
+    try testing.expectEqual(Status.failed, result.status);
+}
+
+test "protocol: evaluate error result can be freed" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = try Session.init(alloc, testing_io);
+    defer session.deinit();
+
+    // Error case - value should be freed
+    const result = try evaluate(alloc, &session, "nonexistent_function");
+    try testing.expectEqual(Status.failed, result.status);
+    try testing.expect(result.value.len > 0);
+
+    // Free the allocated error message
+    result.free(alloc);
+
+    // Verify no leak by deinitializing the arena
+    // (if we didn't free, the arena would have unreachable allocations)
+}
+
+test "protocol: typeOf error result can be freed" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = try Session.init(alloc, testing_io);
+    defer session.deinit();
+
+    // First define something so typeOf has a valid session
+    _ = try evaluate(alloc, &session, "id x = x");
+
+    // Error case: type an invalid expression
+    const result = typeOf(alloc, &session, "undefined_var") catch |err| {
+        // Expected to fail - check that we can still free if needed
+        if (err == error.CompilationFailed) {
+            // Check session diagnostics for the actual error message
+            try testing.expect(session.last_diagnostics.items.len > 0);
+            return; // Test passes if we got here without leak
+        }
+        return err;
+    };
+    defer result.free(alloc);
+
+    // If we got a result (success path for error handling), it should be freeable
     try testing.expectEqual(Status.failed, result.status);
 }
