@@ -925,7 +925,7 @@ fn inferLit(lit: @import("../frontend/ast.zig").Literal, ctx: *InferCtx) std.mem
 
 /// Infer the type introduced by a pattern, binding new names into the env.
 /// Returns a pointer to the arena-allocated type the pattern matches against.
-pub fn inferPat(ctx: *InferCtx, pat: RPat) std.mem.Allocator.Error!*HType {
+pub fn inferPat(ctx: *InferCtx, sig_vars: ?*const TypeVarMap, pat: RPat) std.mem.Allocator.Error!*HType {
     return switch (pat) {
         .Var => |v| blk: {
             const ty = try ctx.freshMeta();
