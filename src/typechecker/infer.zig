@@ -928,7 +928,18 @@ fn inferLit(lit: @import("../frontend/ast.zig").Literal, ctx: *InferCtx) std.mem
 pub fn inferPat(ctx: *InferCtx, sig_vars: ?*const TypeVarMap, pat: RPat) std.mem.Allocator.Error!*HType {
     return switch (pat) {
         .Var => |v| blk: {
-            const ty = try ctx.freshMeta();
+            var ty: *HType = undefined;
+            
+            if (sig_vars) |scope| {
+                if (scope.get(v.name.base)) |rigid_ty| {
+                    ty = rigid_ty;  // Use signature's rigid type
+                } else {
+                    ty = try ctx.freshMeta();  // Backward compatible: fresh meta
+                }
+            } else {
+                ty = try ctx.freshMeta();  // Backward compatible: fresh meta
+            }
+            
             try ctx.env.bindMono(v.name, ty.*);
             try ctx.local_binders.put(ctx.alloc, v.name.unique, ty);
             break :blk ty;
