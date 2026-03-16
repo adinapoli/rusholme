@@ -227,3 +227,21 @@ test "typequery: type error diagnostics captured (#514)" {
     // so the caller can render them instead of showing a generic error message
     try testing.expect(session.last_diagnostics.items.len > 0);
 }
+
+test "typequery: class method shows constraint (#582)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = try Session.init(alloc, testing.io);
+    defer session.deinit();
+
+    // Define a type class with a method
+    _ = try session.processInput("class ShowIt a where\n  showIt :: a -> String");
+
+    // Query the type of the method — must include the class constraint
+    const result = try typeOf(alloc, &session, "showIt");
+    defer alloc.free(result.display);
+
+    try testing.expectEqualStrings("showIt :: forall a. ShowIt a => a -> [Char]", result.display);
+}
