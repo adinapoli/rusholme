@@ -527,7 +527,7 @@ pub fn prettyScheme(scheme: anytype, alloc: std.mem.Allocator) std.mem.Allocator
                 if (ci > 0) try buf.appendSlice(alloc, ", ");
                 try buf.appendSlice(alloc, constraint.class_name.base);
                 try buf.append(alloc, ' ');
-                const ty_str = try prettyPrecSubst(constraint.ty, alloc, PREC_CON_ARG, &subst);
+                const ty_str = try prettyPrecSubst(constraint.ty.*, alloc, PREC_CON_ARG, &subst);
                 try buf.appendSlice(alloc, ty_str);
             }
             if (constraints.len > 1) try buf.append(alloc, ')');
@@ -1037,9 +1037,10 @@ test "prettyScheme: constrained — forall a. ShowIt a => a -> [Char]" {
     const span_mod = @import("../diagnostics/span.zig");
     const invalid_pos = span_mod.SourcePos.invalid();
     const invalid_span = span_mod.SourceSpan.init(invalid_pos, invalid_pos);
+    const constraint_ty = HType{ .Rigid = a };
     var constraints = [_]class_env_mod.ClassConstraint{.{
         .class_name = testName("ShowIt", 99),
-        .ty = HType{ .Rigid = a },
+        .ty = &constraint_ty,
         .span = invalid_span,
     }};
     const scheme = env_mod.TyScheme{
