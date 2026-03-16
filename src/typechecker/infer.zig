@@ -364,6 +364,10 @@ pub fn generalisePtr(
 
     var binder_ids = std.ArrayListUnmanaged(u64){};
 
+    // Map from meta ID → rigid type, so we can substitute in constraints.
+    var meta_to_rigid = std.AutoHashMapUnmanaged(u32, *HType){};
+    defer meta_to_rigid.deinit(ctx.alloc);
+
     var it = ty_metas.keyIterator();
     while (it.next()) |meta_id_ptr| {
         const meta_id = meta_id_ptr.*;
@@ -375,12 +379,42 @@ pub fn generalisePtr(
 
         solveMetaInTree(ty_node, meta_id, rigid_ty);
         try binder_ids.append(ctx.alloc, rigid_name.unique.value);
+        try meta_to_rigid.put(ctx.alloc, meta_id, rigid_ty);
+    }
+
+    // Collect class constraints that mention generalised variables.
+    // When a polymorphic scheme is instantiated (Var case in infer), the
+    // constraints are accumulated in ctx.wanted_constraints with fresh
+    // metavar copies. Those copies share the same .id as the metas in
+    // the type, but are separate structs — solveMetaInTree doesn't reach
+    // them. We match by meta ID and substitute the rigid type.
+    var constraints = std.ArrayListUnmanaged(ClassConstraint){};
+    for (ctx.wanted_constraints.items) |wc| {
+        switch (wc) {
+            .Class => |cc| {
+                const chased = cc.ty.*.chase();
+                switch (chased) {
+                    .Meta => |mv| {
+                        if (meta_to_rigid.get(mv.id)) |rigid_ty| {
+                            try constraints.append(ctx.alloc, .{
+                                .class_name = cc.class_name,
+                                .ty = rigid_ty,
+                                .span = cc.span,
+                            });
+                        }
+                    },
+                    else => {},
+                }
+            },
+            .Eq => {},
+        }
     }
 
     const binders = try binder_ids.toOwnedSlice(ctx.alloc);
+    const scheme_constraints = try constraints.toOwnedSlice(ctx.alloc);
     // Chase ty_node to the root so that the scheme body does not contain an
     // intermediate Meta that instantiateType would leave unresolved.
-    return TyScheme{ .binders = binders, .constraints = &.{}, .body = ty_node.chase() };
+    return TyScheme{ .binders = binders, .constraints = scheme_constraints, .body = ty_node.chase() };
 }
 
 /// Mutate every unsolved meta with `id == target_id` in the tree rooted
@@ -712,7 +746,7 @@ fn convertContextToConstraints(
 
         try result.append(ctx.alloc, .{
             .class_name = class_info.name,
-            .ty = asserted_ty.*,
+            .ty = asserted_ty,
             .span = span,
         });
     }
@@ -1882,9 +1916,11 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
                     // Register the method in TyEnv with a constrained TyScheme.
                     // The scheme is: forall a. ClassName a => method_type
                     const constraint = try ctx.alloc.alloc(ClassConstraint, 1);
+                    const constraint_ty = try ctx.alloc.create(HType);
+                    constraint_ty.* = .{ .Rigid = tyvar_rigid_name };
                     constraint[0] = .{
                         .class_name = cd.name,
-                        .ty = .{ .Rigid = tyvar_rigid_name },
+                        .ty = constraint_ty,
                         .span = cd.span,
                     };
                     const binders = try ctx.alloc.alloc(u64, 1);
@@ -1924,7 +1960,7 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
                         try ctx.freshMeta();
                     context[i] = .{
                         .class_name = assertion.class_name,
-                        .ty = asserted_ty.*,
+                        .ty = asserted_ty,
                         .span = id_decl.span,
                     };
                 }
@@ -2939,7 +2975,7 @@ test "skolemiseSignature: forall with Eq constraint produces ClassConstraint" {
     try testing.expectEqualStrings("Eq", result.constraints[0].class_name.base);
 
     // The constrained type should be a Rigid matching the skolem.
-    try testing.expect(result.constraints[0].ty == .Rigid);
+    try testing.expect(result.constraints[0].ty.* == .Rigid);
     try testing.expectEqual(result.skolem_ids[0], result.constraints[0].ty.Rigid.unique.value);
 }
 

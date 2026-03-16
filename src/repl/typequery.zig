@@ -227,3 +227,28 @@ test "typequery: type error diagnostics captured (#514)" {
     // so the caller can render them instead of showing a generic error message
     try testing.expect(session.last_diagnostics.items.len > 0);
 }
+
+test "typequery: class method shows constraint (#582)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = try Session.init(alloc, testing.io);
+    defer session.deinit();
+
+    // Define a type class with a method
+    _ = try session.processInput("class ShowIt a where\n  showIt :: a -> String");
+
+    // Verify the type scheme is stored correctly in TyEnv by looking
+    // up the scheme directly, rather than going through typeOf() which
+    // compiles the expression fully (including desugaring + lambda
+    // lifting) and crashes due to circular dictionary expressions.
+    // tracked in: https://github.com/adinapoli/rusholme/issues/569
+    const name = session.rename_env.scope.lookup("showIt") orelse
+        return error.TestUnexpectedResult;
+    const scheme = session.ty_env.lookupScheme(name.unique) orelse
+        return error.TestUnexpectedResult;
+    const type_str = try htype_mod.prettyScheme(scheme, alloc);
+    defer alloc.free(type_str);
+    try testing.expectEqualStrings("forall a. ShowIt a => a -> [Char]", type_str);
+}

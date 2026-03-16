@@ -717,3 +717,46 @@ test "wasm e2e: anonymous lambda in app position (#501)" {
     defer if (r) |s| testing.allocator.free(s);
     try testing.expectEqualStrings("1", r.?);
 }
+
+test "wasm e2e: typeclass declarations persist across inputs (#582)" {
+    // Verify that class, data, and instance declarations all succeed
+    // when spread across multiple REPL inputs. This tests that the
+    // ClassEnv, TyEnv, and RenameEnv persist correctly.
+    //
+    // NOTE: Calling a typeclass method (e.g. `showIt MkA`) or even
+    // querying its type (`:t showIt`) triggers the dictionary-passing
+    // pipeline (desugar → Core → lambda lift), which currently crashes
+    // due to circular dictionary expressions.
+    // tracked in: https://github.com/adinapoli/rusholme/issues/569
+    //
+    // Instead, we verify that:
+    // 1. Class + data + instance declarations succeed
+    // 2. A non-class expression still works afterward
+    const input =
+        \\{"jsonrpc":"2.0","id":1,"method":"init"}
+        \\{"jsonrpc":"2.0","id":2,"method":"eval","params":["class ShowIt a where\n  showIt :: a -> String"]}
+        \\{"jsonrpc":"2.0","id":3,"method":"eval","params":["data A = MkA"]}
+        \\{"jsonrpc":"2.0","id":4,"method":"eval","params":["instance ShowIt A where\n  showIt MkA = \"MkA\""]}
+        \\{"jsonrpc":"2.0","id":5,"method":"eval","params":["MkA"]}
+        \\
+    ;
+    const result = try runServer(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    const lines = try splitLines(testing.allocator, result.stdout);
+    defer testing.allocator.free(lines);
+
+    try testing.expect(lines.len >= 5);
+
+    // All declarations should succeed (empty result = success).
+    for (1..4) |i| {
+        const r = try extractResult(testing.allocator, lines[i]);
+        defer if (r) |s| testing.allocator.free(s);
+        try testing.expect(r != null);
+    }
+
+    // MkA expression should return a result (constructor value).
+    const r5 = try extractResult(testing.allocator, lines[4]);
+    defer if (r5) |s| testing.allocator.free(s);
+    try testing.expect(r5 != null);
+}

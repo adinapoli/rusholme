@@ -88,7 +88,7 @@ pub const EqConstraint = struct {
 /// Payload for class constraints: `ClassName ty`.
 pub const ClassConstraintPayload = struct {
     class_name: class_env_mod.Name,
-    ty: HType,
+    ty: *const HType,
     span: SourceSpan,
     /// The unique ID of the variable whose instantiation emitted this
     /// constraint. Used by the desugarer to key evidence back to call sites.
@@ -207,7 +207,7 @@ fn solveClassConstraintWithDepth(
     if (depth >= max_context_depth) {
         const te = TypeError{ .missing_instance = .{
             .class_name = cc.class_name,
-            .ty = cc.ty.chase(),
+            .ty = cc.ty.*.chase(),
         } };
         const msg = try type_error_mod.format(alloc, te);
         try diags.emit(alloc, .{
@@ -221,7 +221,7 @@ fn solveClassConstraintWithDepth(
     }
 
     const env = class_env orelse return; // No ClassEnv → cannot resolve
-    const chased = cc.ty.chase();
+    const chased = cc.ty.*.chase();
 
     // If the type is a rigid (polymorphic context), the constraint becomes
     // a dictionary parameter — evidence is recorded as `param`.
@@ -303,12 +303,14 @@ fn solveClassConstraintWithDepth(
                 // context constraint. E.g., for `instance Eq a => Eq [a]`
                 // matching `Eq [Int]`, substitute `a → Int` in `Eq a` to
                 // get `Eq Int`.
-                const substituted_ty = try applyRigidSubst(alloc, ctx_constraint.ty, subst);
+                const substituted_ty = try applyRigidSubst(alloc, ctx_constraint.ty.*, subst);
 
                 // Build a sub-constraint and resolve it recursively.
+                const sub_ty = try alloc.create(HType);
+                sub_ty.* = substituted_ty;
                 var sub_cc = ClassConstraintPayload{
                     .class_name = ctx_constraint.class_name,
-                    .ty = substituted_ty,
+                    .ty = sub_ty,
                     .span = cc.span,
                 };
                 try solveClassConstraintWithDepth(&sub_cc, alloc, diags, class_env, depth + 1);
@@ -931,9 +933,10 @@ test "solve: class constraint with matching instance resolves to evidence" {
     });
 
     // Constraint: Eq Int
+    const eq_int_ty = con0("Int", Known.Type.Int.unique.value);
     var constraints = [_]Constraint{.{ .Class = .{
         .class_name = Known.Class.Eq,
-        .ty = con0("Int", Known.Type.Int.unique.value),
+        .ty = &eq_int_ty,
         .span = testSpan(),
     } }};
 
@@ -963,9 +966,10 @@ test "solve: class constraint with no matching instance emits missing_instance" 
     });
 
     // Constraint: Eq Int (no instance exists)
+    const eq_int_ty = con0("Int", Known.Type.Int.unique.value);
     var constraints = [_]Constraint{.{ .Class = .{
         .class_name = Known.Class.Eq,
-        .ty = con0("Int", Known.Type.Int.unique.value),
+        .ty = &eq_int_ty,
         .span = testSpan(),
     } }};
 
@@ -994,9 +998,10 @@ test "solve: class constraint with rigid type defers (no error)" {
     });
 
     // Constraint: Eq a (rigid — should defer, not error)
+    const rigid_a_ty = HType{ .Rigid = testName("a", 42) };
     var constraints = [_]Constraint{.{ .Class = .{
         .class_name = Known.Class.Eq,
-        .ty = HType{ .Rigid = testName("a", 42) },
+        .ty = &rigid_a_ty,
         .span = testSpan(),
     } }};
 
@@ -1034,6 +1039,7 @@ test "solve: mixed Eq and Class constraints both resolved" {
     var supply = MetaVarSupply{};
     const mv = supply.fresh();
 
+    const class_int_ty = con0("Int", Known.Type.Int.unique.value);
     var constraints = [_]Constraint{
         // Equality: ?0 ~ Int
         .{ .Eq = .{
@@ -1044,7 +1050,7 @@ test "solve: mixed Eq and Class constraints both resolved" {
         // Class: Eq Int
         .{ .Class = .{
             .class_name = Known.Class.Eq,
-            .ty = con0("Int", Known.Type.Int.unique.value),
+            .ty = &class_int_ty,
             .span = testSpan(),
         } },
     };
@@ -1095,7 +1101,7 @@ test "solve: parametric instance with context resolves recursively" {
     const list_head = HType{ .Con = .{ .name = testName("[]", 99), .args = &list_head_args } };
     const eq_a_context = [_]ClassConstraint{.{
         .class_name = Known.Class.Eq,
-        .ty = rigid_a,
+        .ty = &rigid_a,
         .span = testSpan(),
     }};
     try class_env.addInstance(.{
@@ -1107,9 +1113,10 @@ test "solve: parametric instance with context resolves recursively" {
 
     // Constraint: Eq [Int]
     const list_int_args = [_]HType{con0("Int", Known.Type.Int.unique.value)};
+    const constraint_ty = HType{ .Con = .{ .name = testName("[]", 99), .args = &list_int_args } };
     var constraints = [_]Constraint{.{ .Class = .{
         .class_name = Known.Class.Eq,
-        .ty = HType{ .Con = .{ .name = testName("[]", 99), .args = &list_int_args } },
+        .ty = &constraint_ty,
         .span = testSpan(),
     } }};
 
@@ -1156,7 +1163,7 @@ test "solve: parametric instance with missing context emits diagnostic" {
     const list_head = HType{ .Con = .{ .name = testName("[]", 99), .args = &list_head_args } };
     const eq_a_context = [_]ClassConstraint{.{
         .class_name = Known.Class.Eq,
-        .ty = rigid_a,
+        .ty = &rigid_a,
         .span = testSpan(),
     }};
     try class_env.addInstance(.{
@@ -1168,9 +1175,10 @@ test "solve: parametric instance with missing context emits diagnostic" {
 
     // Constraint: Eq [Bool] — no Eq Bool instance exists
     const list_bool_args = [_]HType{con0("Bool", Known.Type.Bool.unique.value)};
+    const constraint_ty = HType{ .Con = .{ .name = testName("[]", 99), .args = &list_bool_args } };
     var constraints = [_]Constraint{.{ .Class = .{
         .class_name = Known.Class.Eq,
-        .ty = HType{ .Con = .{ .name = testName("[]", 99), .args = &list_bool_args } },
+        .ty = &constraint_ty,
         .span = testSpan(),
     } }};
 
@@ -1215,7 +1223,7 @@ test "solve: nested parametric resolution (Eq [[Int]])" {
     const list_head = HType{ .Con = .{ .name = testName("[]", 99), .args = &list_head_args } };
     const eq_a_context = [_]ClassConstraint{.{
         .class_name = Known.Class.Eq,
-        .ty = rigid_a,
+        .ty = &rigid_a,
         .span = testSpan(),
     }};
     try class_env.addInstance(.{
@@ -1230,9 +1238,10 @@ test "solve: nested parametric resolution (Eq [[Int]])" {
     const list_int_args = [_]HType{int_ty};
     const list_int = HType{ .Con = .{ .name = testName("[]", 99), .args = &list_int_args } };
     const list_list_int_args = [_]HType{list_int};
+    const constraint_ty = HType{ .Con = .{ .name = testName("[]", 99), .args = &list_list_int_args } };
     var constraints = [_]Constraint{.{ .Class = .{
         .class_name = Known.Class.Eq,
-        .ty = HType{ .Con = .{ .name = testName("[]", 99), .args = &list_list_int_args } },
+        .ty = &constraint_ty,
         .span = testSpan(),
     } }};
 

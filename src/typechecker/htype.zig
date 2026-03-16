@@ -517,6 +517,24 @@ pub fn prettyScheme(scheme: anytype, alloc: std.mem.Allocator) std.mem.Allocator
         try buf.appendSlice(alloc, dn);
     }
     try buf.appendSlice(alloc, ". ");
+
+    // Render constraints if present: "ClassName a => " or "(C1 a, C2 b) => "
+    if (comptime @hasField(@TypeOf(scheme), "constraints")) {
+        const constraints = scheme.constraints;
+        if (constraints.len > 0) {
+            if (constraints.len > 1) try buf.append(alloc, '(');
+            for (constraints, 0..) |constraint, ci| {
+                if (ci > 0) try buf.appendSlice(alloc, ", ");
+                try buf.appendSlice(alloc, constraint.class_name.base);
+                try buf.append(alloc, ' ');
+                const ty_str = try prettyPrecSubst(constraint.ty.*, alloc, PREC_CON_ARG, &subst);
+                try buf.appendSlice(alloc, ty_str);
+            }
+            if (constraints.len > 1) try buf.append(alloc, ')');
+            try buf.appendSlice(alloc, " => ");
+        }
+    }
+
     try buf.appendSlice(alloc, body_str);
     return buf.toOwnedSlice(alloc);
 }
@@ -1002,4 +1020,34 @@ test "prettyScheme: polymorphic — forall a. a -> a" {
     const scheme = .{ .binders = &binders, .body = fun_ty };
     const s = try prettyScheme(scheme, alloc);
     try testing.expectEqualStrings("forall a. a -> a", s);
+}
+
+test "prettyScheme: constrained — forall a. ShowIt a => a -> [Char]" {
+    const env_mod = @import("env.zig");
+    const class_env_mod = @import("class_env.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const a = testName("a", 42);
+    const ra = HType{ .Rigid = a };
+    const char_args = try alloc.dupe(HType, &.{con0("Char", 10)});
+    const list_char = HType{ .Con = .{ .name = testName("[]", 11), .args = char_args } };
+    const fun_ty = HType{ .Fun = .{ .arg = &ra, .res = &list_char } };
+    const binders = [_]u64{42};
+    const span_mod = @import("../diagnostics/span.zig");
+    const invalid_pos = span_mod.SourcePos.invalid();
+    const invalid_span = span_mod.SourceSpan.init(invalid_pos, invalid_pos);
+    const constraint_ty = HType{ .Rigid = a };
+    var constraints = [_]class_env_mod.ClassConstraint{.{
+        .class_name = testName("ShowIt", 99),
+        .ty = &constraint_ty,
+        .span = invalid_span,
+    }};
+    const scheme = env_mod.TyScheme{
+        .binders = &binders,
+        .constraints = &constraints,
+        .body = fun_ty,
+    };
+    const s = try prettyScheme(scheme, alloc);
+    try testing.expectEqualStrings("forall a. ShowIt a => a -> [Char]", s);
 }

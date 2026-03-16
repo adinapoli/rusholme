@@ -42,7 +42,12 @@ pub const SourceSpan = span_mod.SourceSpan;
 /// instance resolution.
 pub const ClassConstraint = struct {
     class_name: Name,
-    ty: HType,
+    /// Pointer to the constrained type.  Must be a pointer (not a value
+    /// copy) so that when the type is a fresh metavar, unifier solutions
+    /// propagate through the shared mutable cell.  See env.zig
+    /// `TyScheme.instantiate` where constraints are instantiated with
+    /// fresh metas that must stay linked to the type tree.
+    ty: *const HType,
     span: SourceSpan,
 };
 

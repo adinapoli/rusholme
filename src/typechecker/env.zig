@@ -122,19 +122,24 @@ pub const TyScheme = struct {
         const ty = (try instantiateType(self.body, subst, alloc)).*;
 
         // Instantiate constraints: substitute binders with fresh metas.
+        // IMPORTANT: we store the pointer returned by instantiateType, not
+        // a value copy.  This ensures that when the constraint type contains
+        // a fresh metavar, it shares the same mutable cell as the type tree.
+        // The unifier's solution then propagates to the constraint automatically
+        // (fixing the bug where dead MetaVar copies prevented evidence resolution).
         var wanted = try alloc.alloc(ClassConstraint, self.constraints.len);
         var found_any_rigid = false;
         for (self.constraints, 0..) |c, i| {
-            const inst_ty = try instantiateType(c.ty, subst, alloc);
+            const inst_ty = try instantiateType(c.ty.*, subst, alloc);
             wanted[i] = .{
                 .class_name = c.class_name,
-                .ty = inst_ty.*,
+                .ty = inst_ty,
                 .span = c.span,
             };
             // Track if any constraints contain rigid binders (for backward compat)
             if (!found_any_rigid) {
                 // Check if the constraint type has any rigids from binders
-                if (containsAnyRigid(wanted[i].ty, self.binders)) {
+                if (containsAnyRigid(inst_ty.*, self.binders)) {
                     found_any_rigid = true;
                 }
             }

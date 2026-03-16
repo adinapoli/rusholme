@@ -1364,6 +1364,13 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                 // arguments.
                 const evidences = try findEvidenceForVar(ctx, v.name.unique.value, v.span, scheme);
                 if (evidences.len > 0) {
+                    // Build an App chain: showIt dict1 dict2 ...
+                    // `node` holds the Var; each iteration wraps in a new App
+                    // whose fn_expr points to the *previous* outermost node.
+                    // We must NOT copy the final App back into `node` because
+                    // the App's fn_expr already points to `node` — that would
+                    // create a self-referential cycle.  Instead, return the
+                    // outermost App directly.
                     var current: *const ast_mod.Expr = node;
                     for (evidences) |ev| {
                         const dict_arg = try buildDictExpr(ctx, ev, v.span);
@@ -1375,8 +1382,7 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                         } };
                         current = app_node;
                     }
-                    // Overwrite the node with the final App chain.
-                    node.* = current.*;
+                    return @constCast(current);
                 }
             } else {
                 std.debug.panic("Variable {s} (id {d}) not found in type definitions", .{ v.name.base, v.name.unique.value });
