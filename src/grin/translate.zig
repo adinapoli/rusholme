@@ -21,6 +21,7 @@ const core = @import("../core/ast.zig");
 const grin = @import("ast.zig");
 const PrimOp = @import("primop.zig").PrimOp;
 const FieldType = grin.FieldType;
+const known = @import("../naming/known.zig");
 
 const CoreExpr = core.Expr;
 const CoreBind = core.Bind;
@@ -220,7 +221,98 @@ fn buildArityMap(alloc: std.mem.Allocator, core_prog: CoreProgram) !std.AutoHash
         }
     }
 
+    // Fixup pass: eta-reduced definitions like `(+) = primAddInt` get arity 0
+    // because they have no leading lambdas.  If the RHS is a bare Var
+    // referencing a function with known arity (from the primop table or
+    // another binding in this program), inherit that arity.  This ensures
+    // call sites see the correct arity and emit App instead of
+    // over-application chains with unknown_func placeholders.
+    for (core_prog.binds) |bind| {
+        switch (bind) {
+            .NonRec => |pair| {
+                const uid = pair.binder.name.unique.value;
+                const current_arity = arity_map.get(uid) orelse continue;
+                if (current_arity > 0) continue;
+                const rhs_arity = resolveEtaArity(pair.rhs, &arity_map);
+                if (rhs_arity > 0) {
+                    try arity_map.put(alloc, uid, rhs_arity);
+                }
+            },
+            .Rec => |pairs| {
+                for (pairs) |pair| {
+                    const uid = pair.binder.name.unique.value;
+                    const current_arity = arity_map.get(uid) orelse continue;
+                    if (current_arity > 0) continue;
+                    const rhs_arity = resolveEtaArity(pair.rhs, &arity_map);
+                    if (rhs_arity > 0) {
+                        try arity_map.put(alloc, uid, rhs_arity);
+                    }
+                }
+            },
+        }
+    }
+
     return arity_map;
+}
+
+/// If `expr` is a bare Var, look up its arity from the arity_map or primop
+/// table.  Returns 0 if the arity cannot be determined.
+fn resolveEtaArity(
+    expr: *const CoreExpr,
+    arity_map: *const std.AutoHashMapUnmanaged(u64, u32),
+) u32 {
+    // Strip leading lambdas — if the user wrote `f = \x -> g x`, the outer
+    // `countLambdaArity` already found 1; we only enter here with arity 0,
+    // but the RHS might still be wrapped in type lambdas or coercions in
+    // future.  For now, only handle bare Var.
+    switch (expr.*) {
+        .Var => |v| {
+            // Check arity_map first (other user definitions).
+            if (arity_map.get(v.name.unique.value)) |a| {
+                if (a > 0) return a;
+            }
+            // Check primop table by base name.
+            return primopArity(v.name.base);
+        },
+        else => return 0,
+    }
+}
+
+/// Return the arity (number of value-level arguments) for a PrimOp given its
+/// base name string.  Returns 0 for unknown names.
+fn primopArity(name_str: []const u8) u32 {
+    const op = PrimOp.fromString(name_str) orelse return 0;
+    return switch (op) {
+        // IO: write_stdout, write_stderr, putStrLn_ take 1 arg (String -> IO ())
+        .write_stdout, .write_stderr, .putStrLn_ => 1,
+        // IO: read_stdin takes 0 args (IO String)
+        .read_stdin => 0,
+        // Unary arithmetic: neg_Int, abs_Int, neg_Double
+        .neg_Int, .abs_Int, .neg_Double => 1,
+        // Binary arithmetic
+        .add_Int, .sub_Int, .mul_Int, .quot_Int, .rem_Int => 2,
+        .add_Double, .sub_Double, .mul_Double, .div_Double => 2,
+        // Comparisons (all binary)
+        .eq_Int, .ne_Int, .lt_Int, .le_Int, .gt_Int, .ge_Int => 2,
+        .eq_Char => 2,
+        .eq_Double, .ne_Double, .lt_Double, .le_Double, .gt_Double, .ge_Double => 2,
+        // Unary conversions
+        .intToDouble, .doubleToInt, .charToInt, .intToChar => 1,
+        // String ops
+        .str_cons => 2,
+        .str_head, .str_tail, .str_null => 1,
+        // error: 1 arg (String -> a)
+        .@"error" => 1,
+        // unreachable: 0 args
+        .unreachable_ => 0,
+        // Heap ops
+        .newMutVar, .readMutVar => 1,
+        .writeMutVar => 2,
+        // ccall: unknown arity
+        .ccall => 0,
+        // Non-exhaustive enum catch-all
+        _ => 0,
+    };
 }
 
 /// Build a map from data constructor uniques to their field counts.
@@ -342,6 +434,38 @@ pub fn translateProgram(
         }
     }
 
+    // Seed built-in constructors that are pure syntax with no user-visible
+    // data declaration: list (`[]`, `(:)`), unit (`()`), and tuples.
+    // These are wired into the compiler via src/naming/known.zig with stable
+    // unique IDs but are never declared in user code.  Without seeding, the
+    // translator treats e.g. `(:)` as a function call instead of a constructor
+    // application, producing undefined linker references.
+    //
+    // Note: Bool (True/False), Maybe (Nothing/Just), Either (Left/Right) are
+    // NOT seeded here because they have explicit `data` declarations in the
+    // Prelude.  Their constructors enter the con_map via buildConMap when the
+    // Prelude is compiled.  Seeding them here would cause a GRIN→LLVM mismatch:
+    // the GRIN translator would emit ValTag (tag discriminant) instead of Var,
+    // but the LLVM backend has hardcoded paths for True/False Var uniques that
+    // map to the correct i64 values expected by formatJitResult.
+    //
+    // Use getOrPut so user-declared constructors take precedence.
+    const builtin_cons = [_]struct { unique: u64, n_fields: u32 }{
+        .{ .unique = known.Con.Unit.unique.value, .n_fields = 0 },
+        .{ .unique = known.Con.Nil.unique.value, .n_fields = 0 },
+        .{ .unique = known.Con.Cons.unique.value, .n_fields = 2 },
+        .{ .unique = known.Con.Tuple2.unique.value, .n_fields = 2 },
+        .{ .unique = known.Con.Tuple3.unique.value, .n_fields = 3 },
+        .{ .unique = known.Con.Tuple4.unique.value, .n_fields = 4 },
+        .{ .unique = known.Con.Tuple5.unique.value, .n_fields = 5 },
+    };
+    for (builtin_cons) |b| {
+        const gop = try ctx.con_map.getOrPut(alloc, b.unique);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = b.n_fields;
+        }
+    }
+
     var defs = std.ArrayListUnmanaged(GrinDef){};
     defer defs.deinit(alloc);
 
@@ -399,6 +523,51 @@ fn translateDef(ctx: *TranslateCtx, pair: CoreBindPair) !GrinDef {
                 body_expr = lam.body;
             },
             else => break,
+        }
+    }
+
+    // Eta-expansion for eta-reduced definitions.
+    //
+    // When a binding has no lambda parameters but the arity_map records a
+    // positive arity (inherited from its RHS via resolveEtaArity), the body
+    // is just a bare Var reference to the target function.  We must
+    // eta-expand: generate fresh parameters and wrap the body as a call.
+    //
+    //   (+) = primAddInt          -- Core: no lambdas, arity 0
+    //   →  (+)(x, y) = primAddInt x y   -- GRIN: arity 2, calls primAddInt
+    const expected_arity = ctx.arity_map.get(pair.binder.name.unique.value) orelse 0;
+    if (params.items.len == 0 and expected_arity > 0) {
+        switch (body_expr.*) {
+            .Var => |v| {
+                const target_name = try ctx.getCoreVar(v.name);
+
+                // Generate fresh parameters for the eta-expanded definition.
+                var eta_params = try ctx.alloc.alloc(GrinName, expected_arity);
+                var eta_args = try ctx.alloc.alloc(GrinVal, expected_arity);
+                for (0..expected_arity) |i| {
+                    const pname = try ctx.freshName("eta");
+                    eta_params[i] = pname;
+                    eta_args[i] = .{ .Var = pname };
+                }
+
+                // Body: App(target, [eta_0, eta_1, ...])
+                const app_expr = try ctx.alloc.create(GrinExpr);
+                app_expr.* = .{ .App = .{
+                    .name = target_name,
+                    .args = eta_args,
+                } };
+
+                return GrinDef{
+                    .name = name,
+                    .params = eta_params,
+                    .body = app_expr,
+                };
+            },
+            else => {
+                // Non-Var RHS with arity mismatch — fall through to normal
+                // translation.  This shouldn't happen with the current
+                // resolveEtaArity (only resolves Var), but is safe to handle.
+            },
         }
     }
 
@@ -1504,15 +1673,44 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
 }
 
 /// Translate a case expression.
+///
+/// Simple scrutinees (Var, Lit) translate directly.  Complex scrutinees
+/// (App, Case, Let, …) are A-normalized: the expression is translated,
+/// its result bound to a fresh variable, and the case dispatches on that
+/// variable.
+///
+///   case (f x) of { alts }
+///   →  scrut <- f x; case scrut of { alts }
 fn translateCase(ctx: *TranslateCtx, case_expr: *const CoreCase) anyerror!*GrinExpr {
-    // case scrutinee of { alts }
-    // becomes: fetch scrutinee >>= \val -> case val of { alts }
-    // Note: eval call would be inserted by #315 (eval/apply generation)
-    // For now, we just fetch and case directly.
+    // A-normalize complex scrutinee expressions.
+    const ScrutInfo = struct {
+        val: GrinVal,
+        bind_expr: ?*GrinExpr,
+        bind_name: ?GrinName,
+    };
 
-    const scrutinee_val = try translateScrutinee(ctx, case_expr.scrutinee);
+    const scrut_info: ScrutInfo = switch (case_expr.scrutinee.*) {
+        .Var => |v| .{
+            .val = .{ .Var = try ctx.getCoreVar(v.name) },
+            .bind_expr = null,
+            .bind_name = null,
+        },
+        .Lit => |l| .{
+            .val = .{ .Lit = translateLiteral(l.val) },
+            .bind_expr = null,
+            .bind_name = null,
+        },
+        else => blk: {
+            const scrut_expr = try translateExpr(ctx, case_expr.scrutinee);
+            const fresh = try ctx.freshName("scrut");
+            break :blk .{
+                .val = .{ .Var = fresh },
+                .bind_expr = scrut_expr,
+                .bind_name = fresh,
+            };
+        },
+    };
 
-    // Translate the case binder.
     // Translate case alternatives.
     var alts = try ctx.alloc.alloc(GrinAlt, case_expr.alts.len);
     for (case_expr.alts, 0..) |alt, i| {
@@ -1522,32 +1720,22 @@ fn translateCase(ctx: *TranslateCtx, case_expr: *const CoreCase) anyerror!*GrinE
     // Create the case expression.
     const case_grin = try ctx.alloc.create(GrinExpr);
     case_grin.* = .{ .Case = .{
-        .scrutinee = scrutinee_val,
+        .scrutinee = scrut_info.val,
         .alts = alts,
     } };
 
-    return case_grin;
-}
-
-/// Translate a case scrutinee to a value.
-fn translateScrutinee(ctx: *TranslateCtx, scrutinee: *const CoreExpr) !GrinVal {
-    // Simple case: variable or literal.
-    // For MVP, handle Var and Lit only.
-    switch (scrutinee.*) {
-        .Var => |v| {
-            const grin_name = try ctx.getCoreVar(v.name);
-            return .{ .Var = grin_name };
-        },
-        .Lit => |l| {
-            return .{ .Lit = translateLiteral(l.val) };
-        },
-        else => {
-            // Complex scrutinee expression.
-            // For MVP, use a placeholder variable.
-            const fresh = try ctx.freshName("scrut");
-            return .{ .Var = fresh };
-        },
+    // Wrap with scrutinee binding if the scrutinee was complex.
+    if (scrut_info.bind_expr) |bind_lhs| {
+        const bind_expr = try ctx.alloc.create(GrinExpr);
+        bind_expr.* = .{ .Bind = .{
+            .lhs = bind_lhs,
+            .pat = .{ .Var = scrut_info.bind_name.? },
+            .rhs = case_grin,
+        } };
+        return bind_expr;
     }
+
+    return case_grin;
 }
 
 /// Translate a case alternative.
