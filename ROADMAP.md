@@ -451,7 +451,8 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | [#555](https://github.com/adinapoli/rusholme/issues/555) | Implement default method compilation for type classes | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#556](https://github.com/adinapoli/rusholme/issues/556) | Insert dictionary arguments at type class method call sites | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#557](https://github.com/adinapoli/rusholme/issues/557) | Persist ClassEnv across REPL inputs in session state | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
-| [#578](https://github.com/adinapoli/rusholme/issues/578) | Fix JIT segfault when calling typeclass methods across REPL inputs | [#557](https://github.com/adinapoli/rusholme/issues/557) | :yellow_circle: |
+| [#578](https://github.com/adinapoli/rusholme/issues/578) | Fix JIT segfault when calling typeclass methods across REPL inputs | [#557](https://github.com/adinapoli/rusholme/issues/557) | :green_circle: |
+| [#582](https://github.com/adinapoli/rusholme/issues/582) | Typeclass functions do not carry constraint correctly | [#578](https://github.com/adinapoli/rusholme/issues/578) | :yellow_circle: |
 | [#558](https://github.com/adinapoli/rusholme/issues/558) | Implement recursive instance context constraint resolution | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#559](https://github.com/adinapoli/rusholme/issues/559) | Support class constraints in user-written type signatures | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#566](https://github.com/adinapoli/rusholme/issues/566) | Typechecker: support declaration-order-independent inference | — | :white_circle: |
