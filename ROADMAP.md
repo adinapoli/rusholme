@@ -398,9 +398,10 @@
 | [#381](https://github.com/adinapoli/rusholme/issues/381) | Epic: GRIN to LLVM Translation - Compiler Path to M1 | [#55](https://github.com/adinapoli/rusholme/issues/55) | :white_circle: |
 | [#396](https://github.com/adinapoli/rusholme/issues/396) | Research: Zig LLVM bitcode compatibility with llvm-link | [#57](https://github.com/adinapoli/rusholme/issues/57) | :white_circle: |
 | [#572](https://github.com/adinapoli/rusholme/issues/572) | Implement tuple codegen in GRIN-to-LLVM backend | [#381](https://github.com/adinapoli/rusholme/issues/381) | :white_circle: |
-| [#573](https://github.com/adinapoli/rusholme/issues/573) | GRIN backend: polymorphic Prelude functions produce broken codegen | [#529](https://github.com/adinapoli/rusholme/issues/529) | :white_circle: |
+| [#573](https://github.com/adinapoli/rusholme/issues/573) | GRIN backend: polymorphic Prelude functions produce broken codegen | [#529](https://github.com/adinapoli/rusholme/issues/529) | :yellow_circle: |
 | [#569](https://github.com/adinapoli/rusholme/issues/569) | GRIN/LLVM backend: support dictionary-passing in codegen | [#556](https://github.com/adinapoli/rusholme/issues/556) | :white_circle: |
 | [#583](https://github.com/adinapoli/rusholme/issues/583) | Implement VarTagNode handling in LLVM backend for partial applications | — | :yellow_circle: |
+| [#589](https://github.com/adinapoli/rusholme/issues/589) | LLVM backend: ptr/i64 return type confusion causes segfaults | [#573](https://github.com/adinapoli/rusholme/issues/573) | :white_circle: |
 
 ### Epic [#515](https://github.com/adinapoli/rusholme/issues/515): Support Laziness (Call-by-Need Evaluation)
 
