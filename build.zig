@@ -89,6 +89,13 @@ pub fn build(b: *std.Build) void {
     // imports src/backend/llvm.zig (which uses @cImport for LLVM-C).
     configureLlvm(b, mod);
 
+    // Embed the Prelude source text so the REPL session can compile it
+    // at init time without reading from disk.  The WASM REPL has no
+    // filesystem access, so embedding is the only option there.
+    mod.addAnonymousImport("prelude_source", .{
+        .root_source_file = b.path("lib/Prelude.hs"),
+    });
+
     // Runtime module - for LLVM-based runtime tests
     const runtime_mod = b.addModule("runtime", .{
         .root_source_file = b.path("src/rts/root.zig"),
@@ -578,6 +585,10 @@ pub fn build(b: *std.Build) void {
             }),
             .optimize = .ReleaseSmall,
         }),
+    });
+    // Embed the Prelude source for the WASM REPL (same as the library module).
+    repl_wasm.root_module.addAnonymousImport("prelude_source", .{
+        .root_source_file = b.path("lib/Prelude.hs"),
     });
     // Reactor mode: the REPL is a long-lived module with exported functions,
     // not a command that runs once and exits. In reactor mode the entry point

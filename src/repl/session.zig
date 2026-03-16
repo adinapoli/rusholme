@@ -56,6 +56,14 @@ const ClassEnv = class_env_mod.ClassEnv;
 const desugar_mod = @import("../core/desugar.zig");
 const DictNameMap = desugar_mod.DesugarCtx.DictNameMap;
 
+// ── Embedded Prelude source ───────────────────────────────────────────
+
+/// The Prelude source text, embedded at compile time.
+/// The anonymous import "prelude_source" is registered in build.zig on
+/// both the library module (mod) and the WASM REPL module, so this
+/// resolves correctly for native, WASM, and test targets.
+const prelude_source = @embedFile("prelude_source");
+
 // ── Result types ──────────────────────────────────────────────────────
 
 /// Result of processing a REPL input.
@@ -178,7 +186,7 @@ pub const Session = struct {
             return SessionError.OutOfMemory;
         };
 
-        return .{
+        var self = Session{
             .allocator = allocator,
             .io = io,
             .u_supply = u_supply,
@@ -195,6 +203,21 @@ pub const Session = struct {
             .accumulated_class_env = ClassEnv.init(allocator),
             .accumulated_dict_names = .empty,
         };
+
+        // Load the Prelude so its functions are available immediately.
+        // Non-fatal: on failure the session continues with built-in names only.
+        //
+        // Currently WASM-only: the native JIT backend cannot yet compile
+        // the Prelude's GRIN output (GRIN→LLVM translation fails — tracked
+        // in #589). Additionally, loading Prelude `data Bool` reassigns
+        // constructor uniques, breaking the JIT's hardcoded True/False
+        // discriminant check in formatJitResult. Once #589 is resolved,
+        // this guard can be removed.
+        if (is_wasi) {
+            self.loadPrelude();
+        }
+
+        return self;
     }
 
     /// Release all session resources.
@@ -209,6 +232,83 @@ pub const Session = struct {
         self.rename_env.deinit();
         self.ty_env.deinit();
     }
+
+    // ── Prelude loading ─────────────────────────────────────────────
+
+    /// Load the embedded Prelude into the session state.
+    ///
+    /// Compiles the Prelude source through the pipeline and accumulates
+    /// its bindings (GRIN defs, arities, con_map, class_env, dict_names)
+    /// so that Prelude functions are available in subsequent REPL inputs.
+    ///
+    /// Non-fatal: on failure, the session continues with built-in names
+    /// only.  This keeps the REPL usable even if the Prelude has issues.
+    fn loadPrelude(self: *Session) void {
+        // Push scope frames for Prelude bindings (permanent — never popped).
+        self.rename_env.scope.push() catch return;
+        self.ty_env.push() catch {
+            self.rename_env.scope.pop();
+            return;
+        };
+
+        var diags = DiagnosticCollector.init();
+        defer diags.deinit(self.allocator);
+
+        const file_id: FileId = 0; // Prelude gets file_id 0 (same as batch compiler)
+
+        const result = self.pipeline.compileModule(
+            prelude_source,
+            file_id,
+            &self.u_supply,
+            &self.rename_env,
+            &self.ty_env,
+            &self.mv_supply,
+            &diags,
+            null, // no external arities yet
+            null, // no external con_map yet
+            null, // no external class_env yet
+            null, // no external dict_names yet
+        ) catch {
+            // Prelude failed to compile — roll back and continue without it.
+            self.ty_env.pop();
+            self.rename_env.scope.pop();
+            return;
+        };
+
+        // Accumulate GRIN definitions and arities.
+        for (result.grin_prog.defs) |def| {
+            self.accumulated_defs.append(self.allocator, def) catch return;
+            self.accumulated_arities.put(
+                self.allocator,
+                def.name.unique.value,
+                @intCast(def.params.len),
+            ) catch return;
+        }
+
+        // Accumulate constructor field counts from data declarations.
+        for (result.core_data_decls) |decl| {
+            for (decl.constructors) |con| {
+                self.accumulated_con_map.put(
+                    self.allocator,
+                    con.name.unique.value,
+                    translate_mod.countConFields(con.ty),
+                ) catch return;
+            }
+        }
+
+        // Take ownership of class_env and dict_names.
+        self.accumulated_class_env.deinit();
+        self.accumulated_class_env = result.class_env;
+
+        self.accumulated_dict_names.deinit(self.allocator);
+        self.accumulated_dict_names = result.dict_names;
+
+        // Note: no addDeclarations call needed here. This function is
+        // only called on the WASM path (guarded in init), where the
+        // tree-walking evaluator uses accumulated_defs directly.
+    }
+
+    // ── Input processing ──────────────────────────────────────────────
 
     /// Compile a REPL input through the full pipeline.
     ///
@@ -565,4 +665,73 @@ test "session: processInput returns diagnostics on error" {
         return;
     };
     _ = result;
+}
+
+// ── Prelude loading tests ─────────────────────────────────────────────
+//
+// loadPrelude is only called automatically on WASM (is_wasi). These
+// tests call it explicitly to verify the pipeline on native, where
+// the GRIN tree-walker is not available but the frontend pipeline
+// (parse → rename → typecheck → desugar → GRIN translate) still works.
+
+test "session: loadPrelude populates accumulated state" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = try Session.init(alloc, testing.io);
+    defer session.deinit();
+
+    // On native, loadPrelude is not called by init. Call explicitly.
+    if (!is_wasi) session.loadPrelude();
+
+    // Prelude should have loaded — accumulated_defs should be non-empty.
+    try testing.expect(session.accumulated_defs.items.len > 0);
+    // Prelude declares data types — accumulated_con_map should have entries.
+    try testing.expect(session.accumulated_con_map.count() > 0);
+}
+
+test "session: Prelude names resolve after loadPrelude" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = try Session.init(alloc, testing.io);
+    defer session.deinit();
+
+    if (!is_wasi) session.loadPrelude();
+
+    // `id` is defined in the Prelude — should compile as expression.
+    const result = try session.processInput("id 42");
+    try testing.expect(result.compile.kind == .expression);
+}
+
+test "session: Prelude operators resolve after loadPrelude" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = try Session.init(alloc, testing.io);
+    defer session.deinit();
+
+    if (!is_wasi) session.loadPrelude();
+
+    // `(+)` is defined in the Prelude — should compile as expression.
+    const result = try session.processInput("1 + 2");
+    try testing.expect(result.compile.kind == .expression);
+}
+
+test "session: Prelude data constructors resolve after loadPrelude" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = try Session.init(alloc, testing.io);
+    defer session.deinit();
+
+    if (!is_wasi) session.loadPrelude();
+
+    // `Just` is defined in the Prelude — should compile as expression.
+    const result = try session.processInput("Just 42");
+    try testing.expect(result.compile.kind == .expression);
 }
