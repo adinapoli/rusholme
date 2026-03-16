@@ -237,27 +237,40 @@ const PrimOpResult = union(enum) {
 /// the FieldType of each field for HPT-lite.
 ///
 /// Built once before translation starts by scanning all `ConstTagNode`
-/// values in the program.  The unique value of the tag's name is used as
-/// the map key so that identity is name-based, not string-based.
+/// values in the program.  A composite key (encoding tag type + name
+/// unique + partial-application missing count) ensures that `C:Foo`,
+/// `F:Foo`, `P(1):Foo`, and `P(2):Foo` all receive distinct
+/// discriminants even when they share the same name unique.
 ///
 /// See: https://github.com/adinapoli/rusholme/issues/449
 const TagTable = struct {
-    /// Discriminant assigned to each constructor, keyed by name unique.
+    /// Discriminant assigned to each tag, keyed by composite `tagKey`.
     discriminants: std.AutoHashMapUnmanaged(u64, i64),
-    /// Number of fields for each constructor, keyed by name unique.
+    /// Number of fields for each tag, keyed by composite `tagKey`.
     field_counts: std.AutoHashMapUnmanaged(u64, u32),
-    /// Field types per constructor, keyed by name unique.
+    /// Field types per tag, keyed by composite `tagKey`.
     /// Each slice contains FieldType for each field position.
     /// This is HPT-lite: a simplified type tracking that will be
     /// extended when implementing full HPT (M2.4).
     field_types: std.AutoHashMapUnmanaged(u64, []const FieldType),
-    /// Set of unique IDs that are F-tags (function thunks).
+    /// Set of composite keys that are F-tags (function thunks).
     /// Used by the inline eval loop to distinguish thunks from constructors.
     fun_tags: std.AutoHashMapUnmanaged(u64, void),
-    /// Maps F-tag unique IDs to their GRIN names for LLVM function lookup.
+    /// Maps F-tag composite keys to their GRIN names for LLVM function lookup.
     fun_tag_names: std.AutoHashMapUnmanaged(u64, grin.Name),
+    /// Set of composite keys that are P-tags (partial applications).
+    /// Used by the apply function to dispatch on partial application nodes.
+    partial_tags: std.AutoHashMapUnmanaged(u64, void),
+    /// Maps P-tag composite keys to their tag info (name + missing count + field count).
+    partial_tag_info: std.AutoHashMapUnmanaged(u64, PartialTagInfo),
     /// Next discriminant to assign.
     next: i64,
+
+    const PartialTagInfo = struct {
+        name: grin.Name,
+        missing: u32,
+        n_fields: u32,
+    };
 
     fn init() TagTable {
         return .{
@@ -266,6 +279,8 @@ const TagTable = struct {
             .field_types = .{},
             .fun_tags = .{},
             .fun_tag_names = .{},
+            .partial_tags = .{},
+            .partial_tag_info = .{},
             .next = 0,
         };
     }
@@ -281,13 +296,33 @@ const TagTable = struct {
         self.field_types.deinit(alloc);
         self.fun_tags.deinit(alloc);
         self.fun_tag_names.deinit(alloc);
+        self.partial_tags.deinit(alloc);
+        self.partial_tag_info.deinit(alloc);
+    }
+
+    /// Compute a composite key that distinguishes tag types sharing
+    /// the same name unique.  Without this, `F:map` and `P(1):map`
+    /// would collide when both have `unique = 5`.
+    ///
+    /// Encoding:
+    ///   Con:        unique * 4
+    ///   Fun:        unique * 4 + 1
+    ///   Partial(n): (unique * 4 + 2) * 31 + n
+    fn tagKey(tag: grin.Tag) u64 {
+        const base = tag.name.unique.value;
+        return switch (tag.tag_type) {
+            .Con => base *% 4,
+            .Fun => base *% 4 +% 1,
+            .Partial => |n| (base *% 4 +% 2) *% 31 +% @as(u64, n),
+        };
     }
 
     /// Register a tag with the given field count.
     /// If already registered, this is a no-op (idempotent).
-    /// F-tags (Fun) are also recorded in the fun_tags set for eval dispatch.
+    /// F-tags (Fun) are recorded in the fun_tags set for eval dispatch.
+    /// P-tags (Partial) are recorded in the partial_tags set for apply dispatch.
     fn register(self: *TagTable, alloc: std.mem.Allocator, tag: grin.Tag, n_fields: u32) !void {
-        const key = tag.name.unique.value;
+        const key = tagKey(tag);
         if (self.discriminants.contains(key)) return;
         try self.discriminants.put(alloc, key, self.next);
         try self.field_counts.put(alloc, key, n_fields);
@@ -300,28 +335,39 @@ const TagTable = struct {
             try self.fun_tags.put(alloc, key, {});
             try self.fun_tag_names.put(alloc, key, tag.name);
         }
+        // Track P-tags for the apply function dispatch.
+        if (tag.tag_type == .Partial) {
+            try self.partial_tags.put(alloc, key, {});
+            try self.partial_tag_info.put(alloc, key, .{
+                .name = tag.name,
+                .missing = tag.tag_type.Partial,
+                .n_fields = n_fields,
+            });
+        }
         self.next += 1;
     }
 
-    /// Return the discriminant for a constructor, or null if unknown.
+    /// Return the discriminant for a tag, or null if unknown.
     fn discriminant(self: *const TagTable, tag: grin.Tag) ?i64 {
-        return self.discriminants.get(tag.name.unique.value);
+        return self.discriminants.get(tagKey(tag));
     }
 
-    /// Return the field count for a constructor, or null if unknown.
+    /// Return the field count for a tag, or null if unknown.
     fn fieldCount(self: *const TagTable, tag: grin.Tag) ?u32 {
-        return self.field_counts.get(tag.name.unique.value);
+        return self.field_counts.get(tagKey(tag));
     }
 
-    /// Return field types for a constructor, or null if unknown.
+    /// Return field types for a tag, or null if unknown.
     fn fieldTypes(self: *const TagTable, tag: grin.Tag) ?[]const FieldType {
-        return self.field_types.get(tag.name.unique.value);
+        return self.field_types.get(tagKey(tag));
     }
 
     /// Return true if the named variable is a known nullary constructor.
-    /// We match by base name since the GRIN Val.Var just carries a Name.
+    /// Uses the Con-specific composite key since nullary constructors
+    /// are always C-tagged.
     fn isNullaryByName(self: *const TagTable, name: grin.Name) bool {
-        const fc = self.field_counts.get(name.unique.value) orelse return false;
+        const con_key = name.unique.value *% 4; // Con key encoding
+        const fc = self.field_counts.get(con_key) orelse return false;
         return fc == 0;
     }
 
@@ -329,7 +375,32 @@ const TagTable = struct {
     /// constructor, otherwise null.
     fn discriminantByName(self: *const TagTable, name: grin.Name) ?i64 {
         if (!self.isNullaryByName(name)) return null;
-        return self.discriminants.get(name.unique.value);
+        const con_key = name.unique.value *% 4; // Con key encoding
+        return self.discriminants.get(con_key);
+    }
+
+    /// Ensure that intermediate partial tags exist for the apply function.
+    /// If the program contains `P(n)func` with `n > 1`, the apply function
+    /// needs to construct `P(n-1)func` nodes. This pre-registers all such
+    /// intermediate tags so they have valid discriminants.
+    fn registerIntermediatePartialTags(self: *TagTable, alloc: std.mem.Allocator) !void {
+        var to_add = std.ArrayListUnmanaged(struct { tag: grin.Tag, n_fields: u32 }){};
+        defer to_add.deinit(alloc);
+
+        var iter = self.partial_tag_info.iterator();
+        while (iter.next()) |entry| {
+            const info = entry.value_ptr.*;
+            if (info.missing > 1) {
+                const new_tag = grin.Tag{
+                    .tag_type = .{ .Partial = info.missing - 1 },
+                    .name = info.name,
+                };
+                try to_add.append(alloc, .{ .tag = new_tag, .n_fields = info.n_fields + 1 });
+            }
+        }
+        for (to_add.items) |item| {
+            try self.register(alloc, item.tag, item.n_fields);
+        }
     }
 };
 
@@ -626,12 +697,31 @@ pub const GrinTranslator = struct {
         // Link TypeEnv to the tag table for field type lookups.
         self.type_env.setTagTable(&self.tag_table);
 
+        // Pre-register intermediate partial tags (P(n) → P(n-1) chains)
+        // so that __rhc_apply can construct them with valid discriminants.
+        // Iterate until no new tags are added to handle chains like
+        // P(3) → P(2) → P(1).
+        {
+            var prev_count = self.tag_table.partial_tags.count();
+            while (true) {
+                self.tag_table.registerIntermediatePartialTags(self.allocator) catch return error.OutOfMemory;
+                const new_count = self.tag_table.partial_tags.count();
+                if (new_count == prev_count) break;
+                prev_count = new_count;
+            }
+        }
+
         // Emit __rhc_force(ptr) → ptr once the tag table is complete.
         // User-defined function Returns call this to force thunks to WHNF.
         // Only emitted for whole-program (non-REPL) compilation — the REPL
         // uses inline forceValueToWhnf at the entry-point return instead.
         if (self.tag_table.fun_tags.count() > 0 and self.repl_entry_point == null) {
             try self.emitForceFunction();
+        }
+
+        // Emit __rhc_apply(ptr, ptr) → ptr for partial application dispatch.
+        if (self.tag_table.partial_tags.count() > 0) {
+            try self.emitApplyFunction();
         }
 
         for (program.defs) |def| {
@@ -982,6 +1072,30 @@ pub const GrinTranslator = struct {
             return null;
         }
 
+        // Intercept calls to the GRIN-level `apply` stub (unique 9998)
+        // and route them to the LLVM-level __rhc_apply instead.
+        if (std.mem.eql(u8, name.base, "apply") and name.unique.value == 9998) {
+            if (args.len >= 2) {
+                const f_val = try self.translateValToLlvm(args[0]);
+                const x_val = try self.translateValToLlvm(args[1]);
+                const apply_fn = c.LLVMGetNamedFunction(self.module, "__rhc_apply") orelse blk: {
+                    var apply_params = [_]llvm.Type{ ptrType(), ptrType() };
+                    const apply_type = llvm.functionType(ptrType(), &apply_params, false);
+                    break :blk llvm.addFunction(self.module, "__rhc_apply", apply_type);
+                };
+                var apply_args = [_]llvm.Value{ f_val, x_val };
+                return c.LLVMBuildCall2(
+                    self.builder,
+                    llvm.getFunctionType(apply_fn),
+                    apply_fn,
+                    &apply_args,
+                    2,
+                    "apply_result",
+                );
+            }
+            return null;
+        }
+
         if (PrimOpMapping.lookup(name)) |result| {
             switch (result) {
                 .libcall => |libc_fn| try self.emitLibcCall(libc_fn, args),
@@ -1064,6 +1178,29 @@ pub const GrinTranslator = struct {
 
     fn translateApp(self: *GrinTranslator, name: grin.Name, args: []const grin.Val) TranslationError!void {
         if (std.mem.eql(u8, name.base, "pure")) return;
+
+        // Intercept calls to the GRIN-level `apply` stub (unique 9998).
+        if (std.mem.eql(u8, name.base, "apply") and name.unique.value == 9998) {
+            if (args.len >= 2) {
+                const f_val = try self.translateValToLlvm(args[0]);
+                const x_val = try self.translateValToLlvm(args[1]);
+                const apply_fn = c.LLVMGetNamedFunction(self.module, "__rhc_apply") orelse blk: {
+                    var apply_params = [_]llvm.Type{ ptrType(), ptrType() };
+                    const apply_type = llvm.functionType(ptrType(), &apply_params, false);
+                    break :blk llvm.addFunction(self.module, "__rhc_apply", apply_type);
+                };
+                var apply_args = [_]llvm.Value{ f_val, x_val };
+                _ = c.LLVMBuildCall2(
+                    self.builder,
+                    llvm.getFunctionType(apply_fn),
+                    apply_fn,
+                    &apply_args,
+                    2,
+                    "",
+                );
+            }
+            return;
+        }
 
         if (PrimOpMapping.lookup(name)) |result| {
             switch (result) {
@@ -1233,78 +1370,12 @@ pub const GrinTranslator = struct {
                 break :blk try self.translateStoreToValue(.{ .ConstTagNode = ctn }, "node") orelse
                     return error.UnsupportedGrinVal;
             },
-            .VarTagNode => |vtn| blk: {
-                // Variable-tag nodes represent partial applications.
-                // The tag_var is a function name, and fields are captured args.
-                // We allocate a heap node with P-tag (partial application marker)
-                // containing the function pointer and captured arguments.
-
-                // Get the function pointer for the tag variable
-                const fn_ptr = try self.translateValToLlvm(.{ .Var = vtn.tag_var });
-
-                // Allocate a partial application node:
-                // - First field: function pointer
-                // - Remaining fields: captured arguments
-                const n_fields: u32 = @intCast(vtn.fields.len + 1); // +1 for fn ptr
-                const ptag_disc: u64 = @as(u64, 0x500) << 48; // 'P' tag marker (partial)
-
-                const rts_alloc_fn = declareRtsAlloc(self.module);
-                var alloc_args = [_]llvm.Value{
-                    c.LLVMConstInt(llvm.i64Type(), @bitCast(ptag_disc), 0),
-                    c.LLVMConstInt(llvm.i32Type(), n_fields, 0),
-                };
-                const node_ptr = c.LLVMBuildCall2(
-                    self.builder,
-                    llvm.getFunctionType(rts_alloc_fn),
-                    rts_alloc_fn,
-                    &alloc_args,
-                    2,
-                    "partial_app",
-                );
-
-                // Store function pointer as first field
-                const rts_store_fn = declareRtsStoreField(self.module);
-                const fn_as_u64 = c.LLVMBuildPtrToInt(self.builder, fn_ptr, llvm.i64Type(), "fn_u64");
-                var store_args = [_]llvm.Value{
-                    node_ptr,
-                    c.LLVMConstInt(llvm.i32Type(), 0, 0),
-                    fn_as_u64,
-                };
-                _ = c.LLVMBuildCall2(
-                    self.builder,
-                    llvm.getFunctionType(rts_store_fn),
-                    rts_store_fn,
-                    &store_args,
-                    3,
-                    "",
-                );
-
-                // Store captured arguments as remaining fields
-                for (vtn.fields, 0..) |field, fi| {
-                    const raw_val = try self.translateValToLlvm(field);
-                    const field_ty = c.LLVMTypeOf(raw_val);
-                    const kind = c.LLVMGetTypeKind(field_ty);
-                    const is_ptr = kind == c.LLVMPointerTypeKind;
-                    const as_u64: llvm.Value = if (is_ptr)
-                        c.LLVMBuildPtrToInt(self.builder, raw_val, llvm.i64Type(), "arg_u64")
-                    else
-                        raw_val;
-                    var field_store_args = [_]llvm.Value{
-                        node_ptr,
-                        c.LLVMConstInt(llvm.i32Type(), @intCast(fi + 1), 0),
-                        as_u64,
-                    };
-                    _ = c.LLVMBuildCall2(
-                        self.builder,
-                        llvm.getFunctionType(rts_store_fn),
-                        rts_store_fn,
-                        &field_store_args,
-                        3,
-                        "",
-                    );
-                }
-
-                break :blk node_ptr;
+            .VarTagNode => {
+                // VarTagNode with truly dynamic tags (e.g., generic eval/apply).
+                // Not needed for partial applications — those use ConstTagNode
+                // with Partial tags (issue #583).
+                // tracked in: https://github.com/adinapoli/rusholme/issues/410
+                return error.UnsupportedGrinVal;
             },
             .ValTag => |t| blk: {
                 // Bare tag value — emit its discriminant as i64.
@@ -2259,6 +2330,184 @@ pub const GrinTranslator = struct {
         llvm.positionBuilderAtEnd(self.builder, done_bb);
         return phi;
     }
+
+    // ── Apply function for partial applications ───────────────────────
+
+    /// Emit `__rhc_apply(f_ptr, x_ptr) -> ptr` as a standalone LLVM
+    /// function.  Dispatches on the tag of `f_ptr`:
+    ///
+    ///   P(n)func [a0..a_{k-1}]  with n > 1  →  allocate P(n-1)func [a0..a_{k-1}, x]
+    ///   P(1)func [a0..a_{k-1}]               →  call func(a0..a_{k-1}, x)
+    ///   anything else                        →  return f_ptr (no-op)
+    fn emitApplyFunction(self: *GrinTranslator) TranslationError!void {
+        const ptr_ty = ptrType();
+        const i64_ty = llvm.i64Type();
+        const i32_ty = llvm.i32Type();
+        const header_ty = nodeHeaderType();
+        const rts_load_fn = declareRtsLoadField(self.module);
+        const rts_store_fn = declareRtsStoreField(self.module);
+        const rts_alloc_fn = declareRtsAlloc(self.module);
+
+        // fn __rhc_apply(ptr, ptr) -> ptr
+        var param_types = [_]llvm.Type{ ptr_ty, ptr_ty };
+        const fn_type = llvm.functionType(ptr_ty, &param_types, false);
+        const func = llvm.addFunction(self.module, "__rhc_apply", fn_type);
+
+        // Save and restore builder/function state.
+        const saved_func = self.current_func;
+        const saved_bb = c.LLVMGetInsertBlock(self.builder);
+        defer {
+            self.current_func = saved_func;
+            if (saved_bb != null) llvm.positionBuilderAtEnd(self.builder, saved_bb);
+        }
+        self.current_func = func;
+
+        const f_param = c.LLVMGetParam(func, 0);
+        const x_param = c.LLVMGetParam(func, 1);
+        const entry_bb = llvm.appendBasicBlock(func, "entry");
+        const default_bb = c.LLVMAppendBasicBlock(func, "default");
+
+        // ── entry: load tag and switch ─────────────────────────────────
+        llvm.positionBuilderAtEnd(self.builder, entry_bb);
+        var tag_idx = [_]llvm.Value{
+            c.LLVMConstInt(i32_ty, 0, 0),
+            c.LLVMConstInt(i32_ty, 0, 0),
+        };
+        const tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, f_param, &tag_idx, 2, "tag_gep");
+        const tag_val = c.LLVMBuildLoad2(self.builder, i64_ty, tag_gep, "tag");
+
+        const n_cases: u32 = @intCast(self.tag_table.partial_tags.count());
+        const sw = c.LLVMBuildSwitch(self.builder, tag_val, default_bb, n_cases);
+
+        // ── default: not a partial application — return f_ptr ──────────
+        llvm.positionBuilderAtEnd(self.builder, default_bb);
+        _ = llvm.buildRet(self.builder, f_param);
+
+        // ── P-tag cases ────────────────────────────────────────────────
+        var ptag_iter = self.tag_table.partial_tags.iterator();
+        while (ptag_iter.next()) |ptag_entry| {
+            const ptag_key = ptag_entry.key_ptr.*;
+            const ptag_disc = self.tag_table.discriminants.get(ptag_key) orelse continue;
+            const ptag_info = self.tag_table.partial_tag_info.get(ptag_key) orelse continue;
+
+            const ptag_bb = c.LLVMAppendBasicBlock(func, "ptag");
+            c.LLVMAddCase(sw, c.LLVMConstInt(i64_ty, @bitCast(ptag_disc), 0), ptag_bb);
+
+            llvm.positionBuilderAtEnd(self.builder, ptag_bb);
+
+            if (ptag_info.missing > 1) {
+                // ── Still unsaturated: build P(n-1)func [old_fields..., x] ──
+                const new_tag = grin.Tag{
+                    .tag_type = .{ .Partial = ptag_info.missing - 1 },
+                    .name = ptag_info.name,
+                };
+                const new_disc = self.tag_table.discriminant(new_tag) orelse
+                    return error.UnsupportedGrinVal;
+                const new_n_fields: u32 = ptag_info.n_fields + 1;
+
+                var alloc_args = [_]llvm.Value{
+                    c.LLVMConstInt(i64_ty, @bitCast(new_disc), 0),
+                    c.LLVMConstInt(i32_ty, new_n_fields, 0),
+                };
+                const new_node = c.LLVMBuildCall2(
+                    self.builder,
+                    llvm.getFunctionType(rts_alloc_fn),
+                    rts_alloc_fn,
+                    &alloc_args,
+                    2,
+                    "new_pap",
+                );
+
+                // Copy captured fields from the old node.
+                for (0..ptag_info.n_fields) |fi| {
+                    var load_args = [_]llvm.Value{
+                        f_param,
+                        c.LLVMConstInt(i32_ty, @intCast(fi), 0),
+                    };
+                    const loaded = c.LLVMBuildCall2(
+                        self.builder,
+                        llvm.getFunctionType(rts_load_fn),
+                        rts_load_fn,
+                        &load_args,
+                        2,
+                        "cap_arg",
+                    );
+                    var store_args = [_]llvm.Value{
+                        new_node,
+                        c.LLVMConstInt(i32_ty, @intCast(fi), 0),
+                        loaded,
+                    };
+                    _ = c.LLVMBuildCall2(
+                        self.builder,
+                        llvm.getFunctionType(rts_store_fn),
+                        rts_store_fn,
+                        &store_args,
+                        3,
+                        "",
+                    );
+                }
+
+                // Store the new argument as the last field.
+                const x_as_u64 = c.LLVMBuildPtrToInt(self.builder, x_param, i64_ty, "x_u64");
+                var x_store_args = [_]llvm.Value{
+                    new_node,
+                    c.LLVMConstInt(i32_ty, ptag_info.n_fields, 0),
+                    x_as_u64,
+                };
+                _ = c.LLVMBuildCall2(
+                    self.builder,
+                    llvm.getFunctionType(rts_store_fn),
+                    rts_store_fn,
+                    &x_store_args,
+                    3,
+                    "",
+                );
+
+                _ = llvm.buildRet(self.builder, new_node);
+            } else {
+                // ── Saturated (missing == 1): call func(captured_args..., x) ──
+                const total_args = ptag_info.n_fields + 1; // captured + x
+
+                // Load captured arguments.
+                var call_args: [8]llvm.Value = undefined;
+                const n_cap = @min(ptag_info.n_fields, 7); // leave room for x
+                for (0..n_cap) |fi| {
+                    var load_args = [_]llvm.Value{
+                        f_param,
+                        c.LLVMConstInt(i32_ty, @intCast(fi), 0),
+                    };
+                    const loaded = c.LLVMBuildCall2(
+                        self.builder,
+                        llvm.getFunctionType(rts_load_fn),
+                        rts_load_fn,
+                        &load_args,
+                        2,
+                        "sat_arg",
+                    );
+                    call_args[fi] = c.LLVMBuildIntToPtr(self.builder, loaded, ptr_ty, "sat_ptr");
+                }
+                call_args[n_cap] = x_param; // the new argument
+
+                // Call the function.
+                const fn_name_z = self.formatName(ptag_info.name);
+                const n_call_args: u32 = @intCast(@min(total_args, 8));
+                var fn_param_types: [8]llvm.Type = undefined;
+                for (0..n_call_args) |pi| fn_param_types[pi] = ptr_ty;
+                const callee_type = llvm.functionType(ptr_ty, fn_param_types[0..n_call_args], false);
+                const callee = c.LLVMGetNamedFunction(self.module, fn_name_z) orelse
+                    llvm.addFunction(self.module, fn_name_z, callee_type);
+                const result = c.LLVMBuildCall2(
+                    self.builder,
+                    callee_type,
+                    callee,
+                    @ptrCast(&call_args),
+                    n_call_args,
+                    "sat_result",
+                );
+                _ = llvm.buildRet(self.builder, result);
+            }
+        }
+    }
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2394,4 +2643,179 @@ test "Store emits rts_alloc and rts_store_field instead of malloc" {
     try std.testing.expect(std.mem.indexOf(u8, ir, "rts_store_field") != null);
     // Must NOT call malloc (the old layout is removed).
     try std.testing.expect(std.mem.indexOf(u8, ir, "@malloc") == null);
+}
+
+// ── Partial application tag tests (#583) ──────────────────────────────
+
+test "TagTable: composite keying distinguishes Con, Fun, and Partial tags" {
+    const alloc = std.testing.allocator;
+    var table = TagTable.init();
+    defer table.deinit(alloc);
+
+    const name = grin.Name{ .base = "Foo", .unique = .{ .value = 7 } };
+    const con_tag = grin.Tag{ .tag_type = .Con, .name = name };
+    const fun_tag = grin.Tag{ .tag_type = .Fun, .name = name };
+    const p1_tag = grin.Tag{ .tag_type = .{ .Partial = 1 }, .name = name };
+
+    try table.register(alloc, con_tag, 2);
+    try table.register(alloc, fun_tag, 2);
+    try table.register(alloc, p1_tag, 1);
+
+    // All three should get distinct discriminants.
+    const con_disc = table.discriminant(con_tag).?;
+    const fun_disc = table.discriminant(fun_tag).?;
+    const p1_disc = table.discriminant(p1_tag).?;
+    try std.testing.expect(con_disc != fun_disc);
+    try std.testing.expect(con_disc != p1_disc);
+    try std.testing.expect(fun_disc != p1_disc);
+
+    // Each should report correct field counts.
+    try std.testing.expectEqual(@as(?u32, 2), table.fieldCount(con_tag));
+    try std.testing.expectEqual(@as(?u32, 2), table.fieldCount(fun_tag));
+    try std.testing.expectEqual(@as(?u32, 1), table.fieldCount(p1_tag));
+
+    // Fun tag tracked in fun_tags, Partial in partial_tags.
+    try std.testing.expect(table.fun_tags.contains(TagTable.tagKey(fun_tag)));
+    try std.testing.expect(table.partial_tags.contains(TagTable.tagKey(p1_tag)));
+    try std.testing.expect(!table.partial_tags.contains(TagTable.tagKey(con_tag)));
+}
+
+test "TagTable: P(1) and P(2) get distinct discriminants" {
+    const alloc = std.testing.allocator;
+    var table = TagTable.init();
+    defer table.deinit(alloc);
+
+    const name = grin.Name{ .base = "map", .unique = .{ .value = 5 } };
+    const p2_tag = grin.Tag{ .tag_type = .{ .Partial = 2 }, .name = name };
+    const p1_tag = grin.Tag{ .tag_type = .{ .Partial = 1 }, .name = name };
+
+    try table.register(alloc, p2_tag, 0);
+    try table.register(alloc, p1_tag, 1);
+
+    const p2_disc = table.discriminant(p2_tag).?;
+    const p1_disc = table.discriminant(p1_tag).?;
+    try std.testing.expect(p2_disc != p1_disc);
+
+    try std.testing.expectEqual(@as(?u32, 0), table.fieldCount(p2_tag));
+    try std.testing.expectEqual(@as(?u32, 1), table.fieldCount(p1_tag));
+
+    // Both should be in partial_tag_info.
+    const p2_info = table.partial_tag_info.get(TagTable.tagKey(p2_tag)).?;
+    try std.testing.expectEqual(@as(u32, 2), p2_info.missing);
+    const p1_info = table.partial_tag_info.get(TagTable.tagKey(p1_tag)).?;
+    try std.testing.expectEqual(@as(u32, 1), p1_info.missing);
+}
+
+test "TagTable: registerIntermediatePartialTags creates P(n-1) from P(n)" {
+    const alloc = std.testing.allocator;
+    var table = TagTable.init();
+    defer table.deinit(alloc);
+
+    const name = grin.Name{ .base = "add", .unique = .{ .value = 3 } };
+    const p3_tag = grin.Tag{ .tag_type = .{ .Partial = 3 }, .name = name };
+
+    try table.register(alloc, p3_tag, 0);
+    try std.testing.expectEqual(@as(u32, 1), table.partial_tags.count());
+
+    // First round: P(3) → P(2)
+    try table.registerIntermediatePartialTags(alloc);
+    try std.testing.expectEqual(@as(u32, 2), table.partial_tags.count());
+
+    // Second round: P(2) → P(1)
+    try table.registerIntermediatePartialTags(alloc);
+    try std.testing.expectEqual(@as(u32, 3), table.partial_tags.count());
+
+    // Third round: P(1) has missing == 1, no new tags.
+    try table.registerIntermediatePartialTags(alloc);
+    try std.testing.expectEqual(@as(u32, 3), table.partial_tags.count());
+
+    // Verify all three exist with distinct discriminants.
+    const p2_tag = grin.Tag{ .tag_type = .{ .Partial = 2 }, .name = name };
+    const p1_tag = grin.Tag{ .tag_type = .{ .Partial = 1 }, .name = name };
+    try std.testing.expect(table.discriminant(p3_tag) != null);
+    try std.testing.expect(table.discriminant(p2_tag) != null);
+    try std.testing.expect(table.discriminant(p1_tag) != null);
+
+    // Field counts should cascade: P(3):0, P(2):1, P(1):2
+    try std.testing.expectEqual(@as(?u32, 0), table.fieldCount(p3_tag));
+    try std.testing.expectEqual(@as(?u32, 1), table.fieldCount(p2_tag));
+    try std.testing.expectEqual(@as(?u32, 2), table.fieldCount(p1_tag));
+}
+
+test "Partial application store emits rts_alloc with TagTable discriminant" {
+    // Build a GRIN program with a partial application:
+    //   double = store (P(1)add [42]) ; return ()
+    // and verify the LLVM IR uses rts_alloc (not a magic constant).
+    const alloc = std.testing.allocator;
+
+    const add_name = grin.Name{ .base = "add", .unique = .{ .value = 10 } };
+    const p1_tag = grin.Tag{ .tag_type = .{ .Partial = 1 }, .name = add_name };
+    const lit_val = grin.Val{ .Lit = .{ .Int = 42 } };
+    const unit_val = grin.Val{ .Unit = {} };
+
+    var store_expr = grin.Expr{ .Store = .{
+        .ConstTagNode = .{ .tag = p1_tag, .fields = &.{lit_val} },
+    } };
+    var ret_expr = grin.Expr{ .Return = unit_val };
+    var bind_expr = grin.Expr{ .Bind = .{
+        .lhs = &store_expr,
+        .pat = unit_val,
+        .rhs = &ret_expr,
+    } };
+
+    const main_def = grin.Def{
+        .name = .{ .base = "main", .unique = .{ .value = 0 } },
+        .params = &.{},
+        .body = &bind_expr,
+    };
+    const program = grin.Program{ .defs = &.{main_def} };
+
+    var translator = GrinTranslator.init(alloc);
+    defer translator.deinit();
+
+    const ir_raw = try translator.translateProgram(program);
+    const ir: [:0]u8 = ir_raw.ptr[0..ir_raw.len :0];
+    defer alloc.free(ir);
+
+    // Must call rts_alloc (P-tag node allocation).
+    try std.testing.expect(std.mem.indexOf(u8, ir, "rts_alloc") != null);
+    // Must NOT contain the old magic P-tag constant (0x500...).
+    try std.testing.expect(std.mem.indexOf(u8, ir, "5629499534213120") == null); // 0x500 << 48
+}
+
+test "Partial application emits __rhc_apply when P-tags exist" {
+    // Build a GRIN program with a P-tag to verify __rhc_apply is emitted.
+    const alloc = std.testing.allocator;
+
+    const add_name = grin.Name{ .base = "add", .unique = .{ .value = 10 } };
+    const p1_tag = grin.Tag{ .tag_type = .{ .Partial = 1 }, .name = add_name };
+    const lit_val = grin.Val{ .Lit = .{ .Int = 42 } };
+    const unit_val = grin.Val{ .Unit = {} };
+
+    var store_expr = grin.Expr{ .Store = .{
+        .ConstTagNode = .{ .tag = p1_tag, .fields = &.{lit_val} },
+    } };
+    var ret_expr = grin.Expr{ .Return = unit_val };
+    var bind_expr = grin.Expr{ .Bind = .{
+        .lhs = &store_expr,
+        .pat = unit_val,
+        .rhs = &ret_expr,
+    } };
+
+    const main_def = grin.Def{
+        .name = .{ .base = "main", .unique = .{ .value = 0 } },
+        .params = &.{},
+        .body = &bind_expr,
+    };
+    const program = grin.Program{ .defs = &.{main_def} };
+
+    var translator = GrinTranslator.init(alloc);
+    defer translator.deinit();
+
+    const ir_raw = try translator.translateProgram(program);
+    const ir: [:0]u8 = ir_raw.ptr[0..ir_raw.len :0];
+    defer alloc.free(ir);
+
+    // __rhc_apply should be emitted since P-tags exist.
+    try std.testing.expect(std.mem.indexOf(u8, ir, "__rhc_apply") != null);
 }
