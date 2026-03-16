@@ -685,11 +685,16 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
             if (arg_count < arity) {
                 // Partial application: create a P-tagged node
                 // Example: map f (arity=2, args=1) -> store (P(1)map [f])
+                const missing = arity - arg_count;
 
-                // Create the partial application node with P-tag
+                // Create the partial application node with a static Partial tag.
+                // Using ConstTagNode (not VarTagNode) because the tag is fully
+                // known at translation time — the function name and missing arg
+                // count are both static. This integrates naturally with the LLVM
+                // backend's TagTable, discriminant assignment, and case dispatch.
                 const store_expr = try ctx.alloc.create(GrinExpr);
-                store_expr.* = .{ .Store = .{ .VarTagNode = .{
-                    .tag_var = fn_name,
+                store_expr.* = .{ .Store = .{ .ConstTagNode = .{
+                    .tag = partialTag(fn_name.base, fn_name.unique.value, missing),
                     .fields = grin_args,
                 } } };
 
