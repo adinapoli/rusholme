@@ -757,6 +757,32 @@ test "repl: typeclass method call across inputs compiles (#578)" {
     try testing.expect(r4.compile.kind == .expression);
 }
 
+test "repl: bare class method does not segfault (#582)" {
+    // Evaluating a bare class method (e.g. `showIt` without arguments)
+    // must not cause a stack overflow / segfault. The dictionary-passing
+    // pipeline (#569) may not produce a correct result yet, but the
+    // compilation must either succeed or return an error — never crash.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    _ = try session.processInput("class ShowIt a where\n  showIt :: a -> String");
+    _ = try session.processInput("data A = MkA");
+    _ = try session.processInput("instance ShowIt A where\n  showIt MkA = \"MkA\"");
+
+    // This must not segfault. It's OK if it returns an error.
+    if (session.processInput("showIt")) |_| {
+        // Success is fine too
+    } else |_| {
+        // Error is acceptable — dictionary passing is not fully implemented (#569)
+    }
+}
+
 test "repl: load file with comments then evaluate main (issue #494)" {
     // Reproduces the browser REPL scenario with a file containing
     // comments and blank lines — typical of a real .hs file.
