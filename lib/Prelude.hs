@@ -5,7 +5,10 @@ module Prelude
     , not, (&&), (||), otherwise
     , (+), (-), (*), negate, abs, div, mod
     , (==), (/=), (<), (>), (<=), (>=)
-    , id, const
+    , id, const, flip, (.), ($)
+    , map, filter, (++), head, tail, null, length
+    , foldr, foldl, concat, take, drop
+    , maybe, fromMaybe, either
     , putStrLn, putStr
     , error
     ) where
@@ -149,9 +152,94 @@ mod = primRemInt
 (>=) = primGeInt
 
 -- ========================================================================
--- Polymorphic list, tuple, and higher-order functions are omitted for now
--- because the GRIN→LLVM backend cannot yet compile them (produces
--- unresolvable linker symbols for (:), unknown_func, scrut, etc.).
--- These will be re-added when the backend supports polymorphic codegen.
--- Tracked in: https://github.com/adinapoli/rusholme/issues/573
+-- Higher-order combinators
+-- ========================================================================
+
+flip :: (a -> b -> c) -> b -> a -> c
+flip f x y = f y x
+
+(.) :: (b -> c) -> (a -> b) -> a -> c
+(.) f g x = f (g x)
+
+($) :: (a -> b) -> a -> b
+($) f x = f x
+
+-- ========================================================================
+-- List functions
+-- ========================================================================
+
+map :: (a -> b) -> [a] -> [b]
+map f []     = []
+map f (x:xs) = f x : map f xs
+
+filter :: (a -> Bool) -> [a] -> [a]
+filter p []     = []
+filter p (x:xs) = case p x of
+    True  -> x : filter p xs
+    False -> filter p xs
+
+(++) :: [a] -> [a] -> [a]
+(++) []     ys = ys
+(++) (x:xs) ys = x : (++) xs ys
+
+head :: [a] -> a
+head (x:xs) = x
+
+tail :: [a] -> [a]
+tail (x:xs) = xs
+
+null :: [a] -> Bool
+null []    = True
+null (x:xs) = False
+
+length :: [a] -> Int
+length []     = 0
+length (x:xs) = 1 + length xs
+
+foldr :: (a -> b -> b) -> b -> [a] -> b
+foldr f z []     = z
+foldr f z (x:xs) = f x (foldr f z xs)
+
+foldl :: (b -> a -> b) -> b -> [a] -> b
+foldl f z []     = z
+foldl f z (x:xs) = foldl f (f z x) xs
+
+concat :: [[a]] -> [a]
+concat []     = []
+concat (x:xs) = (++) x (concat xs)
+
+take :: Int -> [a] -> [a]
+take n []     = []
+take n (x:xs) = case n <= 0 of
+    True  -> []
+    False -> x : take (n - 1) xs
+
+drop :: Int -> [a] -> [a]
+drop n []     = []
+drop n (x:xs) = case n <= 0 of
+    True  -> x : xs
+    False -> drop (n - 1) xs
+
+-- ========================================================================
+-- Maybe / Either
+-- ========================================================================
+
+maybe :: b -> (a -> b) -> Maybe a -> b
+maybe n f Nothing  = n
+maybe n f (Just x) = f x
+
+fromMaybe :: a -> Maybe a -> a
+fromMaybe d Nothing  = d
+fromMaybe d (Just x) = x
+
+either :: (a -> c) -> (b -> c) -> Either a b -> c
+either f g (Left x)  = f x
+either f g (Right y) = g y
+
+-- ========================================================================
+-- Polymorphic functions still blocked:
+--   - reverse: uses (:) as higher-order value, needs constructor closures (#386)
+--   - zip, unzip: needs tuple codegen (#571)
+--   - fst, snd: needs tuple codegen (#571)
+--   - show, read: needs dictionary-passing codegen (#569)
 -- ========================================================================
