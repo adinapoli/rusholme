@@ -400,7 +400,7 @@
 | [#572](https://github.com/adinapoli/rusholme/issues/572) | Implement tuple codegen in GRIN-to-LLVM backend | [#381](https://github.com/adinapoli/rusholme/issues/381) | :white_circle: |
 | [#573](https://github.com/adinapoli/rusholme/issues/573) | GRIN backend: polymorphic Prelude functions produce broken codegen | [#529](https://github.com/adinapoli/rusholme/issues/529) | :yellow_circle: |
 | [#569](https://github.com/adinapoli/rusholme/issues/569) | GRIN/LLVM backend: support dictionary-passing in codegen | [#556](https://github.com/adinapoli/rusholme/issues/556) | :white_circle: |
-| [#583](https://github.com/adinapoli/rusholme/issues/583) | Implement VarTagNode handling in LLVM backend for partial applications | — | :yellow_circle: |
+| [#583](https://github.com/adinapoli/rusholme/issues/583) | Implement VarTagNode handling in LLVM backend for partial applications | — | :green_circle: |
 | [#589](https://github.com/adinapoli/rusholme/issues/589) | LLVM backend: ptr/i64 return type confusion causes segfaults | [#573](https://github.com/adinapoli/rusholme/issues/573) | :white_circle: |
 
 ### Epic [#515](https://github.com/adinapoli/rusholme/issues/515): Support Laziness (Call-by-Need Evaluation)
@@ -458,6 +458,8 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | [#559](https://github.com/adinapoli/rusholme/issues/559) | Support class constraints in user-written type signatures | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#566](https://github.com/adinapoli/rusholme/issues/566) | Typechecker: support declaration-order-independent inference | — | :white_circle: |
 | [#567](https://github.com/adinapoli/rusholme/issues/567) | Parser: support parenthesised-pattern LHS in function bindings | — | :white_circle: |
+| [#591](https://github.com/adinapoli/rusholme/issues/591) | Wire Prelude into REPL session for WASM target | [#529](https://github.com/adinapoli/rusholme/issues/529) | :yellow_circle: |
+| [#592](https://github.com/adinapoli/rusholme/issues/592) | GRIN evaluator drops first IO action with eta-reduced bindings in do-blocks | [#591](https://github.com/adinapoli/rusholme/issues/591) | :white_circle: |
 
 ### Epic [#14](https://github.com/adinapoli/rusholme/issues/14): Memory Management (Arena → Immix GC)
 
