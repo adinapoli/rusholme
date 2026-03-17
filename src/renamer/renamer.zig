@@ -934,13 +934,9 @@ fn decomposeInstanceHead(ty: ast.Type) ?struct { class_name: []const u8, instanc
                 .instance_type = .{ .App = parts[1..] },
             };
         },
-        // Bare constructor: `instance Eq` (no instance type — malformed but handle gracefully)
-        .Con => |con| {
-            return .{
-                .class_name = con.name,
-                .instance_type = ty,
-            };
-        },
+        // Bare constructor with no type argument is invalid.
+        // Catches malformed instances like `instance ShowIt where ...`.
+        .Con => return null,
         else => return null,
     }
 }

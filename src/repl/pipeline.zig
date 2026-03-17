@@ -36,6 +36,7 @@ const FileId = span_mod.FileId;
 
 const unique_mod = @import("../naming/unique.zig");
 const UniqueSupply = unique_mod.UniqueSupply;
+const Name = unique_mod.Name;
 
 const infer_mod = @import("../typechecker/infer.zig");
 const htype_mod = @import("../typechecker/htype.zig");
@@ -55,6 +56,7 @@ const DictNameMap = desugar_mod.DesugarCtx.DictNameMap;
 
 const ArityMap = std.AutoHashMapUnmanaged(u64, u32);
 const ConMap = std.AutoHashMapUnmanaged(u64, u32);
+const TypeConNames = std.StringHashMapUnmanaged(Name);
 
 // ── Result types ──────────────────────────────────────────────────────
 
@@ -292,6 +294,7 @@ pub const Pipeline = struct {
         external_con_map: ?*const ConMap,
         external_class_env: ?*const ClassEnv,
         external_dict_names: ?*const DictNameMap,
+        external_type_con_names: ?*const TypeConNames,
     ) CompileError!ModuleResult {
         const alloc = self.allocator;
 
@@ -335,7 +338,7 @@ pub const Pipeline = struct {
             };
         }
 
-        var module_types = infer_mod.inferModule(&infer_ctx, renamed) catch {
+        var module_types = infer_mod.inferModule(&infer_ctx, renamed, external_type_con_names) catch {
             return CompileError.OutOfMemory;
         };
         if (diags.hasErrors()) {
@@ -403,6 +406,7 @@ pub const Pipeline = struct {
         external_con_map: ?*const ConMap,
         external_class_env: ?*const ClassEnv,
         external_dict_names: ?*const DictNameMap,
+        external_type_con_names: ?*const TypeConNames,
     ) CompileError!CompileResult {
         const alloc = self.allocator;
         const file_id: FileId = 0;
@@ -431,7 +435,7 @@ pub const Pipeline = struct {
             var decl_diags = DiagnosticCollector.init();
             defer decl_diags.deinit(alloc);
 
-            if (self.compileModule(decl_source, file_id, u_supply, rename_env, ty_env, mv_supply, &decl_diags, external_arities, external_con_map, external_class_env, external_dict_names)) |result| {
+            if (self.compileModule(decl_source, file_id, u_supply, rename_env, ty_env, mv_supply, &decl_diags, external_arities, external_con_map, external_class_env, external_dict_names, external_type_con_names)) |result| {
                 // Copy any diagnostics from the attempt
                 try copyDiagnostics(alloc, &decl_diags, diags);
                 return .{ .program = result.grin_prog, .kind = decl_kind, .core_data_decls = result.core_data_decls, .class_env = result.class_env, .dict_names = result.dict_names };
@@ -456,7 +460,7 @@ pub const Pipeline = struct {
             self.last_source = expr_source;
             self.last_input_kind = .expression;
 
-            if (self.compileModule(expr_source, file_id, u_supply, rename_env, ty_env, mv_supply, diags, external_arities, external_con_map, external_class_env, external_dict_names)) |result| {
+            if (self.compileModule(expr_source, file_id, u_supply, rename_env, ty_env, mv_supply, diags, external_arities, external_con_map, external_class_env, external_dict_names, external_type_con_names)) |result| {
                 // Expression succeeded — clear declaration diagnostics.
                 clearLeadingDiags(alloc, diags, decl_diag_count);
                 return .{ .program = result.grin_prog, .kind = .expression, .core_data_decls = result.core_data_decls, .class_env = result.class_env, .dict_names = result.dict_names };
@@ -520,6 +524,7 @@ test "pipeline: compile simple literal expression" {
         null,
         null,
         null,
+        null,
     );
 
     try testing.expect(result.program.defs.len > 0);
@@ -551,6 +556,7 @@ test "pipeline: compile data declaration" {
         &ty_env,
         &mv_supply,
         &diags,
+        null,
         null,
         null,
         null,
@@ -587,6 +593,7 @@ test "pipeline: compile function declaration" {
         &ty_env,
         &mv_supply,
         &diags,
+        null,
         null,
         null,
         null,
@@ -708,6 +715,7 @@ test "pipeline: handle let prefix in declarations" {
         &ty_env,
         &mv_supply,
         &diags,
+        null,
         null,
         null,
         null,

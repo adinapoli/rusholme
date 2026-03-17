@@ -33,6 +33,7 @@ const FileId = span_mod.FileId;
 
 const unique_mod = @import("../naming/unique.zig");
 const UniqueSupply = unique_mod.UniqueSupply;
+const Name = unique_mod.Name;
 
 const htype_mod = @import("../typechecker/htype.zig");
 const env_mod = @import("../typechecker/env.zig");
@@ -163,6 +164,12 @@ pub const Session = struct {
     // REPL inputs can find dictionaries declared in prior inputs (#578).
     accumulated_dict_names: DictNameMap,
 
+    // Accumulated type constructor names from data declarations in prior inputs.
+    // Maps base name (e.g. "A") → Name (with correct unique).
+    // Passed to the typechecker so that instance heads can reference types
+    // from prior REPL inputs (#588).
+    accumulated_type_con_names: std.StringHashMapUnmanaged(Name),
+
     /// Create a new REPL session with initialised compiler state.
     pub fn init(allocator: Allocator, io: std.Io) SessionError!Session {
         var u_supply = UniqueSupply{};
@@ -202,6 +209,7 @@ pub const Session = struct {
             .accumulated_con_map = .{},
             .accumulated_class_env = ClassEnv.init(allocator),
             .accumulated_dict_names = .empty,
+            .accumulated_type_con_names = .empty,
         };
 
         // Load the Prelude so its functions are available immediately.
@@ -223,6 +231,7 @@ pub const Session = struct {
     /// Release all session resources.
     pub fn deinit(self: *Session) void {
         // GrinEngine has no deinit; only JitEngine does.
+        self.accumulated_type_con_names.deinit(self.allocator);
         self.accumulated_dict_names.deinit(self.allocator);
         self.accumulated_class_env.deinit();
         self.accumulated_con_map.deinit(self.allocator);
@@ -268,6 +277,7 @@ pub const Session = struct {
             null, // no external con_map yet
             null, // no external class_env yet
             null, // no external dict_names yet
+            null, // no external type_con_names yet
         ) catch {
             // Prelude failed to compile — roll back and continue without it.
             self.ty_env.pop();
@@ -294,6 +304,13 @@ pub const Session = struct {
                     translate_mod.countConFields(con.ty),
                 ) catch return;
             }
+        }
+
+        // Accumulate type constructor names from Prelude data declarations.
+        // This allows instance heads to reference types from the Prelude
+        // (#588).
+        for (result.core_data_decls) |decl| {
+            self.accumulated_type_con_names.put(self.allocator, decl.name.base, decl.name) catch return;
         }
 
         // Take ownership of class_env and dict_names.
@@ -356,6 +373,7 @@ pub const Session = struct {
             &self.accumulated_con_map,
             &self.accumulated_class_env,
             &self.accumulated_dict_names,
+            &self.accumulated_type_con_names,
         ) catch |err| {
             // Capture compilation context for diagnostic rendering.
             self.last_source = self.pipeline.last_source;
@@ -423,6 +441,13 @@ pub const Session = struct {
                         translate_mod.countConFields(con.ty),
                     );
                 }
+            }
+
+            // Accumulate type constructor names from data declarations.
+            // This allows instance heads to reference types from prior REPL
+            // inputs by their correct unique IDs (#588).
+            for (result.core_data_decls) |decl| {
+                try self.accumulated_type_con_names.put(self.allocator, decl.name.base, decl.name);
             }
 
             // Replace the accumulated class env with the result's env.
