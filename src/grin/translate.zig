@@ -85,7 +85,7 @@ fn inferFieldTypeFromCoreType(ty: core.CoreType) ?FieldType {
             // Other type constructors are heap pointers
             break :blk .ptr;
         },
-        .FunTy => .ptr, // Functions are closures (pointers)
+        .FunTy => .fn_ptr, // Function types are function pointers (for dictionary fields)
         .ForAllTy => |fa| inferFieldTypeFromCoreType(fa.body.*),
     };
 }
@@ -105,6 +105,9 @@ const TranslateCtx = struct {
     // Used to distinguish constructor applications from function calls in
     // translateApp, and to emit ValTag for nullary constructors in translateExpr.
     con_map: std.AutoHashMapUnmanaged(u64, u32),
+    // Maps data constructor uniques to their field types.
+    // Used for dictionary field type tracking (issue #569).
+    con_field_types: std.AutoHashMapUnmanaged(u64, []const grin.FieldType),
     // Counter for generating fresh GRIN variable names.
     name_counter: u64 = 0,
     // Lambda-lifted helper functions generated during translation.
@@ -118,6 +121,7 @@ const TranslateCtx = struct {
             .var_map = .{},
             .arity_map = .{},
             .con_map = .{},
+            .con_field_types = .{},
         };
     }
 
@@ -126,6 +130,9 @@ const TranslateCtx = struct {
         self.arity_map.deinit(self.alloc);
         self.con_map.deinit(self.alloc);
         self.lifted_defs.deinit(self.alloc);
+
+        // Note: con_field_types ownership is transferred to GrinProgram in translateProgram
+        // The caller (translateProgram) takes ownership and handles cleanup
     }
 
     /// Return true if the given unique belongs to a known data constructor.
@@ -364,6 +371,73 @@ pub fn countConFields(ty: CoreType) u32 {
     return fields;
 }
 
+/// Build a map from data constructor uniques to their field types.
+/// For dictionary constructors (like MkDict$Eq), fields that are function
+/// types are marked as fn_ptr. This is needed for the LLVM backend to
+/// properly handle dictionary fields.
+/// See: https://github.com/adinapoli/rusholme/issues/569
+fn buildConFieldTypes(alloc: std.mem.Allocator, core_prog: CoreProgram) !std.AutoHashMapUnmanaged(u64, []const grin.FieldType) {
+    var con_map = std.AutoHashMapUnmanaged(u64, []const grin.FieldType){};
+    errdefer {
+        var iter = con_map.iterator();
+        while (iter.next()) |entry| {
+            alloc.free(entry.value_ptr.*);
+        }
+        con_map.deinit(alloc);
+    }
+
+    for (core_prog.data_decls) |decl| {
+        for (decl.constructors) |con| {
+            const unique = con.name.unique.value;
+            const n_fields = countConFields(con.ty);
+
+            // Default to .ptr for all fields (conservative)
+            var fields = try alloc.alloc(grin.FieldType, n_fields);
+            for (fields) |*ft| ft.* = .ptr;
+
+            // Now check if any fields should be .fn_ptr by analyzing the type
+            var current = con.ty;
+            var field_idx: u32 = 0;
+
+            // Strip ForAllTy quantifiers
+            while (true) {
+                switch (current) {
+                    .ForAllTy => |fa| current = fa.body.*,
+                    else => break,
+                }
+            }
+
+            // For each FunTy arrow, check if the argument type is a function.
+            // Dictionary methods have function types (FunTy), which means we need
+            // nested analysis.
+            while (field_idx < n_fields) {
+                switch (current) {
+                    .FunTy => |ft| {
+                        // Check if this field's type is a function (nested FunTy)
+                        const arg_type = ft.arg.*;
+                        const is_fn = switch (arg_type) {
+                            .FunTy => true,
+                            else => false,
+                        };
+
+                        if (is_fn) {
+                            fields[field_idx] = .fn_ptr;
+                        }
+
+                        field_idx += 1;
+                        current = ft.res.*;
+                    },
+                    else => break,
+                }
+            }
+
+            try con_map.put(alloc, unique, fields);
+        }
+    }
+
+    return con_map;
+}
+
 /// Count the number of lambda parameters in a Core expression.
 fn countLambdaArity(expr: *const CoreExpr) !u32 {
     var arity: u32 = 0;
@@ -395,6 +469,10 @@ pub fn translateProgram(
     var con_map = try buildConMap(alloc, core_prog);
     defer con_map.deinit(alloc);
 
+    // Build constructor field type map for dictionary handling (issue #569).
+    var con_field_types = try buildConFieldTypes(alloc, core_prog);
+    defer con_field_types.deinit(alloc);
+
     var ctx = TranslateCtx.init(alloc);
     defer ctx.deinit();
 
@@ -420,6 +498,15 @@ pub fn translateProgram(
     var con_iter = con_map.iterator();
     while (con_iter.next()) |entry| {
         try ctx.con_map.put(alloc, entry.key_ptr.*, entry.value_ptr.*);
+    }
+
+    // Copy the constructor field type map into the context.
+    var ft_iter = con_field_types.iterator();
+    while (ft_iter.next()) |entry| {
+        // Deep copy the field type slice
+        const field_types = try alloc.alloc(grin.FieldType, entry.value_ptr.len);
+        @memcpy(field_types, entry.value_ptr.*);
+        try ctx.con_field_types.put(alloc, entry.key_ptr.*, field_types);
     }
 
     // Seed with external constructor map (from REPL session's prior data declarations).
@@ -504,7 +591,13 @@ pub fn translateProgram(
     }
 
     const defs_slice = try defs.toOwnedSlice(alloc);
-    return GrinProgram{ .defs = defs_slice };
+    // Move field type map from context to program
+    const field_types = ctx.con_field_types;
+
+    return GrinProgram{
+        .defs = defs_slice,
+        .field_types = field_types,
+    };
 }
 
 /// Translate a single Core binding to a GRIN definition.
@@ -1963,7 +2056,10 @@ pub fn generateEvalApply(alloc: std.mem.Allocator, program: GrinProgram) !GrinPr
     try new_defs.append(alloc, apply_def);
 
     const defs_slice = try new_defs.toOwnedSlice(alloc);
-    return GrinProgram{ .defs = defs_slice };
+    return GrinProgram{
+        .defs = defs_slice,
+        .field_types = .{},
+    };
 }
 
 /// Generate the `eval p` function.
@@ -2326,7 +2422,10 @@ test "generateEvalApply: adds eval and apply to program" {
     const defs = try alloc.alloc(GrinDef, 1);
     defs[0] = def;
 
-    const program = GrinProgram{ .defs = defs };
+    const program = GrinProgram{
+        .defs = defs,
+        .field_types = .{},
+    };
 
     // Generate eval/apply functions
     const augmented = try generateEvalApply(alloc, program);
@@ -2382,7 +2481,10 @@ test "generateEvalFunc: has proper structure" {
     const defs = try alloc.alloc(GrinDef, 1);
     defs[0] = def;
 
-    const program = GrinProgram{ .defs = defs };
+    const program = GrinProgram{
+        .defs = defs,
+        .field_types = .{},
+    };
 
     // Generate eval function
     var tag_info = try collectTags(alloc, program);
@@ -2450,7 +2552,10 @@ test "TagInfo: collects constructor tags" {
     const defs = try alloc.alloc(GrinDef, 1);
     defs[0] = def;
 
-    const program = GrinProgram{ .defs = defs };
+    const program = GrinProgram{
+        .defs = defs,
+        .field_types = .{},
+    };
 
     // Collect tags
     var tag_info = try collectTags(alloc, program);

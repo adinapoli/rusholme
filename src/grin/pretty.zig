@@ -729,7 +729,10 @@ test "pretty: Program with two defs" {
         .body = main_body,
     };
 
-    const result = try renderProgram(.{ .defs = defs });
+    const result = try renderProgram(.{
+        .defs = defs,
+        .field_types = .{},
+    });
 
     try testing.expectEqualStrings(
         \\id_1 x_2 =

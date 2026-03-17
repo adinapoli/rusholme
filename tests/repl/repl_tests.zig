@@ -403,7 +403,10 @@ test "repl: GrinEngine — define then use function (WASM path)" {
         all_defs[session.accumulated_defs.items.len + i] = def;
     }
 
-    const merged_program = grin_ast.Program{ .defs = all_defs };
+    const merged_program = grin_ast.Program{
+        .defs = all_defs,
+        .field_types = .{},
+    };
 
     // Step 4: Execute via GrinEngine (the WASM path)
     var engine = GrinEngine.init(alloc, testing_io);
@@ -446,7 +449,10 @@ test "repl: GrinEngine — define then use with putStrLn (WASM path)" {
         all_defs[session.accumulated_defs.items.len + i] = def;
     }
 
-    const merged_program = grin_ast.Program{ .defs = all_defs };
+    const merged_program = grin_ast.Program{
+        .defs = all_defs,
+        .field_types = .{},
+    };
 
     var engine = GrinEngine.init(alloc, testing_io);
     const result = engine.execute(&merged_program) catch |err| {
@@ -520,7 +526,10 @@ test "repl: GrinEngine — load then evaluate main (WASM :load path, issue #494)
         all_defs[session.accumulated_defs.items.len + i] = def;
     }
 
-    const merged_program = grin_ast.Program{ .defs = all_defs };
+    const merged_program = grin_ast.Program{
+        .defs = all_defs,
+        .field_types = .{},
+    };
 
     // Step 4: Execute via GrinEngine (the WASM path)
     var engine = GrinEngine.init(alloc, testing_io);

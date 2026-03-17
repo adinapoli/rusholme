@@ -1149,7 +1149,10 @@ test "FunctionTable: populate and lookup" {
     const defs = try alloc.alloc(Def, 1);
     defs[0] = def;
 
-    const program = Program{ .defs = defs };
+    const program = Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     try funcs.populate(&program);
     try testing.expectEqual(@as(usize, 1), funcs.count());
@@ -1186,7 +1189,10 @@ test "GrinEvaluator: full integration" {
     const defs = try alloc.alloc(Def, 1);
     defs[0] = main_def;
 
-    const program = Program{ .defs = defs };
+    const program = Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     // Initialize evaluator
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
@@ -1221,7 +1227,10 @@ test "GrinEvaluator: scoped bindings" {
         .body = body,
     };
 
-    const program = Program{ .defs = defs };
+    const program = Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -1259,7 +1268,10 @@ test "eval: Return literal" {
         .body = body,
     };
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -1284,7 +1296,10 @@ test "eval: Return variable" {
         .body = body,
     };
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -1328,7 +1343,10 @@ test "eval: Store constructor node and fetch it back" {
         .body = body,
     };
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -1370,7 +1388,10 @@ test "eval: Store nullary constructor and fetch it back" {
         .body = body,
     };
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -1414,7 +1435,10 @@ test "eval: Fetch with field index" {
         .body = body,
     };
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -1473,7 +1497,10 @@ test "eval: Update a heap node" {
         .body = body,
     };
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -1510,7 +1537,10 @@ test "eval: Nested binds" {
         .body = body,
     };
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -1539,7 +1569,10 @@ test "eval: Block expression" {
         .body = body,
     };
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -1563,7 +1596,10 @@ test "eval: Unbound variable error" {
         .body = body,
     };
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -1587,7 +1623,10 @@ test "eval: Return unit" {
         .body = body,
     };
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -1625,7 +1664,10 @@ test "eval: Store and fetch literal" {
         .body = body,
     };
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -1671,7 +1713,10 @@ test "eval: Two-element constructor (Cons cell)" {
         .body = body,
     };
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -1713,7 +1758,10 @@ test "eval: Bind with literal pattern (matching)" {
         .body = body,
     };
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -1752,7 +1800,10 @@ test "eval: Bind with literal pattern (non-matching)" {
         .body = body,
     };
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -1801,7 +1852,10 @@ test "eval: App - simple function call" {
     defs[0] = f_def;
     defs[1] = main_def;
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -1830,7 +1884,10 @@ test "eval: App - unbound function error" {
         .body = body,
     };
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -1874,7 +1931,10 @@ test "eval: App - arity mismatch error" {
     defs[0] = f_def;
     defs[1] = main_def;
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -1943,7 +2003,10 @@ test "eval: App - recursive function" {
     defs[1] = inner_def;
     defs[2] = main_def;
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -2004,7 +2067,10 @@ test "eval: Case - matching node pattern" {
         .body = body,
     };
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -2061,7 +2127,10 @@ test "eval: Case - default pattern match" {
         .body = body,
     };
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -2107,7 +2176,10 @@ test "eval: Case - literal pattern match" {
         .body = body,
     };
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -2158,7 +2230,10 @@ test "eval: Case - tag pattern match" {
         .body = body,
     };
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -2204,7 +2279,10 @@ test "eval: Case - pattern match failure" {
         .body = body,
     };
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -2282,7 +2360,10 @@ test "eval: Combined - function that cases on its argument" {
     defs[0] = f_def;
     defs[1] = main_def;
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -2314,7 +2395,10 @@ test "eval: (>>) returns second argument (IO monad sequencing)" {
     } };
 
     const defs = try alloc.alloc(ast.Def, 0);
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -2360,7 +2444,10 @@ test "eval: (>>=) applies continuation to action result" {
     const defs = try alloc.alloc(ast.Def, 1);
     defs[0] = cont_def;
 
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();
@@ -2382,7 +2469,10 @@ test "eval: (>>) arity mismatch" {
     } };
 
     const defs = try alloc.alloc(ast.Def, 0);
-    const program = ast.Program{ .defs = defs };
+    const program = ast.Program{
+    .defs = defs,
+    .field_types = .{},
+};
 
     var evaluator = try GrinEvaluator.init(testing.allocator, &program, testing.io);
     defer evaluator.deinit();

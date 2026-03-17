@@ -523,7 +523,10 @@ pub const Session = struct {
                         all_defs[self.accumulated_defs.items.len + i] = def;
                     }
 
-                    const merged_program = grin_ast.Program{ .defs = all_defs };
+                    const merged_program = grin_ast.Program{
+                        .defs = all_defs,
+                        .field_types = process.compile.program.field_types,
+                    };
                     const exec = try self.engine.execute(&merged_program);
                     const value_copy = try self.allocator.dupe(u8, exec.value);
                     self.allocator.free(all_defs);
