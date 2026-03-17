@@ -411,6 +411,29 @@ fn buildTagTable(alloc: std.mem.Allocator, program: grin.Program) !TagTable {
     for (program.defs) |def| {
         try scanExprForTags(alloc, def.body, &table);
     }
+
+    // Merge constructor field types from the GRIN program's field_types map.
+    // This allows dictionary constructors with function-typed fields to be
+    // properly tracked (issue #569).
+    // Note: program.field_types.keys() are constructor unique IDs. The TagTable
+    // internally encodes these as unique * 4 for Con tags (see tagKey() above).
+    var iter = program.field_types.iterator();
+    while (iter.next()) |entry| {
+        const unique = entry.key_ptr.*;
+        const field_types = entry.value_ptr.*;
+        const key = unique *% 4; // Con key encoding
+
+        // Update the field types array in the tag table
+        if (table.field_types.get(key)) |existing| {
+            alloc.free(existing);
+        }
+
+        // Deep copy the field types array
+        const types = try alloc.alloc(FieldType, field_types.len);
+        @memcpy(types, field_types);
+        try table.field_types.put(alloc, key, types);
+    }
+
     return table;
 }
 
@@ -450,7 +473,14 @@ fn scanValForTags(alloc: std.mem.Allocator, val: grin.Val, table: *TagTable) !vo
         },
         .ValTag => |t| try table.register(alloc, t, 0),
         .VarTagNode => |vtn| for (vtn.fields) |f| try scanValForTags(alloc, f, table),
-        else => {},
+        // Variables (function references, parameters) - skip tag registration
+        // Dictionary constructor fields can be function references that don't
+        // need to be registered as tags. See: https://github.com/adinapoli/rusholme/issues/569
+        .Var => {},
+        // Literals - skip tag registration
+        .Lit => {},
+        // Unit value - skip tag registration
+        .Unit => {},
     }
 }
 
@@ -1770,6 +1800,7 @@ pub const GrinTranslator = struct {
                         .i64 => loaded_i64,
                         .f64 => c.LLVMBuildBitCast(self.builder, loaded_i64, c.LLVMDoubleType(), "as_f64"),
                         .ptr => c.LLVMBuildIntToPtr(self.builder, loaded_i64, ptrType(), "as_ptr"),
+                        .fn_ptr => c.LLVMBuildIntToPtr(self.builder, loaded_i64, ptrType(), "as_fn_ptr"),
                     };
 
                     try self.params.put(field_name.unique.value, final_val);
@@ -2626,7 +2657,10 @@ test "Store emits rts_alloc and rts_store_field instead of malloc" {
         .params = &.{},
         .body = &bind_expr,
     };
-    const program = grin.Program{ .defs = &.{main_def} };
+    const program = grin.Program{
+        .defs = &.{main_def},
+        .field_types = .{},
+    };
 
     var translator = GrinTranslator.init(alloc);
     defer translator.deinit();
@@ -2768,7 +2802,10 @@ test "Partial application store emits rts_alloc with TagTable discriminant" {
         .params = &.{},
         .body = &bind_expr,
     };
-    const program = grin.Program{ .defs = &.{main_def} };
+    const program = grin.Program{
+        .defs = &.{main_def},
+        .field_types = .{},
+    };
 
     var translator = GrinTranslator.init(alloc);
     defer translator.deinit();
@@ -2807,7 +2844,10 @@ test "Partial application emits __rhc_apply when P-tags exist" {
         .params = &.{},
         .body = &bind_expr,
     };
-    const program = grin.Program{ .defs = &.{main_def} };
+    const program = grin.Program{
+        .defs = &.{main_def},
+        .field_types = .{},
+    };
 
     var translator = GrinTranslator.init(alloc);
     defer translator.deinit();

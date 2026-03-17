@@ -212,7 +212,10 @@ test "engine: execute trivial GRIN program" {
         .body = body,
     };
 
-    const program = grin_ast.Program{ .defs = defs };
+    const program = grin_ast.Program{
+        .defs = defs,
+        .field_types = .{},
+    };
 
     var engine = GrinEngine.init(alloc, testing_io);
     const result = try engine.execute(&program);

@@ -812,7 +812,10 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     for (per_module_grin.items) |prog| {
         try all_grin_defs.appendSlice(arena_alloc, prog.defs);
     }
-    const all_grin = rusholme.grin.ast.Program{ .defs = all_grin_defs.items };
+    const all_grin = rusholme.grin.ast.Program{
+        .defs = all_grin_defs.items,
+        .field_types = .{},
+    };
 
     // ── Dispatch to backend-specific emission ─────────────────────────────
     switch (backend_kind) {

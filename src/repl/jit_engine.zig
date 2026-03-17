@@ -335,7 +335,10 @@ fn patchEntryPointName(allocator: Allocator, program: *const grin_ast.Program, t
             };
         }
     }
-    return .{ .defs = new_defs };
+    return .{
+        .defs = new_defs,
+        .field_types = .{},
+    };
 }
 
 // ── Result formatting ─────────────────────────────────────────────────
@@ -516,7 +519,10 @@ test "jit engine: execute literal expression" {
         .body = body,
     };
 
-    const program = grin_ast.Program{ .defs = defs };
+    const program = grin_ast.Program{
+        .defs = defs,
+        .field_types = .{},
+    };
 
     const result = try engine.execute(&program);
     try testing.expectEqualStrings("42", result.value);

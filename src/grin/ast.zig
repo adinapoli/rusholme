@@ -77,6 +77,8 @@ pub const FieldType = enum {
     f64,
     /// Heap pointer (to another node).
     ptr,
+    /// Function pointer (closure - for dictionary method fields).
+    fn_ptr,
 };
 
 // ── Literals ───────────────────────────────────────────────────────────
@@ -192,6 +194,9 @@ pub const Def = struct {
 /// A complete GRIN program.
 pub const Program = struct {
     defs: []const Def,
+    // Maps constructor unique IDs to their field types.
+    // Used by LLVM backend to properly handle dictionary fields (issue #569).
+    field_types: std.AutoHashMapUnmanaged(u64, []const FieldType),
 };
 
 // ── Simple types (for analysis) ────────────────────────────────────────
@@ -466,7 +471,10 @@ test "Program: list of defs" {
         .body = body,
     };
 
-    const prog = Program{ .defs = defs };
+    const prog = Program{
+        .defs = defs,
+        .field_types = .{},
+    };
     try testing.expectEqual(@as(usize, 1), prog.defs.len);
 }
 
