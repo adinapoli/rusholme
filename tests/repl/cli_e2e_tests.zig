@@ -15,6 +15,11 @@
 //! arrives in bulk via a pipe. This is tracked as a known issue and
 //! will be testable once the fix lands.
 //! tracked in: https://github.com/adinapoli/rusholme/issues/487
+//!
+//! NOTE: Issue #588 e2e tests (bare instance rejection, instance finding across REPL inputs)
+//! are blocked on multi-line REPL support. The bare instance case requires multi-line body,
+//! and the cross-REPL-inputs case requires class → data → instance → use workflow.
+//! Unit tests in repl_tests.zig cover these compilation checks.
 
 const std = @import("std");
 const testing = std.testing;

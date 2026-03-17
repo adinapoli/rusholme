@@ -99,6 +99,8 @@ pub const ClassConstraint = class_env_mod.ClassConstraint;
 pub const DiagnosticCollector = diag_mod.DiagnosticCollector;
 pub const DiagnosticCode = diag_mod.DiagnosticCode;
 pub const Severity = diag_mod.Severity;
+pub const Name = naming_mod.Name;
+pub const TypeConNames = std.StringHashMapUnmanaged(Name);
 pub const SourceSpan = span_mod.SourceSpan;
 pub const SourcePos = span_mod.SourcePos;
 pub const RExpr = renamer_mod.RExpr;
@@ -109,7 +111,6 @@ pub const RStmt = renamer_mod.RStmt;
 pub const RRhs = renamer_mod.RRhs;
 pub const RMatch = renamer_mod.RMatch;
 pub const RenamedModule = renamer_mod.RenamedModule;
-pub const Name = naming_mod.Name;
 pub const UniqueSupply = naming_mod.UniqueSupply;
 const Known = known_mod;
 
@@ -1825,7 +1826,11 @@ fn inferMatch(ctx: *InferCtx, match: RMatch) std.mem.Allocator.Error!*HType {
 ///
 /// Returns a `ModuleTypes` mapping each top-level name's unique to its
 /// `TyScheme`.  Errors are collected in `ctx.diags`.
-pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Error!ModuleTypes {
+pub fn inferModule(
+    ctx: *InferCtx,
+    module: RenamedModule,
+    external_type_con_names: ?*const TypeConNames,
+) std.mem.Allocator.Error!ModuleTypes {
     // Pass 0: Build type constructor lookup map from data declarations.
     // This map is used during type signature conversion to resolve custom ADT
     // type constructors to their proper unique IDs.
@@ -1839,6 +1844,20 @@ pub fn inferModule(ctx: *InferCtx, module: RenamedModule) std.mem.Allocator.Erro
             else => {},
         }
     }
+
+    // Merge in type constructor names from prior REPL inputs (#588).
+    // This allows instance heads to reference types declared in previous
+    // inputs with their correct unique IDs. Don't overwrite — current
+    // module's declarations take precedence.
+    if (external_type_con_names) |ext_names| {
+        var it = ext_names.iterator();
+        while (it.next()) |entry| {
+            if (!type_con_names.contains(entry.key_ptr.*)) {
+                try type_con_names.put(ctx.alloc, entry.key_ptr.*, entry.value_ptr.*);
+            }
+        }
+    }
+
     ctx.type_con_names = &type_con_names;
 
     // Pass 0a: Collect type signatures and convert them to HType.
@@ -3627,7 +3646,7 @@ test "inferModule: main = putStrLn \"Hello\"" {
         .span = testSpan(),
     };
 
-    var module_types = try inferModule(&ctx, module);
+    var module_types = try inferModule(&ctx, module, null);
     defer module_types.deinit(alloc);
 
     try testing.expect(!diags.hasErrors());
@@ -3680,7 +3699,7 @@ test "inferModule: two independent definitions" {
         .span = testSpan(),
     };
 
-    var module_types = try inferModule(&ctx, module);
+    var module_types = try inferModule(&ctx, module, null);
     defer module_types.deinit(alloc);
 
     try testing.expect(!diags.hasErrors());
@@ -3751,7 +3770,7 @@ test "inferModule: signature matches inferred type" {
         .span = testSpan(),
     };
 
-    var module_types = try inferModule(&ctx, module);
+    var module_types = try inferModule(&ctx, module, null);
     defer module_types.deinit(alloc);
 
     // Should have no errors (signature matches)
@@ -3810,7 +3829,7 @@ test "inferModule: signature mismatch produces error" {
         .span = testSpan(),
     };
 
-    var module_types = try inferModule(&ctx, module);
+    var module_types = try inferModule(&ctx, module, null);
     defer module_types.deinit(alloc);
 
     try testing.expect(diags.hasErrors());
@@ -3875,7 +3894,7 @@ test "inferModule: type variables in signature are scoped correctly" {
         .span = testSpan(),
     };
 
-    var module_types = try inferModule(&ctx, module);
+    var module_types = try inferModule(&ctx, module, null);
     defer module_types.deinit(alloc);
 
     try testing.expect(!diags.hasErrors());
@@ -3967,7 +3986,7 @@ test "inferModule: #304 bad x y = x with sig a -> b -> b produces RigidMismatch"
         .span = testSpan(),
     };
 
-    var module_types = try inferModule(&ctx, module);
+    var module_types = try inferModule(&ctx, module, null);
     defer module_types.deinit(alloc);
 
     // The body returns `x :: a` but the signature declares the result as `b`.
@@ -4025,7 +4044,7 @@ test "inferModule: #304 good x y = y with sig a -> b -> b succeeds" {
         .span = testSpan(),
     };
 
-    var module_types = try inferModule(&ctx, module);
+    var module_types = try inferModule(&ctx, module, null);
     defer module_types.deinit(alloc);
 
     try testing.expect(!diags.hasErrors());
@@ -4392,7 +4411,7 @@ test "inferModule with type application in signature" {
         .span = testSpan(),
     };
 
-    var module_types = try inferModule(&ctx, module);
+    var module_types = try inferModule(&ctx, module, null);
     defer module_types.deinit(alloc);
 
     // The signature gets parsed and converted correctly; the type error

@@ -366,7 +366,7 @@ fn cmdCheck(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
 
     var infer_ctx = infer_mod.InferCtx.init(arena_alloc, &ty_env, &mv_supply, &u_supply, &diags);
-    var module_types = try infer_mod.inferModule(&infer_ctx, renamed);
+    var module_types = try infer_mod.inferModule(&infer_ctx, renamed, null);
     defer module_types.deinit(arena_alloc);
 
     if (diags.hasErrors()) {
@@ -449,7 +449,7 @@ fn cmdCore(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
     try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
     var infer_ctx = infer_mod.InferCtx.init(arena_alloc, &ty_env, &mv_supply, &u_supply, &diags);
-    var module_types = try infer_mod.inferModule(&infer_ctx, renamed);
+    var module_types = try infer_mod.inferModule(&infer_ctx, renamed, null);
     defer module_types.deinit(arena_alloc);
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
@@ -535,7 +535,7 @@ fn cmdGrin(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
     try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
     var infer_ctx = infer_mod.InferCtx.init(arena_alloc, &ty_env, &mv_supply, &u_supply, &diags);
-    var module_types = try infer_mod.inferModule(&infer_ctx, renamed);
+    var module_types = try infer_mod.inferModule(&infer_ctx, renamed, null);
     defer module_types.deinit(arena_alloc);
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
@@ -635,7 +635,7 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
     try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
     var infer_ctx = infer_mod.InferCtx.init(arena_alloc, &ty_env, &mv_supply, &u_supply, &diags);
-    var module_types = try infer_mod.inferModule(&infer_ctx, renamed);
+    var module_types = try infer_mod.inferModule(&infer_ctx, renamed, null);
     defer module_types.deinit(arena_alloc);
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);

@@ -757,6 +757,62 @@ test "repl: typeclass method call across inputs compiles (#578)" {
     try testing.expect(r4.compile.kind == .expression);
 }
 
+test "repl: bare instance without type should be rejected (#588)" {
+    // Bug 1 from issue #588: `instance ShowIt where ...` (bare class, no type arg)
+    // should be rejected by the compiler, not silently accepted.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    _ = try session.processInput("class ShowIt a where\n  showIt :: a -> String");
+
+    // This should fail — `instance ShowIt where ...` has no type argument
+    if (session.processInput("instance ShowIt where\n  showIt _ = \"bug\"")) |_| {
+        std.debug.print("\n[#588-bug1] bare instance was ACCEPTED (bug still exists)\n", .{});
+        // This is the bug — bare instance should be rejected
+        try testing.expect(false);
+    } else |_| {
+        // Good — the bare instance was rejected
+    }
+}
+
+test "repl: showIt MkA reproduces issue #588" {
+    // Verify whether calling a typeclass method with a concrete argument
+    // still fails with "no instance for ShowIt A" (issue #588).
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    _ = try session.processInput("class ShowIt a where\n  showIt :: a -> String");
+    _ = try session.processInput("data A = MkA");
+    _ = try session.processInput("instance ShowIt A where\n  showIt MkA = \"MkA\"");
+
+    // This is the exact scenario from issue #588.
+    // If it compiles, the "no instance" bug is fixed (even if dict-passing crashes at runtime).
+    // If it returns CompileError, the bug still exists.
+    if (session.processInput("showIt MkA")) |r| {
+        std.debug.print("\n[#588] showIt MkA compiled OK, kind={}\n", .{r.compile.kind});
+    } else |err| {
+        std.debug.print("\n[#588] showIt MkA FAILED: {}\n", .{err});
+        // Print diagnostics
+        for (session.last_diagnostics.items) |diag| {
+            std.debug.print("[#588] diag: {s}\n", .{diag.message});
+        }
+        // Fail the test to show the bug still exists
+        try testing.expect(false);
+    }
+}
+
 test "repl: bare class method does not segfault (#582)" {
     // Evaluating a bare class method (e.g. `showIt` without arguments)
     // must not cause a stack overflow / segfault. The dictionary-passing

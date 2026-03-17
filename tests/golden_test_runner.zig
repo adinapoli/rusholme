@@ -146,7 +146,7 @@ fn pipelineToCore(allocator: std.mem.Allocator, source: []const u8) ![]const u8 
     var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
     try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
     var infer_ctx = infer_mod.InferCtx.init(arena_alloc, &ty_env, &mv_supply, &u_supply, &diags);
-    var module_types = try infer_mod.inferModule(&infer_ctx, renamed);
+    var module_types = try infer_mod.inferModule(&infer_ctx, renamed, null);
     defer module_types.deinit(arena_alloc);
     if (diags.hasErrors()) return error.TypecheckError;
 

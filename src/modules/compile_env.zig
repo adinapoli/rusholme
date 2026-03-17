@@ -386,7 +386,7 @@ pub const CompileEnv = struct {
             &self.u_supply,
             &self.diags,
         );
-        var module_types = try infer_mod.inferModule(&infer_ctx, renamed);
+        var module_types = try infer_mod.inferModule(&infer_ctx, renamed, null);
         defer module_types.deinit(self.alloc);
         if (self.diags.hasErrors()) return null;
 
