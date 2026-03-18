@@ -815,6 +815,7 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     const all_grin = rusholme.grin.ast.Program{
         .defs = all_grin_defs.items,
         .field_types = .{},
+        .arities = .{},
     };
 
     // ── Dispatch to backend-specific emission ─────────────────────────────

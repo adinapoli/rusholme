@@ -526,6 +526,7 @@ pub const Session = struct {
                     const merged_program = grin_ast.Program{
                         .defs = all_defs,
                         .field_types = process.compile.program.field_types,
+                        .arities = process.compile.program.arities,
                     };
                     const exec = try self.engine.execute(&merged_program);
                     const value_copy = try self.allocator.dupe(u8, exec.value);

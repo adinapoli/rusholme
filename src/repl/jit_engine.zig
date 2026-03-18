@@ -338,6 +338,7 @@ fn patchEntryPointName(allocator: Allocator, program: *const grin_ast.Program, t
     return .{
         .defs = new_defs,
         .field_types = .{},
+        .arities = .{},
     };
 }
 
