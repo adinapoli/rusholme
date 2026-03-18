@@ -989,23 +989,15 @@ pub const GrinTranslator = struct {
                 try self.translateExpr(rhs);
             },
             .Var => |v| {
-                // Special case: if lhs is a Case expression directly in bind position,
-                // use translateCaseToValue to generate phi nodes instead of returns.
-                if (lhs.* == .Case) {
-                    const case_expr = lhs.Case;
-                    const result = try self.translateCaseToValue(case_expr.scrutinee, case_expr.alts, v.base);
-                    if (result) |val| {
-                        try self.params.put(v.unique.value, val);
-                    }
-                    try self.translateExpr(rhs);
-                } else {
-                    // General case: evaluate LHS and bind result to variable.
-                    const result = try self.translateExprToValue(lhs, v.base);
-                    if (result) |val| {
-                        try self.params.put(v.unique.value, val);
-                    }
-                    try self.translateExpr(rhs);
+                // General case: evaluate LHS and bind result to variable.
+                // If the LHS contains a Case expression (directly or nested in a Bind),
+                // translateExprToValue will handle it correctly via the .Case branch
+                // which calls translateCaseToValue to generate phi nodes.
+                const result = try self.translateExprToValue(lhs, v.base);
+                if (result) |val| {
+                    try self.params.put(v.unique.value, val);
                 }
+                try self.translateExpr(rhs);
             },
             .ConstTagNode => |ctn| {
                 // Destructure: the LHS produced a heap pointer to a node
@@ -1096,6 +1088,11 @@ pub const GrinTranslator = struct {
                 // pointer IS the node.  Return the pointer value so that
                 // `fetch p >>= \node -> ...` binds `node` to `p`'s value.
                 return @as(?llvm.Value, try self.translateValToLlvm(.{ .Var = f.ptr }));
+            },
+            .Case => |case_expr| {
+                // Case expression in value-producing context (e.g., nested in a bind RHS).
+                // Use translateCaseToValue to generate phi nodes instead of returns.
+                return try self.translateCaseToValue(case_expr.scrutinee, case_expr.alts, result_name);
             },
             else => {
                 try self.translateExpr(expr);
@@ -2174,7 +2171,31 @@ pub const GrinTranslator = struct {
             
             // Every alternative must produce a value in bind context
             if (alt_value) |val| {
-                try phi_values.append(self.allocator, val);
+                // Normalize value type: box i64 nullary constructors into heap nodes
+                // so all phi incoming values have the same type (ptr).
+                // This handles cases where different alternatives return nullary
+                // constructors (i64 discriminants) vs heap-allocated nodes (ptr).
+                const val_ty = c.LLVMTypeOf(val);
+                const val_kind = c.LLVMGetTypeKind(val_ty);
+                const is_i64 = val_kind == c.LLVMIntegerTypeKind and c.LLVMGetIntTypeWidth(val_ty) == 64;
+                const normalized_val: llvm.Value = if (is_i64) blk: {
+                    // Box the i64 discriminant into a 0-field heap node
+                    const rts_alloc_fn = declareRtsAlloc(self.module);
+                    var alloc_args = [_]llvm.Value{
+                        val, // tag discriminant
+                        c.LLVMConstInt(llvm.i32Type(), 0, 0), // 0 fields
+                    };
+                    break :blk c.LLVMBuildCall2(
+                        self.builder,
+                        llvm.getFunctionType(rts_alloc_fn),
+                        rts_alloc_fn,
+                        &alloc_args,
+                        2,
+                        "boxed",
+                    );
+                } else val;
+                
+                try phi_values.append(self.allocator, normalized_val);
                 const cur_bb = c.LLVMGetInsertBlock(self.builder);
                 try phi_blocks.append(self.allocator, cur_bb);
                 _ = c.LLVMBuildBr(self.builder, merge_bb);
@@ -2189,9 +2210,8 @@ pub const GrinTranslator = struct {
         
         if (phi_values.items.len == 0) return null;
         
-        // Determine phi type from first value
-        const phi_ty = c.LLVMTypeOf(phi_values.items[0]);
-        const phi = c.LLVMBuildPhi(self.builder, phi_ty, nullTerminate(result_name).ptr);
+        // All values have been normalized to ptr type, so phi is always ptr
+        const phi = c.LLVMBuildPhi(self.builder, ptrType(), nullTerminate(result_name).ptr);
         
         c.LLVMAddIncoming(
             phi,
