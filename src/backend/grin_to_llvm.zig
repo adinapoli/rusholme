@@ -989,12 +989,23 @@ pub const GrinTranslator = struct {
                 try self.translateExpr(rhs);
             },
             .Var => |v| {
-                // Bind the LHS result to a named variable.
-                const result = try self.translateExprToValue(lhs, v.base);
-                if (result) |val| {
-                    try self.params.put(v.unique.value, val);
+                // Special case: if lhs is a Case expression directly in bind position,
+                // use translateCaseToValue to generate phi nodes instead of returns.
+                if (lhs.* == .Case) {
+                    const case_expr = lhs.Case;
+                    const result = try self.translateCaseToValue(case_expr.scrutinee, case_expr.alts, v.base);
+                    if (result) |val| {
+                        try self.params.put(v.unique.value, val);
+                    }
+                    try self.translateExpr(rhs);
+                } else {
+                    // General case: evaluate LHS and bind result to variable.
+                    const result = try self.translateExprToValue(lhs, v.base);
+                    if (result) |val| {
+                        try self.params.put(v.unique.value, val);
+                    }
+                    try self.translateExpr(rhs);
                 }
-                try self.translateExpr(rhs);
             },
             .ConstTagNode => |ctn| {
                 // Destructure: the LHS produced a heap pointer to a node
@@ -1085,12 +1096,6 @@ pub const GrinTranslator = struct {
                 // pointer IS the node.  Return the pointer value so that
                 // `fetch p >>= \node -> ...` binds `node` to `p`'s value.
                 return @as(?llvm.Value, try self.translateValToLlvm(.{ .Var = f.ptr }));
-            },
-            .Case => |case_| {
-                // Case expression in bind context — use value-producing mode.
-                // Each alternative produces a value (no ret), branches to merge,
-                // and a phi node collects the values.
-                return self.translateCaseToValue(case_.scrutinee, case_.alts, result_name);
             },
             else => {
                 try self.translateExpr(expr);
