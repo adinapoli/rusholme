@@ -920,6 +920,7 @@ test "solve: class constraint with matching instance resolves to evidence" {
     defer class_env.deinit();
 
     try class_env.addClass(.{
+        .dict_con_name = .{ .base = "", .unique = .{ .value = 0 } },
         .name = Known.Class.Eq,
         .tyvar = 5000,
         .superclasses = &.{},
@@ -959,6 +960,7 @@ test "solve: class constraint with no matching instance emits missing_instance" 
     defer class_env.deinit();
 
     try class_env.addClass(.{
+        .dict_con_name = .{ .base = "", .unique = .{ .value = 0 } },
         .name = Known.Class.Eq,
         .tyvar = 5000,
         .superclasses = &.{},
@@ -991,6 +993,7 @@ test "solve: class constraint with rigid type defers (no error)" {
     defer class_env.deinit();
 
     try class_env.addClass(.{
+        .dict_con_name = .{ .base = "", .unique = .{ .value = 0 } },
         .name = Known.Class.Eq,
         .tyvar = 5000,
         .superclasses = &.{},
@@ -1024,6 +1027,7 @@ test "solve: mixed Eq and Class constraints both resolved" {
     defer class_env.deinit();
 
     try class_env.addClass(.{
+        .dict_con_name = .{ .base = "", .unique = .{ .value = 0 } },
         .name = Known.Class.Eq,
         .tyvar = 5000,
         .superclasses = &.{},
@@ -1080,6 +1084,7 @@ test "solve: parametric instance with context resolves recursively" {
     defer class_env.deinit();
 
     try class_env.addClass(.{
+        .dict_con_name = .{ .base = "", .unique = .{ .value = 0 } },
         .name = Known.Class.Eq,
         .tyvar = 5000,
         .superclasses = &.{},
@@ -1151,6 +1156,7 @@ test "solve: parametric instance with missing context emits diagnostic" {
     defer class_env.deinit();
 
     try class_env.addClass(.{
+        .dict_con_name = .{ .base = "", .unique = .{ .value = 0 } },
         .name = Known.Class.Eq,
         .tyvar = 5000,
         .superclasses = &.{},
@@ -1203,6 +1209,7 @@ test "solve: nested parametric resolution (Eq [[Int]])" {
     defer class_env.deinit();
 
     try class_env.addClass(.{
+        .dict_con_name = .{ .base = "", .unique = .{ .value = 0 } },
         .name = Known.Class.Eq,
         .tyvar = 5000,
         .superclasses = &.{},
