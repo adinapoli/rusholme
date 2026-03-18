@@ -647,6 +647,10 @@ pub const GrinTranslator = struct {
     /// handle thunks created by previously-compiled functions.
     extra_tag_defs: []const grin.Def = &.{},
 
+    /// Function arity map for correct forward declarations (issue #595).
+    /// Maps function unique IDs to their parameter counts.
+    arity_map: ?*const std.AutoHashMapUnmanaged(u64, u32) = null,
+
     pub fn init(allocator: std.mem.Allocator) GrinTranslator {
         llvm.initialize();
         const ctx = llvm.createContext();
@@ -726,6 +730,8 @@ pub const GrinTranslator = struct {
         }
         // Link TypeEnv to the tag table for field type lookups.
         self.type_env.setTagTable(&self.tag_table);
+        // Link arity map for correct forward declarations (issue #595).
+        self.arity_map = &program.arities;
 
         // Pre-register intermediate partial tags (P(n) → P(n-1) chains)
         // so that __rhc_apply can construct them with valid discriminants.
@@ -809,6 +815,8 @@ pub const GrinTranslator = struct {
         // tag table (which moves it in memory when the old table is deinited and
         // a new one is allocated).
         self.type_env.setTagTable(&self.tag_table);
+        // Link arity map for correct forward declarations (issue #595).
+        self.arity_map = &prog.arities;
 
         const mod = llvm.createModule(module_name, self.ctx);
 
@@ -1392,7 +1400,11 @@ pub const GrinTranslator = struct {
                 // external so the ORC linker can resolve it from a
                 // previously-loaded module. This mirrors the pattern
                 // used by translateApp for unknown function calls.
-                const ext_fn_type = llvm.functionType(ptrType(), &.{}, false);
+                // Look up arity to create correct signature (issue #595).
+                const arity = if (self.arity_map) |map| map.get(name.unique.value) orelse 0 else 0;
+                var param_types: [8]llvm.Type = undefined;
+                for (0..arity) |i| param_types[i] = ptrType();
+                const ext_fn_type = llvm.functionType(ptrType(), param_types[0..arity], false);
                 break :blk llvm.addFunction(self.module, fn_name_z, ext_fn_type);
             },
             .ConstTagNode => |ctn| blk: {
@@ -2660,6 +2672,7 @@ test "Store emits rts_alloc and rts_store_field instead of malloc" {
     const program = grin.Program{
         .defs = &.{main_def},
         .field_types = .{},
+        .arities = .{},
     };
 
     var translator = GrinTranslator.init(alloc);
@@ -2805,6 +2818,7 @@ test "Partial application store emits rts_alloc with TagTable discriminant" {
     const program = grin.Program{
         .defs = &.{main_def},
         .field_types = .{},
+        .arities = .{},
     };
 
     var translator = GrinTranslator.init(alloc);
@@ -2847,6 +2861,7 @@ test "Partial application emits __rhc_apply when P-tags exist" {
     const program = grin.Program{
         .defs = &.{main_def},
         .field_types = .{},
+        .arities = .{},
     };
 
     var translator = GrinTranslator.init(alloc);

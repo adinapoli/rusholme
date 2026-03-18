@@ -127,11 +127,11 @@ const TranslateCtx = struct {
 
     pub fn deinit(self: *TranslateCtx) void {
         self.var_map.deinit(self.alloc);
-        self.arity_map.deinit(self.alloc);
+        // arity_map ownership is transferred to GrinProgram - do not deinit
         self.con_map.deinit(self.alloc);
         self.lifted_defs.deinit(self.alloc);
 
-        // Note: con_field_types ownership is transferred to GrinProgram in translateProgram
+        // Note: con_field_types and arities ownership transferred to GrinProgram in translateProgram
         // The caller (translateProgram) takes ownership and handles cleanup
     }
 
@@ -593,10 +593,13 @@ pub fn translateProgram(
     const defs_slice = try defs.toOwnedSlice(alloc);
     // Move field type map from context to program
     const field_types = ctx.con_field_types;
+    // Move arity map from context to program (issue #595)
+    const arities = ctx.arity_map;
 
     return GrinProgram{
         .defs = defs_slice,
         .field_types = field_types,
+        .arities = arities,
     };
 }
 
@@ -2059,6 +2062,7 @@ pub fn generateEvalApply(alloc: std.mem.Allocator, program: GrinProgram) !GrinPr
     return GrinProgram{
         .defs = defs_slice,
         .field_types = .{},
+        .arities = .{},
     };
 }
 
@@ -2425,6 +2429,7 @@ test "generateEvalApply: adds eval and apply to program" {
     const program = GrinProgram{
         .defs = defs,
         .field_types = .{},
+        .arities = .{},
     };
 
     // Generate eval/apply functions
@@ -2484,6 +2489,7 @@ test "generateEvalFunc: has proper structure" {
     const program = GrinProgram{
         .defs = defs,
         .field_types = .{},
+        .arities = .{},
     };
 
     // Generate eval function
@@ -2555,6 +2561,7 @@ test "TagInfo: collects constructor tags" {
     const program = GrinProgram{
         .defs = defs,
         .field_types = .{},
+        .arities = .{},
     };
 
     // Collect tags

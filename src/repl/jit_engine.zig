@@ -338,6 +338,7 @@ fn patchEntryPointName(allocator: Allocator, program: *const grin_ast.Program, t
     return .{
         .defs = new_defs,
         .field_types = .{},
+        .arities = .{},
     };
 }
 
@@ -522,6 +523,7 @@ test "jit engine: execute literal expression" {
     const program = grin_ast.Program{
         .defs = defs,
         .field_types = .{},
+        .arities = .{},
     };
 
     const result = try engine.execute(&program);

@@ -104,7 +104,7 @@ test "integration: main = putStrLn Hello" {
     const defs = try alloc.alloc(GrinDef, 1);
     defs[0] = main_def;
 
-    const program = grin.Program{ .defs = defs };
+    const program = grin.Program{ .defs = defs, .field_types = .{}, .arities = .{} };
 
     // Use testing.io for IO capture
     var grin_eval = try evaluator.GrinEvaluator.init(
@@ -142,7 +142,7 @@ test "integration: simple literal return" {
     const defs = try alloc.alloc(GrinDef, 1);
     defs[0] = main_def;
 
-    const program = grin.Program{ .defs = defs };
+    const program = grin.Program{ .defs = defs, .field_types = .{}, .arities = .{} };
 
     var grin_eval = try evaluator.GrinEvaluator.init(
         alloc,
@@ -177,7 +177,7 @@ test "integration: return unit" {
     const defs = try alloc.alloc(GrinDef, 1);
     defs[0] = main_def;
 
-    const program = grin.Program{ .defs = defs };
+    const program = grin.Program{ .defs = defs, .field_types = .{}, .arities = .{} };
 
     var grin_eval = try evaluator.GrinEvaluator.init(
         alloc,
@@ -220,7 +220,7 @@ test "integration: putStrLn via PrimOp" {
     const defs = try alloc.alloc(GrinDef, 1);
     defs[0] = main_def;
 
-    const program = grin.Program{ .defs = defs };
+    const program = grin.Program{ .defs = defs, .field_types = .{}, .arities = .{} };
 
     var grin_eval = try evaluator.GrinEvaluator.init(
         alloc,

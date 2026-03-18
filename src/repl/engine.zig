@@ -215,6 +215,7 @@ test "engine: execute trivial GRIN program" {
     const program = grin_ast.Program{
         .defs = defs,
         .field_types = .{},
+        .arities = .{},
     };
 
     var engine = GrinEngine.init(alloc, testing_io);

@@ -197,6 +197,9 @@ pub const Program = struct {
     // Maps constructor unique IDs to their field types.
     // Used by LLVM backend to properly handle dictionary fields (issue #569).
     field_types: std.AutoHashMapUnmanaged(u64, []const FieldType),
+    // Maps function unique IDs to their parameter counts.
+    // Used by LLVM backend to create forward declarations with correct arity (issue #595).
+    arities: std.AutoHashMapUnmanaged(u64, u32),
 };
 
 // ── Simple types (for analysis) ────────────────────────────────────────
@@ -474,6 +477,7 @@ test "Program: list of defs" {
     const prog = Program{
         .defs = defs,
         .field_types = .{},
+        .arities = .{},
     };
     try testing.expectEqual(@as(usize, 1), prog.defs.len);
 }
