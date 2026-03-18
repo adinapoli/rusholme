@@ -1544,20 +1544,23 @@ pub const GrinTranslator = struct {
         // ── 1b. Inline eval loop (laziness) ────────────────────────────────
         //
         // If the scrutinee is a heap pointer, it may be an unevaluated thunk
-        // (F-tag) or an indirection (Ind).  We insert a loop that forces
-        // thunks and follows indirections until the value is in WHNF.
+        // (F-tag), a saturated partial application (P(0)-tag), or an indirection (Ind).
+        // We insert a loop that forces thunks, evaluates P(0) closures, and follows
+        // indirections until the value is in WHNF.
         //
         //   eval.entry:
-        //     %scrut_phi = phi [original, entry] [forced, eval.ind] [result, eval.ftag.*]
+        //     %scrut_phi = phi [original, entry] [forced, eval.ind] [result, eval.ftag.*] [result, eval.ptag.*]
         //     tag = load %scrut_phi.tag
-        //     switch tag: F-tags → force, Ind → follow, default → case.dispatch
+        //     switch tag: F-tags → force, P(0)-tags → call, Ind → follow, default → case.dispatch
 
         // The "current scrutinee" used by the rest of the function.
         // For non-pointer scrutinees, no eval loop is needed.
         var cur_scrut: llvm.Value = scrut_llvm;
         var cur_tag: llvm.Value = undefined;
 
-        if (is_ptr and self.tag_table.fun_tags.count() > 0) {
+        // Create eval loop if we have F-tags (thunks) or P-tags (partial applications) to force
+        const has_forceable_tags = self.tag_table.fun_tags.count() > 0 or self.tag_table.partial_tags.count() > 0;
+        if (is_ptr and has_forceable_tags) {
             const entry_bb = c.LLVMGetInsertBlock(self.builder);
 
             // Create the eval loop header and dispatch target.
@@ -1690,6 +1693,69 @@ pub const GrinTranslator = struct {
 
                 phi_incoming_vals.append(self.allocator, result) catch return error.OutOfMemory;
                 phi_incoming_bbs.append(self.allocator, ftag_bb) catch return error.OutOfMemory;
+            }
+
+            // ── P-tag cases: force partial applications ─────────────────
+            // For each P-tag, we need to apply it (possibly multiple times)
+            // until it's fully saturated, then force the result.
+            // We use __rhc_apply with a dummy argument (null) to trigger evaluation.
+            var ptag_iter = self.tag_table.partial_tags.iterator();
+            while (ptag_iter.next()) |ptag_entry| {
+                const ptag_unique = ptag_entry.key_ptr.*;
+                const ptag_disc = self.tag_table.discriminants.get(ptag_unique) orelse continue;
+
+                const ptag_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.ptag");
+                c.LLVMAddCase(eval_switch, c.LLVMConstInt(llvm.i64Type(), @bitCast(ptag_disc), 0), ptag_bb);
+
+                llvm.positionBuilderAtEnd(self.builder, ptag_bb);
+
+                // A P-tag partial application in a case scrutinee needs to be fully applied.
+                // If the stored fields represent all the arguments the function needs,
+                // we can call it directly. Otherwise, it's an error.
+                const ptag_info = self.tag_table.partial_tag_info.get(ptag_unique) orelse continue;
+                
+                // Extract and call the function with all stored arguments
+                const fn_name_z = self.formatName(ptag_info.name);
+                const n_fields = ptag_info.n_fields;
+                
+                // Load all captured arguments
+                var call_args: [8]llvm.Value = undefined;
+                for (0..@min(n_fields, 8)) |fi| {
+                    var load_args = [_]llvm.Value{
+                        phi,
+                        c.LLVMConstInt(llvm.i32Type(), @intCast(fi), 0),
+                    };
+                    const loaded = c.LLVMBuildCall2(
+                        self.builder,
+                        llvm.getFunctionType(rts_load_fn),
+                        rts_load_fn,
+                        &load_args,
+                        2,
+                        "pap.arg",
+                    );
+                    call_args[fi] = c.LLVMBuildIntToPtr(self.builder, loaded, ptrType(), "pap.ptr");
+                }
+                
+                // Call the function with stored arguments
+                var fn_param_types: [8]llvm.Type = undefined;
+                for (0..@min(n_fields, 8)) |pi| fn_param_types[pi] = ptrType();
+                const callee_type = llvm.functionType(ptrType(), fn_param_types[0..@min(n_fields, 8)], false);
+                const callee = c.LLVMGetNamedFunction(self.module, fn_name_z) orelse
+                    llvm.addFunction(self.module, fn_name_z, callee_type);
+                const result = c.LLVMBuildCall2(
+                    self.builder,
+                    callee_type,
+                    callee,
+                    @ptrCast(&call_args),
+                    @intCast(@min(n_fields, 8)),
+                    "pap.result",
+                );
+                
+                // Loop back to re-eval the result
+                _ = c.LLVMBuildBr(self.builder, eval_bb);
+                
+                phi_incoming_vals.append(self.allocator, result) catch return error.OutOfMemory;
+                phi_incoming_bbs.append(self.allocator, ptag_bb) catch return error.OutOfMemory;
             }
 
             // Wire up the phi node.

@@ -1873,13 +1873,33 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                 .span = syntheticSpan(),
             } };
 
+            // If the operator has class constraints, look up the solved
+            // evidence and wrap it in App nodes with dictionary arguments.
+            var op_with_dicts: *const ast_mod.Expr = op_var;
+            if (ctx.types.schemes.get(infix.op.unique)) |scheme| {
+                const evidences = try findEvidenceForVar(ctx, infix.op.unique.value, infix.op_span, scheme);
+                if (evidences.len > 0) {
+                    // Build an App chain: (==) dict1 dict2 ...
+                    for (evidences) |ev| {
+                        const dict_arg = try buildDictExpr(ctx, ev, infix.op_span);
+                        const dict_app = try alloc.create(ast_mod.Expr);
+                        dict_app.* = .{ .App = .{
+                            .fn_expr = op_with_dicts,
+                            .arg = dict_arg,
+                            .span = infix.op_span,
+                        } };
+                        op_with_dicts = dict_app;
+                    }
+                }
+            }
+
             // Desugar left operand
             const left_result = try desugarExpr(ctx, infix.left.*);
 
-            // Create app: op left
+            // Create app: (op dict...) left
             const app1 = try alloc.create(ast_mod.Expr);
             app1.* = .{ .App = .{
-                .fn_expr = op_var,
+                .fn_expr = op_with_dicts,
                 .arg = left_result,
                 .span = syntheticSpan(),
             } };
