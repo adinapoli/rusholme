@@ -1204,12 +1204,33 @@ pub const GrinTranslator = struct {
 
         // Coerce i64 arguments to ptr: integer literals (e.g., #1, #2) are
         // translated to i64 by translateValToLlvm, but GRIN functions use
-        // opaque ptr for all parameters. Use inttoptr to pass them through.
+        // opaque ptr for all parameters.
         for (0..arg_count) |i| {
             const arg_ty = c.LLVMTypeOf(llvm_args[i]);
             const arg_kind = c.LLVMGetTypeKind(arg_ty);
             if (arg_kind == c.LLVMIntegerTypeKind) {
-                llvm_args[i] = c.LLVMBuildIntToPtr(self.builder, llvm_args[i], ptrType(), "arg_to_ptr");
+                if (args[i] == .ValTag) {
+                    // Nullary constructors (e.g. MkA, True, False) are
+                    // translated as i64 discriminants but the callee
+                    // expects a heap-allocated node it can pattern-match
+                    // on. Box into rts_alloc(tag, 0).
+                    const rts_alloc_fn = declareRtsAlloc(self.module);
+                    var alloc_args = [_]llvm.Value{
+                        llvm_args[i], // tag discriminant
+                        c.LLVMConstInt(llvm.i32Type(), 0, 0), // n_fields = 0
+                    };
+                    llvm_args[i] = c.LLVMBuildCall2(
+                        self.builder,
+                        llvm.getFunctionType(rts_alloc_fn),
+                        rts_alloc_fn,
+                        &alloc_args,
+                        2,
+                        "boxed_tag",
+                    );
+                } else {
+                    // Plain integer literal — use inttoptr to pass through.
+                    llvm_args[i] = c.LLVMBuildIntToPtr(self.builder, llvm_args[i], ptrType(), "arg_to_ptr");
+                }
             }
         }
 

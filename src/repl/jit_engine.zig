@@ -119,6 +119,12 @@ pub const JitEngine = struct {
 
         var translator = GrinTranslator.init(self.allocator);
         defer translator.deinit();
+        // Enable REPL mode so that zero-arity functions (e.g. dictionary
+        // bindings like dict$ShowIt$A) return ptr instead of void. The
+        // ORC linker needs matching signatures between declaration and
+        // expression modules. The sentinel value "__decl__" is never
+        // matched as an actual entry point.
+        translator.repl_entry_point = "__decl__";
 
         const ir_text = translator.translateProgram(program.*) catch {
             return JitError.TranslationFailed;

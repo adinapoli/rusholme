@@ -1138,8 +1138,15 @@ fn wrapWithLazyBindsForFunc(
                 // cannot be thunked because F-tag dispatch requires a
                 // statically known function name in the function table.
                 if (ctx.getFunctionArity(app.name)) |arity| {
-                    if (app.args.len == arity) {
-                        // Fully-saturated application: store as lazy thunk
+                    if (app.args.len == arity and arity > 0) {
+                        // Fully-saturated application with arguments:
+                        // store as lazy thunk (F-tag node).
+                        //
+                        // Zero-arity calls (e.g. dictionary bindings like
+                        // dict$ShowIt$A) are NOT wrapped as thunks because
+                        // the callee immediately scrutinizes the result via
+                        // Case and does not force F-tagged nodes. Eagerly
+                        // evaluating them avoids a force/eval round-trip.
                         const ftag = GrinTag{ .tag_type = .{ .Fun = {} }, .name = app.name };
                         const store_expr = try ctx.alloc.create(GrinExpr);
                         // Copy the arguments into a new allocation for the heap node
