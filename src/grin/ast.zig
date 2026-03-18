@@ -477,6 +477,7 @@ test "Program: list of defs" {
     const prog = Program{
         .defs = defs,
         .field_types = .{},
+        .arities = .{},
     };
     try testing.expectEqual(@as(usize, 1), prog.defs.len);
 }

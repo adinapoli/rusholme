@@ -406,6 +406,7 @@ test "repl: GrinEngine — define then use function (WASM path)" {
     const merged_program = grin_ast.Program{
         .defs = all_defs,
         .field_types = .{},
+        .arities = .{},
     };
 
     // Step 4: Execute via GrinEngine (the WASM path)
@@ -452,6 +453,7 @@ test "repl: GrinEngine — define then use with putStrLn (WASM path)" {
     const merged_program = grin_ast.Program{
         .defs = all_defs,
         .field_types = .{},
+        .arities = .{},
     };
 
     var engine = GrinEngine.init(alloc, testing_io);
@@ -529,6 +531,7 @@ test "repl: GrinEngine — load then evaluate main (WASM :load path, issue #494)
     const merged_program = grin_ast.Program{
         .defs = all_defs,
         .field_types = .{},
+        .arities = .{},
     };
 
     // Step 4: Execute via GrinEngine (the WASM path)

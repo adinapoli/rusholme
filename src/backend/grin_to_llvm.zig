@@ -544,7 +544,6 @@ pub const TranslationError = error{
     UnknownFunction,
     OutOfMemory,
     UnimplementedPattern,
-    SignatureMismatch,
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -862,15 +861,8 @@ pub const GrinTranslator = struct {
         const fn_name_z = self.formatName(def.name);
         // Check if function was already forward-declared; if so, reuse it.
         // This prevents LLVM from adding .1 suffix due to name collision.
-        // Validate that the signature matches to catch arity mismatches (issue #595).
-        const func = if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |existing| blk: {
-            const existing_type = c.LLVMGlobalGetValueType(existing);
-            if (existing_type != fn_type) {
-                std.debug.print("Signature mismatch for {s}: forward-declared with wrong arity\n", .{fn_name_z});
-                return error.SignatureMismatch;
-            }
-            break :blk existing;
-        } else llvm.addFunction(self.module, fn_name_z, fn_type);
+        const func = c.LLVMGetNamedFunction(self.module, fn_name_z) orelse
+            llvm.addFunction(self.module, fn_name_z, fn_type);
         self.current_func = func;
         const entry_bb = llvm.appendBasicBlock(func, "entry");
         llvm.positionBuilderAtEnd(self.builder, entry_bb);

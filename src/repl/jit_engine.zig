@@ -523,6 +523,7 @@ test "jit engine: execute literal expression" {
     const program = grin_ast.Program{
         .defs = defs,
         .field_types = .{},
+        .arities = .{},
     };
 
     const result = try engine.execute(&program);

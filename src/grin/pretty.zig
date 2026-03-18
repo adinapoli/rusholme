@@ -732,6 +732,7 @@ test "pretty: Program with two defs" {
     const result = try renderProgram(.{
         .defs = defs,
         .field_types = .{},
+        .arities = .{},
     });
 
     try testing.expectEqualStrings(
