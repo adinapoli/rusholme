@@ -572,6 +572,38 @@ test "repl: load file body then evaluate main (issue #494)" {
     try testing.expectEqual(Status.silent, main_result.status);
 }
 
+test "repl: typeclass method call produces correct result (#607)" {
+    // Issue #607: Calling a typeclass method across REPL inputs must
+    // produce the correct result end-to-end (compile + JIT execute).
+    // The dictionary symbol from the instance declaration must be
+    // available when the expression is JIT-compiled and executed.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Input 1: Define a custom class
+    const r1 = try evaluate(alloc, &session, "class ShowIt a where\n  showIt :: a -> String");
+    try testing.expect(r1.status != .failed);
+
+    // Input 2: Define a data type
+    const r2 = try evaluate(alloc, &session, "data A = MkA");
+    try testing.expect(r2.status != .failed);
+
+    // Input 3: Define an instance
+    const r3 = try evaluate(alloc, &session, "instance ShowIt A where\n  showIt MkA = \"MkA\"");
+    try testing.expect(r3.status != .failed);
+
+    // Input 4: Call showIt MkA — requires dictionary to be in JIT
+    const r4 = try evaluate(alloc, &session, "showIt MkA");
+    try testing.expectEqual(Status.success, r4.status);
+    try testing.expectEqualStrings("\"MkA\"", r4.value);
+}
+
 test "repl: multi-declaration load then evaluate main (issue #494 reproducer)" {
     // Reproduces the browser REPL scenario where a multi-declaration
     // .hs file is loaded, then "main" is evaluated. The file body
