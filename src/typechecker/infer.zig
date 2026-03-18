@@ -1395,9 +1395,18 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
         // `l op r`  ≡  `(op l) r`
         .InfixApp => |ia| blk: {
             const op_scheme = ctx.env.lookupScheme(ia.op.unique);
-            const op_ty = if (op_scheme) |s|
-                try ctx.alloc_ty((try s.instantiate(ctx.alloc, ctx.mv_supply)).ty)
-            else blk2: {
+            const op_ty = if (op_scheme) |s| blk2: {
+                const inst = try s.instantiate(ctx.alloc, ctx.mv_supply);
+                for (inst.wanted) |wc| {
+                    try ctx.wanted_constraints.append(ctx.alloc, .{ .Class = .{
+                        .class_name = wc.class_name,
+                        .ty = wc.ty,
+                        .span = ia.op_span,
+                        .var_unique = ia.op.unique,
+                    } });
+                }
+                break :blk2 try ctx.alloc_ty(inst.ty);
+            } else blk2: {
                 const msg = try std.fmt.allocPrint(ctx.alloc, "unknown operator `{s}`", .{ia.op.base});
                 break :blk2 try ctx.recoverWithFreshMeta(msg, ia.op_span);
             };
@@ -1416,9 +1425,18 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
         // ── Sections ─────────────────────────────────────────────────
         .LeftSection => |ls| blk: {
             const op_scheme = ctx.env.lookupScheme(ls.op.unique);
-            const op_ty = if (op_scheme) |s|
-                try ctx.alloc_ty((try s.instantiate(ctx.alloc, ctx.mv_supply)).ty)
-            else
+            const op_ty = if (op_scheme) |s| blk2: {
+                const inst = try s.instantiate(ctx.alloc, ctx.mv_supply);
+                for (inst.wanted) |wc| {
+                    try ctx.wanted_constraints.append(ctx.alloc, .{ .Class = .{
+                        .class_name = wc.class_name,
+                        .ty = wc.ty,
+                        .span = ls.op_span,
+                        .var_unique = ls.op.unique,
+                    } });
+                }
+                break :blk2 try ctx.alloc_ty(inst.ty);
+            } else
                 try ctx.freshMeta();
 
             const expr_ty = try infer(ctx, ls.expr.*);
@@ -1433,9 +1451,18 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
 
         .RightSection => |rs| blk: {
             const op_scheme = ctx.env.lookupScheme(rs.op.unique);
-            const op_ty = if (op_scheme) |s|
-                try ctx.alloc_ty((try s.instantiate(ctx.alloc, ctx.mv_supply)).ty)
-            else
+            const op_ty = if (op_scheme) |s| blk2: {
+                const inst = try s.instantiate(ctx.alloc, ctx.mv_supply);
+                for (inst.wanted) |wc| {
+                    try ctx.wanted_constraints.append(ctx.alloc, .{ .Class = .{
+                        .class_name = wc.class_name,
+                        .ty = wc.ty,
+                        .span = rs.op_span,
+                        .var_unique = rs.op.unique,
+                    } });
+                }
+                break :blk2 try ctx.alloc_ty(inst.ty);
+            } else
                 try ctx.freshMeta();
 
             const expr_ty = try infer(ctx, rs.expr.*);
