@@ -1142,16 +1142,25 @@ pub const GrinTranslator = struct {
             return null;
         }
 
-        if (PrimOpMapping.lookup(name)) |result| {
-            switch (result) {
-                .libcall => |libc_fn| try self.emitLibcCall(libc_fn, args),
-                .instruction => |instr| try self.emitInstruction(instr, args),
+        if (PrimOpMapping.lookup(name)) |mapping| {
+            switch (mapping) {
+                .libcall => |libc_fn| {
+                    try self.emitLibcCall(libc_fn, args);
+                    return c.LLVMConstPointerNull(ptrType());
+                },
+                .instruction => |instr| {
+                    const raw = try self.emitInstruction(instr, args);
+                    if (raw) |val| {
+                        if (isComparisonOp(instr)) {
+                            // Comparison: wrap i1 result as a Bool heap node
+                            return try self.wrapComparisonAsBool(val);
+                        }
+                        // Arithmetic: return i64 directly
+                        return val;
+                    }
+                    return c.LLVMConstPointerNull(ptrType());
+                },
             }
-            // Return a null pointer for PrimOps so that bindings still work.
-            // The value itself isn't used for IO actions, but the variable
-            // needs to be registered in params so it can be referenced in
-            // subsequent expressions (e.g., passed to >> for sequencing).
-            return c.LLVMConstPointerNull(ptrType());
         }
 
         // User-defined function call.
@@ -1192,6 +1201,17 @@ pub const GrinTranslator = struct {
         var param_types: [8]llvm.Type = undefined;
         for (0..arg_count) |i| param_types[i] = ptrType();
         const fn_type = llvm.functionType(ptrType(), param_types[0..arg_count], false);
+
+        // Coerce i64 arguments to ptr: integer literals (e.g., #1, #2) are
+        // translated to i64 by translateValToLlvm, but GRIN functions use
+        // opaque ptr for all parameters. Use inttoptr to pass them through.
+        for (0..arg_count) |i| {
+            const arg_ty = c.LLVMTypeOf(llvm_args[i]);
+            const arg_kind = c.LLVMGetTypeKind(arg_ty);
+            if (arg_kind == c.LLVMIntegerTypeKind) {
+                llvm_args[i] = c.LLVMBuildIntToPtr(self.builder, llvm_args[i], ptrType(), "arg_to_ptr");
+            }
+        }
 
         // Resolve the callee:
         //   1. Local variable holding a function pointer (higher-order call) — use
@@ -1248,10 +1268,12 @@ pub const GrinTranslator = struct {
             return;
         }
 
-        if (PrimOpMapping.lookup(name)) |result| {
-            switch (result) {
+        if (PrimOpMapping.lookup(name)) |mapping| {
+            switch (mapping) {
                 .libcall => |libc_fn| try self.emitLibcCall(libc_fn, args),
-                .instruction => |instr| try self.emitInstruction(instr, args),
+                .instruction => |instr| {
+                    _ = try self.emitInstruction(instr, args);
+                },
             }
             return;
         }
@@ -1306,18 +1328,21 @@ pub const GrinTranslator = struct {
         );
     }
 
-    fn emitInstruction(self: *GrinTranslator, instr: LLVMInstruction, args: []const grin.Val) TranslationError!void {
+    /// Emit an LLVM instruction for a GRIN primop application.
+    /// Returns the raw LLVM value (i64 for arithmetic, i1 for comparisons)
+    /// so the caller can decide how to use it.
+    fn emitInstruction(self: *GrinTranslator, instr: LLVMInstruction, args: []const grin.Val) TranslationError!?llvm.Value {
         // seq is a no-op that doesn't need arguments
         if (instr == .seq) {
             // Monadic sequencing - nothing to do, the bind structure handles it
-            return;
+            return null;
         }
 
         // Unary instructions (neg_Int, abs_Int)
         if (instr == .neg or instr == .abs) {
             if (args.len < 1) return error.UnsupportedGrinVal;
             const operand = try self.translateValToLlvm(args[0]);
-            const result = switch (instr) {
+            return switch (instr) {
                 .neg => c.LLVMBuildNeg(self.builder, operand, "neg"),
                 .abs => blk: {
                     // abs(x) = x >= 0 ? x : -x
@@ -1334,16 +1359,25 @@ pub const GrinTranslator = struct {
                 },
                 else => unreachable,
             };
-            _ = result;
-            return;
         }
 
         if (args.len < 2) return error.UnsupportedGrinVal;
 
-        const lhs = try self.translateValToLlvm(args[0]);
-        const rhs = try self.translateValToLlvm(args[1]);
+        const lhs_raw = try self.translateValToLlvm(args[0]);
+        const rhs_raw = try self.translateValToLlvm(args[1]);
 
-        const result = switch (instr) {
+        // Coerce operands to i64: function parameters are ptr-typed in GRIN,
+        // but arithmetic/comparison primops operate on integer values.
+        const lhs = if (c.LLVMGetTypeKind(c.LLVMTypeOf(lhs_raw)) == c.LLVMPointerTypeKind)
+            c.LLVMBuildPtrToInt(self.builder, lhs_raw, llvm.i64Type(), "lhs_i64")
+        else
+            lhs_raw;
+        const rhs = if (c.LLVMGetTypeKind(c.LLVMTypeOf(rhs_raw)) == c.LLVMPointerTypeKind)
+            c.LLVMBuildPtrToInt(self.builder, rhs_raw, llvm.i64Type(), "rhs_i64")
+        else
+            rhs_raw;
+
+        return switch (instr) {
             .add => c.LLVMBuildAdd(self.builder, lhs, rhs, "add"),
             .sub => c.LLVMBuildSub(self.builder, lhs, rhs, "sub"),
             .mul => c.LLVMBuildMul(self.builder, lhs, rhs, "mul"),
@@ -1358,7 +1392,43 @@ pub const GrinTranslator = struct {
             .neg, .abs => unreachable, // handled above
             .seq => unreachable, // handled above
         };
-        _ = result;
+    }
+
+    /// Check whether a primop instruction is a comparison (returns i1/Bool).
+    fn isComparisonOp(instr: LLVMInstruction) bool {
+        return switch (instr) {
+            .eq, .ne, .slt, .sle, .sgt, .sge => true,
+            else => false,
+        };
+    }
+
+    /// Wrap an i1 comparison result in a Bool constructor heap node.
+    /// Produces: select i1 %cmp, i64 <true_disc>, i64 <false_disc> → rts_alloc(tag, 0)
+    fn wrapComparisonAsBool(self: *GrinTranslator, cmp_i1: llvm.Value) TranslationError!llvm.Value {
+        const true_name = grin.Name{ .base = "True", .unique = .{ .value = known.true_val } };
+        const false_name = grin.Name{ .base = "False", .unique = .{ .value = known.false_val } };
+        const true_tag = grin.Tag{ .tag_type = .Con, .name = true_name };
+        const false_tag = grin.Tag{ .tag_type = .Con, .name = false_name };
+        const true_disc: i64 = self.tag_table.discriminant(true_tag) orelse 2;
+        const false_disc: i64 = self.tag_table.discriminant(false_tag) orelse 3;
+
+        const true_i64 = c.LLVMConstInt(llvm.i64Type(), @bitCast(true_disc), 0);
+        const false_i64 = c.LLVMConstInt(llvm.i64Type(), @bitCast(false_disc), 0);
+        const tag = c.LLVMBuildSelect(self.builder, cmp_i1, true_i64, false_i64, "bool_tag");
+
+        const rts_alloc_fn = declareRtsAlloc(self.module);
+        var alloc_args = [_]llvm.Value{
+            tag,
+            c.LLVMConstInt(llvm.i32Type(), 0, 0), // 0 fields
+        };
+        return c.LLVMBuildCall2(
+            self.builder,
+            llvm.getFunctionType(rts_alloc_fn),
+            rts_alloc_fn,
+            &alloc_args,
+            2,
+            "bool_node",
+        );
     }
 
     fn translateValToLlvm(self: *GrinTranslator, val: grin.Val) TranslationError!llvm.Value {
