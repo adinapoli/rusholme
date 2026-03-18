@@ -604,6 +604,59 @@ test "repl: typeclass method call produces correct result (#607)" {
     try testing.expectEqualStrings("\"MkA\"", r4.value);
 }
 
+test "repl: GrinEngine — typeclass method call produces correct result (WASM path, #607)" {
+    // WASM counterpart of the native JIT test above. Exercises the
+    // tree-walking GRIN evaluator path: compile class + data + instance
+    // as declarations, compile expression, merge all defs, execute.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Step 1: Define class, data type, and instance
+    const decl1 = try session.processInput("class ShowIt a where\n  showIt :: a -> String");
+    try testing.expect(decl1.compile.kind == .declaration);
+
+    const decl2 = try session.processInput("data A = MkA");
+    try testing.expect(decl2.compile.kind == .declaration);
+
+    const decl3 = try session.processInput("instance ShowIt A where\n  showIt MkA = \"MkA\"");
+    try testing.expect(decl3.compile.kind == .declaration);
+
+    // Step 2: Compile expression that calls the typeclass method
+    const expr = try session.processInput("showIt MkA");
+    try testing.expect(expr.compile.kind == .expression);
+
+    // Step 3: Merge accumulated_defs + expression defs (as Session.eval does for WASM)
+    const total_defs = session.accumulated_defs.items.len + expr.compile.program.defs.len;
+    const all_defs = try alloc.alloc(grin_ast.Def, total_defs);
+
+    for (session.accumulated_defs.items, 0..) |def, i| {
+        all_defs[i] = def;
+    }
+    for (expr.compile.program.defs, 0..) |def, i| {
+        all_defs[session.accumulated_defs.items.len + i] = def;
+    }
+
+    const merged_program = grin_ast.Program{
+        .defs = all_defs,
+        .field_types = .{},
+        .arities = .{},
+    };
+
+    // Step 4: Execute via GrinEngine (the WASM path)
+    var engine = GrinEngine.init(alloc, testing_io);
+    const result = engine.execute(&merged_program) catch |err| {
+        std.debug.panic("GrinEngine execution failed: {s}", .{@errorName(err)});
+    };
+
+    try testing.expectEqualStrings("\"MkA\"", result.value);
+}
+
 test "repl: multi-declaration load then evaluate main (issue #494 reproducer)" {
     // Reproduces the browser REPL scenario where a multi-declaration
     // .hs file is loaded, then "main" is evaluated. The file body

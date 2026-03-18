@@ -398,8 +398,8 @@
 | [#381](https://github.com/adinapoli/rusholme/issues/381) | Epic: GRIN to LLVM Translation - Compiler Path to M1 | [#55](https://github.com/adinapoli/rusholme/issues/55) | :white_circle: |
 | [#396](https://github.com/adinapoli/rusholme/issues/396) | Research: Zig LLVM bitcode compatibility with llvm-link | [#57](https://github.com/adinapoli/rusholme/issues/57) | :white_circle: |
 | [#572](https://github.com/adinapoli/rusholme/issues/572) | Implement tuple codegen in GRIN-to-LLVM backend | [#381](https://github.com/adinapoli/rusholme/issues/381) | :white_circle: |
-| [#573](https://github.com/adinapoli/rusholme/issues/573) | GRIN backend: polymorphic Prelude functions produce broken codegen | [#529](https://github.com/adinapoli/rusholme/issues/529) | :yellow_circle: |
-| [#569](https://github.com/adinapoli/rusholme/issues/569) | GRIN/LLVM backend: support dictionary-passing in codegen | [#556](https://github.com/adinapoli/rusholme/issues/556) | :white_circle: |
+| [#573](https://github.com/adinapoli/rusholme/issues/573) | GRIN backend: polymorphic Prelude functions produce broken codegen | [#529](https://github.com/adinapoli/rusholme/issues/529) | :green_circle: |
+| [#569](https://github.com/adinapoli/rusholme/issues/569) | GRIN/LLVM backend: support dictionary-passing in codegen | [#556](https://github.com/adinapoli/rusholme/issues/556) | :green_circle: |
 | [#583](https://github.com/adinapoli/rusholme/issues/583) | Implement VarTagNode handling in LLVM backend for partial applications | — | :green_circle: |
 | [#589](https://github.com/adinapoli/rusholme/issues/589) | LLVM backend: ptr/i64 return type confusion causes segfaults | [#573](https://github.com/adinapoli/rusholme/issues/573) | :white_circle: |
 
@@ -453,12 +453,13 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | [#556](https://github.com/adinapoli/rusholme/issues/556) | Insert dictionary arguments at type class method call sites | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#557](https://github.com/adinapoli/rusholme/issues/557) | Persist ClassEnv across REPL inputs in session state | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#578](https://github.com/adinapoli/rusholme/issues/578) | Fix JIT segfault when calling typeclass methods across REPL inputs | [#557](https://github.com/adinapoli/rusholme/issues/557) | :green_circle: |
-| [#582](https://github.com/adinapoli/rusholme/issues/582) | Typeclass functions do not carry constraint correctly | [#578](https://github.com/adinapoli/rusholme/issues/578) | :yellow_circle: |
+| [#582](https://github.com/adinapoli/rusholme/issues/582) | Typeclass functions do not carry constraint correctly | [#578](https://github.com/adinapoli/rusholme/issues/578) | :green_circle: |
+| [#607](https://github.com/adinapoli/rusholme/issues/607) | REPL: type class method calls fail at JIT execution time | [#578](https://github.com/adinapoli/rusholme/issues/578) | :yellow_circle: |
 | [#558](https://github.com/adinapoli/rusholme/issues/558) | Implement recursive instance context constraint resolution | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#559](https://github.com/adinapoli/rusholme/issues/559) | Support class constraints in user-written type signatures | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#566](https://github.com/adinapoli/rusholme/issues/566) | Typechecker: support declaration-order-independent inference | — | :white_circle: |
 | [#567](https://github.com/adinapoli/rusholme/issues/567) | Parser: support parenthesised-pattern LHS in function bindings | — | :white_circle: |
-| [#591](https://github.com/adinapoli/rusholme/issues/591) | Wire Prelude into REPL session for WASM target | [#529](https://github.com/adinapoli/rusholme/issues/529) | :yellow_circle: |
+| [#591](https://github.com/adinapoli/rusholme/issues/591) | Wire Prelude into REPL session for WASM target | [#529](https://github.com/adinapoli/rusholme/issues/529) | :green_circle: |
 | [#592](https://github.com/adinapoli/rusholme/issues/592) | GRIN evaluator drops first IO action with eta-reduced bindings in do-blocks | [#591](https://github.com/adinapoli/rusholme/issues/591) | :white_circle: |
 
 ### Epic [#14](https://github.com/adinapoli/rusholme/issues/14): Memory Management (Arena → Immix GC)
