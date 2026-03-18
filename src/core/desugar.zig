@@ -17,7 +17,7 @@ const DiagnosticCollector = diag_mod.DiagnosticCollector;
 
 pub const DesugarCtx = struct {
     alloc: std.mem.Allocator,
-    types: *const infer_mod.ModuleTypes,
+    types: *infer_mod.ModuleTypes,
     diags: *DiagnosticCollector,
     /// Used to generate fresh unique values for synthetic binders (lambda
     /// parameters created by the pattern-match compiler, constructor field
@@ -132,7 +132,7 @@ pub const DesugarResult = struct {
 pub fn desugarModule(
     alloc: std.mem.Allocator,
     module: renamer_mod.RenamedModule,
-    module_types: *const infer_mod.ModuleTypes,
+    module_types: *infer_mod.ModuleTypes,
     diags: *DiagnosticCollector,
     u_supply: *naming_mod.UniqueSupply,
     external_dict_names: ?*const DesugarCtx.DictNameMap,
@@ -692,6 +692,10 @@ fn desugarClassDecl(
             .rhs = lam_default,
         } });
     }
+
+    // Store the dictionary constructor name in ClassEnv so that instance
+    // declarations can reuse it (issue #569).
+    ctx.types.class_env.setDictConName(cd.name.unique.value, dict_con_name);
 }
 
 /// Desugar an instance declaration into a dictionary value binding.
@@ -706,11 +710,9 @@ fn desugarInstanceDecl(
     // Look up the class to know method order.
     const class_info = class_env.lookupClass(id_decl.class_name.unique.value) orelse return;
 
-    // Find the dictionary constructor name.  Convention: MkDict$<ClassName>.
-    const dict_con_name = Name{
-        .base = try std.fmt.allocPrint(alloc, "MkDict${s}", .{id_decl.class_name.base}),
-        .unique = ctx.u_supply.fresh(),
-    };
+    // Reuse the dictionary constructor name from the class declaration.
+    // This ensures all instances use the same constructor unique (issue #569).
+    const dict_con_name = class_info.dict_con_name;
 
     // Build an instance dictionary name.  Convention: dict$<ClassName>$<HeadType>.
     const head_name = try instanceHeadName(alloc, id_decl.instance_type);

@@ -68,6 +68,10 @@ pub const ClassInfo = struct {
     superclasses: []const Name,
     /// Method signatures declared in the class body.
     methods: []const MethodInfo,
+    /// Dictionary constructor name (e.g. `MkDict$Eq`).
+    /// Stored during desugaring so that instance declarations can reuse
+    /// the same constructor unique instead of creating fresh ones (issue #569).
+    dict_con_name: Name,
 };
 
 /// A single method in a class declaration.
@@ -135,6 +139,16 @@ pub const ClassEnv = struct {
     /// Register a class declaration.
     pub fn addClass(self: *ClassEnv, info: ClassInfo) !void {
         try self.classes.put(self.alloc, info.name.unique.value, info);
+    }
+
+    /// Update the dictionary constructor name for an existing class.
+    /// Called by the desugarer after creating the dictionary data type.
+    /// Asserts that the class exists (should have been registered during type inference).
+    pub fn setDictConName(self: *ClassEnv, class_unique: u64, dict_con_name: Name) void {
+        const entry = self.classes.getPtr(class_unique) orelse {
+            std.debug.panic("setDictConName: class {d} not found in ClassEnv", .{class_unique});
+        };
+        entry.dict_con_name = dict_con_name;
     }
 
     /// Register an instance declaration.
@@ -235,6 +249,7 @@ test "ClassEnv: add and lookup class" {
     };
 
     try env.addClass(.{
+        .dict_con_name = .{ .base = "", .unique = .{ .value = 0 } },
         .name = Known.Class.Eq,
         .tyvar = 5000,
         .superclasses = &.{},
@@ -278,6 +293,7 @@ test "ClassEnv: superclass chain" {
 
     // class Eq a
     try env.addClass(.{
+        .dict_con_name = .{ .base = "", .unique = .{ .value = 0 } },
         .name = Known.Class.Eq,
         .tyvar = 5000,
         .superclasses = &.{},
@@ -286,6 +302,7 @@ test "ClassEnv: superclass chain" {
 
     // class Eq a => Ord a
     try env.addClass(.{
+        .dict_con_name = .{ .base = "", .unique = .{ .value = 0 } },
         .name = Known.Class.Ord,
         .tyvar = 5001,
         .superclasses = &.{Known.Class.Eq},
@@ -312,6 +329,7 @@ test "ClassEnv: lookupClassByBaseName finds registered class" {
     defer env.deinit();
 
     try env.addClass(.{
+        .dict_con_name = .{ .base = "", .unique = .{ .value = 0 } },
         .name = Known.Class.Eq,
         .tyvar = 5000,
         .superclasses = &.{},

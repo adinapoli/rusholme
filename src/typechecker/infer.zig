@@ -1963,6 +1963,8 @@ pub fn inferModule(
                     .tyvar = tyvar_id,
                     .superclasses = superclass_names,
                     .methods = method_infos,
+                    // Placeholder - will be set by desugarer when creating dictionary data type
+                    .dict_con_name = .{ .base = "", .unique = .{ .value = 0 } },
                 });
             },
             .InstanceDecl => |id_decl| {
@@ -2953,6 +2955,7 @@ test "skolemiseSignature: forall with Eq constraint produces ClassConstraint" {
         .tyvar = 5000,
         .superclasses = &.{},
         .methods = &.{eq_method},
+        .dict_con_name = .{ .base = "", .unique = .{ .value = 0 } },
     });
 
     const AstType = @import("../frontend/ast.zig").Type;
