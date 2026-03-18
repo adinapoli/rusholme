@@ -989,7 +989,10 @@ pub const GrinTranslator = struct {
                 try self.translateExpr(rhs);
             },
             .Var => |v| {
-                // Bind the LHS result to a named variable.
+                // General case: evaluate LHS and bind result to variable.
+                // If the LHS contains a Case expression (directly or nested in a Bind),
+                // translateExprToValue will handle it correctly via the .Case branch
+                // which calls translateCaseToValue to generate phi nodes.
                 const result = try self.translateExprToValue(lhs, v.base);
                 if (result) |val| {
                     try self.params.put(v.unique.value, val);
@@ -1086,6 +1089,11 @@ pub const GrinTranslator = struct {
                 // `fetch p >>= \node -> ...` binds `node` to `p`'s value.
                 return @as(?llvm.Value, try self.translateValToLlvm(.{ .Var = f.ptr }));
             },
+            .Case => |case_expr| {
+                // Case expression in value-producing context (e.g., nested in a bind RHS).
+                // Use translateCaseToValue to generate phi nodes instead of returns.
+                return try self.translateCaseToValue(case_expr.scrutinee, case_expr.alts, result_name);
+            },
             else => {
                 try self.translateExpr(expr);
                 return null;
@@ -1134,16 +1142,25 @@ pub const GrinTranslator = struct {
             return null;
         }
 
-        if (PrimOpMapping.lookup(name)) |result| {
-            switch (result) {
-                .libcall => |libc_fn| try self.emitLibcCall(libc_fn, args),
-                .instruction => |instr| try self.emitInstruction(instr, args),
+        if (PrimOpMapping.lookup(name)) |mapping| {
+            switch (mapping) {
+                .libcall => |libc_fn| {
+                    try self.emitLibcCall(libc_fn, args);
+                    return c.LLVMConstPointerNull(ptrType());
+                },
+                .instruction => |instr| {
+                    const raw = try self.emitInstruction(instr, args);
+                    if (raw) |val| {
+                        if (isComparisonOp(instr)) {
+                            // Comparison: wrap i1 result as a Bool heap node
+                            return try self.wrapComparisonAsBool(val);
+                        }
+                        // Arithmetic: return i64 directly
+                        return val;
+                    }
+                    return c.LLVMConstPointerNull(ptrType());
+                },
             }
-            // Return a null pointer for PrimOps so that bindings still work.
-            // The value itself isn't used for IO actions, but the variable
-            // needs to be registered in params so it can be referenced in
-            // subsequent expressions (e.g., passed to >> for sequencing).
-            return c.LLVMConstPointerNull(ptrType());
         }
 
         // User-defined function call.
@@ -1184,6 +1201,17 @@ pub const GrinTranslator = struct {
         var param_types: [8]llvm.Type = undefined;
         for (0..arg_count) |i| param_types[i] = ptrType();
         const fn_type = llvm.functionType(ptrType(), param_types[0..arg_count], false);
+
+        // Coerce i64 arguments to ptr: integer literals (e.g., #1, #2) are
+        // translated to i64 by translateValToLlvm, but GRIN functions use
+        // opaque ptr for all parameters. Use inttoptr to pass them through.
+        for (0..arg_count) |i| {
+            const arg_ty = c.LLVMTypeOf(llvm_args[i]);
+            const arg_kind = c.LLVMGetTypeKind(arg_ty);
+            if (arg_kind == c.LLVMIntegerTypeKind) {
+                llvm_args[i] = c.LLVMBuildIntToPtr(self.builder, llvm_args[i], ptrType(), "arg_to_ptr");
+            }
+        }
 
         // Resolve the callee:
         //   1. Local variable holding a function pointer (higher-order call) — use
@@ -1240,10 +1268,12 @@ pub const GrinTranslator = struct {
             return;
         }
 
-        if (PrimOpMapping.lookup(name)) |result| {
-            switch (result) {
+        if (PrimOpMapping.lookup(name)) |mapping| {
+            switch (mapping) {
                 .libcall => |libc_fn| try self.emitLibcCall(libc_fn, args),
-                .instruction => |instr| try self.emitInstruction(instr, args),
+                .instruction => |instr| {
+                    _ = try self.emitInstruction(instr, args);
+                },
             }
             return;
         }
@@ -1298,18 +1328,21 @@ pub const GrinTranslator = struct {
         );
     }
 
-    fn emitInstruction(self: *GrinTranslator, instr: LLVMInstruction, args: []const grin.Val) TranslationError!void {
+    /// Emit an LLVM instruction for a GRIN primop application.
+    /// Returns the raw LLVM value (i64 for arithmetic, i1 for comparisons)
+    /// so the caller can decide how to use it.
+    fn emitInstruction(self: *GrinTranslator, instr: LLVMInstruction, args: []const grin.Val) TranslationError!?llvm.Value {
         // seq is a no-op that doesn't need arguments
         if (instr == .seq) {
             // Monadic sequencing - nothing to do, the bind structure handles it
-            return;
+            return null;
         }
 
         // Unary instructions (neg_Int, abs_Int)
         if (instr == .neg or instr == .abs) {
             if (args.len < 1) return error.UnsupportedGrinVal;
             const operand = try self.translateValToLlvm(args[0]);
-            const result = switch (instr) {
+            return switch (instr) {
                 .neg => c.LLVMBuildNeg(self.builder, operand, "neg"),
                 .abs => blk: {
                     // abs(x) = x >= 0 ? x : -x
@@ -1326,16 +1359,25 @@ pub const GrinTranslator = struct {
                 },
                 else => unreachable,
             };
-            _ = result;
-            return;
         }
 
         if (args.len < 2) return error.UnsupportedGrinVal;
 
-        const lhs = try self.translateValToLlvm(args[0]);
-        const rhs = try self.translateValToLlvm(args[1]);
+        const lhs_raw = try self.translateValToLlvm(args[0]);
+        const rhs_raw = try self.translateValToLlvm(args[1]);
 
-        const result = switch (instr) {
+        // Coerce operands to i64: function parameters are ptr-typed in GRIN,
+        // but arithmetic/comparison primops operate on integer values.
+        const lhs = if (c.LLVMGetTypeKind(c.LLVMTypeOf(lhs_raw)) == c.LLVMPointerTypeKind)
+            c.LLVMBuildPtrToInt(self.builder, lhs_raw, llvm.i64Type(), "lhs_i64")
+        else
+            lhs_raw;
+        const rhs = if (c.LLVMGetTypeKind(c.LLVMTypeOf(rhs_raw)) == c.LLVMPointerTypeKind)
+            c.LLVMBuildPtrToInt(self.builder, rhs_raw, llvm.i64Type(), "rhs_i64")
+        else
+            rhs_raw;
+
+        return switch (instr) {
             .add => c.LLVMBuildAdd(self.builder, lhs, rhs, "add"),
             .sub => c.LLVMBuildSub(self.builder, lhs, rhs, "sub"),
             .mul => c.LLVMBuildMul(self.builder, lhs, rhs, "mul"),
@@ -1350,7 +1392,43 @@ pub const GrinTranslator = struct {
             .neg, .abs => unreachable, // handled above
             .seq => unreachable, // handled above
         };
-        _ = result;
+    }
+
+    /// Check whether a primop instruction is a comparison (returns i1/Bool).
+    fn isComparisonOp(instr: LLVMInstruction) bool {
+        return switch (instr) {
+            .eq, .ne, .slt, .sle, .sgt, .sge => true,
+            else => false,
+        };
+    }
+
+    /// Wrap an i1 comparison result in a Bool constructor heap node.
+    /// Produces: select i1 %cmp, i64 <true_disc>, i64 <false_disc> → rts_alloc(tag, 0)
+    fn wrapComparisonAsBool(self: *GrinTranslator, cmp_i1: llvm.Value) TranslationError!llvm.Value {
+        const true_name = grin.Name{ .base = "True", .unique = .{ .value = known.true_val } };
+        const false_name = grin.Name{ .base = "False", .unique = .{ .value = known.false_val } };
+        const true_tag = grin.Tag{ .tag_type = .Con, .name = true_name };
+        const false_tag = grin.Tag{ .tag_type = .Con, .name = false_name };
+        const true_disc: i64 = self.tag_table.discriminant(true_tag) orelse 2;
+        const false_disc: i64 = self.tag_table.discriminant(false_tag) orelse 3;
+
+        const true_i64 = c.LLVMConstInt(llvm.i64Type(), @bitCast(true_disc), 0);
+        const false_i64 = c.LLVMConstInt(llvm.i64Type(), @bitCast(false_disc), 0);
+        const tag = c.LLVMBuildSelect(self.builder, cmp_i1, true_i64, false_i64, "bool_tag");
+
+        const rts_alloc_fn = declareRtsAlloc(self.module);
+        var alloc_args = [_]llvm.Value{
+            tag,
+            c.LLVMConstInt(llvm.i32Type(), 0, 0), // 0 fields
+        };
+        return c.LLVMBuildCall2(
+            self.builder,
+            llvm.getFunctionType(rts_alloc_fn),
+            rts_alloc_fn,
+            &alloc_args,
+            2,
+            "bool_node",
+        );
     }
 
     fn translateValToLlvm(self: *GrinTranslator, val: grin.Val) TranslationError!llvm.Value {
@@ -1670,23 +1748,28 @@ pub const GrinTranslator = struct {
                 );
 
                 // Update the thunk with an indirection: tag = Ind, field[0] = result.
-                const upd_tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, phi, &tag_idx, 2, "ftag.upd.tag");
-                _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(llvm.i64Type(), 0x101, 0), upd_tag_gep);
-                const rts_store_fn = declareRtsStoreField(self.module);
-                const result_u64 = c.LLVMBuildPtrToInt(self.builder, result, llvm.i64Type(), "ftag.upd.u64");
-                var upd_store_args = [_]llvm.Value{
-                    phi,
-                    c.LLVMConstInt(llvm.i32Type(), 0, 0),
-                    result_u64,
-                };
-                _ = c.LLVMBuildCall2(
-                    self.builder,
-                    llvm.getFunctionType(rts_store_fn),
-                    rts_store_fn,
-                    &upd_store_args,
-                    3,
-                    "",
-                );
+                // Only update if the thunk has space for the result (ftag_n_fields > 0).
+                // Thunks with 0 fields can't be updated and will be re-evaluated each time.
+                // TODO(issue #602): Allocate thunks with 1 field minimum for update frame.
+                if (ftag_n_fields > 0) {
+                    const upd_tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, phi, &tag_idx, 2, "ftag.upd.tag");
+                    _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(llvm.i64Type(), 0x101, 0), upd_tag_gep);
+                    const rts_store_fn = declareRtsStoreField(self.module);
+                    const result_u64 = c.LLVMBuildPtrToInt(self.builder, result, llvm.i64Type(), "ftag.upd.u64");
+                    var upd_store_args = [_]llvm.Value{
+                        phi,
+                        c.LLVMConstInt(llvm.i32Type(), 0, 0),
+                        result_u64,
+                    };
+                    _ = c.LLVMBuildCall2(
+                        self.builder,
+                        llvm.getFunctionType(rts_store_fn),
+                        rts_store_fn,
+                        &upd_store_args,
+                        3,
+                        "",
+                    );
+                }
 
                 // Loop back to re-eval the result.
                 _ = c.LLVMBuildBr(self.builder, eval_bb);
@@ -1899,6 +1982,322 @@ pub const GrinTranslator = struct {
 
         // ── 5. Continue from merge block ──────────────────────────────────
         llvm.positionBuilderAtEnd(self.builder, merge_bb);
+    }
+
+    /// Translate a case expression in value-producing mode (for bind contexts).
+    /// Returns an LLVM value (typically a phi node) representing the case result.
+    /// Each alternative produces a value and branches to the merge block instead
+    /// of returning directly.
+    fn translateCaseToValue(
+        self: *GrinTranslator,
+        scrutinee: grin.Val,
+        alts: []const grin.Alt,
+        result_name: []const u8,
+    ) TranslationError!?llvm.Value {
+        if (alts.len == 0) return null;
+
+        // ── 1. Obtain scrutinee and force to WHNF (same as translateCase) ──
+        const scrut_llvm = try self.translateValToLlvm(scrutinee);
+        const scrut_ty = c.LLVMTypeOf(scrut_llvm);
+        const scrut_kind = c.LLVMGetTypeKind(scrut_ty);
+        const is_ptr = scrut_kind == c.LLVMPointerTypeKind;
+
+        var cur_scrut: llvm.Value = scrut_llvm;
+        var cur_tag: llvm.Value = undefined;
+
+        // Create eval loop if we have F-tags (thunks) or P-tags (partial applications) to force
+        const has_forceable_tags = self.tag_table.fun_tags.count() > 0 or self.tag_table.partial_tags.count() > 0;
+        if (is_ptr and has_forceable_tags) {
+            const entry_bb = c.LLVMGetInsertBlock(self.builder);
+            const eval_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.entry");
+            const dispatch_bb = c.LLVMAppendBasicBlock(self.current_func, "case.dispatch");
+
+            _ = c.LLVMBuildBr(self.builder, eval_bb);
+
+            llvm.positionBuilderAtEnd(self.builder, eval_bb);
+            const phi = c.LLVMBuildPhi(self.builder, ptrType(), "scrut.eval");
+
+            const header_ty = nodeHeaderType();
+            var tag_idx = [_]llvm.Value{
+                c.LLVMConstInt(llvm.i32Type(), 0, 0),
+                c.LLVMConstInt(llvm.i32Type(), 0, 0),
+            };
+            const tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, phi, &tag_idx, 2, "eval.tag_gep");
+            const tag_val = c.LLVMBuildLoad2(self.builder, llvm.i64Type(), tag_gep, "eval.tag");
+
+            const n_eval_cases = @as(u32, @intCast(self.tag_table.fun_tags.count())) + 1;
+            const eval_switch = c.LLVMBuildSwitch(self.builder, tag_val, dispatch_bb, n_eval_cases);
+
+            // Ind case
+            const ind_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.ind");
+            const ind_disc = c.LLVMConstInt(llvm.i64Type(), 0x101, 0);
+            c.LLVMAddCase(eval_switch, ind_disc, ind_bb);
+
+            llvm.positionBuilderAtEnd(self.builder, ind_bb);
+            const rts_load_fn = declareRtsLoadField(self.module);
+            var ind_load_args = [_]llvm.Value{ phi, c.LLVMConstInt(llvm.i32Type(), 0, 0) };
+            const ind_target_i64 = c.LLVMBuildCall2(self.builder, llvm.getFunctionType(rts_load_fn), rts_load_fn, &ind_load_args, 2, "ind.target");
+            const ind_target = c.LLVMBuildIntToPtr(self.builder, ind_target_i64, ptrType(), "ind.ptr");
+            _ = c.LLVMBuildBr(self.builder, eval_bb);
+
+            var phi_incoming_vals = std.ArrayListUnmanaged(llvm.Value){};
+            defer phi_incoming_vals.deinit(self.allocator);
+            var phi_incoming_bbs = std.ArrayListUnmanaged(llvm.BasicBlock){};
+            defer phi_incoming_bbs.deinit(self.allocator);
+
+            phi_incoming_vals.append(self.allocator, scrut_llvm) catch return error.OutOfMemory;
+            phi_incoming_bbs.append(self.allocator, entry_bb) catch return error.OutOfMemory;
+            phi_incoming_vals.append(self.allocator, ind_target) catch return error.OutOfMemory;
+            phi_incoming_bbs.append(self.allocator, ind_bb) catch return error.OutOfMemory;
+
+            // F-tag cases
+            var ftag_iter = self.tag_table.fun_tags.iterator();
+            while (ftag_iter.next()) |ftag_entry| {
+                const ftag_unique = ftag_entry.key_ptr.*;
+                const ftag_disc = self.tag_table.discriminants.get(ftag_unique) orelse continue;
+                const ftag_name = self.tag_table.fun_tag_names.get(ftag_unique) orelse continue;
+                const ftag_n_fields = self.tag_table.field_counts.get(ftag_unique) orelse 0;
+
+                const ftag_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.ftag");
+                c.LLVMAddCase(eval_switch, c.LLVMConstInt(llvm.i64Type(), @bitCast(ftag_disc), 0), ftag_bb);
+                llvm.positionBuilderAtEnd(self.builder, ftag_bb);
+
+                var call_args: [8]llvm.Value = undefined;
+                const n_args = @min(ftag_n_fields, 8);
+                for (0..n_args) |fi| {
+                    var fld_load_args = [_]llvm.Value{ phi, c.LLVMConstInt(llvm.i32Type(), @intCast(fi), 0) };
+                    const loaded_i64 = c.LLVMBuildCall2(self.builder, llvm.getFunctionType(rts_load_fn), rts_load_fn, &fld_load_args, 2, "ftag.arg");
+                    call_args[fi] = c.LLVMBuildIntToPtr(self.builder, loaded_i64, ptrType(), "ftag.ptr");
+                }
+
+                const fn_name_z = self.formatName(ftag_name);
+                var param_types: [8]llvm.Type = undefined;
+                for (0..n_args) |pi| param_types[pi] = ptrType();
+                const fn_type = llvm.functionType(ptrType(), param_types[0..n_args], false);
+                const func = c.LLVMGetNamedFunction(self.module, fn_name_z) orelse llvm.addFunction(self.module, fn_name_z, fn_type);
+                const result = c.LLVMBuildCall2(self.builder, fn_type, func, @ptrCast(&call_args), @intCast(n_args), "ftag.result");
+
+                // Update thunk to indirection (only if it has space for the result)
+                // Thunks with 0 fields can't be updated — they'll be re-evaluated each time.
+                // TODO(issue #602): Allocate thunks with 1 field minimum for update frame.
+                if (ftag_n_fields > 0) {
+                    const upd_tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, phi, &tag_idx, 2, "ftag.upd.tag");
+                    _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(llvm.i64Type(), 0x101, 0), upd_tag_gep);
+                    const rts_store_fn = declareRtsStoreField(self.module);
+                    const result_u64 = c.LLVMBuildPtrToInt(self.builder, result, llvm.i64Type(), "ftag.upd.u64");
+                    var upd_store_args = [_]llvm.Value{ phi, c.LLVMConstInt(llvm.i32Type(), 0, 0), result_u64 };
+                    _ = c.LLVMBuildCall2(self.builder, llvm.getFunctionType(rts_store_fn), rts_store_fn, &upd_store_args, 3, "");
+                }
+
+                _ = c.LLVMBuildBr(self.builder, eval_bb);
+                phi_incoming_vals.append(self.allocator, result) catch return error.OutOfMemory;
+                phi_incoming_bbs.append(self.allocator, ftag_bb) catch return error.OutOfMemory;
+            }
+
+            // P-tag cases
+            var ptag_iter = self.tag_table.partial_tags.iterator();
+            while (ptag_iter.next()) |ptag_entry| {
+                const ptag_unique = ptag_entry.key_ptr.*;
+                const ptag_disc = self.tag_table.discriminants.get(ptag_unique) orelse continue;
+                const ptag_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.ptag");
+                c.LLVMAddCase(eval_switch, c.LLVMConstInt(llvm.i64Type(), @bitCast(ptag_disc), 0), ptag_bb);
+                llvm.positionBuilderAtEnd(self.builder, ptag_bb);
+
+                const ptag_info = self.tag_table.partial_tag_info.get(ptag_unique) orelse continue;
+                const fn_name_z = self.formatName(ptag_info.name);
+                const n_fields = ptag_info.n_fields;
+
+                var call_args: [8]llvm.Value = undefined;
+                for (0..@min(n_fields, 8)) |fi| {
+                    var load_args = [_]llvm.Value{ phi, c.LLVMConstInt(llvm.i32Type(), @intCast(fi), 0) };
+                    const loaded = c.LLVMBuildCall2(self.builder, llvm.getFunctionType(rts_load_fn), rts_load_fn, &load_args, 2, "pap.arg");
+                    call_args[fi] = c.LLVMBuildIntToPtr(self.builder, loaded, ptrType(), "pap.ptr");
+                }
+
+                var fn_param_types: [8]llvm.Type = undefined;
+                for (0..@min(n_fields, 8)) |pi| fn_param_types[pi] = ptrType();
+                const callee_type = llvm.functionType(ptrType(), fn_param_types[0..@min(n_fields, 8)], false);
+                const callee = c.LLVMGetNamedFunction(self.module, fn_name_z) orelse llvm.addFunction(self.module, fn_name_z, callee_type);
+                const result = c.LLVMBuildCall2(self.builder, callee_type, callee, @ptrCast(&call_args), @intCast(@min(n_fields, 8)), "pap.result");
+
+                _ = c.LLVMBuildBr(self.builder, eval_bb);
+                phi_incoming_vals.append(self.allocator, result) catch return error.OutOfMemory;
+                phi_incoming_bbs.append(self.allocator, ptag_bb) catch return error.OutOfMemory;
+            }
+
+            c.LLVMAddIncoming(phi, @ptrCast(phi_incoming_vals.items.ptr), @ptrCast(phi_incoming_bbs.items.ptr), @intCast(phi_incoming_vals.items.len));
+
+            llvm.positionBuilderAtEnd(self.builder, dispatch_bb);
+            cur_scrut = phi;
+            cur_tag = tag_val;
+        } else if (is_ptr) {
+            const header_ty = nodeHeaderType();
+            var idx = [_]llvm.Value{ c.LLVMConstInt(llvm.i32Type(), 0, 0), c.LLVMConstInt(llvm.i32Type(), 0, 0) };
+            const tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, scrut_llvm, &idx, 2, "tag_gep");
+            cur_tag = c.LLVMBuildLoad2(self.builder, llvm.i64Type(), tag_gep, "tag");
+        } else {
+            cur_tag = scrut_llvm;
+        }
+
+        // ── 2. Build basic blocks ──────────────────────────────────────────
+        const merge_bb = c.LLVMAppendBasicBlock(self.current_func, "case.merge");
+        const unreachable_bb = c.LLVMAppendBasicBlock(self.current_func, "case.unreachable");
+
+        var default_bb: llvm.BasicBlock = null;
+        var alt_bbs = self.allocator.alloc(llvm.BasicBlock, alts.len) catch return error.OutOfMemory;
+        defer self.allocator.free(alt_bbs);
+
+        for (alts, 0..) |*alt, i| {
+            switch (alt.pat) {
+                .DefaultPat => {
+                    default_bb = c.LLVMAppendBasicBlock(self.current_func, "case.default");
+                    alt_bbs[i] = default_bb;
+                },
+                else => {
+                    var name_buf: [32]u8 = undefined;
+                    const bb_name = std.fmt.bufPrintZ(&name_buf, "case.alt{d}", .{i}) catch "case.alt";
+                    alt_bbs[i] = c.LLVMAppendBasicBlock(self.current_func, bb_name.ptr);
+                },
+            }
+        }
+
+        // Non-exhaustive match — default case is unreachable in well-typed programs
+        if (default_bb == null) default_bb = unreachable_bb;
+
+        // ── 3. Emit switch ──────────────────────────────────────────────────
+        var n_cases: u32 = 0;
+        for (alts) |alt| {
+            if (alt.pat != .DefaultPat) n_cases += 1;
+        }
+        const switch_inst = c.LLVMBuildSwitch(self.builder, cur_tag, default_bb, n_cases);
+
+        for (alts, 0..) |alt, i| {
+            switch (alt.pat) {
+                .DefaultPat => {},
+                .NodePat => |np| {
+                    const disc = self.tag_table.discriminant(np.tag) orelse return error.UnsupportedGrinVal;
+                    const case_val = c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0);
+                    c.LLVMAddCase(switch_inst, case_val, alt_bbs[i]);
+                },
+                .TagPat => |t| {
+                    const disc = self.tag_table.discriminant(t) orelse return error.UnsupportedGrinVal;
+                    const case_val = c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0);
+                    c.LLVMAddCase(switch_inst, case_val, alt_bbs[i]);
+                },
+                .LitPat => |lit| {
+                    const case_val: llvm.Value = switch (lit) {
+                        .Int => |int_val| c.LLVMConstInt(llvm.i64Type(), @bitCast(int_val), 1),
+                        .Bool => |b| c.LLVMConstInt(llvm.i64Type(), @intFromBool(b), 0),
+                        .Char => |ch| c.LLVMConstInt(llvm.i64Type(), ch, 0),
+                        else => return error.UnsupportedGrinVal,
+                    };
+                    c.LLVMAddCase(switch_inst, case_val, alt_bbs[i]);
+                },
+            }
+        }
+
+        // ── 4. Emit alternatives and collect values for phi ────────────────
+        var phi_values = std.ArrayListUnmanaged(llvm.Value){};
+        defer phi_values.deinit(self.allocator);
+        var phi_blocks = std.ArrayListUnmanaged(llvm.BasicBlock){};
+        defer phi_blocks.deinit(self.allocator);
+
+        for (alts, 0..) |alt, i| {
+            llvm.positionBuilderAtEnd(self.builder, alt_bbs[i]);
+
+            // Handle NodePat field binding (same as translateCase)
+            if (alt.pat == .NodePat and is_ptr) {
+                const np = alt.pat.NodePat;
+                const rts_load_fn = declareRtsLoadField(self.module);
+                for (np.fields, 0..) |field_name, fi| {
+                    var load_args = [_]llvm.Value{
+                        cur_scrut,
+                        c.LLVMConstInt(llvm.i32Type(), fi, 0),
+                    };
+                    const loaded_i64 = c.LLVMBuildCall2(
+                        self.builder,
+                        llvm.getFunctionType(rts_load_fn),
+                        rts_load_fn,
+                        &load_args,
+                        2,
+                        nullTerminate(field_name.base).ptr,
+                    );
+
+                    const field_type = self.type_env.getFieldTagType(np.tag, @intCast(fi));
+                    const final_val: llvm.Value = switch (field_type) {
+                        .i64 => loaded_i64,
+                        .f64 => c.LLVMBuildBitCast(self.builder, loaded_i64, c.LLVMDoubleType(), "as_f64"),
+                        .ptr => c.LLVMBuildIntToPtr(self.builder, loaded_i64, ptrType(), "as_ptr"),
+                        .fn_ptr => c.LLVMBuildIntToPtr(self.builder, loaded_i64, ptrType(), "as_fn_ptr"),
+                    };
+
+                    try self.params.put(field_name.unique.value, final_val);
+                    try self.type_env.setVarType(self.allocator, field_name, field_type);
+                }
+            }
+
+            // Translate the alternative body as a value (not with ret)
+            const alt_value = try self.translateExprToValue(alt.body, result_name);
+            
+            // Every alternative must produce a value in bind context
+            if (alt_value) |val| {
+                // Normalize value type: box i64 nullary constructors into heap nodes
+                // so all phi incoming values have the same type (ptr).
+                // This handles cases where different alternatives return nullary
+                // constructors (i64 discriminants) vs heap-allocated nodes (ptr).
+                const val_ty = c.LLVMTypeOf(val);
+                const val_kind = c.LLVMGetTypeKind(val_ty);
+                const is_i64 = val_kind == c.LLVMIntegerTypeKind and c.LLVMGetIntTypeWidth(val_ty) == 64;
+                const normalized_val: llvm.Value = if (is_i64) blk: {
+                    // Box the i64 discriminant into a 0-field heap node
+                    const rts_alloc_fn = declareRtsAlloc(self.module);
+                    var alloc_args = [_]llvm.Value{
+                        val, // tag discriminant
+                        c.LLVMConstInt(llvm.i32Type(), 0, 0), // 0 fields
+                    };
+                    break :blk c.LLVMBuildCall2(
+                        self.builder,
+                        llvm.getFunctionType(rts_alloc_fn),
+                        rts_alloc_fn,
+                        &alloc_args,
+                        2,
+                        "boxed",
+                    );
+                } else val;
+                
+                try phi_values.append(self.allocator, normalized_val);
+                const cur_bb = c.LLVMGetInsertBlock(self.builder);
+                try phi_blocks.append(self.allocator, cur_bb);
+                _ = c.LLVMBuildBr(self.builder, merge_bb);
+            } else {
+                // Alternative didn't produce a value - this shouldn't happen in bind context
+                return error.UnsupportedGrinVal;
+            }
+        }
+
+        // ── 5. Create phi node in merge block ──────────────────────────────
+        llvm.positionBuilderAtEnd(self.builder, merge_bb);
+        
+        if (phi_values.items.len == 0) return null;
+        
+        // All values have been normalized to ptr type, so phi is always ptr
+        const phi = c.LLVMBuildPhi(self.builder, ptrType(), nullTerminate(result_name).ptr);
+        
+        c.LLVMAddIncoming(
+            phi,
+            @ptrCast(phi_values.items.ptr),
+            @ptrCast(phi_blocks.items.ptr),
+            @intCast(phi_values.items.len),
+        );
+
+        // ── 6. Emit unreachable in default block (for non-exhaustive matches) ──
+        llvm.positionBuilderAtEnd(self.builder, unreachable_bb);
+        _ = c.LLVMBuildUnreachable(self.builder);
+        
+        // Reposition at merge for continuation
+        llvm.positionBuilderAtEnd(self.builder, merge_bb);
+
+        return phi;
     }
 
     fn translateFetch(
