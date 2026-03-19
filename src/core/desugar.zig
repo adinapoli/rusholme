@@ -1391,7 +1391,6 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
             }
         },
         .Lit => |l| {
-            // In a complete compiler, we'd lookup Enum types based on Literal variant.
             node.* = .{ .Lit = .{ .val = desugarLiteral(l), .span = l.getSpan() } };
         },
         .App => |a| {

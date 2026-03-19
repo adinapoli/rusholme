@@ -57,6 +57,10 @@ pub const PrimOp = enum(u16) {
     /// Type: String -> IO ()
     putStrLn_ = 3,
 
+    /// Write a single character to stdout.
+    /// Type: Char -> IO ()
+    putChar_ = 4,
+
     // ═══════════════════════════════════════════════════════════════════════
     // Integer Arithmetic (100-149)
     // ═══════════════════════════════════════════════════════════════════════
@@ -257,6 +261,7 @@ pub const PrimOp = enum(u16) {
             .write_stderr => "write_stderr",
             .read_stdin => "read_stdin",
             .putStrLn_ => "putStrLn_",
+            .putChar_ => "putChar_",
             .add_Int => "add_Int",
             .sub_Int => "sub_Int",
             .mul_Int => "mul_Int",
@@ -340,6 +345,7 @@ pub const PrimOp = enum(u16) {
     pub fn fromPreludeName(str: []const u8) ?PrimOp {
         if (std.mem.eql(u8, str, "putStrLn")) return .putStrLn_;
         if (std.mem.eql(u8, str, "putStr")) return .write_stdout;
+        if (std.mem.eql(u8, str, "putChar")) return .putChar_;
         if (std.mem.eql(u8, str, "print")) return .write_stdout;
         // Add more Prelude function mappings here as needed
         return null;
@@ -426,7 +432,7 @@ test "PrimOpRegistry: stable names" {
 test "PrimOp: all ops have name mappings" {
     // Verify that all defined PrimOps have a name() implementation
     const ops = [_]PrimOp{
-        .write_stdout, .write_stderr, .read_stdin, .putStrLn_,
+        .write_stdout, .write_stderr, .read_stdin, .putStrLn_, .putChar_,
         .add_Int,      .sub_Int,      .mul_Int,    .neg_Int,
         .abs_Int,      .quot_Int,     .rem_Int,    .add_Double,
         .sub_Double,   .mul_Double,   .div_Double, .neg_Double,

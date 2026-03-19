@@ -73,6 +73,21 @@ pub fn putStrLn(io: std.Io, args: []const Value) EvalError!Value {
     return Value.unit;
 }
 
+/// Write a single character to stdout.
+pub fn putChar(io: std.Io, args: []const Value) EvalError!Value {
+    if (args.len != 1) return EvalError.ArityMismatch;
+
+    const ch = args[0].asChar() orelse return EvalError.TypeError;
+
+    var buf: [4096]u8 = undefined;
+    var fw: File.Writer = .init(.stdout(), io, &buf);
+    const w = &fw.interface;
+    w.writeByte(@intCast(ch)) catch return EvalError.IOError;
+    w.flush() catch return EvalError.IOError;
+
+    return Value.unit;
+}
+
 /// Read a line from stdin using the provided Io interface.
 ///
 /// Args: []

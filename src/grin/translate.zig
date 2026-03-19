@@ -292,6 +292,8 @@ fn primopArity(name_str: []const u8) u32 {
     return switch (op) {
         // IO: write_stdout, write_stderr, putStrLn_ take 1 arg (String -> IO ())
         .write_stdout, .write_stderr, .putStrLn_ => 1,
+        // IO: putChar_ takes 1 arg (Char -> IO ())
+        .putChar_ => 1,
         // IO: read_stdin takes 0 args (IO String)
         .read_stdin => 0,
         // Unary arithmetic: neg_Int, abs_Int, neg_Double
