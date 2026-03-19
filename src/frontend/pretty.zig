@@ -244,10 +244,24 @@ pub const PrettyPrinter = struct {
     fn printTypeDecl(self: *PrettyPrinter, td: ast.TypeDecl) Error!void {
         try self.writeIndent();
         try self.write("type ");
-        try self.write(td.name);
-        for (td.tyvars) |tv| {
+        
+        // Check if this is an infix type constructor (operator name with 2 tyvars)
+        const is_infix = td.name.len > 0 and td.name[0] == ':' and td.tyvars.len == 2;
+        
+        if (is_infix) {
+            // Print in infix form: type a ~> b
+            try self.write(td.tyvars[0]);
             try self.writeByte(' ');
-            try self.write(tv);
+            try self.write(td.name);
+            try self.writeByte(' ');
+            try self.write(td.tyvars[1]);
+        } else {
+            // Print in prefix form: type T a b
+            try self.write(td.name);
+            for (td.tyvars) |tv| {
+                try self.writeByte(' ');
+                try self.write(tv);
+            }
         }
         try self.write(" = ");
         try self.printType(td.type);
@@ -256,10 +270,24 @@ pub const PrettyPrinter = struct {
     fn printDataDecl(self: *PrettyPrinter, dd: ast.DataDecl) Error!void {
         try self.writeIndent();
         try self.write("data ");
-        try self.write(dd.name);
-        for (dd.tyvars) |tv| {
+        
+        // Check if this is an infix type constructor (operator name with 2 tyvars)
+        const is_infix = dd.name.len > 0 and dd.name[0] == ':' and dd.tyvars.len == 2;
+        
+        if (is_infix) {
+            // Print in infix form: data a :+: b
+            try self.write(dd.tyvars[0]);
             try self.writeByte(' ');
-            try self.write(tv);
+            try self.write(dd.name);
+            try self.writeByte(' ');
+            try self.write(dd.tyvars[1]);
+        } else {
+            // Print in prefix form: data T a b c
+            try self.write(dd.name);
+            for (dd.tyvars) |tv| {
+                try self.writeByte(' ');
+                try self.write(tv);
+            }
         }
         if (dd.constructors.len > 0) {
             try self.newline();
@@ -288,6 +316,20 @@ pub const PrettyPrinter = struct {
     }
 
     fn printConDecl(self: *PrettyPrinter, con: ast.ConDecl) Error!void {
+        // Print existential quantification if present: forall a. Show a =>
+        if (con.ex_tyvars.len > 0) {
+            try self.write("forall ");
+            for (con.ex_tyvars, 0..) |tv, i| {
+                if (i > 0) try self.writeByte(' ');
+                try self.write(tv);
+            }
+            try self.write(". ");
+        }
+        if (con.ex_context) |ctx| {
+            try self.printContext(ctx);
+            try self.write(" => ");
+        }
+
         try self.write(con.name);
         if (con.fields.len == 0) return;
 
@@ -335,10 +377,24 @@ pub const PrettyPrinter = struct {
     fn printNewtypeDecl(self: *PrettyPrinter, nd: ast.NewtypeDecl) Error!void {
         try self.writeIndent();
         try self.write("newtype ");
-        try self.write(nd.name);
-        for (nd.tyvars) |tv| {
+        
+        // Check if this is an infix type constructor (operator name with 2 tyvars)
+        const is_infix = nd.name.len > 0 and nd.name[0] == ':' and nd.tyvars.len == 2;
+        
+        if (is_infix) {
+            // Print in infix form: newtype a :-> b
+            try self.write(nd.tyvars[0]);
             try self.writeByte(' ');
-            try self.write(tv);
+            try self.write(nd.name);
+            try self.writeByte(' ');
+            try self.write(nd.tyvars[1]);
+        } else {
+            // Print in prefix form: newtype T a b
+            try self.write(nd.name);
+            for (nd.tyvars) |tv| {
+                try self.writeByte(' ');
+                try self.write(tv);
+            }
         }
         try self.write(" = ");
         try self.printConDecl(nd.constructor);
