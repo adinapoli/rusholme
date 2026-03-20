@@ -299,3 +299,7 @@ test "e2e: e2e_017_prelude_list" {
 test "e2e: e2e_dict_minimal" {
     try testE2e(std.testing.allocator, "e2e_dict_minimal");
 }
+
+test "e2e: e2e_show_basic" {
+    try testE2e(std.testing.allocator, "e2e_show_basic");
+}

@@ -254,7 +254,10 @@ pub const LambdaLifter = struct {
     ) !VarSet {
         switch (expr.*) {
             .Var => |v| {
-                if (!self.inScope(v.name.unique.value)) {
+                // Data constructors are globally available and must never be
+                // captured as free variables.  In Haskell, constructor names
+                // start with an uppercase letter or ':'.
+                if (!isDataCon(v.name.base) and !self.inScope(v.name.unique.value)) {
                     try free_vars.add(self.alloc, v.name.unique.value);
                 }
             },
@@ -311,7 +314,13 @@ pub const LambdaLifter = struct {
 
                     // Complete lambda registration with free variables.
                     const free_vars_slice = try body_free_vars.toSlice(self.alloc);
-                    try self.completeLambda(lambda_id, free_vars_slice, &.{l.binder}, l.body, l.binder.ty, needs_lifting);
+                    // Heap-allocate the params slice so it outlives this scope.
+                    // Using a temporary `&.{l.binder}` would create a dangling
+                    // reference — all lifted lambdas would share the same
+                    // (overwritten) stack slot.
+                    const param_slice = try self.alloc.alloc(Id, 1);
+                    param_slice[0] = l.binder;
+                    try self.completeLambda(lambda_id, free_vars_slice, param_slice, l.body, l.binder.ty, needs_lifting);
 
                     // Compute function type with free vars added as parameters.
                     var lifted_ty = l.binder.ty;
@@ -821,6 +830,25 @@ pub fn lambdaLift(alloc: std.mem.Allocator, program: core.CoreProgram) !core.Cor
 }
 
 // ── Helper Functions ─────────────────────────────────────────────────────
+
+/// Return true if `name` is a Haskell data constructor.
+///
+/// Data constructors are globally available and must never be captured as
+/// free variables during lambda lifting.  In Haskell:
+///   - Named constructors start with uppercase: `True`, `Just`, `MkDict$Show`
+///   - Operator constructors start with `:`: `(:)` in source, `(:)` in Core
+///   - Special syntax constructors: `[]`, `()`, `(,)`, `(,,)`, etc.
+fn isDataCon(name: []const u8) bool {
+    if (name.len == 0) return false;
+    if (std.ascii.isUpper(name[0])) return true;
+    if (name[0] == ':') return true;
+    // Parenthesized operator constructors: (:), (,), (,,), ...
+    // and special constructors: (), []
+    if (name.len >= 2 and name[0] == '(' and (name[1] == ':' or name[1] == ',' or name[1] == ')'))
+        return true;
+    if (std.mem.eql(u8, name, "[]")) return true;
+    return false;
+}
 
 fn intType() CoreType {
     return .{ .TyCon = .{

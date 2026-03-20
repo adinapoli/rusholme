@@ -447,7 +447,60 @@ pub const Pipeline = struct {
             }
         }
 
-        // Try as an expression: wrap in replExpr__ = <expr>
+        // ── Show-wrapped expression (Phase A) ─────────────────────────
+        //
+        // When enabled, this attempts to wrap the expression as:
+        //   replExpr__ = putStrLn (show (<input>))
+        // matching GHCi's behavior.  Show drives evaluation through
+        // demand (call-by-need), and putStrLn prints the result via IO.
+        //
+        // Currently DISABLED because the GRIN evaluator does not yet
+        // handle dictionary-passing codegen.  The show-wrapped code
+        // compiles successfully but crashes at runtime with
+        // "Non-exhaustive patterns in case" when the evaluator's case
+        // dispatch encounters dictionary constructor tags it doesn't
+        // recognise.  Once the GRIN evaluator gains dictionary support,
+        // set `enable_show_wrapping = true` to activate this path.
+        //
+        // tracked in: https://github.com/adinapoli/rusholme/issues/612
+        const enable_show_wrapping = false;
+        if (enable_show_wrapping) {
+            // Scope safety: push a transactional scope frame around this
+            // attempt.  If it fails, pop the frame to discard any bindings
+            // (e.g. `replExpr__`) that the renamer introduced.  If it
+            // succeeds, the frame stays in place.
+            rename_env.scope.push() catch return CompileError.OutOfMemory;
+            ty_env.push() catch {
+                rename_env.scope.pop();
+                return CompileError.OutOfMemory;
+            };
+
+            var show_diags = DiagnosticCollector.init();
+            defer show_diags.deinit(alloc);
+
+            const show_source = std.fmt.allocPrint(alloc, "module ReplInput where\nreplExpr__ = putStrLn (show ({s}))\n", .{input}) catch {
+                ty_env.pop();
+                rename_env.scope.pop();
+                return CompileError.OutOfMemory;
+            };
+            self.last_source = show_source;
+            self.last_input_kind = .expression;
+
+            if (self.compileModule(show_source, file_id, u_supply, rename_env, ty_env, mv_supply, &show_diags, external_arities, external_con_map, external_class_env, external_dict_names, external_type_con_names)) |result| {
+                // Show-wrapped compilation succeeded — keep the scope
+                // frame and clear any declaration diagnostics.
+                const decl_diag_count = diags.diagnostics.items.len;
+                clearLeadingDiags(alloc, diags, decl_diag_count);
+                return .{ .program = result.grin_prog, .kind = .expression, .core_data_decls = result.core_data_decls, .class_env = result.class_env, .dict_names = result.dict_names };
+            } else |_| {
+                // No Show instance or other error — rollback the scope
+                // frame and fall through to bare expression.
+                ty_env.pop();
+                rename_env.scope.pop();
+            }
+        }
+
+        // Phase B: bare expression (existing behavior).
         {
             // Save declaration state for possible restoration.
             const decl_diag_count = diags.diagnostics.items.len;

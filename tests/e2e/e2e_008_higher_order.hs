@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 module Main where
 
 ($) :: (a -> b) -> a -> b
