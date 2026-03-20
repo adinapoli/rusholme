@@ -2084,6 +2084,13 @@ fn desugarMatch(
         },
     };
 
+    // Pre-register pattern variables in `local_binders` so that `desugarRhs`
+    // can resolve them.  This is necessary for instance method bindings whose
+    // bodies are not type-checked by `inferPat` (the typechecker skips
+    // InstanceDecl bodies).  For top-level FunBinds this is a harmless no-op
+    // because `inferPat` already populated `local_binders`.
+    try registerPatBinders(ctx, equations, arg_tys);
+
     var eq_idx: usize = equations.len;
     while (eq_idx > 0) {
         eq_idx -= 1;
@@ -2488,6 +2495,109 @@ fn freshFieldBinder(
 /// track through the pattern match compiler (no full type propagation yet).
 fn dummyCoreType() ast_mod.CoreType {
     return .{ .TyVar = .{ .base = "_t", .unique = .{ .value = 0 } } };
+}
+
+/// Convert a CoreType back to HType so it can be stored in `local_binders`.
+///
+/// This is the inverse of `HType.toCore`.  Used by `registerPatBinders` to
+/// populate `local_binders` for instance method pattern variables that were
+/// never processed by the typechecker's `inferPat`.
+fn coreTypeToHType(alloc: std.mem.Allocator, ty: ast_mod.CoreType) std.mem.Allocator.Error!*htype_mod.HType {
+    const node = try alloc.create(htype_mod.HType);
+    node.* = switch (ty) {
+        .TyVar => |n| htype_mod.HType{ .Rigid = n },
+        .TyCon => |tc| blk: {
+            const args = try alloc.alloc(htype_mod.HType, tc.args.len);
+            for (tc.args, 0..) |arg, i| {
+                args[i] = (try coreTypeToHType(alloc, arg)).*;
+            }
+            break :blk htype_mod.HType{ .Con = .{ .name = tc.name, .args = args } };
+        },
+        .FunTy => |f| blk: {
+            const arg_p = try coreTypeToHType(alloc, f.arg.*);
+            const res_p = try coreTypeToHType(alloc, f.res.*);
+            break :blk htype_mod.HType{ .Fun = .{ .arg = arg_p, .res = res_p } };
+        },
+        .ForAllTy => |fa| blk: {
+            const body_p = try coreTypeToHType(alloc, fa.body.*);
+            break :blk htype_mod.HType{ .ForAll = .{ .binder = fa.binder, .body = body_p } };
+        },
+    };
+    return node;
+}
+
+/// Register pattern variables in `local_binders` so that `desugarExpr` can
+/// find their types during RHS desugaring.
+///
+/// When instance methods have pattern-matching bindings (e.g. `show n = ...`),
+/// the typechecker skips their bodies, so pattern variables are never added to
+/// `local_binders` via `inferPat`.  This function fills that gap by walking
+/// each equation's patterns and registering `.Var` patterns with the
+/// corresponding argument type derived from the method's declared type.
+fn registerPatBinders(
+    ctx: *DesugarCtx,
+    equations: []const renamer_mod.RMatch,
+    arg_tys: []const ast_mod.CoreType,
+) std.mem.Allocator.Error!void {
+    for (equations) |eq| {
+        for (eq.patterns, 0..) |pat, i| {
+            if (i >= arg_tys.len) break;
+            try registerPatBindersRec(ctx, pat, arg_tys[i]);
+        }
+    }
+}
+
+/// Recursively walk a pattern and register any variable binders in `local_binders`.
+///
+/// For top-level argument patterns, `ty` is the argument type from the method
+/// signature.  For sub-patterns inside constructors, we pass a dummy type since
+/// decomposing the constructor's field types is not available here; the
+/// desugarer's `applyPat` will later assign the correct type in the Core AST
+/// via the Case binder.
+fn registerPatBindersRec(
+    ctx: *DesugarCtx,
+    pat: renamer_mod.RPat,
+    ty: ast_mod.CoreType,
+) std.mem.Allocator.Error!void {
+    const dummy = dummyCoreType();
+    switch (pat) {
+        .Var => |v| {
+            // Only register if not already present (the typechecker may have
+            // populated it for top-level FunBinds).
+            if (!ctx.types.local_binders.contains(v.name.unique)) {
+                const hty = try coreTypeToHType(ctx.alloc, ty);
+                try ctx.types.local_binders.put(ctx.alloc, v.name.unique, hty);
+            }
+        },
+        .Paren => |inner| try registerPatBindersRec(ctx, inner.*, ty),
+        .AsPat => |as_| {
+            if (!ctx.types.local_binders.contains(as_.name.unique)) {
+                const hty = try coreTypeToHType(ctx.alloc, ty);
+                try ctx.types.local_binders.put(ctx.alloc, as_.name.unique, hty);
+            }
+            try registerPatBindersRec(ctx, as_.pat.*, ty);
+        },
+        .Con => |c| {
+            for (c.args) |sub| try registerPatBindersRec(ctx, sub, dummy);
+        },
+        .InfixCon => |ic| {
+            try registerPatBindersRec(ctx, ic.left.*, dummy);
+            try registerPatBindersRec(ctx, ic.right.*, dummy);
+        },
+        .Tuple => |elems| {
+            for (elems) |sub| try registerPatBindersRec(ctx, sub, dummy);
+        },
+        .List => |elems| {
+            for (elems) |sub| try registerPatBindersRec(ctx, sub, dummy);
+        },
+        .Negate => |inner| try registerPatBindersRec(ctx, inner.*, ty),
+        .RecPat => |rp| {
+            for (rp.fields) |f| {
+                if (f.pat) |sub| try registerPatBindersRec(ctx, sub.*, dummy);
+            }
+        },
+        .Lit, .Wild => {},
+    }
 }
 
 /// Build the tuple constructor name for a tuple of `arity` elements.

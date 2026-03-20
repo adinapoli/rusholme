@@ -170,6 +170,11 @@ const PrimOpMapping = struct {
         if (std.mem.eql(u8, name.base, ">>")) return .{ .instruction = .{ .seq = {} } };
         if (std.mem.eql(u8, name.base, ">>=")) return .{ .instruction = .{ .seq = {} } };
 
+        // Character ↔ Int conversions — identity at the LLVM level since
+        // both Char and Int are represented as i64.
+        if (std.mem.eql(u8, name.base, "intToChar")) return .{ .instruction = .{ .identity = {} } };
+        if (std.mem.eql(u8, name.base, "charToInt")) return .{ .instruction = .{ .identity = {} } };
+
         return null;
     }
 };
@@ -242,6 +247,9 @@ const LLVMInstruction = union(enum) {
     /// Monadic sequencing (>>) and bind (>>=)
     /// These are no-ops in M1 - the GRIN bind structure handles sequencing
     seq: void,
+    /// Identity passthrough (intToChar, charToInt) — both types are i64
+    /// at the LLVM level, so no conversion is needed.
+    identity: void,
 };
 
 /// A translated PrimOp result
@@ -1579,6 +1587,16 @@ pub const GrinTranslator = struct {
             return null;
         }
 
+        // Identity passthrough (intToChar, charToInt) — both are i64, no conversion.
+        if (instr == .identity) {
+            if (args.len < 1) return error.UnsupportedGrinVal;
+            const operand_raw = try self.translateValToLlvm(args[0]);
+            return if (c.LLVMGetTypeKind(c.LLVMTypeOf(operand_raw)) == c.LLVMPointerTypeKind)
+                c.LLVMBuildPtrToInt(self.builder, operand_raw, llvm.i64Type(), "identity_i64")
+            else
+                operand_raw;
+        }
+
         // Unary instructions (neg_Int, abs_Int)
         if (instr == .neg or instr == .abs) {
             if (args.len < 1) return error.UnsupportedGrinVal;
@@ -1637,6 +1655,7 @@ pub const GrinTranslator = struct {
             .sge => c.LLVMBuildICmp(self.builder, @as(c_uint, @bitCast(c.LLVMIntSGE)), lhs, rhs, "sge"),
             .neg, .abs => unreachable, // handled above
             .seq => unreachable, // handled above
+            .identity => unreachable, // handled above
         };
     }
 

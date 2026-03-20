@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 module DictMinimal where
 
 foreign import prim "eq_Int"   eqInt :: Int -> Int -> Bool

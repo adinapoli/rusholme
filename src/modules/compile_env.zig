@@ -60,6 +60,7 @@ const renamer_mod = @import("../renamer/renamer.zig");
 const htype_mod = @import("../typechecker/htype.zig");
 const env_mod = @import("../typechecker/env.zig");
 const infer_mod = @import("../typechecker/infer.zig");
+const class_env_mod = @import("../typechecker/class_env.zig");
 const desugar_mod = @import("../core/desugar.zig");
 const core_ast = @import("../core/ast.zig");
 const mod_iface = @import("mod_iface.zig");
@@ -73,6 +74,8 @@ pub const Diagnostic = diag_mod.Diagnostic;
 pub const ModIface = mod_iface.ModIface;
 pub const CoreProgram = core_ast.CoreProgram;
 pub const ModuleGraph = module_graph.ModuleGraph;
+pub const ClassEnv = class_env_mod.ClassEnv;
+pub const DictNameMap = desugar_mod.DesugarCtx.DictNameMap;
 
 // ── CompileEnv ────────────────────────────────────────────────────────────
 
@@ -116,6 +119,20 @@ pub const CompileEnv = struct {
     /// Accumulates diagnostics from all modules.
     diags: DiagnosticCollector,
 
+    /// Map: module name → class environment after type inference.
+    ///
+    /// Stores class declarations and instance information so that
+    /// downstream modules can resolve class constraints for imported
+    /// type classes.
+    class_envs: std.StringHashMapUnmanaged(ClassEnv),
+
+    /// Map: module name → dictionary name map after desugaring.
+    ///
+    /// Stores the mapping from (class_unique, head_type_name) → dictionary
+    /// Name so that downstream modules can resolve dictionary evidence
+    /// for imported type class instances.
+    dict_names_map: std.StringHashMapUnmanaged(DictNameMap),
+
     // ── Lifecycle ─────────────────────────────────────────────────────────
 
     /// Create an empty compilation session.
@@ -128,6 +145,8 @@ pub const CompileEnv = struct {
             .u_supply = .{},
             .mv_supply = .{},
             .diags = DiagnosticCollector.init(),
+            .class_envs = .{},
+            .dict_names_map = .{},
         };
     }
 
@@ -136,6 +155,8 @@ pub const CompileEnv = struct {
         self.programs.deinit(self.alloc);
         self.parsed_modules.deinit(self.alloc);
         self.diags.deinit(self.alloc);
+        self.class_envs.deinit(self.alloc);
+        self.dict_names_map.deinit(self.alloc);
         self.* = undefined;
     }
 
@@ -262,6 +283,38 @@ pub const CompileEnv = struct {
         }
     }
 
+    /// Seed a `ClassEnv` with class declarations and instances from modules
+    /// that the current module imports.  This allows the typechecker to
+    /// resolve class constraints for imported type classes (e.g. `Show`).
+    pub fn seedClassEnvFromImports(
+        self: *const CompileEnv,
+        class_env: *ClassEnv,
+        imports: []const ast_mod.ImportDecl,
+    ) !void {
+        for (imports) |imp| {
+            const upstream = self.class_envs.get(imp.module_name) orelse continue;
+            try class_env.mergeFrom(&upstream);
+        }
+    }
+
+    /// Collect dictionary name mappings from all modules that the current
+    /// module imports into a single merged map.  This allows the desugarer
+    /// to resolve dictionary evidence for imported instances.
+    pub fn collectDictNamesFromImports(
+        self: *const CompileEnv,
+        alloc: std.mem.Allocator,
+        imports: []const ast_mod.ImportDecl,
+    ) std.mem.Allocator.Error!DictNameMap {
+        var merged: DictNameMap = .empty;
+        for (imports) |imp| {
+            const upstream = self.dict_names_map.get(imp.module_name) orelse continue;
+            for (upstream.keys(), upstream.values()) |key, val| {
+                try merged.put(alloc, key, val);
+            }
+        }
+        return merged;
+    }
+
     /// Seed a `RenameEnv` from a single module interface.
     fn seedRenamerFromIface(
         env: *renamer_mod.RenameEnv,
@@ -386,18 +439,25 @@ pub const CompileEnv = struct {
             &self.u_supply,
             &self.diags,
         );
+        // Seed with class declarations and instances from imported modules
+        // so that the typechecker can resolve class constraints (e.g. Show).
+        try self.seedClassEnvFromImports(&infer_ctx.class_env, module.imports);
+
         var module_types = try infer_mod.inferModule(&infer_ctx, renamed, null);
         defer module_types.deinit(self.alloc);
         if (self.diags.hasErrors()) return null;
 
         // ── Desugar ──────────────────────────────────────────────────────
+        // Collect dictionary names from imported modules so the desugarer
+        // can resolve evidence for imported type class instances.
+        var ext_dict_names = try self.collectDictNamesFromImports(self.alloc, module.imports);
         const desugar_result = try desugar_mod.desugarModule(
             self.alloc,
             renamed,
             &module_types,
             &self.diags,
             &self.u_supply,
-            null,
+            &ext_dict_names,
         );
         const core_prog = desugar_result.program;
         if (self.diags.hasErrors()) return null;
@@ -414,6 +474,17 @@ pub const CompileEnv = struct {
 
         // ── Register ─────────────────────────────────────────────────────
         try self.register(module_name, iface, core_prog);
+
+        // Store class environment and dictionary names for downstream modules.
+        // These are needed so that importing modules can resolve class
+        // constraints and dictionary evidence for type classes defined here.
+        {
+            const owned_name = try self.alloc.dupe(u8, module_name);
+            var stored_class_env = ClassEnv.init(self.alloc);
+            try stored_class_env.mergeFrom(&module_types.class_env);
+            try self.class_envs.put(self.alloc, owned_name, stored_class_env);
+            try self.dict_names_map.put(self.alloc, owned_name, desugar_result.dict_names);
+        }
 
         return core_prog;
     }
@@ -529,6 +600,32 @@ pub fn compileProgram(
     }
 
     // ── Phase 2: Build module graph from cached parses ─────────────────────
+    //
+    // Before building edges, apply implicit Prelude injection (Haskell 2010
+    // §5.6) to the cached parses.  This ensures the module graph has an
+    // edge from every non-Prelude module to `Prelude`, matching the same
+    // injection that `compileSingle` performs later.  Without this, the
+    // topological sort may place a user module before the Prelude, causing
+    // cross-module seeding to find no registered interfaces.
+    {
+        const has_prelude = env.parsed_modules.contains("Prelude");
+        var inject_iter = env.parsed_modules.iterator();
+        while (inject_iter.next()) |entry| {
+            const parsed = entry.value_ptr.*;
+            // Only inject if:
+            // 1. The Prelude is actually among the source modules (so the
+            //    graph edge points to a compilable module).
+            // 2. The module doesn't opt out via NoImplicitPrelude.
+            // 3. The module doesn't already mention Prelude.
+            if (has_prelude and
+                !parsed.language_extensions.contains(.NoImplicitPrelude) and
+                !mentionsPrelude(parsed.imports))
+            {
+                entry.value_ptr.* = try injectImplicitPrelude(alloc, parsed);
+            }
+        }
+    }
+
     var graph = ModuleGraph.init(alloc);
     defer graph.deinit();
 
@@ -603,15 +700,22 @@ pub fn compileProgram(
             null;
 
         // Attempt cache lookup.
-        const cache_hit: bool = blk: {
-            const rp = rhi_p orelse break :blk false;
-            const fp = expected_fp.?;
-            const cached = try mod_iface.tryLoadCachedIface(alloc, io, rp, fp);
-            if (cached == null) break :blk false;
-            // Cache hit: register the loaded interface and an empty Core.
-            try env.register(mod_name, cached.?, .{ .data_decls = &.{}, .binds = &.{} });
-            break :blk true;
-        };
+        //
+        // NOTE: The .rhi cache currently stores only ModIface (types and
+        // data constructors).  It does NOT store ClassEnv or DictNameMap.
+        // A cache hit registers an empty Core, which means:
+        //   - Class declarations from the cached module are invisible to
+        //     downstream modules (seedClassEnvFromImports finds nothing).
+        //   - Dictionary names are missing, so the desugarer can't resolve
+        //     evidence for imported instances.
+        //   - The merged Core is incomplete: function definitions from the
+        //     cached module are absent, causing linker errors.
+        //
+        // Until per-module .bc caching is implemented (#436) and the .rhi
+        // format is extended to include class/instance information (#369),
+        // .rhi caching produces incorrect whole-program builds.  Disabled
+        // for now so that every module is always compiled from source.
+        const cache_hit = false;
 
         if (!cache_hit) {
             // Cache miss: compile from source.
@@ -1052,7 +1156,14 @@ test "compileProgram: .rhi cache hit — second invocation loads cached interfac
         break :blk fp;
     };
 
-    // ── Second run: cache hit → loads .rhi, registers empty CoreProgram ───
+    // ── Second run ──────────────────────────────────────────────────────
+    //
+    // NOTE: .rhi caching is currently disabled (see the `const cache_hit
+    // = false` comment in Phase 3 of compileProgram).  When caching was
+    // active, this second run would hit the cache and produce zero Core
+    // binds.  With caching disabled, it recompiles and produces real binds.
+    // The fingerprint is still correct because fingerprinting is
+    // independent of whether the cache was actually read.
     {
         var r2 = try compileProgram(alloc, io, &.{.{
             .module_name = "CacheHit",
@@ -1063,13 +1174,12 @@ test "compileProgram: .rhi cache hit — second invocation loads cached interfac
         defer r2.env.deinit();
         try testing.expect(!r2.result.had_errors);
 
-        // The cached iface carries the same fingerprint as the first run.
+        // The iface carries the same fingerprint as the first run.
         const fp2 = r2.env.ifaces.get("CacheHit").?.fingerprint;
         try testing.expectEqual(fp1, fp2);
 
-        // On a cache hit an empty CoreProgram is registered (no recompile).
-        // The merged result therefore has zero binds.
-        try testing.expectEqual(@as(usize, 0), r2.result.core.binds.len);
+        // With caching disabled, recompilation produces real Core binds.
+        try testing.expect(r2.result.core.binds.len > 0);
     }
 }
 

@@ -11,6 +11,9 @@ module Prelude
     , maybe, fromMaybe, either
     , putChar, putStr, putStrLn
     , error
+    , intToChar, charToInt
+    , Show(..), show
+    , intToDigit
     ) where
 
 -- ========================================================================
@@ -34,6 +37,8 @@ foreign import prim "putChar"   primPutChar  :: Char -> IO ()
 foreign import prim "putStrLn"  primPutStrLn :: String -> IO ()
 foreign import prim "putStr"    primPutStr   :: String -> IO ()
 foreign import prim "error"     primError    :: String -> a
+foreign import prim "intToChar" intToChar    :: Int -> Char
+foreign import prim "charToInt" charToInt    :: Char -> Int
 
 -- ========================================================================
 -- Data types
@@ -225,6 +230,83 @@ drop n (x:xs) = case n <= 0 of
     False -> drop (n - 1) xs
 
 -- ========================================================================
+-- Show typeclass
+-- ========================================================================
+
+-- Note: Haskell 2010's full Show class uses ShowS (String -> String) for
+-- efficient difference-list concatenation, plus showsPrec for precedence.
+-- Type synonym expansion in the typechecker is not yet implemented, so we
+-- use a simplified single-method class. Follow-up: full ShowS/showsPrec
+-- once type synonym unification is supported.
+
+class Show a where
+  show :: a -> String
+
+-- ── Character conversion ────────────────────────────────────────────
+
+intToDigit :: Int -> Char
+intToDigit i = case i >= 0 of
+    True  -> case i <= 9 of
+        True  -> intToChar (charToInt '0' + i)
+        False -> error "intToDigit: not a digit"
+    False -> error "intToDigit: not a digit"
+
+-- ── Show Int helpers ────────────────────────────────────────────────
+
+showPosInt :: Int -> String
+showPosInt n = case n < 10 of
+    True  -> intToDigit n : []
+    False -> showPosInt (div n 10) ++ (intToDigit (mod n 10) : [])
+
+-- ── Show helpers for lists ──────────────────────────────────────────
+
+-- showListTail :: Show a => [a] -> String
+-- showListTail []     = "]"
+-- showListTail (x:xs) = ',' : show x ++ showListTail xs
+--
+-- showListWith :: Show a => [a] -> String
+-- showListWith []     = "[]"
+-- showListWith (x:xs) = '[' : show x ++ showListTail xs
+
+showLitString :: String -> String
+showLitString []     = "\""
+showLitString (x:xs) = x : showLitString xs
+
+-- ── Show instances ──────────────────────────────────────────────────
+
+instance Show Int where
+  show n = case n < 0 of
+      True  -> '-' : showPosInt (0 - n)
+      False -> showPosInt n
+
+instance Show Bool where
+  show b = case b of
+      True  -> "True"
+      False -> "False"
+
+instance Show Ordering where
+  show o = case o of
+      LT -> "LT"
+      EQ -> "EQ"
+      GT -> "GT"
+
+instance Show Char where
+  show c = '\'' : c : '\'' : []
+
+-- Polymorphic Show instances require dictionary-passing codegen that may
+-- have edge cases in the LLVM backend.  Tracked as a follow-up.
+-- instance Show a => Show [a] where
+--   show xs = showListWith xs
+--
+-- instance Show a => Show (Maybe a) where
+--   show Nothing  = "Nothing"
+--   show (Just x) = "Just " ++ show x
+--
+-- instance (Show a, Show b) => Show (Either a b) where
+--   show (Left x)  = "Left " ++ show x
+--   show (Right y) = "Right " ++ show y
+
+-- ========================================================================
 -- Maybe / Either
 -- ========================================================================
 
@@ -245,5 +327,5 @@ either f g (Right y) = g y
 --   - reverse: uses (:) as higher-order value, needs constructor closures (#386)
 --   - zip, unzip: needs tuple codegen (#571)
 --   - fst, snd: needs tuple codegen (#571)
---   - show, read: needs dictionary-passing codegen (#569)
+--   - read: needs parser integration (no issue filed yet)
 -- ========================================================================
