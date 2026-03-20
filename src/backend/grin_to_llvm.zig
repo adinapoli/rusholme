@@ -48,6 +48,18 @@ const rts_node = @import("../rts/node.zig");
 const llvm = @import("llvm.zig");
 const c = llvm.c;
 
+/// Well-known constructor discriminants captured from the tag table.
+/// Used by the JIT engine to format results correctly.
+pub const KnownTags = struct {
+    true_disc: ?i64 = null,
+    false_disc: ?i64 = null,
+    nil_disc: ?i64 = null,
+    cons_disc: ?i64 = null,
+    nothing_disc: ?i64 = null,
+    just_disc: ?i64 = null,
+    unit_disc: ?i64 = null,
+};
+
 // Known Prelude constants with stable unique IDs
 // These are used when variables reference Prelude literals like True, False, etc.
 const known = struct {
@@ -107,6 +119,16 @@ const PrimOpMapping = struct {
                     .return_kind = .i32,
                     .param_kinds = &.{.ptr},
                     .arg_strategy = .string_to_global_ptr,
+                },
+            };
+        }
+        if (std.mem.eql(u8, name.base, "putChar")) {
+            return .{
+                .libcall = .{
+                    .name = "rts_putChar",
+                    .return_kind = .i32,
+                    .param_kinds = &.{.i64},
+                    .arg_strategy = .value_passthrough,
                 },
             };
         }
@@ -263,6 +285,11 @@ const TagTable = struct {
     partial_tags: std.AutoHashMapUnmanaged(u64, void),
     /// Maps P-tag composite keys to their tag info (name + missing count + field count).
     partial_tag_info: std.AutoHashMapUnmanaged(u64, PartialTagInfo),
+    /// Maps constructor base name strings to their discriminants.
+    /// Populated during register() for Con tags. Used by findByName()
+    /// to look up well-known constructors (True, False, [], (:), etc.)
+    /// regardless of which unique ID the renamer assigned.
+    con_name_to_disc: std.StringHashMapUnmanaged(i64),
     /// Next discriminant to assign.
     next: i64,
 
@@ -271,6 +298,11 @@ const TagTable = struct {
         missing: u32,
         n_fields: u32,
     };
+
+    // Start discriminants at 0x1000 to avoid colliding with RTS special
+    // tags (Unit=0, Int=1, Char=2, String=3, Thunk=0x100, Ind=0x101,
+    // Closure=0x200). This matches rts/node.zig Tag.Data = 0x1000.
+    const first_discriminant: i64 = 0x1000;
 
     fn init() TagTable {
         return .{
@@ -281,7 +313,8 @@ const TagTable = struct {
             .fun_tag_names = .{},
             .partial_tags = .{},
             .partial_tag_info = .{},
-            .next = 0,
+            .con_name_to_disc = .{},
+            .next = first_discriminant,
         };
     }
 
@@ -298,6 +331,7 @@ const TagTable = struct {
         self.fun_tag_names.deinit(alloc);
         self.partial_tags.deinit(alloc);
         self.partial_tag_info.deinit(alloc);
+        self.con_name_to_disc.deinit(alloc);
     }
 
     /// Compute a composite key that distinguishes tag types sharing
@@ -330,6 +364,10 @@ const TagTable = struct {
         const types = try alloc.alloc(FieldType, n_fields);
         for (types) |*t| t.* = .ptr;
         try self.field_types.put(alloc, key, types);
+        // Track Con-tags by base name for reverse lookup (findByName).
+        if (tag.tag_type == .Con) {
+            try self.con_name_to_disc.put(alloc, tag.name.base, self.next);
+        }
         // Track F-tags for the inline eval loop in translateCase.
         if (tag.tag_type == .Fun) {
             try self.fun_tags.put(alloc, key, {});
@@ -378,6 +416,38 @@ const TagTable = struct {
         const con_key = name.unique.value *% 4; // Con key encoding
         return self.discriminants.get(con_key);
     }
+    
+    /// Find a constructor discriminant by base name string.
+    /// Returns the discriminant if a constructor with this name exists in the table.
+    /// Used for well-known constructors (True, False, [], (:), etc.) whose
+    /// unique IDs vary between compilation contexts (the renamer assigns fresh
+    /// uniques to data declaration constructors).
+    fn findByName(self: *const TagTable, name_base: []const u8) ?i64 {
+        return self.con_name_to_disc.get(name_base);
+    }
+
+    /// Ensure list constructors ([] and (:)) are registered in the tag table.
+    /// These are needed whenever string literals appear in the program, because
+    /// strings are converted to [Char] lists at runtime via rts_cstring_to_charlist.
+    /// If a program doesn't explicitly use list constructors in GRIN patterns,
+    /// they won't be found by the tag scanner — this method fills that gap
+    /// using the well-known unique IDs from naming/known.zig.
+    fn ensureListConstructors(self: *TagTable, alloc: std.mem.Allocator) !void {
+        if (self.con_name_to_disc.get("[]") == null) {
+            const nil_tag = grin.Tag{
+                .tag_type = .Con,
+                .name = .{ .base = "[]", .unique = .{ .value = known.nil_val } },
+            };
+            try self.register(alloc, nil_tag, 0);
+        }
+        if (self.con_name_to_disc.get("(:)") == null) {
+            const cons_tag = grin.Tag{
+                .tag_type = .Con,
+                .name = .{ .base = "(:)", .unique = .{ .value = known.cons_val } },
+            };
+            try self.register(alloc, cons_tag, 2);
+        }
+    }
 
     /// Ensure that intermediate partial tags exist for the apply function.
     /// If the program contains `P(n)func` with `n > 1`, the apply function
@@ -411,6 +481,8 @@ fn buildTagTable(alloc: std.mem.Allocator, program: grin.Program) !TagTable {
     for (program.defs) |def| {
         try scanExprForTags(alloc, def.body, &table);
     }
+    // Ensure list constructors are available for string↔[Char] conversion.
+    try table.ensureListConstructors(alloc);
 
     // Merge constructor field types from the GRIN program's field_types map.
     // This allows dictionary constructors with function-typed fields to be
@@ -675,6 +747,23 @@ pub const GrinTranslator = struct {
         llvm.disposeContext(self.ctx);
     }
 
+    /// Extract the tag discriminants for well-known constructors
+    /// (True, False, [], (:), etc.) from the current tag table.
+    /// Used by the JIT engine to format results correctly.
+    pub fn getKnownTagDiscriminants(self: *const GrinTranslator) KnownTags {
+        // Look up by name base instead of unique ID, since different compilation
+        // contexts may assign different uniques to the same constructor.
+        return .{
+            .true_disc = self.tag_table.findByName("True"),
+            .false_disc = self.tag_table.findByName("False"),
+            .nil_disc = self.tag_table.findByName("[]"),
+            .cons_disc = self.tag_table.findByName("(:)"),
+            .nothing_disc = self.tag_table.findByName("Nothing"),
+            .just_disc = self.tag_table.findByName("Just"),
+            .unit_disc = self.tag_table.findByName("()"),
+        };
+    }
+
     /// Returns true if `base` is an entry-point name — either the standard
     /// "main" or the REPL-specific entry point set via `repl_entry_point`.
     fn isEntryPoint(self: *const GrinTranslator, base: []const u8) bool {
@@ -702,7 +791,7 @@ pub const GrinTranslator = struct {
             unit_disc,
             c.LLVMConstInt(llvm.i32Type(), 0, 0), // n_fields = 0
         };
-        const node_ptr = c.LLVMBuildCall2(
+        return c.LLVMBuildCall2(
             self.builder,
             llvm.getFunctionType(rts_alloc_fn),
             rts_alloc_fn,
@@ -710,7 +799,6 @@ pub const GrinTranslator = struct {
             2,
             "unit",
         );
-        return c.LLVMBuildPtrToInt(self.builder, node_ptr, llvm.i64Type(), "unit_i64");
     }
 
     /// Translate the entire GRIN program into the LLVM module.
@@ -718,15 +806,41 @@ pub const GrinTranslator = struct {
     /// The module is owned by this translator's context — do not dispose it
     /// separately; it is freed when the translator is deinited.
     pub fn translateProgramToModule(self: *GrinTranslator, program: grin.Program) TranslationError!llvm.Module {
-        // Build the tag table once before any translation.
-        self.tag_table = buildTagTable(self.allocator, program) catch return error.OutOfMemory;
-        // Also scan extra defs (from prior REPL sessions) for tag
-        // registration. These defs are NOT translated — they were
-        // already compiled in a previous JIT session — but their tags
-        // must be known so that forceValueToWhnf can handle thunks
-        // created by those functions.
+        // Build the tag table by scanning extra defs FIRST (from prior
+        // REPL sessions like the Prelude), then the current program.
+        // Order matters: scanning extra defs first ensures that
+        // constructors from prior sessions receive the same discriminants
+        // they had when they were originally compiled. If we scanned the
+        // current program first, its constructors would claim discriminants
+        // 0, 1, 2... and prior session constructors would get different
+        // values, causing tag mismatches at runtime (e.g. [] gets
+        // discriminant 5 in the Prelude but 0 in the expression).
+        self.tag_table = TagTable.init();
         for (self.extra_tag_defs) |def| {
             scanExprForTags(self.allocator, def.body, &self.tag_table) catch return error.OutOfMemory;
+        }
+        // Now scan the current program's defs. Tags already registered
+        // by extra_tag_defs are skipped (register is idempotent), so
+        // shared constructors keep their prior discriminants.
+        for (program.defs) |def| {
+            scanExprForTags(self.allocator, def.body, &self.tag_table) catch return error.OutOfMemory;
+        }
+        // Ensure list constructors are available for string↔[Char] conversion.
+        self.tag_table.ensureListConstructors(self.allocator) catch return error.OutOfMemory;
+        // Merge constructor field types from the GRIN program's field_types map.
+        {
+            var iter = program.field_types.iterator();
+            while (iter.next()) |entry| {
+                const unique = entry.key_ptr.*;
+                const field_types = entry.value_ptr.*;
+                const key = unique *% 4;
+                if (self.tag_table.field_types.get(key)) |existing| {
+                    self.allocator.free(existing);
+                }
+                const types = self.allocator.alloc(FieldType, field_types.len) catch return error.OutOfMemory;
+                @memcpy(types, field_types);
+                self.tag_table.field_types.put(self.allocator, key, types) catch return error.OutOfMemory;
+            }
         }
         // Link TypeEnv to the tag table for field type lookups.
         self.type_env.setTagTable(&self.tag_table);
@@ -787,7 +901,21 @@ pub const GrinTranslator = struct {
     /// Any previously held tag table is released.
     pub fn prepareGlobalTagTable(self: *GrinTranslator, all_prog: grin.Program) TranslationError!void {
         self.tag_table.deinit(self.allocator);
-        self.tag_table = buildTagTable(self.allocator, all_prog) catch return error.OutOfMemory;
+        // Scan extra_tag_defs FIRST (from prior REPL sessions like the
+        // Prelude), then the current program's defs. Order matters:
+        // scanning extra defs first ensures discriminant assignments are
+        // consistent with expression compilations that also use
+        // extra_tag_defs. Tags already registered are idempotent, so
+        // shared tags keep their prior discriminants.
+        self.tag_table = TagTable.init();
+        for (self.extra_tag_defs) |def| {
+            scanExprForTags(self.allocator, def.body, &self.tag_table) catch return error.OutOfMemory;
+        }
+        for (all_prog.defs) |def| {
+            scanExprForTags(self.allocator, def.body, &self.tag_table) catch return error.OutOfMemory;
+        }
+        // Ensure list constructors are available for string↔[Char] conversion.
+        self.tag_table.ensureListConstructors(self.allocator) catch return error.OutOfMemory;
         // TypeEnv pointer is refreshed inside translateModuleGrin before each
         // module translation (needed because the tag_table field was reassigned).
     }
@@ -908,7 +1036,8 @@ pub const GrinTranslator = struct {
                             // IO primops return a null pointer placeholder
                             // (see translateAppToValue). Treat as Unit.
                             if (c.LLVMIsAConstantPointerNull(val) != null) {
-                                _ = llvm.buildRet(self.builder, self.buildUnitNode());
+                                const unit_ptr = self.buildUnitNode();
+                                _ = llvm.buildRet(self.builder, c.LLVMBuildPtrToInt(self.builder, unit_ptr, llvm.i64Type(), "unit_i64"));
                             } else {
                                 // Force any F-tagged thunks to WHNF before
                                 // returning. The user expects REPL results
@@ -924,20 +1053,25 @@ pub const GrinTranslator = struct {
                             _ = llvm.buildRet(self.builder, val);
                         }
                     } else {
-                        // Non-REPL function: force thunks before returning.
+                        // Non-REPL function: ensure return value matches function signature.
+                        // Primop instructions return i64, but user functions return ptr.
+                        // Cast i64→ptr to match the declared return type.
                         const val_kind2 = c.LLVMGetTypeKind(c.LLVMTypeOf(val));
-                        const forced = if (val_kind2 == c.LLVMPointerTypeKind)
+                        const coerced = if (val_kind2 == c.LLVMPointerTypeKind)
                             self.callForceIfNeeded(val)
+                        else if (val_kind2 == c.LLVMIntegerTypeKind)
+                            c.LLVMBuildIntToPtr(self.builder, val, ptrType(), "ret_as_ptr")
                         else
                             val;
-                        _ = llvm.buildRet(self.builder, forced);
+                        _ = llvm.buildRet(self.builder, coerced);
                     }
                 } else {
                     if (is_repl_entry) {
                         // Body returned no value (e.g. IO action) —
                         // return a Unit heap node so the REPL displays
                         // nothing rather than a random integer.
-                        _ = llvm.buildRet(self.builder, self.buildUnitNode());
+                        const unit_ptr2 = self.buildUnitNode();
+                        _ = llvm.buildRet(self.builder, c.LLVMBuildPtrToInt(self.builder, unit_ptr2, llvm.i64Type(), "unit_i64"));
                     } else {
                         _ = llvm.buildRet(self.builder, c.LLVMConstPointerNull(value_type));
                     }
@@ -952,7 +1086,8 @@ pub const GrinTranslator = struct {
                 if (is_repl_entry) {
                     // REPL entry point: return a Unit heap node so
                     // formatJitResult can distinguish unit from boolean False.
-                    _ = llvm.buildRet(self.builder, self.buildUnitNode());
+                    const unit_ptr3 = self.buildUnitNode();
+                    _ = llvm.buildRet(self.builder, c.LLVMBuildPtrToInt(self.builder, unit_ptr3, llvm.i64Type(), "unit_i64"));
                 } else if (is_entry) {
                     // Native main: return 0 (success exit code, C ABI).
                     _ = llvm.buildRet(self.builder, c.LLVMConstInt(llvm.i32Type(), 0, 0));
@@ -1335,7 +1470,20 @@ pub const GrinTranslator = struct {
 
         var llvm_args: [8]llvm.Value = undefined;
         for (args[0..@min(args.len, 8)], 0..) |val, i| {
-            llvm_args[i] = try self.translateValToLlvm(val);
+            llvm_args[i] = switch (libc_fn.arg_strategy) {
+                // For primops that expect C strings: string literals are passed
+                // directly as global string pointers (avoiding a round-trip through
+                // [Char] lists). Variables are assumed to be [Char] lists (the
+                // Haskell representation of String) and are converted via the RTS.
+                .string_to_global_ptr => switch (val) {
+                    .Lit => |lit| switch (lit) {
+                        .String => |s| try self.translateStringLitToPtr(s),
+                        else => try self.translateValToLlvm(val),
+                    },
+                    else => self.emitCharlistToCstring(try self.translateValToLlvm(val)),
+                },
+                .value_passthrough => try self.translateValToLlvm(val),
+            };
         }
 
         const actual_args = llvm_args[0..args.len];
@@ -1346,6 +1494,78 @@ pub const GrinTranslator = struct {
             @ptrCast(actual_args.ptr),
             @intCast(args.len),
             "",
+        );
+    }
+
+    /// Emit a call to rts_charlist_to_cstring to convert a [Char] heap list
+    /// to a null-terminated C string pointer.
+    fn emitCharlistToCstring(self: *GrinTranslator, list_val: llvm.Value) llvm.Value {
+        // Declare rts_charlist_to_cstring if not already declared
+        const conv_fn = blk: {
+            const existing = c.LLVMGetNamedFunction(self.module, "rts_charlist_to_cstring");
+            if (existing) |f| break :blk f;
+            // Signature: ptr rts_charlist_to_cstring(ptr list, i64 cons_disc, i64 nil_disc)
+            var param_types = [_]llvm.Type{ ptrType(), llvm.i64Type(), llvm.i64Type() };
+            const ft = c.LLVMFunctionType(ptrType(), &param_types, 3, 0);
+            break :blk llvm.addFunction(self.module, "rts_charlist_to_cstring", ft);
+        };
+
+        // Look up the (:) and [] discriminants from the tag table
+        const cons_disc: i64 = self.tag_table.findByName("(:)") orelse 0;
+        const nil_disc: i64 = self.tag_table.findByName("[]") orelse 0;
+
+        // Ensure list_val is a pointer (it may be an i64 if from PtrToInt)
+        const list_ptr = if (c.LLVMGetTypeKind(c.LLVMTypeOf(list_val)) == c.LLVMIntegerTypeKind)
+            c.LLVMBuildIntToPtr(self.builder, list_val, ptrType(), "list_ptr")
+        else
+            list_val;
+
+        var call_args = [_]llvm.Value{
+            list_ptr,
+            c.LLVMConstInt(llvm.i64Type(), @bitCast(cons_disc), 0),
+            c.LLVMConstInt(llvm.i64Type(), @bitCast(nil_disc), 0),
+        };
+        return c.LLVMBuildCall2(
+            self.builder,
+            c.LLVMGlobalGetValueType(conv_fn),
+            conv_fn,
+            &call_args,
+            3,
+            "cstr",
+        );
+    }
+
+    /// Emit a call to rts_cstring_to_charlist to convert a C string pointer
+    /// to a [Char] heap list (Cons/Nil linked list).
+    ///
+    /// Called when a string literal value needs to be represented as a [Char]
+    /// list at runtime (e.g., when passed to a user-defined function that
+    /// pattern-matches on list constructors).
+    fn emitCstringToCharlist(self: *GrinTranslator, str_val: llvm.Value) llvm.Value {
+        const conv_fn = blk: {
+            const existing = c.LLVMGetNamedFunction(self.module, "rts_cstring_to_charlist");
+            if (existing) |f| break :blk f;
+            // Signature: ptr rts_cstring_to_charlist(ptr str, i64 cons_disc, i64 nil_disc)
+            var param_types = [_]llvm.Type{ ptrType(), llvm.i64Type(), llvm.i64Type() };
+            const ft = c.LLVMFunctionType(ptrType(), &param_types, 3, 0);
+            break :blk llvm.addFunction(self.module, "rts_cstring_to_charlist", ft);
+        };
+
+        const cons_disc: i64 = self.tag_table.findByName("(:)") orelse 0;
+        const nil_disc: i64 = self.tag_table.findByName("[]") orelse 0;
+
+        var call_args = [_]llvm.Value{
+            str_val,
+            c.LLVMConstInt(llvm.i64Type(), @bitCast(cons_disc), 0),
+            c.LLVMConstInt(llvm.i64Type(), @bitCast(nil_disc), 0),
+        };
+        return c.LLVMBuildCall2(
+            self.builder,
+            c.LLVMGlobalGetValueType(conv_fn),
+            conv_fn,
+            &call_args,
+            3,
+            "charlist",
         );
     }
 
@@ -1362,7 +1582,12 @@ pub const GrinTranslator = struct {
         // Unary instructions (neg_Int, abs_Int)
         if (instr == .neg or instr == .abs) {
             if (args.len < 1) return error.UnsupportedGrinVal;
-            const operand = try self.translateValToLlvm(args[0]);
+            const operand_raw = try self.translateValToLlvm(args[0]);
+            // Coerce operand to i64 if it's a pointer
+            const operand = if (c.LLVMGetTypeKind(c.LLVMTypeOf(operand_raw)) == c.LLVMPointerTypeKind)
+                c.LLVMBuildPtrToInt(self.builder, operand_raw, llvm.i64Type(), "operand_i64")
+            else
+                operand_raw;
             return switch (instr) {
                 .neg => c.LLVMBuildNeg(self.builder, operand, "neg"),
                 .abs => blk: {
@@ -1452,14 +1677,25 @@ pub const GrinTranslator = struct {
         );
     }
 
+    /// Translate a GRIN string literal to an LLVM global string pointer.
+    /// Used by emitLibcCall for primops that expect C strings.
+    fn translateStringLitToPtr(self: *GrinTranslator, s: []const u8) TranslationError!llvm.Value {
+        const s_z = self.allocator.dupeZ(u8, s) catch return error.OutOfMemory;
+        defer self.allocator.free(s_z);
+        return c.LLVMBuildGlobalStringPtr(self.builder, s_z.ptr, ".str") orelse
+            return error.OutOfMemory;
+    }
+
     fn translateValToLlvm(self: *GrinTranslator, val: grin.Val) TranslationError!llvm.Value {
         return switch (val) {
             .Lit => |lit| switch (lit) {
                 .String => |s| blk: {
-                    const s_z = self.allocator.dupeZ(u8, s) catch return error.OutOfMemory;
-                    defer self.allocator.free(s_z);
-                    break :blk c.LLVMBuildGlobalStringPtr(self.builder, s_z.ptr, ".str") orelse
-                        return error.OutOfMemory;
+                    // Convert string literal to [Char] heap list at runtime.
+                    // This ensures strings are always represented as proper Haskell
+                    // lists, making pattern matching (e.g., in ++) work correctly.
+                    // Primop boundaries use translateStringLitToPtr for C string access.
+                    const str_ptr = try self.translateStringLitToPtr(s);
+                    break :blk self.emitCstringToCharlist(str_ptr);
                 },
                 .Int => |i| c.LLVMConstInt(llvm.i64Type(), @bitCast(@as(i64, i)), 1),
                 .Float => |f| c.LLVMConstReal(c.LLVMDoubleType(), f),
@@ -1473,18 +1709,31 @@ pub const GrinTranslator = struct {
                 if (self.params.get(name.unique.value)) |v| break :blk v;
                 // 2. Nullary constructor: emit its tag discriminant as an i64.
                 //    Tracked in: https://github.com/adinapoli/rusholme/issues/410
-                // 2. Check if variable is a known Prelude constant (True, False, None, etc.)
-                //    These have stable unique IDs and should be emitted as literals.
-                switch (name.unique.value) {
-                    known.true_val, known.false_val => break :blk c.LLVMConstInt(llvm.i64Type(), @bitCast(@as(i64, if (name.unique.value == known.true_val) 1 else 0)), 1),
-                    known.unit_val => break :blk self.buildUnitNode(),
-                    else => {},
+                // 2. Check if variable is a known Prelude constant.
+                //    Unit is special: always returns a heap node so the REPL can
+                //    distinguish "no value" from integer 0.
+                if (name.unique.value == known.unit_val) {
+                    break :blk self.buildUnitNode();
                 }
 
                 // 2b. If not a known literal, check tag discriminant for nullary constructors.
+                //    Allocate a heap node so that the REPL and case analysis can
+                //    distinguish constructors from integer literals by type (ptr vs i64).
                 //    Tracked in: https://github.com/adinapoli/rusholme/issues/410
                 if (self.tag_table.discriminantByName(name)) |disc| {
-                    break :blk c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0);
+                    const alloc_fn = declareRtsAlloc(self.module);
+                    var alloc_args2 = [_]llvm.Value{
+                        c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0),
+                        c.LLVMConstInt(llvm.i32Type(), 0, 0),
+                    };
+                    break :blk c.LLVMBuildCall2(
+                        self.builder,
+                        llvm.getFunctionType(alloc_fn),
+                        alloc_fn,
+                        &alloc_args2,
+                        2,
+                        "nullary_node",
+                    );
                 }
                 // 3. Top-level function reference: look up the LLVM function by
                 //    full name (base + unique suffix) and return its pointer (for
@@ -1519,12 +1768,27 @@ pub const GrinTranslator = struct {
                 return error.UnsupportedGrinVal;
             },
             .ValTag => |t| blk: {
-                // Bare tag value — emit its discriminant as i64.
+                // Bare tag value — allocate a heap node with 0 fields.
+                // Using a heap node (pointer) rather than a bare i64 discriminant
+                // lets the REPL and case analysis distinguish constructors from
+                // integer literals by LLVM type (ptr vs i64).
                 const disc = self.tag_table.discriminant(t) orelse {
                     std.debug.print("UnsupportedGrinVal: ValTag {s} not in tag table\n", .{t.name.base});
                     return error.UnsupportedGrinVal;
                 };
-                break :blk c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0);
+                const alloc_fn = declareRtsAlloc(self.module);
+                var alloc_args2 = [_]llvm.Value{
+                    c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0),
+                    c.LLVMConstInt(llvm.i32Type(), 0, 0),
+                };
+                break :blk c.LLVMBuildCall2(
+                    self.builder,
+                    llvm.getFunctionType(alloc_fn),
+                    alloc_fn,
+                    &alloc_args2,
+                    2,
+                    "valtag_node",
+                );
             },
         };
     }
@@ -1558,30 +1822,11 @@ pub const GrinTranslator = struct {
                 // already i64.  No boxing via alloca is needed — the RTS field
                 // slots are plain u64.
                 //
-                // For nullary constructors (ValTag), we need to box them first
-                // since fields must be pointers to heap nodes.
-                // See: https://github.com/adinapuli/rusholme/issues/449
+                // Nullary constructors (ValTag) are already heap-allocated nodes
+                // from translateValToLlvm, so they flow through the pointer path.
                 const rts_store_fn = declareRtsStoreField(self.module);
                 for (ctn.fields, 0..) |field, fi| {
-                    // Check if field is a nullary constructor that needs boxing
-                    const raw_val: llvm.Value = if (field == .ValTag) blk: {
-                        // Box the nullary constructor: allocate a node with tag but 0 fields
-                        const field_tag = field.ValTag;
-                        const field_disc = self.tag_table.discriminant(field_tag) orelse return error.UnsupportedGrinVal;
-                        const field_alloc_fn = declareRtsAlloc(self.module);
-                        var field_alloc_args = [_]llvm.Value{
-                            c.LLVMConstInt(llvm.i64Type(), @bitCast(field_disc), 0),
-                            c.LLVMConstInt(llvm.i32Type(), 0, 0), // n_fields = 0
-                        };
-                        break :blk c.LLVMBuildCall2(
-                            self.builder,
-                            llvm.getFunctionType(field_alloc_fn),
-                            field_alloc_fn,
-                            &field_alloc_args,
-                            2,
-                            "boxed_field",
-                        );
-                    } else try self.translateValToLlvm(field);
+                    const raw_val: llvm.Value = try self.translateValToLlvm(field);
 
                     const field_ty = c.LLVMTypeOf(raw_val);
                     const kind = c.LLVMGetTypeKind(field_ty);
@@ -2427,29 +2672,11 @@ pub const GrinTranslator = struct {
                     // Main returns i32 so no conversion needed — it falls
                     // through to the default buildRet below.
                     if (is_int) {
-                        if (val == .ValTag) {
-                            // Allocate a node with tag but 0 fields
-                            const rts_alloc_fn = declareRtsAlloc(self.module);
-                            var alloc_args = [_]llvm.Value{
-                                llvm_val, // tag discriminant as i64
-                                c.LLVMConstInt(llvm.i32Type(), 0, 0), // n_fields = 0
-                            };
-                            const node_ptr = c.LLVMBuildCall2(
-                                self.builder,
-                                llvm.getFunctionType(rts_alloc_fn),
-                                rts_alloc_fn,
-                                &alloc_args,
-                                2,
-                                "boxed_tag",
-                            );
-                            _ = llvm.buildRet(self.builder, node_ptr);
-                            return;
-                        } else {
-                            // For other i64 values, use inttoptr
-                            const converted = c.LLVMBuildIntToPtr(self.builder, llvm_val, ptrType(), "ret_as_ptr");
-                            _ = llvm.buildRet(self.builder, converted);
-                            return;
-                        }
+                        // Integer values (e.g. primop results) need inttoptr
+                        // to match the ptr return type of non-entry functions.
+                        const converted = c.LLVMBuildIntToPtr(self.builder, llvm_val, ptrType(), "ret_as_ptr");
+                        _ = llvm.buildRet(self.builder, converted);
+                        return;
                     }
                 }
                 // Native main: fall through to default buildRet (returns i32 as-is).
@@ -3096,8 +3323,8 @@ test "TagTable: register and discriminant" {
     try table.register(alloc, nil_tag, 0);
     try table.register(alloc, cons_tag, 2);
 
-    try std.testing.expectEqual(@as(?i64, 0), table.discriminant(nil_tag));
-    try std.testing.expectEqual(@as(?i64, 1), table.discriminant(cons_tag));
+    try std.testing.expectEqual(@as(?i64, 0x1000), table.discriminant(nil_tag));
+    try std.testing.expectEqual(@as(?i64, 0x1001), table.discriminant(cons_tag));
     try std.testing.expectEqual(@as(?u32, 0), table.fieldCount(nil_tag));
     try std.testing.expectEqual(@as(?u32, 2), table.fieldCount(cons_tag));
 }
@@ -3128,7 +3355,7 @@ test "TagTable: idempotent re-registration" {
     try table.register(alloc, tag, 1);
     try table.register(alloc, tag, 1); // second call must not change discriminant
 
-    try std.testing.expectEqual(@as(?i64, 0), table.discriminant(tag));
+    try std.testing.expectEqual(@as(?i64, 0x1000), table.discriminant(tag));
 }
 
 test "Store emits rts_alloc and rts_store_field instead of malloc" {

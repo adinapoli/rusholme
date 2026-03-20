@@ -26,6 +26,9 @@ comptime {
     _ = &node.rts_store;
     _ = &io_module.rts_putStrLn;
     _ = &io_module.rts_putStr;
+    _ = &io_module.rts_putChar;
+    _ = &io_module.rts_charlist_to_cstring;
+    _ = &io_module.rts_cstring_to_charlist;
     _ = &io_module.rts_error;
     _ = &heap.init;
     _ = &heap.deinit;

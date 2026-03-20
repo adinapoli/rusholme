@@ -106,6 +106,7 @@ fn evalIOPrim(ctx: EvalContext, op: PrimOp, args: []const Value) EvalError!Value
         .write_stderr => io_mod.writeStderr(ctx.io, args),
         .read_stdin => io_mod.readStdin(ctx.io, ctx.allocator, args),
         .putStrLn_ => io_mod.putStrLn(ctx.io, args),
+        .putChar_ => io_mod.putChar(ctx.io, args),
         else => EvalError.NotImplemented,
     };
 }

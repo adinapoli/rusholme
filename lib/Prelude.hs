@@ -9,7 +9,7 @@ module Prelude
     , map, filter, (++), head, tail, null, length
     , foldr, foldl, concat, take, drop
     , maybe, fromMaybe, either
-    , putStrLn, putStr
+    , putChar, putStr, putStrLn
     , error
     ) where
 
@@ -30,6 +30,7 @@ foreign import prim "lt_Int"    primLtInt    :: Int -> Int -> Bool
 foreign import prim "le_Int"    primLeInt    :: Int -> Int -> Bool
 foreign import prim "gt_Int"    primGtInt    :: Int -> Int -> Bool
 foreign import prim "ge_Int"    primGeInt    :: Int -> Int -> Bool
+foreign import prim "putChar"   primPutChar  :: Char -> IO ()
 foreign import prim "putStrLn"  primPutStrLn :: String -> IO ()
 foreign import prim "putStr"    primPutStr   :: String -> IO ()
 foreign import prim "error"     primError    :: String -> a
@@ -78,6 +79,9 @@ error = primError
 -- ========================================================================
 -- IO wrappers
 -- ========================================================================
+
+putChar :: Char -> IO ()
+putChar = primPutChar
 
 putStrLn :: String -> IO ()
 putStrLn = primPutStrLn

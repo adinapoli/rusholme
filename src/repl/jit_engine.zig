@@ -60,6 +60,8 @@ pub const JitError = error{
 /// Manages JIT compilation and execution for the REPL. Declarations are
 /// added permanently to the main JITDylib; expressions use unique entry
 /// point names and resource trackers for per-evaluation cleanup.
+const KnownTags = grin_to_llvm.KnownTags;
+
 pub const JitEngine = struct {
     allocator: Allocator,
     jit: llvm.OrcLLJITRef,
@@ -73,6 +75,8 @@ pub const JitEngine = struct {
     /// that expression compilation can scan them for F-tag registration,
     /// enabling `forceValueToWhnf` to handle thunks from any session.
     accumulated_grin_defs: std.ArrayListUnmanaged(grin_ast.Def) = .{},
+    /// Constructor discriminants from Prelude compilation for result formatting.
+    known_tags: KnownTags = .{},
 
     /// Create a new JIT engine backed by LLVM ORC LLJIT.
     pub fn init(allocator: Allocator) JitError!JitEngine {
@@ -117,27 +121,61 @@ pub const JitEngine = struct {
                 return JitError.OutOfMemory;
         }
 
+        // Use a single translator with a global tag table so that
+        // discriminant assignments are consistent across all defs.
+        // Then translate each def individually into its own LLVM module.
+        //
+        // Compiling all defs into a single large module triggers an ORC
+        // JIT "Duplicate definition" error: the inline eval loop in each
+        // translated function forward-declares thunk functions from other
+        // defs, and ORC's materializer treats the combination of forward
+        // declaration + definition as a duplicate symbol within the same
+        // materialization unit. Per-def modules avoid this by keeping
+        // each module small — intra-program function references become
+        // cross-module external declarations that ORC resolves at link time.
         var translator = GrinTranslator.init(self.allocator);
         defer translator.deinit();
-        // Enable REPL mode so that zero-arity functions (e.g. dictionary
-        // bindings like dict$ShowIt$A) return ptr instead of void. The
-        // ORC linker needs matching signatures between declaration and
-        // expression modules. The sentinel value "__decl__" is never
-        // matched as an actual entry point.
         translator.repl_entry_point = "__decl__";
+        // Seed with accumulated defs from prior sessions (e.g. Prelude)
+        // so that discriminant assignments are consistent with future
+        // expression compilations that also scan these defs.
+        translator.extra_tag_defs = self.accumulated_grin_defs.items;
 
-        const ir_text = translator.translateProgram(program.*) catch {
+        // Build a global tag table from all defs.
+        translator.prepareGlobalTagTable(program.*) catch
             return JitError.TranslationFailed;
-        };
-        defer self.allocator.free(ir_text);
 
-        const ts_mod = try self.parseIrToThreadSafeModule(ir_text);
+        // Capture constructor discriminants for result formatting.
+        self.known_tags = translator.getKnownTagDiscriminants();
 
-        const main_dylib = c.LLVMOrcLLJITGetMainJITDylib(self.jit);
-        const add_err = c.LLVMOrcLLJITAddLLVMIRModule(self.jit, main_dylib, ts_mod);
-        if (add_err != null) {
-            c.LLVMConsumeError(add_err);
-            return JitError.ModuleAddFailed;
+        for (program.defs) |def| {
+            const single_defs = self.allocator.alloc(grin_ast.Def, 1) catch
+                return JitError.OutOfMemory;
+            defer self.allocator.free(single_defs);
+            single_defs[0] = def;
+
+            const single_prog = grin_ast.Program{
+                .defs = single_defs,
+                .field_types = program.field_types,
+                .arities = program.arities,
+            };
+
+            const mod = translator.translateModuleGrin("decl", single_prog) catch
+                return JitError.TranslationFailed;
+
+            const ir_text = llvm.printModuleToString(mod, self.allocator) catch
+                return JitError.OutOfMemory;
+            defer self.allocator.free(ir_text);
+
+            const ts_mod = self.parseIrToThreadSafeModule(ir_text) catch
+                return JitError.TranslationFailed;
+
+            const main_dylib = c.LLVMOrcLLJITGetMainJITDylib(self.jit);
+            const add_err = c.LLVMOrcLLJITAddLLVMIRModule(self.jit, main_dylib, ts_mod);
+            if (add_err != null) {
+                c.LLVMConsumeError(add_err);
+                return JitError.ModuleAddFailed;
+            }
         }
     }
 
@@ -181,6 +219,11 @@ pub const JitEngine = struct {
         };
         defer self.allocator.free(ir_text);
 
+        // Update known_tags from the expression's translator, which has
+        // the complete tag table (seeded from all accumulated defs).
+        // This ensures formatJitResult uses correct discriminants.
+        self.known_tags = translator.getKnownTagDiscriminants();
+
         // 4. Parse IR and add to JIT with a resource tracker.
         const ts_mod = try self.parseIrToThreadSafeModule(ir_text);
 
@@ -213,7 +256,7 @@ pub const JitEngine = struct {
         const raw_result = entry_fn();
 
         // 7. Format the result before cleaning up.
-        const formatted = formatJitResult(self.allocator, raw_result) catch {
+        const formatted = formatJitResult(self.allocator, raw_result, self.known_tags) catch {
             const rm_err = c.LLVMOrcResourceTrackerRemove(tracker);
             if (rm_err != null) c.LLVMConsumeError(rm_err);
             c.LLVMOrcReleaseResourceTracker(tracker);
@@ -286,6 +329,9 @@ pub const JitEngine = struct {
         const io_symbols = [_]Symbol{
             .{ .name = "rts_putStrLn", .addr = @intFromPtr(&rts_io.rts_putStrLn) },
             .{ .name = "rts_putStr", .addr = @intFromPtr(&rts_io.rts_putStr) },
+            .{ .name = "rts_putChar", .addr = @intFromPtr(&rts_io.rts_putChar) },
+            .{ .name = "rts_charlist_to_cstring", .addr = @intFromPtr(&rts_io.rts_charlist_to_cstring) },
+            .{ .name = "rts_cstring_to_charlist", .addr = @intFromPtr(&rts_io.rts_cstring_to_charlist) },
             .{ .name = "rts_error", .addr = @intFromPtr(&rts_io.rts_error) },
         };
 
@@ -359,136 +405,97 @@ fn patchEntryPointName(allocator: Allocator, program: *const grin_ast.Program, t
 /// We check if the value looks like a valid heap pointer (non-zero,
 /// aligned) and try to interpret it as a node. If that fails, we
 /// treat it as a plain integer.
-fn formatJitResult(allocator: Allocator, raw: i64) Allocator.Error![]const u8 {
-    // Check if this is a boolean literal (encoded as 0 or 1 directly, not a heap node)
-    // Booleans in GRIN are unboxed i64 values where 1 = True and 0 = False
-    // (from grin_to_llvm.zig where true_val maps to 1 and false_val maps to 0)
-    if (raw == 1) return allocator.dupe(u8, "True");
-    if (raw == 0) return allocator.dupe(u8, "False");
-
-    // Check if the result is a valid-looking pointer to a heap node.
-    // Heap nodes are allocated by rts_alloc and have a specific layout
-    // with a tag in the first 8 bytes.
+fn formatJitResult(allocator: Allocator, raw: i64, tags: KnownTags) Allocator.Error![]const u8 {
     const as_usize: usize = @bitCast(raw);
 
-    if (as_usize != 0 and as_usize % @alignOf(*anyopaque) == 0) {
-        // Try to interpret as a heap node pointer.
+    // Check if the result is a valid-looking pointer to a heap node.
+    // Must be above the first page (4096) to exclude small integers
+    // that happen to be aligned (e.g. ASCII characters like 'h' = 104).
+    const MIN_HEAP_PTR: usize = 0x10000;
+    if (as_usize >= MIN_HEAP_PTR and as_usize % @alignOf(*anyopaque) == 0) {
         const node_ptr: *const rts_node.Node = @ptrFromInt(as_usize);
-
-        // Quick validation: check if tag in reasonable range before formatting
         const tag_int: u64 = @intFromEnum(node_ptr.tag);
         if (tag_int <= 0x10000 and node_ptr.n_fields <= 1024) {
-            // Looks like a valid heap node format it
-            return formatNode(allocator, node_ptr);
+            return formatNode(allocator, node_ptr, tags);
         }
     }
 
-    // If not a heap node, check if it looks like a C string (NUL-terminated)
-    // Global string literals from LLVM GlobalStringPtr return as raw pointers
-    // Only attempt to read if the address is in a reasonable range (not too small like an integer)
-    const MIN_VALID_PTR: usize = 0x1000; // Typical page boundary, integers 0-4095 are likely literal values
+    // Check if it looks like a C string pointer (for raw string results).
+    const MIN_VALID_PTR: usize = 0x1000;
     if (as_usize >= MIN_VALID_PTR) {
         const str_ptr: [*]const u8 = @ptrFromInt(as_usize);
-        
-        // Check first byte for printable ASCII
         if (str_ptr[0] >= 32 and str_ptr[0] <= 126) {
             var len: usize = 0;
-            const max_len: usize = 256; // Reasonable safety limit
-            
-            // Read until NUL or we hit non-printable bytes
+            const max_len: usize = 256;
             while (len < max_len) {
                 const byte = str_ptr[len];
-                if (byte == 0) break; // NUL terminator found
-                if (byte < 32 or byte > 126) break; // Non-printable
+                if (byte == 0) break;
+                if (byte < 32 or byte > 126) break;
                 len += 1;
             }
-            
-            // If we found a reasonable-looking string
             if (len > 0 and len < max_len and str_ptr[len] == 0) {
-                const str_slice = str_ptr[0..len];
-                return std.fmt.allocPrint(allocator, "\"{s}\"", .{str_slice});
+                return std.fmt.allocPrint(allocator, "\"{s}\"", .{str_ptr[0..len]});
             }
         }
     }
 
-    // Not a valid heap node - treat as plain integer literal.
+    // Plain integer literal.
     return std.fmt.allocPrint(allocator, "{d}", .{raw});
 }
 
-// Known Prelude constant tags for boolean/unit formatting
-// These match the unique IDs from grin_to_llvm.zig's `known` struct
-const KNOWN_TRUE_ID: u64 = 200;
-const KNOWN_FALSE_ID: u64 = 201;
-const KNOWN_UNIT_ID: u64 = 206;
-
-/// Format a heap node as a human-readable string.
-/// Assumes the caller has already validated that this is a valid heap node
-/// (tag in reasonable range, n_fields reasonable).
-fn formatNode(allocator: Allocator, node: *const rts_node.Node) ![]const u8 {
+/// Format a heap node as a human-readable string using dynamic tag
+/// discriminants from the compilation's tag table.
+fn formatNode(allocator: Allocator, node: *const rts_node.Node, tags: KnownTags) Allocator.Error![]const u8 {
     const tag_int: u64 = @intFromEnum(node.tag);
+    const disc: i64 = @bitCast(tag_int);
 
-    // Caller should have validated, but if we somehow got here with invalid data,
-    // conservatively return a generic representation
-    if (tag_int > 0x10000 or node.n_fields > 1024) {
-        return std.fmt.allocPrint(allocator, "<invalid node tag={d}>", .{tag_int});
-    }
-
-    // Handle unit (RtsTag.Unit = 0) - display as empty string
-    // Direct tag value comparison since node.tag was set by LLVM code
+    // Unit (RTS-level tag 0)
     if (tag_int == @intFromEnum(rts_node.Tag.Unit)) {
         return allocator.dupe(u8, "");
     }
 
-    // Check if the RtsTag is the user-defined Data type
-    // For these, the actual constructor discriminant is stored in the first field
-    // (tracked in GRIN tag table as unique IDs like 200=True, 201=False, etc.)
-    if (node.tag == .Data) {
-        // Try to read the actual discriminant from the first field
-        if (node.n_fields >= 1) {
-            const disc = rts_node.rts_load_field(node, 0);
-            // Handle boolean values by their GRIN-level discriminant
-            if (disc == KNOWN_TRUE_ID) return allocator.dupe(u8, "True");
-            if (disc == KNOWN_FALSE_ID) return allocator.dupe(u8, "False");
-            if (disc == KNOWN_UNIT_ID) return allocator.dupe(u8, "");
+    // Boolean constructors (nullary, 0 fields)
+    if (tags.true_disc) |td| {
+        if (disc == td and node.n_fields == 0) return allocator.dupe(u8, "True");
+    }
+    if (tags.false_disc) |fd| {
+        if (disc == fd and node.n_fields == 0) return allocator.dupe(u8, "False");
+    }
+
+    // Nothing (nullary, 0 fields)
+    if (tags.nothing_disc) |nd| {
+        if (disc == nd and node.n_fields == 0) return allocator.dupe(u8, "Nothing");
+    }
+
+    // Just x (1 field)
+    if (tags.just_disc) |jd| {
+        if (disc == jd and node.n_fields == 1) {
+            const inner_raw: i64 = @bitCast(rts_node.fieldsConst(node)[0]);
+            const inner = try formatJitResult(allocator, inner_raw, tags);
+            defer allocator.free(inner);
+            return std.fmt.allocPrint(allocator, "Just {s}", .{inner});
         }
     }
 
-    // Handle String nodes - read the string content from the stored pointer
-    if (node.tag == .String and node.n_fields >= 1) {
-        const str_ptr = rts_node.stringValue(node);
-        // Get C string length
-        var len: usize = 0;
-        while (str_ptr[len] != 0) : (len += 1) {}
-        // Format with quotes and escape
-        const str_slice = str_ptr[0..len];
-        var result = try std.ArrayList(u8).initCapacity(allocator, len + 10);
-        try result.append(allocator, '"');
-        try result.appendSlice(allocator, str_slice);
-        try result.append(allocator, '"');
-        return result.toOwnedSlice(allocator);
+    // List: [] (Nil) or x : xs (Cons)
+    if (tags.nil_disc) |nd| {
+        if (disc == nd and node.n_fields == 0) return allocator.dupe(u8, "[]");
+    }
+    if (tags.cons_disc) |cd| {
+        if (disc == cd and node.n_fields == 2) {
+            return formatList(allocator, node, tags);
+        }
     }
 
-    // Handle boolean values using discriminant from tag table
-    // True has stable ID 200, False has ID 201
-    if (tag_int == KNOWN_TRUE_ID) {
-        return allocator.dupe(u8, "True");
-    }
-    if (tag_int == KNOWN_FALSE_ID) {
-        return allocator.dupe(u8, "False");
-    }
-
-    // For nullary constructors, just print the tag number for now.
-    // A full implementation would map tag IDs back to constructor names,
-    // but that requires threading the tag table from compilation.
+    // Generic constructor display
     if (node.n_fields == 0) {
         return std.fmt.allocPrint(allocator, "<constructor tag={d}>", .{tag_int});
     }
 
     var result = try std.fmt.allocPrint(allocator, "<constructor tag={d}", .{tag_int});
-    const field_slots = rts_node.fieldsConst(node);
     var i: u32 = 0;
     while (i < node.n_fields) : (i += 1) {
-        const field_val: i64 = @bitCast(field_slots[i]);
+        const field_val: i64 = @bitCast(rts_node.fieldsConst(node)[i]);
         const new = try std.fmt.allocPrint(allocator, "{s} {d}", .{ result, field_val });
         allocator.free(result);
         result = new;
@@ -496,6 +503,119 @@ fn formatNode(allocator: Allocator, node: *const rts_node.Node) ![]const u8 {
     const final = try std.fmt.allocPrint(allocator, "{s}>", .{result});
     allocator.free(result);
     return final;
+}
+
+/// Format a Cons-headed list as "[e1,e2,e3]".
+/// Traverses the spine, collecting elements until Nil or a non-list node.
+fn formatList(allocator: Allocator, head_node: *const rts_node.Node, tags: KnownTags) Allocator.Error![]const u8 {
+    const nil_disc = tags.nil_disc orelse return allocator.dupe(u8, "[...]");
+    const cons_disc = tags.cons_disc orelse return allocator.dupe(u8, "[...]");
+
+    // First pass: check if this is a [Char] list (String).
+    // If every element is a printable character, format as "string".
+    if (isCharList(head_node, cons_disc, nil_disc)) {
+        return formatCharList(allocator, head_node, cons_disc, nil_disc);
+    }
+
+    var buf = std.ArrayListUnmanaged(u8){};
+    try buf.append(allocator, '[');
+
+    var current: *const rts_node.Node = head_node;
+    var first = true;
+    var depth: usize = 0;
+    const max_depth: usize = 100; // Safety limit
+
+    while (depth < max_depth) : (depth += 1) {
+        const cur_disc: i64 = @bitCast(@as(u64, @intFromEnum(current.tag)));
+
+        if (cur_disc == nil_disc and current.n_fields == 0) {
+            // End of list
+            break;
+        }
+
+        if (cur_disc != cons_disc or current.n_fields != 2) {
+            // Not a proper list tail — show as improper
+            try buf.appendSlice(allocator, "|...");
+            break;
+        }
+
+        if (!first) try buf.append(allocator, ',');
+        first = false;
+
+        // Format the head element
+        const head_raw: i64 = @bitCast(rts_node.fieldsConst(current)[0]);
+        const elem = try formatJitResult(allocator, head_raw, tags);
+        defer allocator.free(elem);
+        try buf.appendSlice(allocator, elem);
+
+        // Advance to the tail
+        const tail_raw: usize = rts_node.fieldsConst(current)[1];
+        if (tail_raw == 0 or tail_raw % @alignOf(*anyopaque) != 0) break;
+        current = @ptrFromInt(tail_raw);
+    }
+
+    try buf.append(allocator, ']');
+    return buf.toOwnedSlice(allocator);
+}
+
+/// Check if a list is a [Char] — every element is a valid Unicode codepoint
+/// stored as a raw integer (not a heap pointer).
+fn isCharList(head_node: *const rts_node.Node, cons_disc: i64, nil_disc: i64) bool {
+    var current: *const rts_node.Node = head_node;
+    var depth: usize = 0;
+    const max_depth: usize = 1000;
+
+    while (depth < max_depth) : (depth += 1) {
+        const cur_disc: i64 = @bitCast(@as(u64, @intFromEnum(current.tag)));
+
+        if (cur_disc == nil_disc and current.n_fields == 0) return depth > 0;
+        if (cur_disc != cons_disc or current.n_fields != 2) return false;
+
+        const head_val: u64 = rts_node.fieldsConst(current)[0];
+        // Characters are Unicode codepoints: 0 to 0x10FFFF.
+        if (head_val > 0x10FFFF) return false;
+
+        const tail_raw: usize = rts_node.fieldsConst(current)[1];
+        if (tail_raw == 0 or tail_raw % @alignOf(*anyopaque) != 0) return false;
+        current = @ptrFromInt(tail_raw);
+    }
+    return false;
+}
+
+/// Format a [Char] list as a quoted string: "hello".
+fn formatCharList(allocator: Allocator, head_node: *const rts_node.Node, cons_disc: i64, nil_disc: i64) Allocator.Error![]const u8 {
+    var buf = std.ArrayListUnmanaged(u8){};
+    try buf.append(allocator, '"');
+
+    var current: *const rts_node.Node = head_node;
+    var depth: usize = 0;
+    const max_depth: usize = 1000;
+
+    while (depth < max_depth) : (depth += 1) {
+        const cur_disc: i64 = @bitCast(@as(u64, @intFromEnum(current.tag)));
+        if (cur_disc == nil_disc and current.n_fields == 0) break;
+        if (cur_disc != cons_disc or current.n_fields != 2) break;
+
+        const ch: u64 = rts_node.fieldsConst(current)[0];
+        if (ch < 128) {
+            try buf.append(allocator, @intCast(ch));
+        } else {
+            // Encode as Unicode escape for non-ASCII
+            var code_buf: [4]u8 = undefined;
+            const cp: u21 = @intCast(ch);
+            const len = std.unicode.utf8Encode(cp, &code_buf) catch 0;
+            if (len > 0) {
+                try buf.appendSlice(allocator, code_buf[0..len]);
+            }
+        }
+
+        const tail_raw: usize = rts_node.fieldsConst(current)[1];
+        if (tail_raw == 0 or tail_raw % @alignOf(*anyopaque) != 0) break;
+        current = @ptrFromInt(tail_raw);
+    }
+
+    try buf.append(allocator, '"');
+    return buf.toOwnedSlice(allocator);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────

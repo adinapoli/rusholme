@@ -214,16 +214,7 @@ pub const Session = struct {
 
         // Load the Prelude so its functions are available immediately.
         // Non-fatal: on failure the session continues with built-in names only.
-        //
-        // Currently WASM-only: the native JIT backend cannot yet compile
-        // the Prelude's GRIN output (GRIN→LLVM translation fails — tracked
-        // in #589). Additionally, loading Prelude `data Bool` reassigns
-        // constructor uniques, breaking the JIT's hardcoded True/False
-        // discriminant check in formatJitResult. Once #589 is resolved,
-        // this guard can be removed.
-        if (is_wasi) {
-            self.loadPrelude();
-        }
+        self.loadPrelude();
 
         return self;
     }
@@ -320,9 +311,16 @@ pub const Session = struct {
         self.accumulated_dict_names.deinit(self.allocator);
         self.accumulated_dict_names = result.dict_names;
 
-        // Note: no addDeclarations call needed here. This function is
-        // only called on the WASM path (guarded in init), where the
-        // tree-walking evaluator uses accumulated_defs directly.
+        // On native JIT, add Prelude declarations to the JIT engine so
+        // symbols are available for linking.
+        if (!is_wasi) {
+            self.engine.addDeclarations(&result.grin_prog) catch |err| {
+                // Non-fatal: continue with Prelude symbols in renamer/typechecker
+                // but unavailable in JIT (expressions using them will fail at link time).
+                std.debug.print("Warning: addDeclarations failed for Prelude: {}\n", .{err});
+                return;
+            };
+        }
     }
 
     // ── Input processing ──────────────────────────────────────────────
@@ -698,10 +696,9 @@ test "session: processInput returns diagnostics on error" {
 
 // ── Prelude loading tests ─────────────────────────────────────────────
 //
-// loadPrelude is only called automatically on WASM (is_wasi). These
-// tests call it explicitly to verify the pipeline on native, where
-// the GRIN tree-walker is not available but the frontend pipeline
-// (parse → rename → typecheck → desugar → GRIN translate) still works.
+// loadPrelude is called automatically by init() for all targets.
+// These tests verify that Prelude names resolve correctly in
+// subsequent REPL inputs.
 
 test "session: loadPrelude populates accumulated state" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -710,9 +707,6 @@ test "session: loadPrelude populates accumulated state" {
 
     var session = try Session.init(alloc, testing.io);
     defer session.deinit();
-
-    // On native, loadPrelude is not called by init. Call explicitly.
-    if (!is_wasi) session.loadPrelude();
 
     // Prelude should have loaded — accumulated_defs should be non-empty.
     try testing.expect(session.accumulated_defs.items.len > 0);
@@ -728,8 +722,6 @@ test "session: Prelude names resolve after loadPrelude" {
     var session = try Session.init(alloc, testing.io);
     defer session.deinit();
 
-    if (!is_wasi) session.loadPrelude();
-
     // `id` is defined in the Prelude — should compile as expression.
     const result = try session.processInput("id 42");
     try testing.expect(result.compile.kind == .expression);
@@ -743,8 +735,6 @@ test "session: Prelude operators resolve after loadPrelude" {
     var session = try Session.init(alloc, testing.io);
     defer session.deinit();
 
-    if (!is_wasi) session.loadPrelude();
-
     // `(+)` is defined in the Prelude — should compile as expression.
     const result = try session.processInput("1 + 2");
     try testing.expect(result.compile.kind == .expression);
@@ -757,8 +747,6 @@ test "session: Prelude data constructors resolve after loadPrelude" {
 
     var session = try Session.init(alloc, testing.io);
     defer session.deinit();
-
-    if (!is_wasi) session.loadPrelude();
 
     // `Just` is defined in the Prelude — should compile as expression.
     const result = try session.processInput("Just 42");

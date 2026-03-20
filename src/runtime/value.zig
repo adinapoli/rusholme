@@ -106,6 +106,14 @@ pub const Value = union(enum) {
         };
     }
 
+    /// Get the value as a character, if it is one.
+    pub fn asChar(self: Value) ?u21 {
+        return switch (self) {
+            .Char => |c| c,
+            else => null,
+        };
+    }
+
     /// Get the value as an integer, if it is one.
     pub fn asInt(self: Value) ?i64 {
         return switch (self) {
