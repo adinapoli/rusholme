@@ -454,7 +454,9 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | [#557](https://github.com/adinapoli/rusholme/issues/557) | Persist ClassEnv across REPL inputs in session state | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#578](https://github.com/adinapoli/rusholme/issues/578) | Fix JIT segfault when calling typeclass methods across REPL inputs | [#557](https://github.com/adinapoli/rusholme/issues/557) | :green_circle: |
 | [#582](https://github.com/adinapoli/rusholme/issues/582) | Typeclass functions do not carry constraint correctly | [#578](https://github.com/adinapoli/rusholme/issues/578) | :green_circle: |
-| [#607](https://github.com/adinapoli/rusholme/issues/607) | REPL: type class method calls fail at JIT execution time | [#578](https://github.com/adinapoli/rusholme/issues/578) | :yellow_circle: |
+| [#607](https://github.com/adinapoli/rusholme/issues/607) | REPL: type class method calls fail at JIT execution time | [#578](https://github.com/adinapoli/rusholme/issues/578) | :green_circle: |
+| [#609](https://github.com/adinapoli/rusholme/issues/609) | Implement string-as-[Char] and Prelude loading for native JIT REPL | [#557](https://github.com/adinapoli/rusholme/issues/557), [#529](https://github.com/adinapoli/rusholme/issues/529) | :green_circle: |
+| [#612](https://github.com/adinapoli/rusholme/issues/612) | REPL: deep forcing of lazy data structures for result display | [#609](https://github.com/adinapoli/rusholme/issues/609) | :white_circle: |
 | [#558](https://github.com/adinapoli/rusholme/issues/558) | Implement recursive instance context constraint resolution | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#559](https://github.com/adinapoli/rusholme/issues/559) | Support class constraints in user-written type signatures | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#566](https://github.com/adinapoli/rusholme/issues/566) | Typechecker: support declaration-order-independent inference | — | :white_circle: |
