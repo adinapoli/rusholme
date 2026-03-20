@@ -6,6 +6,12 @@
 **Architecture Decisions:**
 - **#0001**: PrimOps and RTS Architecture — defines the contract between compiler and runtime via ~15-30 primitive operations. See `docs/decisions/0001-primops-and-rts-architecture.md`.
 
+**Recent Progress (2026-03-23):**
+- ✓ #624: Fix integer/pointer discrimination via low-bit tagging (PR #625 merged)
+- ✓ #618: Fix dictionary-passing codegen and enable polymorphic Show instances (PR #622 merged)
+- ✓ #612: Show typeclass infrastructure and REPL display improvements (PRs #614, #619 merged)
+- ✓ #609: Implement string-as-[Char] and Prelude loading for native JIT REPL (PR #611 merged)
+
 **Recent Progress (2026-03-08):**
 - ✓ #75: Implement basic REPL loop (PR #486 merged — consolidation, multiline, :load, diagnostics)
 - ✓ #64: Implement end-to-end test runner (PR merged)
@@ -239,7 +245,7 @@
 | [#316](https://github.com/adinapoli/rusholme/issues/316) | Add validation for duplicate record field names in data types | [#135](https://github.com/adinapoli/rusholme/issues/135) | :green_circle: |
 | [#444](https://github.com/adinapoli/rusholme/issues/444) | Refactor parseImportHeaders to eliminate redundant parsing | [#29](https://github.com/adinapoli/rusholme/issues/29) | :white_circle: |
 | [#538](https://github.com/adinapoli/rusholme/issues/538) | Parser cannot handle `(-)` in export lists | [#29](https://github.com/adinapoli/rusholme/issues/29) | :white_circle: |
-| [#539](https://github.com/adinapoli/rusholme/issues/539) | Parser cannot handle infix operator definitions with parenthesized patterns | [#29](https://github.com/adinapoli/rusholme/issues/29), [#31](https://github.com/adinapoli/rusholme/issues/31) | :yellow_circle: |
+| [#539](https://github.com/adinapoli/rusholme/issues/539) | Parser cannot handle infix operator definitions with parenthesized patterns | [#29](https://github.com/adinapoli/rusholme/issues/29), [#31](https://github.com/adinapoli/rusholme/issues/31) | :green_circle: |
 | [#540](https://github.com/adinapoli/rusholme/issues/540) | Parser cannot handle multiple consecutive parenthesized cons patterns | [#31](https://github.com/adinapoli/rusholme/issues/31) | :white_circle: |
 | [#543](https://github.com/adinapoli/rusholme/issues/543) | Layout processor injects virtual tokens inside parenthesized contexts | [#26](https://github.com/adinapoli/rusholme/issues/26) | :white_circle: |
 
@@ -455,11 +461,15 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | [#578](https://github.com/adinapoli/rusholme/issues/578) | Fix JIT segfault when calling typeclass methods across REPL inputs | [#557](https://github.com/adinapoli/rusholme/issues/557) | :green_circle: |
 | [#582](https://github.com/adinapoli/rusholme/issues/582) | Typeclass functions do not carry constraint correctly | [#578](https://github.com/adinapoli/rusholme/issues/578) | :green_circle: |
 | [#607](https://github.com/adinapoli/rusholme/issues/607) | REPL: type class method calls fail at JIT execution time | [#578](https://github.com/adinapoli/rusholme/issues/578) | :green_circle: |
-| [#612](https://github.com/adinapoli/rusholme/issues/612) | REPL: result display via Haskell's Show typeclass | [#607](https://github.com/adinapoli/rusholme/issues/607) | :yellow_circle: |
+| [#609](https://github.com/adinapoli/rusholme/issues/609) | Implement string-as-[Char] and Prelude loading for native JIT REPL | [#557](https://github.com/adinapoli/rusholme/issues/557), [#529](https://github.com/adinapoli/rusholme/issues/529) | :green_circle: |
+| [#612](https://github.com/adinapoli/rusholme/issues/612) | REPL: result display via Haskell's Show typeclass | [#607](https://github.com/adinapoli/rusholme/issues/607) | :green_circle: |
 | [#615](https://github.com/adinapoli/rusholme/issues/615) | GRIN evaluator: support dictionary-passing for typeclass dispatch | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
 | [#616](https://github.com/adinapoli/rusholme/issues/616) | Module interface cache (.rhi) does not store ClassEnv or DictNameMap | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
 | [#617](https://github.com/adinapoli/rusholme/issues/617) | Show Char and Show String instances lack escape sequence handling | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
-| [#618](https://github.com/adinapoli/rusholme/issues/618) | Native LLVM backend segfaults on dictionary-passing codegen | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
+| [#618](https://github.com/adinapoli/rusholme/issues/618) | Native LLVM backend segfaults on dictionary-passing codegen | [#612](https://github.com/adinapoli/rusholme/issues/612) | :green_circle: |
+| [#621](https://github.com/adinapoli/rusholme/issues/621) | Unit and integer 0 are indistinguishable in JIT result formatting | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
+| [#623](https://github.com/adinapoli/rusholme/issues/623) | Where-clause bindings not in scope during renaming/typechecking | — | :white_circle: |
+| [#624](https://github.com/adinapoli/rusholme/issues/624) | Runtime segfault in programs combining many different thunk types in long do-blocks | [#618](https://github.com/adinapoli/rusholme/issues/618) | :green_circle: |
 | [#558](https://github.com/adinapoli/rusholme/issues/558) | Implement recursive instance context constraint resolution | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#559](https://github.com/adinapoli/rusholme/issues/559) | Support class constraints in user-written type signatures | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#566](https://github.com/adinapoli/rusholme/issues/566) | Typechecker: support declaration-order-independent inference | — | :white_circle: |
