@@ -646,9 +646,12 @@ test "session: eval expression end-to-end" {
     var session = try Session.init(alloc, testing.io);
     defer session.deinit();
 
-    // Show-wrapping: `42` → `putStrLn (show (42))` → IO action → empty value
+    // Disable show-wrapping: the Zig test runner uses IPC mode (--listen=-)
+    // and JIT-compiled putStrLn writes directly to fd 1, corrupting the pipe.
+    session.pipeline.enable_show_wrapping = false;
+
     const result = try session.eval("42");
-    try testing.expectEqualStrings("", result.value);
+    try testing.expectEqualStrings("42", result.value);
 }
 
 test "session: eval declaration returns empty" {
