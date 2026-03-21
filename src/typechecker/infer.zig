@@ -1995,15 +1995,42 @@ pub fn inferModule(
                 });
             },
             .InstanceDecl => |id_decl| {
-                // Convert the instance head type to HType.
-                const head_htype = try astTypeToHType(id_decl.instance_type, ctx);
+                // Instance type variables must be Rigids (pattern variables),
+                // not Metas.  The solver's matchInstanceHead matches concrete
+                // types against Rigid wildcards in the instance head.
+                //
+                // Build a shared scope that maps each free type variable to a
+                // fresh Rigid, then use it for both the head and the context.
+                var inst_scope = TypeVarMap{};
+                defer inst_scope.deinit(ctx.alloc);
 
-                // Convert context assertions to ClassConstraints.
+                // Pre-populate scope: collect free type variables from the
+                // instance head and context, mapping each to a fresh Rigid.
+                var tyvars = std.ArrayListUnmanaged([]const u8){};
+                defer tyvars.deinit(ctx.alloc);
+                try collectFreeTypeVars(id_decl.instance_type, &tyvars, ctx.alloc);
+                for (id_decl.context) |assertion| {
+                    for (assertion.types) |ty| {
+                        try collectFreeTypeVars(ty, &tyvars, ctx.alloc);
+                    }
+                }
+                for (tyvars.items) |tv| {
+                    if (!inst_scope.contains(tv)) {
+                        const rigid_name = ctx.u_supply.freshName(tv);
+                        const rigid_node = try ctx.alloc_ty(HType{ .Rigid = rigid_name });
+                        try inst_scope.put(ctx.alloc, tv, rigid_node);
+                    }
+                }
+
+                // Convert the instance head type to HType using Rigid scope.
+                const head_htype = try astTypeToHTypeWithScope(id_decl.instance_type, ctx, &inst_scope);
+
+                // Convert context assertions to ClassConstraints using same scope.
                 var context = try ctx.alloc.alloc(ClassConstraint, id_decl.context.len);
                 for (id_decl.context, 0..) |assertion, i| {
                     // Each assertion has one type argument (single-parameter classes).
                     const asserted_ty = if (assertion.types.len > 0)
-                        try astTypeToHType(assertion.types[0], ctx)
+                        try astTypeToHTypeWithScope(assertion.types[0], ctx, &inst_scope)
                     else
                         try ctx.freshMeta();
                     context[i] = .{

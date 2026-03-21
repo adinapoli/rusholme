@@ -38,6 +38,7 @@ const unique_mod = @import("../naming/unique.zig");
 const UniqueSupply = unique_mod.UniqueSupply;
 const Name = unique_mod.Name;
 
+
 const infer_mod = @import("../typechecker/infer.zig");
 const htype_mod = @import("../typechecker/htype.zig");
 const env_mod = @import("../typechecker/env.zig");
@@ -65,6 +66,10 @@ const TypeConNames = std.StringHashMapUnmanaged(Name);
 pub const InputKind = enum {
     /// A bare expression (e.g. `2 + 3`, `not True`).
     expression,
+    /// A show-wrapped IO expression (e.g. `putStrLn (show expr)`).
+    /// The display is handled by `putStrLn` as a side effect — the
+    /// return value (`IO ()`) should be suppressed, matching GHCi.
+    expression_io,
     /// A top-level declaration (e.g. `data Color = Red`, `f x = x + 1`).
     declaration,
     /// A declaration where `let ` was stripped (e.g. user typed `let f x = x`).
@@ -108,7 +113,7 @@ fn translatePos(pos: span_mod.SourcePos, kind: InputKind) ?span_mod.SourcePos {
     const user_line = pos.line - 1;
 
     var user_col = pos.column;
-    if (kind == .expression and pos.line == 2) {
+    if ((kind == .expression or kind == .expression_io) and pos.line == 2) {
         // First line of user code in expression wrapper has
         // `replExpr__ = ` prepended (13 chars).
         if (pos.column <= EXPR_PREFIX_LEN) return null;
@@ -215,6 +220,11 @@ pub const Pipeline = struct {
     /// Used to translate wrapper-relative spans back to user-input-relative
     /// coordinates for rendering.
     last_input_kind: InputKind = .declaration,
+
+    /// Whether to attempt show-wrapping expressions as
+    /// `putStrLn (show (expr))`. Disabled for type queries (:type)
+    /// which need the original expression type, not IO ().
+    enable_show_wrapping: bool = true,
 
     /// Create a new pipeline.
     pub fn init(allocator: Allocator, io: std.Io) Pipeline {
@@ -449,22 +459,22 @@ pub const Pipeline = struct {
 
         // ── Show-wrapped expression (Phase A) ─────────────────────────
         //
-        // When enabled, this attempts to wrap the expression as:
+        // Attempt to wrap the expression as:
         //   replExpr__ = putStrLn (show (<input>))
         // matching GHCi's behavior.  Show drives evaluation through
         // demand (call-by-need), and putStrLn prints the result via IO.
         //
-        // Currently DISABLED because the GRIN evaluator does not yet
-        // handle dictionary-passing codegen.  The show-wrapped code
-        // compiles successfully but crashes at runtime with
-        // "Non-exhaustive patterns in case" when the evaluator's case
-        // dispatch encounters dictionary constructor tags it doesn't
-        // recognise.  Once the GRIN evaluator gains dictionary support,
-        // set `enable_show_wrapping = true` to activate this path.
-        //
-        // tracked in: https://github.com/adinapoli/rusholme/issues/612
-        const enable_show_wrapping = false;
-        if (enable_show_wrapping) {
+        // For monomorphic expressions (Bool, Char, known-type lists),
+        // the desugarer specializes dictionaries away, so the GRIN
+        // evaluator handles them correctly.  For polymorphic expressions
+        // (e.g. numeric literals without defaulting), show-wrapping
+        // will fail at the typechecker and fall through to bare display.
+        // Show-wrapping is disabled until JIT cross-module linking is fixed (#618).
+        // The Show class infrastructure is in place (Prelude, expression_io kind,
+        // session suppression), but Show Int's helper functions (showPosInt,
+        // intToDigit) live in the Prelude module and crash when called from
+        // JIT-compiled expression code.
+        if (self.enable_show_wrapping) {
             // Scope safety: push a transactional scope frame around this
             // attempt.  If it fails, pop the frame to discard any bindings
             // (e.g. `replExpr__`) that the renamer introduced.  If it
@@ -491,10 +501,46 @@ pub const Pipeline = struct {
                 // frame and clear any declaration diagnostics.
                 const decl_diag_count = diags.diagnostics.items.len;
                 clearLeadingDiags(alloc, diags, decl_diag_count);
-                return .{ .program = result.grin_prog, .kind = .expression, .core_data_decls = result.core_data_decls, .class_env = result.class_env, .dict_names = result.dict_names };
+                return .{ .program = result.grin_prog, .kind = .expression_io, .core_data_decls = result.core_data_decls, .class_env = result.class_env, .dict_names = result.dict_names };
             } else |_| {
                 // No Show instance or other error — rollback the scope
-                // frame and fall through to bare expression.
+                // frame and fall through to showString or bare expression.
+                ty_env.pop();
+                rename_env.scope.pop();
+            }
+        }
+
+        // ── String-wrapped expression (Phase A2) ──────────────────────
+        //
+        // For [Char] expressions (e.g. "hello" ++ " world"), the Show [a]
+        // instance requires dictionary-passing which the LLVM backend
+        // can't handle (#618).  As a workaround, try wrapping as:
+        //   replExpr__ = putStrLn (showString (<input>))
+        // where showString :: String -> String is monomorphic.
+        // Disabled along with show-wrapping until #618 is fixed.
+        if (self.enable_show_wrapping) {
+            rename_env.scope.push() catch return CompileError.OutOfMemory;
+            ty_env.push() catch {
+                rename_env.scope.pop();
+                return CompileError.OutOfMemory;
+            };
+
+            var str_diags = DiagnosticCollector.init();
+            defer str_diags.deinit(alloc);
+
+            const str_source = std.fmt.allocPrint(alloc, "module ReplInput where\nreplExpr__ = putStrLn (showString ({s}))\n", .{input}) catch {
+                ty_env.pop();
+                rename_env.scope.pop();
+                return CompileError.OutOfMemory;
+            };
+            self.last_source = str_source;
+            self.last_input_kind = .expression;
+
+            if (self.compileModule(str_source, file_id, u_supply, rename_env, ty_env, mv_supply, &str_diags, external_arities, external_con_map, external_class_env, external_dict_names, external_type_con_names)) |result| {
+                const decl_diag_count = diags.diagnostics.items.len;
+                clearLeadingDiags(alloc, diags, decl_diag_count);
+                return .{ .program = result.grin_prog, .kind = .expression_io, .core_data_decls = result.core_data_decls, .class_env = result.class_env, .dict_names = result.dict_names };
+            } else |_| {
                 ty_env.pop();
                 rename_env.scope.pop();
             }

@@ -830,6 +830,75 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
         }
     }
 
+    // ── IO monad sequencing operators ────────────────────────────────────
+    //
+    // `>>` and `>>=` are magical known names used by do-notation desugaring.
+    // They have no runtime definition — sequencing is structural in GRIN.
+    // Translate them into GRIN Bind chains:
+    //
+    //   >> a b     →   a >>= \_ -> b        (execute a for side effects, then b)
+    //   >>= m f   →   m >>= \x -> f x       (execute m, apply result to f)
+    //
+    // Arguments are translated eagerly (not as F-tag thunks) because both
+    // operands are IO actions whose side effects must actually execute.
+    switch (fn_expr.*) {
+        .Var => |v| {
+            const uid = v.name.unique.value;
+            if (uid == known.Fn.then.unique.value and args.items.len == 2) {
+                // >> a b: args collected in reverse order, so args[1]=a, args[0]=b
+                const lhs_core = args.items[1]; // first argument (a)
+                const rhs_core = args.items[0]; // second argument (b)
+
+                const lhs_grin = try translateExpr(ctx, lhs_core);
+                const rhs_grin = try translateExpr(ctx, rhs_core);
+
+                const discard = try ctx.freshName("_seq");
+                const bind_expr = try ctx.alloc.create(GrinExpr);
+                bind_expr.* = .{ .Bind = .{
+                    .lhs = lhs_grin,
+                    .pat = .{ .Var = discard },
+                    .rhs = rhs_grin,
+                } };
+                return bind_expr;
+            }
+            if (uid == known.Fn.bind.unique.value and args.items.len == 2) {
+                // >>= m f: args collected in reverse order, so args[1]=m, args[0]=f
+                const m_core = args.items[1]; // monadic action (m)
+                const f_core = args.items[0]; // continuation (f)
+
+                const m_grin = try translateExpr(ctx, m_core);
+
+                // The continuation `f` is typically a lambda-lifted function name.
+                // Translate it to get its GRIN name, then emit App(f, [x]).
+                const f_grin = try translateExpr(ctx, f_core);
+                const f_name = switch (f_grin.*) {
+                    .Return => |ret| switch (ret) {
+                        .Var => |name| name,
+                        else => return error.CannotExtractValue,
+                    },
+                    .App => |app| app.name, // zero-arity function call
+                    else => return error.CannotExtractValue,
+                };
+
+                const bind_var = try ctx.freshName("bind_res");
+                const app_cont = try ctx.alloc.create(GrinExpr);
+                app_cont.* = .{ .App = .{
+                    .name = f_name,
+                    .args = &[_]GrinVal{.{ .Var = bind_var }},
+                } };
+
+                const bind_expr = try ctx.alloc.create(GrinExpr);
+                bind_expr.* = .{ .Bind = .{
+                    .lhs = m_grin,
+                    .pat = .{ .Var = bind_var },
+                    .rhs = app_cont,
+                } };
+                return bind_expr;
+            }
+        },
+        else => {},
+    }
+
     // Check whether the function head is a data constructor *before* translating
     // it.  We need the original Core unique to look up the con_map, because
     // translateExpr assigns a fresh GRIN unique that won't match.
@@ -1139,26 +1208,34 @@ fn wrapWithLazyBindsForFunc(
                 // applications (where the function is a parameter variable)
                 // cannot be thunked because F-tag dispatch requires a
                 // statically known function name in the function table.
-                if (ctx.getFunctionArity(app.name)) |arity| {
-                    if (app.args.len == arity and arity > 0) {
-                        // Fully-saturated application with arguments:
-                        // store as lazy thunk (F-tag node).
-                        //
-                        // Zero-arity calls (e.g. dictionary bindings like
-                        // dict$ShowIt$A) are NOT wrapped as thunks because
-                        // the callee immediately scrutinizes the result via
-                        // Case and does not force F-tagged nodes. Eagerly
-                        // evaluating them avoids a force/eval round-trip.
-                        const ftag = GrinTag{ .tag_type = .{ .Fun = {} }, .name = app.name };
-                        const store_expr = try ctx.alloc.create(GrinExpr);
-                        // Copy the arguments into a new allocation for the heap node
-                        const stored_node = try ctx.alloc.alloc(GrinVal, app.args.len);
-                        @memcpy(stored_node, app.args);
-                        store_expr.* = .{ .Store = .{ .ConstTagNode = .{
-                            .tag = ftag,
-                            .fields = stored_node,
-                        } } };
-                        break :b store_expr;
+                //
+                // Primop applications (e.g. charToInt, intToChar) must
+                // remain eager — they compile to inline instructions, not
+                // heap-allocated thunks.
+                const is_primop = PrimOp.fromString(app.name.base) != null or
+                    PrimOp.fromPreludeName(app.name.base) != null;
+                if (!is_primop) {
+                    if (ctx.getFunctionArity(app.name)) |arity| {
+                        if (app.args.len == arity and arity > 0) {
+                            // Fully-saturated application with arguments:
+                            // store as lazy thunk (F-tag node).
+                            //
+                            // Zero-arity calls (e.g. dictionary bindings like
+                            // dict$ShowIt$A) are NOT wrapped as thunks because
+                            // the callee immediately scrutinizes the result via
+                            // Case and does not force F-tagged nodes. Eagerly
+                            // evaluating them avoids a force/eval round-trip.
+                            const ftag = GrinTag{ .tag_type = .{ .Fun = {} }, .name = app.name };
+                            const store_expr = try ctx.alloc.create(GrinExpr);
+                            // Copy the arguments into a new allocation for the heap node
+                            const stored_node = try ctx.alloc.alloc(GrinVal, app.args.len);
+                            @memcpy(stored_node, app.args);
+                            store_expr.* = .{ .Store = .{ .ConstTagNode = .{
+                                .tag = ftag,
+                                .fields = stored_node,
+                            } } };
+                            break :b store_expr;
+                        }
                     }
                 }
                 // Higher-order application (function is a parameter variable):
@@ -1795,10 +1872,28 @@ fn translateCase(ctx: *TranslateCtx, case_expr: *const CoreCase) anyerror!*GrinE
     };
 
     const scrut_info: ScrutInfo = switch (case_expr.scrutinee.*) {
-        .Var => |v| .{
-            .val = .{ .Var = try ctx.getCoreVar(v.name) },
-            .bind_expr = null,
-            .bind_name = null,
+        .Var => |v| blk: {
+            // Nullary constructors (True, False, Nil, etc.) must be
+            // A-normalized through translateExpr so they become ValTag
+            // values that the evaluator's case dispatch can match.
+            // A bare GrinVal.Var for a constructor would be unresolvable
+            // at runtime (constructors have no function-table entry).
+            if (ctx.conFieldCount(v.name.unique.value)) |n_fields| {
+                if (n_fields == 0) {
+                    const scrut_expr = try translateExpr(ctx, case_expr.scrutinee);
+                    const fresh = try ctx.freshName("scrut");
+                    break :blk .{
+                        .val = .{ .Var = fresh },
+                        .bind_expr = scrut_expr,
+                        .bind_name = fresh,
+                    };
+                }
+            }
+            break :blk .{
+                .val = .{ .Var = try ctx.getCoreVar(v.name) },
+                .bind_expr = null,
+                .bind_name = null,
+            };
         },
         .Lit => |l| .{
             .val = .{ .Lit = translateLiteral(l.val) },

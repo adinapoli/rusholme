@@ -201,7 +201,13 @@ pub const Session = struct {
             .ty_env = ty_env,
             .mv_supply = .{},
             .next_file_id = 1,
-            .pipeline = Pipeline.init(allocator, io),
+            .pipeline = blk: {
+                var p = Pipeline.init(allocator, io);
+                // Disable show-wrapping on WASM: the GrinEngine tree-walker
+                // can't execute cross-module Prelude Show functions.
+                if (is_wasi) p.enable_show_wrapping = false;
+                break :blk p;
+            },
             .engine = if (is_wasi) GrinEngine.init(allocator, io) else JitEngine.init(allocator) catch return SessionError.InitFailed,
             .last_diagnostics = .{},
             .accumulated_defs = .{},
@@ -497,7 +503,7 @@ pub const Session = struct {
         const process = try self.processInput(input);
 
         switch (process.compile.kind) {
-            .expression => {
+            .expression, .expression_io => {
                 if (is_wasi) {
                     // WASM path: merge accumulated defs with the expression
                     // program, since the GRIN tree-walker needs all defs in
@@ -527,14 +533,24 @@ pub const Session = struct {
                         .arities = process.compile.program.arities,
                     };
                     const exec = try self.engine.execute(&merged_program);
-                    const value_copy = try self.allocator.dupe(u8, exec.value);
                     self.allocator.free(all_defs);
+                    // expression_io: display was handled by putStrLn side
+                    // effect; suppress the Unit return value.
+                    if (process.compile.kind == .expression_io) {
+                        return .{ .value = "" };
+                    }
+                    const value_copy = try self.allocator.dupe(u8, exec.value);
                     return .{ .value = value_copy };
                 } else {
                     // JIT path: pass only the expression's def. Previously-
                     // declared functions are already in the JIT's main dylib
                     // and will be resolved automatically by the ORC linker.
                     const exec = try self.engine.execute(&process.compile.program);
+                    // expression_io: display was handled by putStrLn side
+                    // effect; suppress the Unit return value.
+                    if (process.compile.kind == .expression_io) {
+                        return .{ .value = "" };
+                    }
                     return .{ .value = exec.value };
                 }
             },
@@ -563,7 +579,7 @@ test "session: initialise and compile expression" {
     defer session.deinit();
 
     const result = try session.processInput("42");
-    try testing.expect(result.compile.kind == .expression);
+    try testing.expect(result.compile.kind == .expression or result.compile.kind == .expression_io);
     try testing.expect(result.compile.program.defs.len > 0);
 }
 
@@ -606,7 +622,7 @@ test "session: multiple inputs accumulate" {
 
     // Second: compile another expression
     const r2 = try session.processInput("42");
-    try testing.expect(r2.compile.kind == .expression);
+    try testing.expect(r2.compile.kind == .expression or r2.compile.kind == .expression_io);
 }
 
 test "session: pipeline produces named def for expression" {
@@ -629,6 +645,10 @@ test "session: eval expression end-to-end" {
 
     var session = try Session.init(alloc, testing.io);
     defer session.deinit();
+
+    // Disable show-wrapping: the Zig test runner uses IPC mode (--listen=-)
+    // and JIT-compiled putStrLn writes directly to fd 1, corrupting the pipe.
+    session.pipeline.enable_show_wrapping = false;
 
     const result = try session.eval("42");
     try testing.expectEqualStrings("42", result.value);
@@ -663,7 +683,7 @@ test "session: failed input does not corrupt state" {
 
     // Session should still work after the failed input
     const r = try session.processInput("42");
-    try testing.expect(r.compile.kind == .expression);
+    try testing.expect(r.compile.kind == .expression or r.compile.kind == .expression_io);
 }
 
 test "session: putStrLn compiles as expression" {
@@ -675,7 +695,7 @@ test "session: putStrLn compiles as expression" {
     defer session.deinit();
 
     const result = try session.processInput("putStrLn \"hello\"");
-    try testing.expect(result.compile.kind == .expression);
+    try testing.expect(result.compile.kind == .expression or result.compile.kind == .expression_io);
 }
 
 test "session: processInput returns diagnostics on error" {
@@ -724,7 +744,7 @@ test "session: Prelude names resolve after loadPrelude" {
 
     // `id` is defined in the Prelude — should compile as expression.
     const result = try session.processInput("id 42");
-    try testing.expect(result.compile.kind == .expression);
+    try testing.expect(result.compile.kind == .expression or result.compile.kind == .expression_io);
 }
 
 test "session: Prelude operators resolve after loadPrelude" {
@@ -737,7 +757,7 @@ test "session: Prelude operators resolve after loadPrelude" {
 
     // `(+)` is defined in the Prelude — should compile as expression.
     const result = try session.processInput("1 + 2");
-    try testing.expect(result.compile.kind == .expression);
+    try testing.expect(result.compile.kind == .expression or result.compile.kind == .expression_io);
 }
 
 test "session: Prelude data constructors resolve after loadPrelude" {
@@ -750,5 +770,5 @@ test "session: Prelude data constructors resolve after loadPrelude" {
 
     // `Just` is defined in the Prelude — should compile as expression.
     const result = try session.processInput("Just 42");
-    try testing.expect(result.compile.kind == .expression);
+    try testing.expect(result.compile.kind == .expression or result.compile.kind == .expression_io);
 }

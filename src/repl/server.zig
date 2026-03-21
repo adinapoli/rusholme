@@ -360,6 +360,9 @@ test "server: processRequestToString handles eval" {
     var server = try ReplServer.init(allocator, io);
     defer server.deinit();
 
+    // Disable show-wrapping: IPC mode can't handle JIT fd 1 writes.
+    server.session.pipeline.enable_show_wrapping = false;
+
     const response = try server.processRequestToString(
         \\{"jsonrpc":"2.0","id":1,"method":"eval","params":["42"]}
     );

@@ -77,6 +77,12 @@ pub const JitEngine = struct {
     accumulated_grin_defs: std.ArrayListUnmanaged(grin_ast.Def) = .{},
     /// Constructor discriminants from Prelude compilation for result formatting.
     known_tags: KnownTags = .{},
+    /// Resource tracker for the shared `__rhc_force` module.
+    /// Allows replacing it when new F-tags appear in expressions.
+    force_tracker: ?llvm.OrcResourceTrackerRef = null,
+    /// Number of F-tags in the current force module. Used to detect
+    /// when the expression introduces new F-tags that require re-emission.
+    force_ftag_count: u32 = 0,
 
     /// Create a new JIT engine backed by LLVM ORC LLJIT.
     pub fn init(allocator: Allocator) JitError!JitEngine {
@@ -101,11 +107,50 @@ pub const JitEngine = struct {
 
     /// Destroy the JIT engine and release all JIT'd code.
     pub fn deinit(self: *JitEngine) void {
+        if (self.force_tracker) |tracker| {
+            c.LLVMOrcReleaseResourceTracker(tracker);
+        }
         self.accumulated_grin_defs.deinit(self.allocator);
         if (self.jit) |jit| {
             const err = c.LLVMOrcDisposeLLJIT(jit);
             if (err != null) c.LLVMConsumeError(err);
         }
+    }
+
+    /// Emit and add a shared `__rhc_force` module to the JIT.
+    ///
+    /// If a previous force module exists (tracked by `force_tracker`),
+    /// it is removed first.  The new module contains `__rhc_force` with
+    /// external linkage and covers all F-tags currently in `translator`'s
+    /// tag table.
+    fn emitSharedForceModule(self: *JitEngine, translator: *GrinTranslator) JitError!void {
+        // Remove previous force module if it exists.
+        if (self.force_tracker) |old_tracker| {
+            const rm_err = c.LLVMOrcResourceTrackerRemove(old_tracker);
+            if (rm_err != null) c.LLVMConsumeError(rm_err);
+            c.LLVMOrcReleaseResourceTracker(old_tracker);
+            self.force_tracker = null;
+        }
+
+        const ir_text = translator.emitForceModuleIr() catch
+            return JitError.TranslationFailed;
+        defer self.allocator.free(ir_text);
+
+        const ts_mod = self.parseIrToThreadSafeModule(ir_text) catch
+            return JitError.TranslationFailed;
+
+        const main_dylib = c.LLVMOrcLLJITGetMainJITDylib(self.jit);
+        const tracker = c.LLVMOrcJITDylibCreateResourceTracker(main_dylib);
+
+        const add_err = c.LLVMOrcLLJITAddLLVMIRModuleWithRT(self.jit, tracker, ts_mod);
+        if (add_err != null) {
+            c.LLVMConsumeError(add_err);
+            c.LLVMOrcReleaseResourceTracker(tracker);
+            return JitError.ModuleAddFailed;
+        }
+
+        self.force_tracker = tracker;
+        self.force_ftag_count = @intCast(translator.tag_table.fun_tags.count());
     }
 
     /// Add declaration definitions permanently to the JIT's main dylib.
@@ -147,6 +192,11 @@ pub const JitEngine = struct {
 
         // Capture constructor discriminants for result formatting.
         self.known_tags = translator.getKnownTagDiscriminants();
+
+        // Emit a shared __rhc_force module BEFORE per-def modules.
+        // Per-def modules declare __rhc_force as external and ORC JIT
+        // resolves calls to this shared version (lazy symbol lookup).
+        try self.emitSharedForceModule(&translator);
 
         for (program.defs) |def| {
             const single_defs = self.allocator.alloc(grin_ast.Def, 1) catch
@@ -223,6 +273,15 @@ pub const JitEngine = struct {
         // the complete tag table (seeded from all accumulated defs).
         // This ensures formatJitResult uses correct discriminants.
         self.known_tags = translator.getKnownTagDiscriminants();
+
+        // Re-emit the shared __rhc_force if the expression introduced
+        // new F-tags that the Prelude-time force module didn't know about.
+        // This ensures per-def modules (which call __rhc_force externally)
+        // can force expression-introduced thunks.
+        const expr_ftag_count: u32 = @intCast(translator.tag_table.fun_tags.count());
+        if (expr_ftag_count > self.force_ftag_count) {
+            try self.emitSharedForceModule(&translator);
+        }
 
         // 4. Parse IR and add to JIT with a resource tracker.
         const ts_mod = try self.parseIrToThreadSafeModule(ir_text);
@@ -406,6 +465,10 @@ fn patchEntryPointName(allocator: Allocator, program: *const grin_ast.Program, t
 /// aligned) and try to interpret it as a node. If that fails, we
 /// treat it as a plain integer.
 fn formatJitResult(allocator: Allocator, raw: i64, tags: KnownTags) Allocator.Error![]const u8 {
+    // Raw 0 is the Unit value (IO actions return 0 for `()`).
+    // Suppress display, matching GHCi which doesn't print `()`.
+    if (raw == 0) return allocator.dupe(u8, "");
+
     const as_usize: usize = @bitCast(raw);
 
     // Check if the result is a valid-looking pointer to a heap node.

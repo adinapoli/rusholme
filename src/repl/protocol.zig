@@ -144,6 +144,10 @@ test "protocol: evaluate returns success for simple expression" {
     var session = try Session.init(alloc, testing_io);
     defer session.deinit();
 
+    // Disable show-wrapping: the Zig test runner uses IPC mode (--listen=-)
+    // and JIT-compiled putStrLn writes directly to fd 1, corrupting the pipe.
+    session.pipeline.enable_show_wrapping = false;
+
     const result = try evaluate(alloc, &session, "42");
 
     try testing.expectEqual(Status.success, result.status);
@@ -151,13 +155,16 @@ test "protocol: evaluate returns success for simple expression" {
     try testing.expectEqual(@as(usize, 0), result.diagnostics.len);
 }
 
-test "protocol: getDiagnostics returns empty slice on success" {
+test "protocol: getDiagnostics returns empty slice after evaluation" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
     var session = try Session.init(alloc, testing_io);
     defer session.deinit();
+
+    // Disable show-wrapping: IPC mode can't handle JIT fd 1 writes.
+    session.pipeline.enable_show_wrapping = false;
 
     _ = try evaluate(alloc, &session, "42");
     const diags = getDiagnostics(&session);
@@ -188,11 +195,14 @@ test "protocol: error result value is session-owned and survives across calls" {
     var session = try Session.init(alloc, testing_io);
     defer session.deinit();
 
+    // Disable show-wrapping: IPC mode can't handle JIT fd 1 writes.
+    session.pipeline.enable_show_wrapping = false;
+
     // Trigger an error — the value string must be session-owned (#503).
     const err_result = try evaluate(alloc, &session, "undefined_var");
     try testing.expectEqual(Status.failed, err_result.status);
 
-    // A subsequent successful evaluation must not invalidate the error
+    // A subsequent evaluation must not invalidate the error
     // value, since both are session-owned with session lifetime.
     const ok_result = try evaluate(alloc, &session, "42");
     try testing.expectEqual(Status.success, ok_result.status);
