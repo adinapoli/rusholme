@@ -343,9 +343,17 @@ pub const PrimOp = enum(u16) {
     /// implementations (e.g., `putStrLn_`). Returns null if the name is not
     /// a Prelude function backed by a PrimOp.
     pub fn fromPreludeName(str: []const u8) ?PrimOp {
+        // The Prelude defines putStr/putStrLn as Haskell functions that
+        // drive lazy evaluation via putChar. Internally they call the
+        // "prim"-prefixed variants. However, NoImplicitPrelude code and
+        // e2e tests may still use `foreign import prim "putStrLn"`, so
+        // both the prim-prefixed and legacy names are accepted.
+        if (std.mem.eql(u8, str, "primPutStrLn")) return .putStrLn_;
         if (std.mem.eql(u8, str, "putStrLn")) return .putStrLn_;
+        if (std.mem.eql(u8, str, "primPutStr")) return .write_stdout;
         if (std.mem.eql(u8, str, "putStr")) return .write_stdout;
         if (std.mem.eql(u8, str, "putChar")) return .putChar_;
+        if (std.mem.eql(u8, str, "primPutChar")) return .putChar_;
         if (std.mem.eql(u8, str, "print")) return .write_stdout;
         // Add more Prelude function mappings here as needed
         return null;

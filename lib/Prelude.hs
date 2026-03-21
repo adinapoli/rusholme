@@ -12,7 +12,7 @@ module Prelude
     , putChar, putStr, putStrLn
     , error
     , intToChar, charToInt
-    , Show(..), show
+    , Show(..), show, showString
     , intToDigit
     ) where
 
@@ -33,9 +33,9 @@ foreign import prim "lt_Int"    primLtInt    :: Int -> Int -> Bool
 foreign import prim "le_Int"    primLeInt    :: Int -> Int -> Bool
 foreign import prim "gt_Int"    primGtInt    :: Int -> Int -> Bool
 foreign import prim "ge_Int"    primGeInt    :: Int -> Int -> Bool
-foreign import prim "putChar"   primPutChar  :: Char -> IO ()
-foreign import prim "putStrLn"  primPutStrLn :: String -> IO ()
-foreign import prim "putStr"    primPutStr   :: String -> IO ()
+foreign import prim "putChar"       primPutChar  :: Char -> IO ()
+foreign import prim "primPutStrLn"  primPutStrLn :: String -> IO ()
+foreign import prim "primPutStr"    primPutStr   :: String -> IO ()
 foreign import prim "error"     primError    :: String -> a
 foreign import prim "intToChar" intToChar    :: Int -> Char
 foreign import prim "charToInt" charToInt    :: Char -> Int
@@ -93,6 +93,22 @@ putStrLn = primPutStrLn
 
 putStr :: String -> IO ()
 putStr = primPutStr
+
+-- Haskell-level versions that drive evaluation through pattern matching
+-- on the list spine.  Needed for show-wrapping (#612) once JIT cross-
+-- module linking is fixed (#618).  Until then, the primop wrappers
+-- above are used.
+--
+-- putStrLazy :: String -> IO ()
+-- putStrLazy []     = primPutStr ""
+-- putStrLazy (x:xs) = do
+--     primPutChar x
+--     putStrLazy xs
+--
+-- putStrLnLazy :: String -> IO ()
+-- putStrLnLazy s = do
+--     putStrLazy s
+--     primPutChar '\n'
 
 -- ========================================================================
 -- Boolean functions
@@ -268,9 +284,14 @@ showPosInt n = case n < 10 of
 -- showListWith []     = "[]"
 -- showListWith (x:xs) = '[' : show x ++ showListTail xs
 
+-- Monomorphic string display (avoids dictionary-passing, see #618).
+-- showLitString must precede showString (callee before caller, #566).
 showLitString :: String -> String
 showLitString []     = "\""
 showLitString (x:xs) = x : showLitString xs
+
+showString :: String -> String
+showString s = '"' : showLitString s
 
 -- ── Show instances ──────────────────────────────────────────────────
 
@@ -293,11 +314,11 @@ instance Show Ordering where
 instance Show Char where
   show c = '\'' : c : '\'' : []
 
--- Polymorphic Show instances require dictionary-passing codegen that may
--- have edge cases in the LLVM backend.  Tracked as a follow-up.
+-- Polymorphic Show instances require dictionary-passing codegen that
+-- crashes the LLVM backend (#618).  Tracked as a follow-up.
 -- instance Show a => Show [a] where
 --   show xs = showListWith xs
---
+
 -- instance Show a => Show (Maybe a) where
 --   show Nothing  = "Nothing"
 --   show (Just x) = "Just " ++ show x

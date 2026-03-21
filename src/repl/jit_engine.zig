@@ -406,6 +406,10 @@ fn patchEntryPointName(allocator: Allocator, program: *const grin_ast.Program, t
 /// aligned) and try to interpret it as a node. If that fails, we
 /// treat it as a plain integer.
 fn formatJitResult(allocator: Allocator, raw: i64, tags: KnownTags) Allocator.Error![]const u8 {
+    // Raw 0 is the Unit value (IO actions return 0 for `()`).
+    // Suppress display, matching GHCi which doesn't print `()`.
+    if (raw == 0) return allocator.dupe(u8, "");
+
     const as_usize: usize = @bitCast(raw);
 
     // Check if the result is a valid-looking pointer to a heap node.

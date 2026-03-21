@@ -36,6 +36,12 @@ pub const DesugarCtx = struct {
     /// class constraints (e.g., `(Eq a, Ord a) =>`).
     evidence_map: EvidenceMap = .empty,
 
+    /// The `True` constructor name, extracted from the renamed module's
+    /// `data Bool` declaration. Used by guard desugaring to build
+    /// `case cond of { True -> rhs ; _ -> fallback }`.
+    /// Falls back to `Known.Con.True` if no `data Bool` is in scope.
+    true_name: Name = Known.Con.True,
+
     pub const DictNameKey = struct {
         class_unique: u64,
         head_name: []const u8,
@@ -143,6 +149,28 @@ pub fn desugarModule(
         .diags = diags,
         .u_supply = u_supply,
     };
+
+    // Extract the True constructor name from the renamed module's
+    // data declarations. Guard desugaring needs this to build
+    // `case cond of { True -> rhs ; _ -> fallback }`.
+    // The renamer may have assigned a fresh unique to True when
+    // processing `data Bool = False | True` from the Prelude.
+    for (module.declarations) |decl| {
+        switch (decl) {
+            .DataDecl => |dd| {
+                if (std.mem.eql(u8, dd.name.base, "Bool")) {
+                    for (dd.constructors) |con| {
+                        if (std.mem.eql(u8, con.name.base, "True")) {
+                            ctx.true_name = con.name;
+                            break;
+                        }
+                    }
+                    break;
+                }
+            },
+            else => {},
+        }
+    }
 
     // Seed with dictionary names from prior REPL inputs so that
     // evidence resolution can find dictionaries declared earlier.
@@ -1310,7 +1338,7 @@ fn desugarGuardedRhs(
 
                     var alts = try alloc.alloc(ast_mod.Alt, 2);
                     alts[0] = .{
-                        .con = .{ .DataAlt = Name{ .base = "True", .unique = Known.Con.True.unique } },
+                        .con = .{ .DataAlt = ctx.true_name },
                         .binders = &.{},
                         .body = rhs_expr,
                     };
@@ -1482,48 +1510,10 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                 .span = syntheticSpan(),
             } };
         },
-        .If => |if_blk| {
-            // if c then t else e => case c of True -> t; False -> e
-            const cond = try desugarExpr(ctx, if_blk.condition.*);
-            const then_e = try desugarExpr(ctx, if_blk.then_expr.*);
-            const else_e = try desugarExpr(ctx, if_blk.else_expr.*);
-
-            // Result type of the case
-            // Let's conservatively assume the if is well-typed and has the type of `then_e`.
-            // Note: we can't easily extract type from CoreExpr without a typeof pass.
-            // For M1, we'll try to get it from the environment if possible, or use a dummy.
-            // Actually, Core Expr doesn't cache types bottom-up, we'd need to compute it.
-            // To simplify, we peek into local_binders? No, then_e could be complex.
-            // We use a dummy for now since M1 GRIN codegen won't rely strictly on it.
-            const dummy_ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } };
-
-            var alts = try alloc.alloc(ast_mod.Alt, 2);
-            // True case
-            alts[0] = .{
-                .con = .{ .DataAlt = Name{ .base = "True", .unique = .{ .value = 0 } } },
-                .binders = &.{},
-                .body = then_e,
-            };
-            // False case
-            alts[1] = .{
-                .con = .{ .DataAlt = Name{ .base = "False", .unique = .{ .value = 1 } } },
-                .binders = &.{},
-                .body = else_e,
-            };
-
-            const wild_id = ast_mod.Id{
-                .name = Name{ .base = "wild", .unique = .{ .value = 99999 } },
-                .ty = dummy_ty,
-                .span = syntheticSpan(),
-            };
-
-            node.* = .{ .Case = .{
-                .scrutinee = cond,
-                .binder = wild_id,
-                .ty = dummy_ty,
-                .alts = alts,
-                .span = syntheticSpan(),
-            } };
+        .If => {
+            // The renamer desugars if-then-else into Case on True/False,
+            // so the desugarer should never encounter .If nodes.
+            unreachable;
         },
         .List => |elems| {
             // [e1, e2, ..., en] desugars to (:) e1 ((:) e2 (... ((:) en []) ...))

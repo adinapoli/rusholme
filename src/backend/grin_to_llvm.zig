@@ -89,7 +89,12 @@ const PrimOpMapping = struct {
         // with `std.io`, so the same source compiles to `write()` for native
         // targets and `wasi_snapshot_preview1::fd_write` for wasm32-wasi —
         // no backend-specific adaptations required.
-        if (std.mem.eql(u8, name.base, "putStrLn")) {
+        // putStrLn and putStr are Haskell functions (not PrimOps) that
+        // drive lazy evaluation via putChar.  The actual prims use the
+        // "prim" prefix to avoid collision with the Haskell functions.
+        // Both prim-prefixed and legacy names are accepted so that
+        // NoImplicitPrelude code can still use `foreign import prim "putStrLn"`.
+        if (std.mem.eql(u8, name.base, "primPutStrLn") or std.mem.eql(u8, name.base, "putStrLn")) {
             return .{
                 .libcall = .{
                     .name = "rts_putStrLn",
@@ -99,7 +104,7 @@ const PrimOpMapping = struct {
                 },
             };
         }
-        if (std.mem.eql(u8, name.base, "putStr")) {
+        if (std.mem.eql(u8, name.base, "primPutStr") or std.mem.eql(u8, name.base, "putStr")) {
             return .{
                 .libcall = .{
                     .name = "rts_putStr",
@@ -122,7 +127,7 @@ const PrimOpMapping = struct {
                 },
             };
         }
-        if (std.mem.eql(u8, name.base, "putChar")) {
+        if (std.mem.eql(u8, name.base, "putChar") or std.mem.eql(u8, name.base, "primPutChar")) {
             return .{
                 .libcall = .{
                     .name = "rts_putChar",
@@ -1670,12 +1675,24 @@ pub const GrinTranslator = struct {
     /// Wrap an i1 comparison result in a Bool constructor heap node.
     /// Produces: select i1 %cmp, i64 <true_disc>, i64 <false_disc> → rts_alloc(tag, 0)
     fn wrapComparisonAsBool(self: *GrinTranslator, cmp_i1: llvm.Value) TranslationError!llvm.Value {
+        // Look up True/False discriminants by their exact tag (unique + type).
+        // This works for NoImplicitPrelude modules where Bool uses the
+        // built-in Known.Con uniques (200/201).  For Prelude-imported
+        // modules, the caller's case alternatives also use these uniques
+        // because the renamer resolves True/False to whatever is in scope
+        // (which is the built-in for modules that don't re-declare Bool,
+        // or the Prelude's re-declared version which gets the same
+        // discriminant since it's the same constructor).
         const true_name = grin.Name{ .base = "True", .unique = .{ .value = known.true_val } };
         const false_name = grin.Name{ .base = "False", .unique = .{ .value = known.false_val } };
         const true_tag = grin.Tag{ .tag_type = .Con, .name = true_name };
         const false_tag = grin.Tag{ .tag_type = .Con, .name = false_name };
-        const true_disc: i64 = self.tag_table.discriminant(true_tag) orelse 2;
-        const false_disc: i64 = self.tag_table.discriminant(false_tag) orelse 3;
+        // Try exact unique match first, then fall back to name-based lookup
+        // for contexts where the Prelude assigned fresh uniques to Bool.
+        const true_disc: i64 = self.tag_table.discriminant(true_tag) orelse
+            self.tag_table.findByName("True") orelse 2;
+        const false_disc: i64 = self.tag_table.discriminant(false_tag) orelse
+            self.tag_table.findByName("False") orelse 3;
 
         const true_i64 = c.LLVMConstInt(llvm.i64Type(), @bitCast(true_disc), 0);
         const false_i64 = c.LLVMConstInt(llvm.i64Type(), @bitCast(false_disc), 0);
@@ -3305,9 +3322,9 @@ fn nullTerminate(s: []const u8) [:0]const u8 {
 // Tests
 // ═══════════════════════════════════════════════════════════════════════
 
-test "PrimOpMapping: putStrLn maps to rts_putStrLn" {
+test "PrimOpMapping: primPutStrLn maps to rts_putStrLn" {
     const result = PrimOpMapping.lookup(.{
-        .base = "putStrLn",
+        .base = "primPutStrLn",
         .unique = .{ .value = 42 },
     });
     try std.testing.expect(result != null);
