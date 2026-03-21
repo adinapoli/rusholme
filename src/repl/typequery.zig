@@ -61,7 +61,13 @@ pub fn typeOf(
         return error.OutOfMemory;
     };
 
-    // 2. Compile the expression through the pipeline
+    // 2. Compile the expression through the pipeline.
+    // Disable show-wrapping so we get the original expression type
+    // (e.g. `42 :: Int`) rather than the wrapped IO type.
+    const saved_show_wrapping = session.pipeline.enable_show_wrapping;
+    session.pipeline.enable_show_wrapping = false;
+    defer session.pipeline.enable_show_wrapping = saved_show_wrapping;
+
     var diags = DiagnosticCollector.init();
     defer diags.deinit(session.allocator);
 

@@ -221,6 +221,11 @@ pub const Pipeline = struct {
     /// coordinates for rendering.
     last_input_kind: InputKind = .declaration,
 
+    /// Whether to attempt show-wrapping expressions as
+    /// `putStrLn (show (expr))`. Disabled for type queries (:type)
+    /// which need the original expression type, not IO ().
+    enable_show_wrapping: bool = true,
+
     /// Create a new pipeline.
     pub fn init(allocator: Allocator, io: std.Io) Pipeline {
         return .{
@@ -469,8 +474,7 @@ pub const Pipeline = struct {
         // session suppression), but Show Int's helper functions (showPosInt,
         // intToDigit) live in the Prelude module and crash when called from
         // JIT-compiled expression code.
-        const enable_show_wrapping = true;
-        if (enable_show_wrapping) {
+        if (self.enable_show_wrapping) {
             // Scope safety: push a transactional scope frame around this
             // attempt.  If it fails, pop the frame to discard any bindings
             // (e.g. `replExpr__`) that the renamer introduced.  If it
@@ -514,7 +518,7 @@ pub const Pipeline = struct {
         //   replExpr__ = putStrLn (showString (<input>))
         // where showString :: String -> String is monomorphic.
         // Disabled along with show-wrapping until #618 is fixed.
-        if (enable_show_wrapping) {
+        if (self.enable_show_wrapping) {
             rename_env.scope.push() catch return CompileError.OutOfMemory;
             ty_env.push() catch {
                 rename_env.scope.pop();

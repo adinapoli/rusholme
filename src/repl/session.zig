@@ -640,8 +640,9 @@ test "session: eval expression end-to-end" {
     var session = try Session.init(alloc, testing.io);
     defer session.deinit();
 
+    // Show-wrapping: `42` → `putStrLn (show (42))` → IO action → empty value
     const result = try session.eval("42");
-    try testing.expectEqualStrings("42", result.value);
+    try testing.expectEqualStrings("", result.value);
 }
 
 test "session: eval declaration returns empty" {

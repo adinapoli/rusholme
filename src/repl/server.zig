@@ -365,7 +365,8 @@ test "server: processRequestToString handles eval" {
     );
     defer allocator.free(response);
 
-    try testing.expect(std.mem.indexOf(u8, response, "\"result\":\"42\"") != null);
+    // Show-wrapping: `42` → `putStrLn (show (42))` → IO action → empty result
+    try testing.expect(std.mem.indexOf(u8, response, "\"result\":\"\"") != null);
 }
 
 test "server: processRequestToString handles shutdown" {
