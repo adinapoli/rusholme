@@ -338,24 +338,23 @@ pub const PrimOp = enum(u16) {
         return std.meta.stringToEnum(PrimOp, str);
     }
 
-    /// Try to lookup a PrimOp from a Prelude function name.
-    /// Maps high-level Prelude functions (e.g., `putStrLn`) to their PrimOp
-    /// implementations (e.g., `putStrLn_`). Returns null if the name is not
-    /// a Prelude function backed by a PrimOp.
+    /// Try to lookup a PrimOp from a user-facing alias name.
+    /// Maps human-readable aliases used in `foreign import prim` declarations
+    /// (e.g. `"putStrLn"` → `.putStrLn_`, `"putStr"` → `.write_stdout`) to
+    /// their canonical PrimOp enum variants.
+    ///
+    /// The desugar stage calls this to validate foreign import prim names and
+    /// to normalise the inner call's `name.base` to the canonical PrimOp name
+    /// (via `op.name()`).  Downstream stages (GRIN translator, LLVM backend)
+    /// then only need to match canonical names via `fromString()`.
     pub fn fromPreludeName(str: []const u8) ?PrimOp {
-        // The Prelude defines putStr/putStrLn as Haskell functions that
-        // drive lazy evaluation via putChar. Internally they call the
-        // "prim"-prefixed variants. However, NoImplicitPrelude code and
-        // e2e tests may still use `foreign import prim "putStrLn"`, so
-        // both the prim-prefixed and legacy names are accepted.
-        if (std.mem.eql(u8, str, "primPutStrLn")) return .putStrLn_;
         if (std.mem.eql(u8, str, "putStrLn")) return .putStrLn_;
-        if (std.mem.eql(u8, str, "primPutStr")) return .write_stdout;
+        if (std.mem.eql(u8, str, "primPutStrLn")) return .putStrLn_;
         if (std.mem.eql(u8, str, "putStr")) return .write_stdout;
+        if (std.mem.eql(u8, str, "primPutStr")) return .write_stdout;
         if (std.mem.eql(u8, str, "putChar")) return .putChar_;
         if (std.mem.eql(u8, str, "primPutChar")) return .putChar_;
         if (std.mem.eql(u8, str, "print")) return .write_stdout;
-        // Add more Prelude function mappings here as needed
         return null;
     }
 };

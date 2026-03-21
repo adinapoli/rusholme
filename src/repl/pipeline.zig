@@ -469,7 +469,7 @@ pub const Pipeline = struct {
         // session suppression), but Show Int's helper functions (showPosInt,
         // intToDigit) live in the Prelude module and crash when called from
         // JIT-compiled expression code.
-        const enable_show_wrapping = false;
+        const enable_show_wrapping = true;
         if (enable_show_wrapping) {
             // Scope safety: push a transactional scope frame around this
             // attempt.  If it fails, pop the frame to discard any bindings

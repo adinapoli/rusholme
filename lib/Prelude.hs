@@ -33,7 +33,7 @@ foreign import prim "lt_Int"    primLtInt    :: Int -> Int -> Bool
 foreign import prim "le_Int"    primLeInt    :: Int -> Int -> Bool
 foreign import prim "gt_Int"    primGtInt    :: Int -> Int -> Bool
 foreign import prim "ge_Int"    primGeInt    :: Int -> Int -> Bool
-foreign import prim "putChar"       primPutChar  :: Char -> IO ()
+foreign import prim "putChar_"      primPutChar  :: Char -> IO ()
 foreign import prim "primPutStrLn"  primPutStrLn :: String -> IO ()
 foreign import prim "primPutStr"    primPutStr   :: String -> IO ()
 foreign import prim "error"     primError    :: String -> a
@@ -88,27 +88,21 @@ error = primError
 putChar :: Char -> IO ()
 putChar = primPutChar
 
-putStrLn :: String -> IO ()
-putStrLn = primPutStrLn
-
+-- putStr and putStrLn are implemented in Haskell (not as direct prim
+-- wrappers) so that pattern matching on the list spine drives lazy
+-- evaluation.  The prim versions (primPutStr/primPutStrLn) expect
+-- fully-evaluated C strings and cannot handle lazy cons-cell chains
+-- produced by e.g. (++) or show.
 putStr :: String -> IO ()
-putStr = primPutStr
+putStr []     = primPutStr ""
+putStr (x:xs) = do
+    primPutChar x
+    putStr xs
 
--- Haskell-level versions that drive evaluation through pattern matching
--- on the list spine.  Needed for show-wrapping (#612) once JIT cross-
--- module linking is fixed (#618).  Until then, the primop wrappers
--- above are used.
---
--- putStrLazy :: String -> IO ()
--- putStrLazy []     = primPutStr ""
--- putStrLazy (x:xs) = do
---     primPutChar x
---     putStrLazy xs
---
--- putStrLnLazy :: String -> IO ()
--- putStrLnLazy s = do
---     putStrLazy s
---     primPutChar '\n'
+putStrLn :: String -> IO ()
+putStrLn s = do
+    putStr s
+    primPutChar '\n'
 
 -- ========================================================================
 -- Boolean functions

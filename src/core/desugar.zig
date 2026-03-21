@@ -356,12 +356,22 @@ pub fn desugarModule(
                 // Count the function arity from the type (number of top-level arrows).
                 const arity = countFunctionArity(core_ty);
 
-                // Use the raw source string as the Name.base for the inner call.
-                // The LLVM backend's PrimOpMapping dispatches on name.base strings
-                // (e.g. "putStrLn", "add_Int"), so we must preserve the exact string
-                // the user wrote in the foreign import declaration.
+                // Resolve the user-facing name to the canonical PrimOp enum
+                // name.  This normalises aliases: e.g.
+                //   foreign import prim "putStrLn" ...  → "putStrLn_"
+                //   foreign import prim "putStr"  ...  → "write_stdout"
+                // so the LLVM backend's PrimOpMapping only needs to match
+                // canonical names.  Raw enum names (e.g. "add_Int") pass
+                // through unchanged via fromString.
+                const canonical_base = if (primop_mod.PrimOp.fromString(fp.primop_name)) |_|
+                    fp.primop_name
+                else if (primop_mod.PrimOp.fromPreludeName(fp.primop_name)) |op|
+                    op.name()
+                else
+                    fp.primop_name; // validated above — shouldn't reach here
+
                 const primop_name = Name{
-                    .base = fp.primop_name,
+                    .base = canonical_base,
                     .unique = ctx.u_supply.fresh(),
                 };
 

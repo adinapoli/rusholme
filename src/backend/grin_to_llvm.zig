@@ -81,6 +81,16 @@ const known = struct {
 /// Centralized mapping from GRIN Prelude/PrimOp function base names to
 /// their LLVM equivalents.
 const PrimOpMapping = struct {
+    /// The upper bound for built-in unique IDs (from naming/known.zig).
+    /// Names with unique < this are compiler built-ins; names with
+    /// unique >= this are user/Prelude definitions.
+    const builtin_unique_limit = 1000;
+
+    /// True if the Name is a compiler built-in (reserved unique range).
+    fn isBuiltin(n: grin.Name) bool {
+        return n.unique.value < builtin_unique_limit;
+    }
+
     fn lookup(name: grin.Name) ?PrimOpResult {
         // RTS IO function mappings.
         //
@@ -89,12 +99,23 @@ const PrimOpMapping = struct {
         // with `std.io`, so the same source compiles to `write()` for native
         // targets and `wasi_snapshot_preview1::fd_write` for wasm32-wasi —
         // no backend-specific adaptations required.
-        // putStrLn and putStr are Haskell functions (not PrimOps) that
-        // drive lazy evaluation via putChar.  The actual prims use the
-        // "prim" prefix to avoid collision with the Haskell functions.
-        // Both prim-prefixed and legacy names are accepted so that
-        // NoImplicitPrelude code can still use `foreign import prim "putStrLn"`.
-        if (std.mem.eql(u8, name.base, "primPutStrLn") or std.mem.eql(u8, name.base, "putStrLn")) {
+        //
+        // Canonical names ("putStrLn_", "write_stdout", "putChar_") come
+        // from desugar normalisation of `foreign import prim` aliases.
+        // Prim-prefixed names ("primPutStrLn", etc.) come from the
+        // Prelude's internal foreign imports.
+        //
+        // Unprefixed names ("putStrLn", "putStr", "putChar") are matched
+        // ONLY for compiler built-in names (unique < 1000).  When the
+        // Prelude is loaded, it defines Haskell-level putStr/putStrLn
+        // that drive lazy evaluation via pattern matching on the list
+        // spine (#612).  Those have unique >= 1000 and must NOT be
+        // short-circuited to the RTS.
+
+        // ── putStrLn ────────────────────────────────────────────
+        if (std.mem.eql(u8, name.base, "primPutStrLn") or std.mem.eql(u8, name.base, "putStrLn_") or
+            (std.mem.eql(u8, name.base, "putStrLn") and isBuiltin(name)))
+        {
             return .{
                 .libcall = .{
                     .name = "rts_putStrLn",
@@ -104,7 +125,11 @@ const PrimOpMapping = struct {
                 },
             };
         }
-        if (std.mem.eql(u8, name.base, "primPutStr") or std.mem.eql(u8, name.base, "putStr")) {
+        // ── putStr / write_stdout ───────────────────────────────
+        if (std.mem.eql(u8, name.base, "primPutStr") or std.mem.eql(u8, name.base, "write_stdout") or
+            (std.mem.eql(u8, name.base, "putStr") and isBuiltin(name)) or
+            (std.mem.eql(u8, name.base, "print") and isBuiltin(name)))
+        {
             return .{
                 .libcall = .{
                     .name = "rts_putStr",
@@ -114,20 +139,10 @@ const PrimOpMapping = struct {
                 },
             };
         }
-        if (std.mem.eql(u8, name.base, "print")) {
-            return .{
-                .libcall = .{
-                    // tracked in: https://github.com/adinapoli/rusholme/issues/479
-                    // `print` requires Show desugaring; for now, pass the raw
-                    // string representation through rts_putStrLn as a fallback.
-                    .name = "rts_putStrLn",
-                    .return_kind = .i32,
-                    .param_kinds = &.{.ptr},
-                    .arg_strategy = .string_to_global_ptr,
-                },
-            };
-        }
-        if (std.mem.eql(u8, name.base, "putChar") or std.mem.eql(u8, name.base, "primPutChar")) {
+        // ── putChar ─────────────────────────────────────────────
+        if (std.mem.eql(u8, name.base, "primPutChar") or std.mem.eql(u8, name.base, "putChar_") or
+            (std.mem.eql(u8, name.base, "putChar") and isBuiltin(name)))
+        {
             return .{
                 .libcall = .{
                     .name = "rts_putChar",
@@ -371,7 +386,24 @@ const TagTable = struct {
     fn register(self: *TagTable, alloc: std.mem.Allocator, tag: grin.Tag, n_fields: u32) !void {
         const key = tagKey(tag);
         if (self.discriminants.contains(key)) return;
-        try self.discriminants.put(alloc, key, self.next);
+
+        // For constructors, deduplicate by base name: if a constructor with
+        // the same name but a different unique already exists (e.g., the
+        // built-in True with unique 200 vs the Prelude-renamed True with
+        // unique 1103), reuse its discriminant.  This prevents cross-module
+        // discriminant mismatches when comparisons produce Bool heap nodes
+        // with one discriminant but case alternatives expect another.
+        const disc = if (tag.tag_type == .Con)
+            if (self.con_name_to_disc.get(tag.name.base)) |existing_disc|
+                existing_disc
+            else
+                self.next
+        else
+            self.next;
+
+        const is_new = (disc == self.next);
+
+        try self.discriminants.put(alloc, key, disc);
         try self.field_counts.put(alloc, key, n_fields);
         // Default: all fields are ptr (conservative for HPT-lite)
         const types = try alloc.alloc(FieldType, n_fields);
@@ -379,7 +411,7 @@ const TagTable = struct {
         try self.field_types.put(alloc, key, types);
         // Track Con-tags by base name for reverse lookup (findByName).
         if (tag.tag_type == .Con) {
-            try self.con_name_to_disc.put(alloc, tag.name.base, self.next);
+            try self.con_name_to_disc.put(alloc, tag.name.base, disc);
         }
         // Track F-tags for the inline eval loop in translateCase.
         if (tag.tag_type == .Fun) {
@@ -395,7 +427,7 @@ const TagTable = struct {
                 .n_fields = n_fields,
             });
         }
-        self.next += 1;
+        if (is_new) self.next += 1;
     }
 
     /// Return the discriminant for a tag, or null if unknown.
@@ -875,11 +907,22 @@ pub const GrinTranslator = struct {
         }
 
         // Emit __rhc_force(ptr) → ptr once the tag table is complete.
-        // User-defined function Returns call this to force thunks to WHNF.
-        // Only emitted for whole-program (non-REPL) compilation — the REPL
-        // uses inline forceValueToWhnf at the entry-point return instead.
-        if (self.tag_table.fun_tags.count() > 0 and self.repl_entry_point == null) {
-            try self.emitForceFunction();
+        // In whole-program mode, emit it here.  In REPL mode, the JIT
+        // engine manages a shared external __rhc_force via
+        // `emitForceModuleIr` / `emitSharedForceModule` — expression
+        // modules must NOT define it to avoid duplicate-symbol errors.
+        if (self.tag_table.fun_tags.count() > 0) {
+            if (self.repl_entry_point == null) {
+                // Whole-program mode: emit the force function here.
+                try self.emitForceFunction();
+            } else {
+                // REPL mode: declare __rhc_force as external; the shared
+                // force module (emitted by JitEngine) provides the definition.
+                const ptr_ty = ptrType();
+                var param_types = [_]llvm.Type{ptr_ty};
+                const fn_type = c.LLVMFunctionType(ptr_ty, &param_types, 1, 0);
+                _ = llvm.addFunction(self.module, "__rhc_force", fn_type);
+            }
         }
 
         // Emit __rhc_apply(ptr, ptr) → ptr for partial application dispatch.
@@ -965,12 +1008,59 @@ pub const GrinTranslator = struct {
         // that translateDef emits all functions into it.  Restored afterwards.
         const saved_module = self.module;
         self.module = mod;
+
+        // Per-def modules do NOT emit __rhc_force.  They declare it as
+        // external and ORC JIT resolves calls to the shared force module
+        // emitted by `emitForceModuleIr`.  This ensures per-def code can
+        // force thunks with F-tags introduced by later REPL expressions
+        // that the per-def tag table didn't know about at compile time.
+        if (self.tag_table.fun_tags.count() > 0) {
+            // Declare __rhc_force as an external function so that
+            // callForceIfNeeded can find it via LLVMGetNamedFunction.
+            const ptr_ty = ptrType();
+            var param_types = [_]llvm.Type{ptr_ty};
+            const fn_type = c.LLVMFunctionType(ptr_ty, &param_types, 1, 0);
+            _ = llvm.addFunction(mod, "__rhc_force", fn_type);
+        }
+
         for (prog.defs) |def| {
             try self.translateDef(def);
         }
         self.module = saved_module;
 
         return mod;
+    }
+
+    /// Emit a standalone LLVM module containing only `__rhc_force` with
+    /// **external** linkage.  Used by both the native backend (per-module
+    /// compilation) and the REPL JIT engine to provide a single shared
+    /// force function that all other modules can call.
+    ///
+    /// Per-module code declares `__rhc_force` as external; the linker
+    /// (native) or ORC JIT (REPL) resolves calls to this shared copy.
+    ///
+    /// Returns the LLVM module.  Caller must not dispose it if it will be
+    /// linked via `LLVMLinkModules2` (which disposes source modules).
+    pub fn emitForceModule(self: *GrinTranslator) TranslationError!llvm.Module {
+        const mod = llvm.createModule("rhc_force", self.ctx);
+        const saved_module = self.module;
+        self.module = mod;
+        defer self.module = saved_module;
+
+        if (self.tag_table.fun_tags.count() > 0) {
+            try self.emitForceFunction();
+        }
+
+        return mod;
+    }
+
+    /// Like `emitForceModule` but returns LLVM IR text instead of the
+    /// module object.  Used by the REPL JIT engine which parses IR text
+    /// via `LLVMParseIRInContext`.
+    pub fn emitForceModuleIr(self: *GrinTranslator) TranslationError![]u8 {
+        const mod = try self.emitForceModule();
+        return llvm.printModuleToString(mod, self.allocator) catch
+            return error.OutOfMemory;
     }
 
     fn translateDef(self: *GrinTranslator, def: grin.Def) TranslationError!void {
@@ -1303,7 +1393,13 @@ pub const GrinTranslator = struct {
                             // Comparison: wrap i1 result as a Bool heap node
                             return try self.wrapComparisonAsBool(val);
                         }
-                        // Arithmetic: return i64 directly
+                        // Arithmetic/identity: the raw result is i64 or ptr.
+                        // Normalise to ptr so case-alternative phi nodes
+                        // don't mis-box the value as a heap-node tag via
+                        // rts_alloc (which would corrupt the raw Int/Char).
+                        if (c.LLVMGetTypeKind(c.LLVMTypeOf(val)) == c.LLVMIntegerTypeKind) {
+                            return c.LLVMBuildIntToPtr(self.builder, val, ptrType(), "arith_ptr");
+                        }
                         return val;
                     }
                     return c.LLVMConstPointerNull(ptrType());
@@ -1495,7 +1591,18 @@ pub const GrinTranslator = struct {
                     },
                     else => self.emitCharlistToCstring(try self.translateValToLlvm(val)),
                 },
-                .value_passthrough => try self.translateValToLlvm(val),
+                .value_passthrough => blk: {
+                    const raw = try self.translateValToLlvm(val);
+                    // If the argument is a heap pointer it might be an
+                    // unevaluated thunk (F-tag node). Force it to WHNF
+                    // before passing to the RTS function, then coerce to
+                    // i64 so the callee receives a plain value.
+                    if (c.LLVMGetTypeKind(c.LLVMTypeOf(raw)) == c.LLVMPointerTypeKind) {
+                        const forced = self.callForceIfNeeded(raw);
+                        break :blk c.LLVMBuildPtrToInt(self.builder, forced, llvm.i64Type(), "forced_i64");
+                    }
+                    break :blk raw;
+                },
             };
         }
 
@@ -1592,26 +1699,40 @@ pub const GrinTranslator = struct {
             return null;
         }
 
-        // Identity passthrough (intToChar, charToInt) — both are i64, no conversion.
+        // Identity passthrough (intToChar, charToInt) — both are i64 at
+        // the value level, but we return ptr so that case-alternative phi
+        // normalisation does not box the result as a heap node (which would
+        // treat the raw value as a tag discriminant).
+        // Force pointer args in case they are unevaluated thunks (e.g. a
+        // Char extracted from a lazy list produced by `show`).
         if (instr == .identity) {
             if (args.len < 1) return error.UnsupportedGrinVal;
             const operand_raw = try self.translateValToLlvm(args[0]);
-            return if (c.LLVMGetTypeKind(c.LLVMTypeOf(operand_raw)) == c.LLVMPointerTypeKind)
-                c.LLVMBuildPtrToInt(self.builder, operand_raw, llvm.i64Type(), "identity_i64")
-            else
-                operand_raw;
+            if (c.LLVMGetTypeKind(c.LLVMTypeOf(operand_raw)) == c.LLVMPointerTypeKind) {
+                // Already a pointer — force thunks and return as-is.
+                return self.callForceIfNeeded(operand_raw);
+            }
+            // Raw i64 — wrap as ptr to avoid mis-boxing downstream.
+            return c.LLVMBuildIntToPtr(self.builder, operand_raw, ptrType(), "identity_ptr");
         }
 
         // Unary instructions (neg_Int, abs_Int)
         if (instr == .neg or instr == .abs) {
             if (args.len < 1) return error.UnsupportedGrinVal;
             const operand_raw = try self.translateValToLlvm(args[0]);
-            // Coerce operand to i64 if it's a pointer
-            const operand = if (c.LLVMGetTypeKind(c.LLVMTypeOf(operand_raw)) == c.LLVMPointerTypeKind)
-                c.LLVMBuildPtrToInt(self.builder, operand_raw, llvm.i64Type(), "operand_i64")
+            // Force the operand if it's a pointer — it may be an unevaluated
+            // thunk (e.g. F:div).  Without forcing, ptrtoint would give the
+            // heap address instead of the Haskell integer value.
+            const operand_forced = if (c.LLVMGetTypeKind(c.LLVMTypeOf(operand_raw)) == c.LLVMPointerTypeKind)
+                self.callForceIfNeeded(operand_raw)
             else
                 operand_raw;
-            return switch (instr) {
+            const operand = if (c.LLVMGetTypeKind(c.LLVMTypeOf(operand_forced)) == c.LLVMPointerTypeKind)
+                c.LLVMBuildPtrToInt(self.builder, operand_forced, llvm.i64Type(), "operand_i64")
+            else
+                operand_forced;
+            // Return ptr (via inttoptr) — same rationale as binary arithmetic.
+            const raw_unary = switch (instr) {
                 .neg => c.LLVMBuildNeg(self.builder, operand, "neg"),
                 .abs => blk: {
                     // abs(x) = x >= 0 ? x : -x
@@ -1628,6 +1749,7 @@ pub const GrinTranslator = struct {
                 },
                 else => unreachable,
             };
+            return c.LLVMBuildIntToPtr(self.builder, raw_unary, ptrType(), "unary_ptr");
         }
 
         if (args.len < 2) return error.UnsupportedGrinVal;
@@ -1635,18 +1757,36 @@ pub const GrinTranslator = struct {
         const lhs_raw = try self.translateValToLlvm(args[0]);
         const rhs_raw = try self.translateValToLlvm(args[1]);
 
-        // Coerce operands to i64: function parameters are ptr-typed in GRIN,
-        // but arithmetic/comparison primops operate on integer values.
-        const lhs = if (c.LLVMGetTypeKind(c.LLVMTypeOf(lhs_raw)) == c.LLVMPointerTypeKind)
-            c.LLVMBuildPtrToInt(self.builder, lhs_raw, llvm.i64Type(), "lhs_i64")
+        // Force operands if they are pointers — they may be unevaluated
+        // thunks (e.g. F:div).  Without forcing, ptrtoint would give the
+        // heap address instead of the Haskell integer value.
+        const lhs_forced = if (c.LLVMGetTypeKind(c.LLVMTypeOf(lhs_raw)) == c.LLVMPointerTypeKind)
+            self.callForceIfNeeded(lhs_raw)
         else
             lhs_raw;
-        const rhs = if (c.LLVMGetTypeKind(c.LLVMTypeOf(rhs_raw)) == c.LLVMPointerTypeKind)
-            c.LLVMBuildPtrToInt(self.builder, rhs_raw, llvm.i64Type(), "rhs_i64")
+        const rhs_forced = if (c.LLVMGetTypeKind(c.LLVMTypeOf(rhs_raw)) == c.LLVMPointerTypeKind)
+            self.callForceIfNeeded(rhs_raw)
         else
             rhs_raw;
 
-        return switch (instr) {
+        // Coerce operands to i64: function parameters are ptr-typed in GRIN,
+        // but arithmetic/comparison primops operate on integer values.
+        const lhs = if (c.LLVMGetTypeKind(c.LLVMTypeOf(lhs_forced)) == c.LLVMPointerTypeKind)
+            c.LLVMBuildPtrToInt(self.builder, lhs_forced, llvm.i64Type(), "lhs_i64")
+        else
+            lhs_forced;
+        const rhs = if (c.LLVMGetTypeKind(c.LLVMTypeOf(rhs_forced)) == c.LLVMPointerTypeKind)
+            c.LLVMBuildPtrToInt(self.builder, rhs_forced, llvm.i64Type(), "rhs_i64")
+        else
+            rhs_forced;
+
+        // Arithmetic ops return ptr (via inttoptr) so that downstream
+        // case-alternative phi normalisation never sees raw i64 from a
+        // primop — only from true constructor discriminants.  Without
+        // this, the phi path would call rts_alloc(raw_value, 0) and
+        // treat the integer as a tag, corrupting the result.
+        // Comparisons still return i1 (caller wraps as Bool heap node).
+        const raw_result = switch (instr) {
             .add => c.LLVMBuildAdd(self.builder, lhs, rhs, "add"),
             .sub => c.LLVMBuildSub(self.builder, lhs, rhs, "sub"),
             .mul => c.LLVMBuildMul(self.builder, lhs, rhs, "mul"),
@@ -1662,6 +1802,8 @@ pub const GrinTranslator = struct {
             .seq => unreachable, // handled above
             .identity => unreachable, // handled above
         };
+        if (isComparisonOp(instr)) return raw_result; // i1 — caller wraps
+        return c.LLVMBuildIntToPtr(self.builder, raw_result, ptrType(), "arith_ptr");
     }
 
     /// Check whether a primop instruction is a comparison (returns i1/Bool).
@@ -1736,7 +1878,7 @@ pub const GrinTranslator = struct {
                 .Int => |i| c.LLVMConstInt(llvm.i64Type(), @bitCast(@as(i64, i)), 1),
                 .Float => |f| c.LLVMConstReal(c.LLVMDoubleType(), f),
                 .Bool => |b| c.LLVMConstInt(c.LLVMInt1Type(), @intFromBool(b), 0),
-                .Char => |ch| c.LLVMConstInt(llvm.i32Type(), ch, 0),
+                .Char => |ch| c.LLVMConstInt(llvm.i64Type(), ch, 0),
             },
             .Unit => c.LLVMGetUndef(llvm.i32Type()),
             .Var => |name| blk: {
@@ -1921,7 +2063,20 @@ pub const GrinTranslator = struct {
         const scrut_kind = c.LLVMGetTypeKind(scrut_ty);
         const is_ptr = scrut_kind == c.LLVMPointerTypeKind;
 
-        // ── 1b. Inline eval loop (laziness) ────────────────────────────────
+        // ── 1b. Pre-force via __rhc_force ────────────────────────────────
+        //
+        // In REPL mode, per-def modules' inline eval loops only know about
+        // F-tags that existed at Prelude compile time.  Expressions can
+        // introduce new F-tags (e.g., `< 5 10` becomes an F-tagged thunk).
+        // To handle this, pre-force the scrutinee via the shared external
+        // `__rhc_force` which is re-emitted whenever new F-tags appear.
+        //
+        // After pre-forcing, the inline eval loop below is still needed for
+        // non-REPL (whole-program) compilation where `__rhc_force` may not
+        // exist, and for indirection following.
+        const pre_forced = if (is_ptr) self.callForceIfNeeded(scrut_llvm) else scrut_llvm;
+
+        // ── 1c. Inline eval loop (laziness) ────────────────────────────────
         //
         // If the scrutinee is a heap pointer, it may be an unevaluated thunk
         // (F-tag), a saturated partial application (P(0)-tag), or an indirection (Ind).
@@ -1935,7 +2090,7 @@ pub const GrinTranslator = struct {
 
         // The "current scrutinee" used by the rest of the function.
         // For non-pointer scrutinees, no eval loop is needed.
-        var cur_scrut: llvm.Value = scrut_llvm;
+        var cur_scrut: llvm.Value = pre_forced;
         var cur_tag: llvm.Value = undefined;
 
         // Create eval loop if we have F-tags (thunks) or P-tags (partial applications) to force
@@ -1950,10 +2105,26 @@ pub const GrinTranslator = struct {
             // Branch from current block to eval loop.
             _ = c.LLVMBuildBr(self.builder, eval_bb);
 
-            // ── eval.entry: phi + tag load + switch ──────────────────────
+            // ── eval.entry: phi + heap-pointer guard + tag load + switch ──
             llvm.positionBuilderAtEnd(self.builder, eval_bb);
             const phi = c.LLVMBuildPhi(self.builder, ptrType(), "scrut.eval");
 
+            // Heap-pointer guard: only dereference if the pointer looks
+            // like a valid heap node (aligned to 8 bytes AND above page
+            // zero).  Raw integers stored via inttoptr (e.g. literal 42
+            // in an F-tag thunk field) fail this check and go straight
+            // to case dispatch.
+            const eval_check_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.check");
+            const guard_raw_tag = c.LLVMBuildPtrToInt(self.builder, phi, llvm.i64Type(), "eval.ptr_int");
+            {
+                const align_bits = c.LLVMBuildAnd(self.builder, guard_raw_tag, c.LLVMConstInt(llvm.i64Type(), 7, 0), "eval.align");
+                const is_aligned = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, align_bits, c.LLVMConstInt(llvm.i64Type(), 0, 0), "eval.aligned");
+                const is_above_min = c.LLVMBuildICmp(self.builder, c.LLVMIntUGT, guard_raw_tag, c.LLVMConstInt(llvm.i64Type(), 4096, 0), "eval.above_min");
+                const is_heap = c.LLVMBuildAnd(self.builder, is_aligned, is_above_min, "eval.is_heap");
+                _ = c.LLVMBuildCondBr(self.builder, is_heap, eval_check_bb, dispatch_bb);
+            }
+
+            llvm.positionBuilderAtEnd(self.builder, eval_check_bb);
             const header_ty = nodeHeaderType();
             var tag_idx = [_]llvm.Value{
                 c.LLVMConstInt(llvm.i32Type(), 0, 0),
@@ -1989,14 +2160,14 @@ pub const GrinTranslator = struct {
             _ = c.LLVMBuildBr(self.builder, eval_bb);
 
             // ── F-tag cases: force thunk ─────────────────────────────────
-            // Collect all incoming phi values: entry_bb→scrut_llvm, ind_bb→ind_target, plus each ftag_bb→result.
+            // Collect all incoming phi values: entry_bb→pre_forced, ind_bb→ind_target, plus each ftag_bb→result.
             var phi_incoming_vals = std.ArrayListUnmanaged(llvm.Value){};
             defer phi_incoming_vals.deinit(self.allocator);
             var phi_incoming_bbs = std.ArrayListUnmanaged(llvm.BasicBlock){};
             defer phi_incoming_bbs.deinit(self.allocator);
 
-            // First two: entry and ind.
-            phi_incoming_vals.append(self.allocator, scrut_llvm) catch return error.OutOfMemory;
+            // First two: entry (pre-forced) and ind.
+            phi_incoming_vals.append(self.allocator, pre_forced) catch return error.OutOfMemory;
             phi_incoming_bbs.append(self.allocator, entry_bb) catch return error.OutOfMemory;
             phi_incoming_vals.append(self.allocator, ind_target) catch return error.OutOfMemory;
             phi_incoming_bbs.append(self.allocator, ind_bb) catch return error.OutOfMemory;
@@ -2152,9 +2323,17 @@ pub const GrinTranslator = struct {
             );
 
             // Continue from dispatch block with the resolved scrutinee.
+            // Use a phi for the tag: when arriving from eval.check (the
+            // eval switch default), the tag was loaded from the heap node;
+            // when arriving from eval.entry (heap-guard fail), use the
+            // raw ptrtoint value as the "tag" (for LitPat matching).
             llvm.positionBuilderAtEnd(self.builder, dispatch_bb);
+            const tag_phi = c.LLVMBuildPhi(self.builder, llvm.i64Type(), "dispatch.tag");
+            var tag_phi_vals = [_]llvm.Value{ tag_val, guard_raw_tag };
+            var tag_phi_bbs = [_]llvm.BasicBlock{ eval_check_bb, eval_bb };
+            c.LLVMAddIncoming(tag_phi, @ptrCast(&tag_phi_vals), @ptrCast(&tag_phi_bbs), 2);
             cur_scrut = phi;
-            cur_tag = tag_val;
+            cur_tag = tag_phi;
         } else if (is_ptr) {
             // No F-tags in program — just load the tag directly (no eval loop).
             const header_ty = nodeHeaderType();
@@ -2304,7 +2483,13 @@ pub const GrinTranslator = struct {
         const scrut_kind = c.LLVMGetTypeKind(scrut_ty);
         const is_ptr = scrut_kind == c.LLVMPointerTypeKind;
 
-        var cur_scrut: llvm.Value = scrut_llvm;
+        // ── 1b. Pre-force via __rhc_force ────────────────────────────────
+        // Same as translateCase: in REPL mode, per-def modules' inline eval
+        // loops only know about F-tags from Prelude compile time. Pre-force
+        // via the shared external __rhc_force which knows all F-tags.
+        const pre_forced = if (is_ptr) self.callForceIfNeeded(scrut_llvm) else scrut_llvm;
+
+        var cur_scrut: llvm.Value = pre_forced;
         var cur_tag: llvm.Value = undefined;
 
         // Create eval loop if we have F-tags (thunks) or P-tags (partial applications) to force
@@ -2319,6 +2504,19 @@ pub const GrinTranslator = struct {
             llvm.positionBuilderAtEnd(self.builder, eval_bb);
             const phi = c.LLVMBuildPhi(self.builder, ptrType(), "scrut.eval");
 
+            // Heap-pointer guard (same as translateCase): skip eval for
+            // raw integers stored via inttoptr in F-tag thunk fields.
+            const eval_check_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.check");
+            const guard_raw_tag = c.LLVMBuildPtrToInt(self.builder, phi, llvm.i64Type(), "eval.ptr_int");
+            {
+                const align_bits = c.LLVMBuildAnd(self.builder, guard_raw_tag, c.LLVMConstInt(llvm.i64Type(), 7, 0), "eval.align");
+                const is_aligned = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, align_bits, c.LLVMConstInt(llvm.i64Type(), 0, 0), "eval.aligned");
+                const is_above_min = c.LLVMBuildICmp(self.builder, c.LLVMIntUGT, guard_raw_tag, c.LLVMConstInt(llvm.i64Type(), 4096, 0), "eval.above_min");
+                const is_heap = c.LLVMBuildAnd(self.builder, is_aligned, is_above_min, "eval.is_heap");
+                _ = c.LLVMBuildCondBr(self.builder, is_heap, eval_check_bb, dispatch_bb);
+            }
+
+            llvm.positionBuilderAtEnd(self.builder, eval_check_bb);
             const header_ty = nodeHeaderType();
             var tag_idx = [_]llvm.Value{
                 c.LLVMConstInt(llvm.i32Type(), 0, 0),
@@ -2347,7 +2545,8 @@ pub const GrinTranslator = struct {
             var phi_incoming_bbs = std.ArrayListUnmanaged(llvm.BasicBlock){};
             defer phi_incoming_bbs.deinit(self.allocator);
 
-            phi_incoming_vals.append(self.allocator, scrut_llvm) catch return error.OutOfMemory;
+            // Entry uses pre-forced value so external __rhc_force result feeds in.
+            phi_incoming_vals.append(self.allocator, pre_forced) catch return error.OutOfMemory;
             phi_incoming_bbs.append(self.allocator, entry_bb) catch return error.OutOfMemory;
             phi_incoming_vals.append(self.allocator, ind_target) catch return error.OutOfMemory;
             phi_incoming_bbs.append(self.allocator, ind_bb) catch return error.OutOfMemory;
@@ -2429,9 +2628,15 @@ pub const GrinTranslator = struct {
 
             c.LLVMAddIncoming(phi, @ptrCast(phi_incoming_vals.items.ptr), @ptrCast(phi_incoming_bbs.items.ptr), @intCast(phi_incoming_vals.items.len));
 
+            // Tag phi: merge tag_val from eval.check and raw ptrtoint from
+            // eval.entry (heap-guard fail path).
             llvm.positionBuilderAtEnd(self.builder, dispatch_bb);
+            const tag_phi = c.LLVMBuildPhi(self.builder, llvm.i64Type(), "dispatch.tag");
+            var tag_phi_vals = [_]llvm.Value{ tag_val, guard_raw_tag };
+            var tag_phi_bbs = [_]llvm.BasicBlock{ eval_check_bb, eval_bb };
+            c.LLVMAddIncoming(tag_phi, @ptrCast(&tag_phi_vals), @ptrCast(&tag_phi_bbs), 2);
             cur_scrut = phi;
-            cur_tag = tag_val;
+            cur_tag = tag_phi;
         } else if (is_ptr) {
             const header_ty = nodeHeaderType();
             var idx = [_]llvm.Value{ c.LLVMConstInt(llvm.i32Type(), 0, 0), c.LLVMConstInt(llvm.i32Type(), 0, 0) };
@@ -2551,7 +2756,10 @@ pub const GrinTranslator = struct {
                 const val_kind = c.LLVMGetTypeKind(val_ty);
                 const is_i64 = val_kind == c.LLVMIntegerTypeKind and c.LLVMGetIntTypeWidth(val_ty) == 64;
                 const normalized_val: llvm.Value = if (is_i64) blk: {
-                    // Box the i64 discriminant into a 0-field heap node
+                    // Box the i64 value into a 0-field heap node so that
+                    // case analysis can load a tag from the resulting ptr.
+                    // This is needed for nullary constructors whose
+                    // discriminants are i64 values (e.g. True/False).
                     const rts_alloc_fn = declareRtsAlloc(self.module);
                     var alloc_args = [_]llvm.Value{
                         val, // tag discriminant
@@ -3346,6 +3554,32 @@ test "PrimOpMapping: unknown function returns null" {
         .unique = .{ .value = 0 },
     });
     try std.testing.expect(result == null);
+}
+
+test "PrimOpMapping: built-in putStrLn (unique < 1000) maps to rts_putStrLn" {
+    const result = PrimOpMapping.lookup(.{
+        .base = "putStrLn",
+        .unique = .{ .value = 0 }, // Known.Fn.putStrLn
+    });
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("rts_putStrLn", std.mem.span(result.?.libcall.name));
+}
+
+test "PrimOpMapping: Prelude putStrLn (unique >= 1000) is NOT a primop" {
+    const result = PrimOpMapping.lookup(.{
+        .base = "putStrLn",
+        .unique = .{ .value = 1033 }, // Prelude-renamed
+    });
+    try std.testing.expect(result == null);
+}
+
+test "PrimOpMapping: canonical putStrLn_ always maps regardless of unique" {
+    const result = PrimOpMapping.lookup(.{
+        .base = "putStrLn_",
+        .unique = .{ .value = 9999 },
+    });
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("rts_putStrLn", std.mem.span(result.?.libcall.name));
 }
 
 test "TagTable: register and discriminant" {

@@ -2492,12 +2492,18 @@ test "eval: Combined - function that cases on its argument" {
     try testing.expectEqual(@as(i64, 123), result.Lit.Int);
 }
 
-test "PrimOp: fromPreludeName maps Prelude functions to PrimOps" {
+test "PrimOp: fromPreludeName maps IO function aliases to PrimOps" {
     try testing.expectEqual(PrimOp.putStrLn_, PrimOp.fromString("putStrLn_") orelse return);
     try testing.expectEqual(@as(?PrimOp, null), PrimOp.fromString("putStrLn"));
 
-    // fromPreludeName should recognize the high-level name
+    // fromPreludeName maps both user-facing aliases and prim-prefixed
+    // names.  The desugar stage normalises the alias to the canonical
+    // enum name (via op.name()) so downstream stages only see canonical
+    // names in GRIN/LLVM IR.
+    try testing.expectEqual(PrimOp.putStrLn_, PrimOp.fromPreludeName("primPutStrLn") orelse return);
     try testing.expectEqual(PrimOp.putStrLn_, PrimOp.fromPreludeName("putStrLn") orelse return);
+    try testing.expectEqual(PrimOp.write_stdout, PrimOp.fromPreludeName("putStr") orelse return);
+    try testing.expectEqual(PrimOp.putChar_, PrimOp.fromPreludeName("putChar") orelse return);
     try testing.expect(@as(?PrimOp, null) == PrimOp.fromPreludeName("nonexistent"));
 }
 

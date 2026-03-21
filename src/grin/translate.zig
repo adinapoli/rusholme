@@ -1208,26 +1208,34 @@ fn wrapWithLazyBindsForFunc(
                 // applications (where the function is a parameter variable)
                 // cannot be thunked because F-tag dispatch requires a
                 // statically known function name in the function table.
-                if (ctx.getFunctionArity(app.name)) |arity| {
-                    if (app.args.len == arity and arity > 0) {
-                        // Fully-saturated application with arguments:
-                        // store as lazy thunk (F-tag node).
-                        //
-                        // Zero-arity calls (e.g. dictionary bindings like
-                        // dict$ShowIt$A) are NOT wrapped as thunks because
-                        // the callee immediately scrutinizes the result via
-                        // Case and does not force F-tagged nodes. Eagerly
-                        // evaluating them avoids a force/eval round-trip.
-                        const ftag = GrinTag{ .tag_type = .{ .Fun = {} }, .name = app.name };
-                        const store_expr = try ctx.alloc.create(GrinExpr);
-                        // Copy the arguments into a new allocation for the heap node
-                        const stored_node = try ctx.alloc.alloc(GrinVal, app.args.len);
-                        @memcpy(stored_node, app.args);
-                        store_expr.* = .{ .Store = .{ .ConstTagNode = .{
-                            .tag = ftag,
-                            .fields = stored_node,
-                        } } };
-                        break :b store_expr;
+                //
+                // Primop applications (e.g. charToInt, intToChar) must
+                // remain eager — they compile to inline instructions, not
+                // heap-allocated thunks.
+                const is_primop = PrimOp.fromString(app.name.base) != null or
+                    PrimOp.fromPreludeName(app.name.base) != null;
+                if (!is_primop) {
+                    if (ctx.getFunctionArity(app.name)) |arity| {
+                        if (app.args.len == arity and arity > 0) {
+                            // Fully-saturated application with arguments:
+                            // store as lazy thunk (F-tag node).
+                            //
+                            // Zero-arity calls (e.g. dictionary bindings like
+                            // dict$ShowIt$A) are NOT wrapped as thunks because
+                            // the callee immediately scrutinizes the result via
+                            // Case and does not force F-tagged nodes. Eagerly
+                            // evaluating them avoids a force/eval round-trip.
+                            const ftag = GrinTag{ .tag_type = .{ .Fun = {} }, .name = app.name };
+                            const store_expr = try ctx.alloc.create(GrinExpr);
+                            // Copy the arguments into a new allocation for the heap node
+                            const stored_node = try ctx.alloc.alloc(GrinVal, app.args.len);
+                            @memcpy(stored_node, app.args);
+                            store_expr.* = .{ .Store = .{ .ConstTagNode = .{
+                                .tag = ftag,
+                                .fields = stored_node,
+                            } } };
+                            break :b store_expr;
+                        }
                     }
                 }
                 // Higher-order application (function is a parameter variable):
