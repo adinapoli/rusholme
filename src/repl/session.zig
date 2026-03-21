@@ -201,7 +201,13 @@ pub const Session = struct {
             .ty_env = ty_env,
             .mv_supply = .{},
             .next_file_id = 1,
-            .pipeline = Pipeline.init(allocator, io),
+            .pipeline = blk: {
+                var p = Pipeline.init(allocator, io);
+                // Disable show-wrapping on WASM: the GrinEngine tree-walker
+                // can't execute cross-module Prelude Show functions.
+                if (is_wasi) p.enable_show_wrapping = false;
+                break :blk p;
+            },
             .engine = if (is_wasi) GrinEngine.init(allocator, io) else JitEngine.init(allocator) catch return SessionError.InitFailed,
             .last_diagnostics = .{},
             .accumulated_defs = .{},
