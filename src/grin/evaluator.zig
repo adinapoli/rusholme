@@ -503,33 +503,6 @@ pub const GrinEvaluator = struct {
         return val;
     }
 
-    /// Deep-force a Val to normal form by recursively forcing all fields
-    /// of data constructors.  Runtime equivalent of Haskell's `rnf` from
-    /// `Control.DeepSeq`.
-    ///
-    /// Not used for REPL display (that uses Haskell's `show`).  This is
-    /// a general utility for future `seq`/`deepseq`/bang pattern support.
-    pub fn deepForceVal(self: *GrinEvaluator, val: Val, depth: u32) EvalError!Val {
-        const max_depth: u32 = 128;
-        if (depth >= max_depth) return val;
-
-        const whnf = try self.forceVal(val);
-        switch (whnf) {
-            .ConstTagNode => |ctn| {
-                if (ctn.tag.tag_type != .Con) return whnf;
-                if (ctn.fields.len == 0) return whnf;
-
-                var forced_fields = try self.allocator.alloc(Val, ctn.fields.len);
-                for (ctn.fields, 0..) |field, i| {
-                    forced_fields[i] = try self.deepForceVal(field, depth + 1);
-                }
-                try self.trackAllocation(forced_fields);
-                return Val{ .ConstTagNode = .{ .tag = ctn.tag, .fields = forced_fields } };
-            },
-            else => return whnf,
-        }
-    }
-
     /// Read a node from the heap.
     pub fn readNode(self: GrinEvaluator, ptr: HeapPtr) ?HeapNode {
         return self.heap.read(ptr);

@@ -467,6 +467,14 @@ fn patchEntryPointName(allocator: Allocator, program: *const grin_ast.Program, t
 fn formatJitResult(allocator: Allocator, raw: i64, tags: KnownTags) Allocator.Error![]const u8 {
     // Raw 0 is the Unit value (IO actions return 0 for `()`).
     // Suppress display, matching GHCi which doesn't print `()`.
+    //
+    // Known limitation: the Haskell integer `0` is also raw 0 (via
+    // inttoptr(0) = null), so bare `0` displays as empty in the
+    // non-show-wrapped path.  With show-wrapping enabled, `0` is
+    // printed via `putStrLn (show 0)` as a side effect, and this
+    // check only sees the Unit return from putStrLn.  A proper fix
+    // requires a distinct Unit representation (e.g. a tagged heap
+    // node), tracked in #621.
     if (raw == 0) return allocator.dupe(u8, "");
 
     const as_usize: usize = @bitCast(raw);

@@ -1112,12 +1112,13 @@ fn renameExpr(expr: ast.Expr, env: *RenameEnv) RenameError!RExpr {
             const then_r = try renameExpr(i.then_expr.*, env);
             const else_r = try renameExpr(i.else_expr.*, env);
 
-            const true_name = env.scope.lookup("True") orelse
-                return error.OutOfMemory; // True must be in scope
-            const false_name = env.scope.lookup("False") orelse
-                return error.OutOfMemory; // False must be in scope
-
             const span = i.condition.getSpan();
+
+            // Resolve True/False via the standard `resolve` path so that
+            // a missing Bool (e.g. under NoImplicitPrelude) produces a
+            // proper `unbound_variable` diagnostic instead of crashing.
+            const true_name = try env.resolve("True", span);
+            const false_name = try env.resolve("False", span);
 
             var alts = try env.alloc.alloc(RAlt, 2);
             alts[0] = .{

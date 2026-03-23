@@ -38,7 +38,6 @@ const unique_mod = @import("../naming/unique.zig");
 const UniqueSupply = unique_mod.UniqueSupply;
 const Name = unique_mod.Name;
 
-
 const infer_mod = @import("../typechecker/infer.zig");
 const htype_mod = @import("../typechecker/htype.zig");
 const env_mod = @import("../typechecker/env.zig");

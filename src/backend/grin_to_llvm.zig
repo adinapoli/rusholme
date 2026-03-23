@@ -81,14 +81,11 @@ const known = struct {
 /// Centralized mapping from GRIN Prelude/PrimOp function base names to
 /// their LLVM equivalents.
 const PrimOpMapping = struct {
-    /// The upper bound for built-in unique IDs (from naming/known.zig).
-    /// Names with unique < this are compiler built-ins; names with
-    /// unique >= this are user/Prelude definitions.
-    const builtin_unique_limit = 1000;
+    const naming_known = @import("../naming/known.zig");
 
     /// True if the Name is a compiler built-in (reserved unique range).
     fn isBuiltin(n: grin.Name) bool {
-        return n.unique.value < builtin_unique_limit;
+        return n.unique.value < naming_known.reserved_range_end;
     }
 
     fn lookup(name: grin.Name) ?PrimOpResult {

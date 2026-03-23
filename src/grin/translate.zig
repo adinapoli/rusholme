@@ -868,16 +868,27 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
 
                 const m_grin = try translateExpr(ctx, m_core);
 
-                // The continuation `f` is typically a lambda-lifted function name.
-                // Translate it to get its GRIN name, then emit App(f, [x]).
+                // The continuation `f` must be a lambda-lifted function name
+                // (a Var) or a zero-arity call (App).  Lambda lifting turns
+                // all do-notation continuations (`\x -> body`) into named
+                // top-level functions.  If this fails, it indicates a bug in
+                // the lambda lifter — the continuation was not lifted.
                 const f_grin = try translateExpr(ctx, f_core);
                 const f_name = switch (f_grin.*) {
                     .Return => |ret| switch (ret) {
                         .Var => |name| name,
-                        else => return error.CannotExtractValue,
+                        else => {
+                            std.log.err(">>=: continuation resolved to Return({s}), expected Var " ++
+                                "(lambda lifting may have failed to lift a do-notation continuation)", .{@tagName(ret)});
+                            return error.CannotExtractValue;
+                        },
                     },
-                    .App => |app| app.name, // zero-arity function call
-                    else => return error.CannotExtractValue,
+                    .App => |app| app.name,
+                    else => {
+                        std.log.err(">>=: continuation is {s}, expected Return(Var) or App " ++
+                            "(lambda lifting may have failed to lift a do-notation continuation)", .{@tagName(f_grin.*)});
+                        return error.CannotExtractValue;
+                    },
                 };
 
                 const bind_var = try ctx.freshName("bind_res");
