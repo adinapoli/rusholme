@@ -140,7 +140,7 @@ pub const InferCtx = struct {
     type_con_names: ?*const std.StringHashMapUnmanaged(Name) = null,
 
     /// Class and instance environment, populated from ClassDecl/InstanceDecl
-    /// in Pass 0b of `inferModule`. Used for class constraint resolution.
+    /// in Pass 0a of `inferModule`. Used for class constraint resolution.
     class_env: ClassEnv,
 
     /// Accumulated class constraints from polymorphic scheme instantiation.
@@ -189,6 +189,18 @@ pub const InferCtx = struct {
         const node = try self.alloc.create(HType);
         node.* = ty;
         return node;
+    }
+
+    /// Create an HType value that acts as a forwarding indirection to the
+    /// given arena node.  Embedding this in a `Con.args` slice (which stores
+    /// HType by value) preserves the mutation chain: when the unifier chases
+    /// the indirection meta, it reaches the original arena node and writes
+    /// the solution there — visible to *all* observers.
+    ///
+    /// Without this, Con args are value copies; unification of a copy leaves
+    /// the original arena meta unsolved (severing the pointer graph).
+    pub fn conArgIndirection(self: *InferCtx, target: *HType) HType {
+        return HType{ .Meta = .{ .id = self.mv_supply.fresh().id, .ref = target } };
     }
 
     /// Immediately unify two arena-allocated nodes.
@@ -516,7 +528,7 @@ fn astTypeToHTypeWithScope(
             var args = std.ArrayListUnmanaged(HType){};
             for (parts[1..]) |arg| {
                 const arg_p = try astTypeToHTypeWithScope(arg.*, ctx, scope);
-                try args.append(ctx.alloc, arg_p.*);
+                try args.append(ctx.alloc, ctx.conArgIndirection(arg_p));
             }
 
             const args_slice = try args.toOwnedSlice(ctx.alloc);
@@ -524,7 +536,7 @@ fn astTypeToHTypeWithScope(
         },
         .List => |inner| blk: {
             const inner_p = try astTypeToHTypeWithScope(inner.*, ctx, scope);
-            const args = try ctx.alloc.dupe(HType, &.{inner_p.*});
+            const args = try ctx.alloc.dupe(HType, &.{ctx.conArgIndirection(inner_p)});
             break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
         },
         .Tuple => |parts| blk: {
@@ -532,7 +544,7 @@ fn astTypeToHTypeWithScope(
             var elem_tys = std.ArrayListUnmanaged(HType){};
             for (parts) |part| {
                 const ty = try astTypeToHTypeWithScope(part.*, ctx, scope);
-                try elem_tys.append(ctx.alloc, ty.*);
+                try elem_tys.append(ctx.alloc, ctx.conArgIndirection(ty));
             }
 
             const args = try elem_tys.toOwnedSlice(ctx.alloc);
@@ -658,12 +670,35 @@ fn skolemiseSignature(
 
     switch (ast_ty) {
         .Forall => |fa| {
-            // Explicit forall: create fresh rigids for each binder.
-            for (fa.tyvars) |tv| {
-                const rigid_name = ctx.u_supply.freshName(tv);
-                const rigid_node = try ctx.alloc_ty(HType{ .Rigid = rigid_name });
-                try scope.put(ctx.alloc, tv, rigid_node);
-                try skolem_ids.append(ctx.alloc, rigid_name.unique.value);
+            if (fa.tyvars.len > 0) {
+                // Explicit forall: create fresh rigids for each binder.
+                for (fa.tyvars) |tv| {
+                    const rigid_name = ctx.u_supply.freshName(tv);
+                    const rigid_node = try ctx.alloc_ty(HType{ .Rigid = rigid_name });
+                    try scope.put(ctx.alloc, tv, rigid_node);
+                    try skolem_ids.append(ctx.alloc, rigid_name.unique.value);
+                }
+            } else {
+                // Parser-generated Forall from context-only syntax
+                // (e.g. `Show a => [a] -> String` without explicit forall).
+                // Collect free type variables from both context and body
+                // as implicit forall binders (Haskell 2010 §4.1.2).
+                var free_vars = std.ArrayListUnmanaged([]const u8){};
+                defer free_vars.deinit(ctx.alloc);
+                try collectFreeTypeVars(fa.type.*, &free_vars, ctx.alloc);
+                if (fa.context) |fctx| {
+                    for (fctx.constraints) |assertion| {
+                        for (assertion.types) |ty| {
+                            try collectFreeTypeVars(ty, &free_vars, ctx.alloc);
+                        }
+                    }
+                }
+                for (free_vars.items) |tv| {
+                    const rigid_name = ctx.u_supply.freshName(tv);
+                    const rigid_node = try ctx.alloc_ty(HType{ .Rigid = rigid_name });
+                    try scope.put(ctx.alloc, tv, rigid_node);
+                    try skolem_ids.append(ctx.alloc, rigid_name.unique.value);
+                }
             }
 
             // Convert context assertions to ClassConstraints.
@@ -938,7 +973,7 @@ pub fn inferPat(ctx: *InferCtx, pat: RPat) std.mem.Allocator.Error!*HType {
             var elem_tys = std.ArrayListUnmanaged(HType){};
             for (pats) |p| {
                 const pt = try inferPat(ctx, p);
-                try elem_tys.append(ctx.alloc, pt.*);
+                try elem_tys.append(ctx.alloc, ctx.conArgIndirection(pt));
             }
             const args = try elem_tys.toOwnedSlice(ctx.alloc);
             const tuple_name = switch (args.len) {
@@ -966,14 +1001,14 @@ pub fn inferPat(ctx: *InferCtx, pat: RPat) std.mem.Allocator.Error!*HType {
                 };
                 try ctx.unifyNow(pt, elem_ty, pat_span);
             }
-            const args = try ctx.alloc.dupe(HType, &.{elem_ty.*});
+            const args = try ctx.alloc.dupe(HType, &.{ctx.conArgIndirection(elem_ty)});
             break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
         },
         .InfixCon => |ic| blk: {
             const left_ty = try inferPat(ctx, ic.left.*);
             const right_ty = try inferPat(ctx, ic.right.*);
             const elem_ty = try ctx.freshMeta();
-            const list_args = try ctx.alloc.dupe(HType, &.{elem_ty.*});
+            const list_args = try ctx.alloc.dupe(HType, &.{ctx.conArgIndirection(elem_ty)});
             const list_ty = try ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = list_args } });
             try ctx.unifyNow(left_ty, elem_ty, ic.con_span);
             try ctx.unifyNow(right_ty, list_ty, ic.con_span);
@@ -1075,6 +1110,11 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                 // Record the variable's unique so the desugarer can key evidence
                 // back to this specific call site.
                 for (inst.wanted) |wc| {
+                    const meta_id: u32 = switch (wc.ty.*) {
+                        .Meta => |mv| mv.id,
+                        else => 9999,
+                    };
+                    std.debug.print("accumulate constraint: var={s}_{d} class={s} meta_id={d} ty_ptr={*}\n", .{ v.name.base, v.name.unique.value, wc.class_name.base, meta_id, wc.ty });
                     try ctx.wanted_constraints.append(ctx.alloc, .{ .Class = .{
                         .class_name = wc.class_name,
                         .ty = wc.ty,
@@ -1084,6 +1124,7 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                 }
                 break :blk try ctx.alloc_ty(inst.ty);
             }
+            std.debug.print("UNBOUND VAR: {s} unique={d}\n", .{ v.name.base, v.name.unique.value });
             const msg = try std.fmt.allocPrint(
                 ctx.alloc,
                 "unbound variable `{s}` in typechecker (renamer bug?)",
@@ -1350,7 +1391,7 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
             var elem_tys = std.ArrayListUnmanaged(HType){};
             for (elems) |e| {
                 const et = try infer(ctx, e);
-                try elem_tys.append(ctx.alloc, et.*);
+                try elem_tys.append(ctx.alloc, ctx.conArgIndirection(et));
             }
             const args = try elem_tys.toOwnedSlice(ctx.alloc);
             const tuple_name = switch (args.len) {
@@ -1386,7 +1427,7 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                 };
                 try ctx.unifyNow(et, elem_ty, elem_span);
             }
-            const args = try ctx.alloc.dupe(HType, &.{elem_ty.*});
+            const args = try ctx.alloc.dupe(HType, &.{ctx.conArgIndirection(elem_ty)});
             break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
         },
 
@@ -1537,21 +1578,21 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
         // a later milestone.
         .EnumFrom => |e| blk: {
             const elem_ty = try infer(ctx, e.from.*);
-            const args = try ctx.alloc.dupe(HType, &.{elem_ty.*});
+            const args = try ctx.alloc.dupe(HType, &.{ctx.conArgIndirection(elem_ty)});
             break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
         },
         .EnumFromThen => |e| blk: {
             const from_ty = try infer(ctx, e.from.*);
             const then_ty = try infer(ctx, e.then.*);
             try ctx.unifyNow(from_ty, then_ty, e.span);
-            const args = try ctx.alloc.dupe(HType, &.{from_ty.*});
+            const args = try ctx.alloc.dupe(HType, &.{ctx.conArgIndirection(from_ty)});
             break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
         },
         .EnumFromTo => |e| blk: {
             const from_ty = try infer(ctx, e.from.*);
             const to_ty = try infer(ctx, e.to.*);
             try ctx.unifyNow(from_ty, to_ty, e.span);
-            const args = try ctx.alloc.dupe(HType, &.{from_ty.*});
+            const args = try ctx.alloc.dupe(HType, &.{ctx.conArgIndirection(from_ty)});
             break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
         },
         .EnumFromThenTo => |e| blk: {
@@ -1560,7 +1601,7 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
             const to_ty = try infer(ctx, e.to.*);
             try ctx.unifyNow(from_ty, then_ty, e.span);
             try ctx.unifyNow(from_ty, to_ty, e.span);
-            const args = try ctx.alloc.dupe(HType, &.{from_ty.*});
+            const args = try ctx.alloc.dupe(HType, &.{ctx.conArgIndirection(from_ty)});
             break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
         },
 
@@ -1775,7 +1816,25 @@ fn inferLetDecl(
 
             // If there's a type signature, check the inferred type against it.
             if (sig) |s| {
+                const fn_chased = fun_node.*.chase();
+                const sig_chased = s.ty.*.chase();
+                std.debug.print("SIG UNIFY for {s}_{d}: fun_node={s} sig={s}\n", .{
+                    fb.name.base,
+                    fb.name.unique.value,
+                    @tagName(fn_chased),
+                    @tagName(sig_chased),
+                });
                 try ctx.unifyNow(fun_node, s.ty, fb.span);
+                // Check constraint metas after unification
+                for (ctx.wanted_constraints.items) |wc| {
+                    switch (wc) {
+                        .Class => |cc| {
+                            const after_chase = cc.ty.*.chase();
+                            std.debug.print("  after sig-unify: constraint class={s} chased={s}\n", .{ cc.class_name.base, @tagName(after_chase) });
+                        },
+                        .Eq => {},
+                    }
+                }
             }
 
             // If there's a signature, build the TyScheme directly from
@@ -1887,47 +1946,7 @@ pub fn inferModule(
 
     ctx.type_con_names = &type_con_names;
 
-    // Pass 0a: Collect type signatures and convert them to HType.
-    var sigs = std.AutoHashMapUnmanaged(naming_mod.Unique, TypeSigEntry){};
-    defer sigs.deinit(ctx.alloc);
-
-    for (module.declarations) |decl| {
-        if (decl == .TypeSig) {
-            const ts = decl.TypeSig;
-
-            // Skolemise the signature: top-level forall binders become rigids.
-            // This enables bidirectional checking where the signature enforces
-            // rigidity of type variables (not just metavariables).
-            const skolem_result = try skolemiseSignature(ts.type, ctx);
-
-            // Bind for all names in the signature (Haskell allows multiple names per signature)
-            for (ts.names) |name| {
-                try sigs.put(ctx.alloc, name.unique, .{
-                    .name = name,
-                    .ty = skolem_result.ty,
-                    .loc = ts.span,
-                    .skolem_ids = skolem_result.skolem_ids,
-                    .constraints = skolem_result.constraints,
-                });
-            }
-        } else if (decl == .ForeignPrim) {
-            const fp = decl.ForeignPrim;
-
-            // Foreign prim declarations carry their own type signature.
-            // Skolemise and register it in the same sigs map as TypeSig.
-            const skolem_result = try skolemiseSignature(fp.type, ctx);
-
-            try sigs.put(ctx.alloc, fp.name.unique, .{
-                .name = fp.name,
-                .ty = skolem_result.ty,
-                .loc = fp.span,
-                .skolem_ids = skolem_result.skolem_ids,
-                .constraints = skolem_result.constraints,
-            });
-        }
-    }
-
-    // Pass 0b: Register class declarations and instance declarations in ClassEnv.
+    // Pass 0a: Register class declarations and instance declarations in ClassEnv.
     //
     // For each ClassDecl, we:
     //   1. Create a rigid type variable for the class parameter
@@ -2051,6 +2070,49 @@ pub fn inferModule(
         }
     }
 
+    // Pass 0b: Collect type signatures and convert them to HType.
+    //
+    // Must run after Pass 0a so that class names are in ClassEnv when
+    // skolemising constrained signatures (e.g. `Show a => [a] -> String`).
+    var sigs = std.AutoHashMapUnmanaged(naming_mod.Unique, TypeSigEntry){};
+    defer sigs.deinit(ctx.alloc);
+
+    for (module.declarations) |decl| {
+        if (decl == .TypeSig) {
+            const ts = decl.TypeSig;
+
+            // Skolemise the signature: top-level forall binders become rigids.
+            // This enables bidirectional checking where the signature enforces
+            // rigidity of type variables (not just metavariables).
+            const skolem_result = try skolemiseSignature(ts.type, ctx);
+
+            // Bind for all names in the signature (Haskell allows multiple names per signature)
+            for (ts.names) |name| {
+                try sigs.put(ctx.alloc, name.unique, .{
+                    .name = name,
+                    .ty = skolem_result.ty,
+                    .loc = ts.span,
+                    .skolem_ids = skolem_result.skolem_ids,
+                    .constraints = skolem_result.constraints,
+                });
+            }
+        } else if (decl == .ForeignPrim) {
+            const fp = decl.ForeignPrim;
+
+            // Foreign prim declarations carry their own type signature.
+            // Skolemise and register it in the same sigs map as TypeSig.
+            const skolem_result = try skolemiseSignature(fp.type, ctx);
+
+            try sigs.put(ctx.alloc, fp.name.unique, .{
+                .name = fp.name,
+                .ty = skolem_result.ty,
+                .loc = fp.span,
+                .skolem_ids = skolem_result.skolem_ids,
+                .constraints = skolem_result.constraints,
+            });
+        }
+    }
+
     // Snapshot env free metas before any top-level binders are added.
     // All top-level bindings are mutually recursive peers, so they share
     // this one snapshot for the active-variables check during generalisation.
@@ -2070,11 +2132,29 @@ pub fn inferModule(
                 try ctx.env.bindMono(fb.name, node.*);
                 try ctx.local_binders.put(ctx.alloc, fb.name.unique, node);
                 try top_metas.put(ctx.alloc, fb.name.unique, node);
+
+                // If this function has a type signature with class constraints,
+                // also bind the polymorphic scheme so that recursive calls
+                // instantiate it and produce wanted constraints.  Without this,
+                // lookupScheme returns the mono binding (0 binders), the Var
+                // case returns the mono pointer, and no evidence is generated
+                // for the recursive call — causing the desugarer to omit the
+                // dictionary argument.
+                if (sigs.get(fb.name.unique)) |sig_entry| {
+                    if (sig_entry.constraints.len > 0) {
+                        const scheme = TyScheme{
+                            .binders = sig_entry.skolem_ids,
+                            .constraints = sig_entry.constraints,
+                            .body = sig_entry.ty.*,
+                        };
+                        try ctx.env.bind(fb.name, scheme);
+                    }
+                }
             },
             .PatBind => |pb| try assignPatMetas(ctx, pb.pattern, &top_metas),
             .TypeSig => {},
-            .ClassDecl => {}, // Handled in Pass 0b
-            .InstanceDecl => {}, // Handled in Pass 0b
+            .ClassDecl => {}, // Handled in Pass 0a
+            .InstanceDecl => {}, // Handled in Pass 0a
             .ForeignPrim => |fp| {
                 // Foreign prim declarations have a mandatory type signature.
                 // Allocate a fresh meta and bind it, just like FunBind.
@@ -2160,6 +2240,8 @@ pub fn inferModule(
                 const fun_node = top_metas.get(fb.name.unique) orelse continue;
                 const sig_entry = sigs.get(fb.name.unique);
 
+                std.debug.print("PASS2 FunBind {s}_{d}: has_sig={any}\n", .{ fb.name.base, fb.name.unique.value, sig_entry != null });
+
                 for (fb.equations) |eq| {
                     const eq_ty = try inferMatch(ctx, eq);
 
@@ -2173,6 +2255,49 @@ pub fn inferModule(
                     } else {
                         // Otherwise, unify against the fresh meta node.
                         try ctx.unifyNow(fun_node, eq_ty, fb.span);
+                    }
+                }
+
+                // Check constraint states after body inference + sig unify
+                if (sig_entry != null) {
+                    for (ctx.wanted_constraints.items) |wc| {
+                        switch (wc) {
+                            .Class => |cc| {
+                                const after_chase = cc.ty.*.chase();
+                                switch (after_chase) {
+                                    .Meta => |mv| {
+                                        // Trace the full chain
+                                        var chain_buf: [16]u32 = undefined;
+                                        var chain_len: usize = 0;
+                                        var cur = cc.ty.*;
+                                        while (chain_len < 16) {
+                                            switch (cur) {
+                                                .Meta => |m| {
+                                                    chain_buf[chain_len] = m.id;
+                                                    chain_len += 1;
+                                                    if (m.ref) |next| {
+                                                        cur = next.*;
+                                                    } else break;
+                                                },
+                                                .Rigid => |r| {
+                                                    std.debug.print("  after {s}: constraint {s} chain ends at Rigid({s}_{d})\n", .{ fb.name.base, cc.class_name.base, r.base, r.unique.value });
+                                                    break;
+                                                },
+                                                else => {
+                                                    std.debug.print("  after {s}: constraint {s} chain ends at {s}\n", .{ fb.name.base, cc.class_name.base, @tagName(cur) });
+                                                    break;
+                                                },
+                                            }
+                                        }
+                                        std.debug.print("  after {s}: constraint {s} dead at Meta(id={d}) chain_len={d}\n", .{ fb.name.base, cc.class_name.base, mv.id, chain_len });
+                                    },
+                                    else => {
+                                        std.debug.print("  after {s}: constraint {s} chased={s}\n", .{ fb.name.base, cc.class_name.base, @tagName(after_chase) });
+                                    },
+                                }
+                            },
+                            .Eq => {},
+                        }
                     }
                 }
 
@@ -2200,8 +2325,8 @@ pub fn inferModule(
                 try ctx.unifyNow(rhs_ty, pat_ty, pb.span);
             },
             .TypeSig => {},
-            .ClassDecl => {}, // Handled in Pass 0b
-            .InstanceDecl => {}, // Handled in Pass 0b
+            .ClassDecl => {}, // Handled in Pass 0a
+            .InstanceDecl => {}, // Handled in Pass 0a
             .DataDecl => {},
             .ForeignPrim => |fp| {
                 // Foreign prim has no body to infer — just unify the meta
@@ -2225,6 +2350,30 @@ pub fn inferModule(
     // accumulated class constraints.  This resolves instances and fills in
     // DictEvidence on each Constraint.Class entry.
     if (ctx.wanted_constraints.items.len > 0) {
+        for (ctx.wanted_constraints.items) |wc| {
+            switch (wc) {
+                .Class => |cc| {
+                    const chased = cc.ty.*.chase();
+                    switch (chased) {
+                        .Meta => |mv| {
+                            const raw = cc.ty.*;
+                            const raw_id: u32 = switch (raw) {
+                                .Meta => |rmv| rmv.id,
+                                else => 9999,
+                            };
+                            const raw_ref: bool = switch (raw) {
+                                .Meta => |rmv| rmv.ref != null,
+                                else => false,
+                            };
+                            std.debug.print("pre-solve constraint: class={s} raw_id={d} raw_ref={any} chased_id={d} chased_ref={any} ty_ptr={*}\n", .{ cc.class_name.base, raw_id, raw_ref, mv.id, mv.ref != null, cc.ty });
+                        },
+                        .Rigid => |r| std.debug.print("pre-solve constraint: class={s} ty=Rigid({s}_{d}) ty_ptr={*}\n", .{ cc.class_name.base, r.base, r.unique.value, cc.ty }),
+                        else => std.debug.print("pre-solve constraint: class={s} ty=Other ty_ptr={*}\n", .{ cc.class_name.base, cc.ty }),
+                    }
+                },
+                .Eq => {},
+            }
+        }
         try solver_mod.solve(
             ctx.wanted_constraints.items,
             ctx.alloc,
@@ -2393,7 +2542,7 @@ fn monadTy(ctx: *InferCtx, inner: *const HType) std.mem.Allocator.Error!*HType {
         } });
     } else {
         // Fallback to IO for backward compatibility (M1)
-        const args = try ctx.alloc.dupe(HType, &.{inner.*});
+        const args = try ctx.alloc.dupe(HType, &.{ctx.conArgIndirection(@constCast(inner))});
         return ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.IO, .args = args } });
     }
 }

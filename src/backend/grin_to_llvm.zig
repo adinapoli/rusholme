@@ -1021,6 +1021,7 @@ pub const GrinTranslator = struct {
         }
 
         for (prog.defs) |def| {
+            std.debug.print("translateDef: {s}_{d} params={d}\n", .{ def.name.base, def.name.unique.value, def.params.len });
             try self.translateDef(def);
         }
         self.module = saved_module;
@@ -1069,15 +1070,17 @@ pub const GrinTranslator = struct {
         // this stage and all heap values are pointers.
         const is_entry = self.isEntryPoint(def.name.base);
         const is_repl_entry = if (self.repl_entry_point) |ep| std.mem.eql(u8, def.name.base, ep) else false;
-        const is_repl_mode = self.repl_entry_point != null;
-        const has_params = def.params.len > 0;
         const value_type = if (is_entry) (if (is_repl_entry) llvm.i64Type() else llvm.i32Type()) else ptrType();
-        // In REPL mode, all non-entry functions (including zero-arity ones
-        // like dictionary bindings) return ptr so that cross-module forward
-        // declarations via the ORC linker match (#578).
-        // In batch mode, zero-arity non-entry functions return void (original
-        // behaviour) since the batch linker resolves them differently.
-        const ret_type = if (is_entry) value_type else if (has_params or is_repl_mode) value_type else llvm.voidType();
+        // All non-entry functions return ptr — including zero-arity CAFs
+        // (e.g. dictionary bindings like `dict$Show$Int`).  These are
+        // constant applicative forms that compute and return a heap node.
+        //
+        // Previously, batch mode used `void` for zero-arity functions, but
+        // this caused an LLVM type mismatch when cross-module dictionary
+        // passing called `dict$Show$Int()` and expected a `ptr` return.
+        // Using `ptr` uniformly matches the REPL convention and is correct
+        // because every GRIN function produces a value (#618).
+        const ret_type = if (is_entry) value_type else ptrType();
 
         // Parameter types: i32 for main (no params), ptr for all others.
         var param_types: [8]llvm.Type = undefined;
@@ -1089,7 +1092,21 @@ pub const GrinTranslator = struct {
         const fn_name_z = self.formatName(def.name);
         // Check if function was already forward-declared; if so, reuse it.
         // This prevents LLVM from adding .1 suffix due to name collision.
-        const func = c.LLVMGetNamedFunction(self.module, fn_name_z) orelse
+        const existing_fn = c.LLVMGetNamedFunction(self.module, fn_name_z);
+        if (existing_fn != null) {
+            // Check if forward-declared type matches
+            const existing_type = llvm.getFunctionType(existing_fn.?);
+            const existing_param_count = c.LLVMCountParamTypes(existing_type);
+            std.debug.print("  translateDef {s}: REUSING existing fn, existing_params={d}, def_params={d}\n", .{
+                def.name.base, existing_param_count, def.params.len,
+            });
+            if (existing_param_count != def.params.len) {
+                std.debug.print("  WARNING: param count mismatch! Forward-declared with {d} params but def has {d}\n", .{
+                    existing_param_count, def.params.len,
+                });
+            }
+        }
+        const func = existing_fn orelse
             llvm.addFunction(self.module, fn_name_z, fn_type);
         self.current_func = func;
         const entry_bb = llvm.appendBasicBlock(func, "entry");
@@ -1114,12 +1131,13 @@ pub const GrinTranslator = struct {
         //   - REPL entry points return `i64` (raw value or heap pointer)
         //   - Native `main` falls through to the void/unit path below
         //
-        // In REPL mode, zero-parameter functions (e.g. dictionary bindings
-        // like dict$ShowIt$A) must also return their value so cross-module
-        // references via the ORC linker work correctly (#578).
+        // All non-entry functions (including zero-arity CAFs like dictionary
+        // bindings) compute and return a ptr value.  Zero-arity CAFs are
+        // constant applicative forms that construct heap nodes and return
+        // them.  This applies uniformly in both batch and REPL modes (#618).
         //
         // See: https://github.com/adinapoli/rusholme/issues/449
-        if ((!is_entry and (has_params or is_repl_mode)) or is_repl_entry) {
+        if (!is_entry or is_repl_entry) {
             const body_val = try self.translateExprToValue(def.body, "result");
             const current_bb = c.LLVMGetInsertBlock(self.builder);
             if (current_bb != null and c.LLVMGetBasicBlockTerminator(current_bb) == null) {
@@ -1345,6 +1363,21 @@ pub const GrinTranslator = struct {
         args: []const grin.Val,
         result_name: []const u8,
     ) TranslationError!?llvm.Value {
+        std.debug.print("translateAppToValue: {s}_{d} args={d}\n", .{ name.base, name.unique.value, args.len });
+        // Debug: check if function and args are in params
+        if (self.params.get(name.unique.value) != null) {
+            std.debug.print("  callee from params (indirect call)\n", .{});
+        }
+        for (args[0..@min(args.len, 8)], 0..) |arg, i| {
+            switch (arg) {
+                .Var => |v| {
+                    const in_params = self.params.get(v.unique.value) != null;
+                    std.debug.print("  arg[{d}]: Var {s}_{d} in_params={any}\n", .{ i, v.base, v.unique.value, in_params });
+                },
+                else => std.debug.print("  arg[{d}]: {s}\n", .{ i, @tagName(arg) }),
+            }
+        }
+
         if (std.mem.eql(u8, name.base, "pure")) {
             // `pure` is a no-op in M1 — the argument is the value.
             if (args.len > 0) {
@@ -1408,8 +1441,11 @@ pub const GrinTranslator = struct {
         var llvm_args: [8]llvm.Value = undefined;
         const arg_count = @min(args.len, 8);
         for (args[0..arg_count], 0..) |val, i| {
+            std.debug.print("  translating arg[{d}] tag={s}...\n", .{ i, @tagName(val) });
             llvm_args[i] = try self.translateValToLlvm(val);
+            std.debug.print("  translated arg[{d}] => 0x{x}\n", .{ i, @intFromPtr(llvm_args[i]) });
         }
+        std.debug.print("  all args translated OK\n", .{});
 
         // Detect calls to `main` from the REPL entry point.
         // `main` was compiled with an i32 return type (C ABI exit code),
@@ -1447,8 +1483,15 @@ pub const GrinTranslator = struct {
         // translated to i64 by translateValToLlvm, but GRIN functions use
         // opaque ptr for all parameters.
         for (0..arg_count) |i| {
+            if (@intFromPtr(llvm_args[i]) == 0) {
+                std.debug.print("  NULL llvm_arg[{d}]! arg={s}\n", .{ i, @tagName(args[i]) });
+                return null;
+            }
+            std.debug.print("  coerce arg[{d}]: llvm_val=0x{x}, getting type...\n", .{ i, @intFromPtr(llvm_args[i]) });
             const arg_ty = c.LLVMTypeOf(llvm_args[i]);
+            std.debug.print("  coerce arg[{d}]: arg_ty=0x{x}, getting kind...\n", .{ i, @intFromPtr(arg_ty) });
             const arg_kind = c.LLVMGetTypeKind(arg_ty);
+            std.debug.print("  coerce arg[{d}]: kind={d}\n", .{ i, arg_kind });
             if (arg_kind == c.LLVMIntegerTypeKind) {
                 if (args[i] == .ValTag) {
                     // Nullary constructors (e.g. MkA, True, False) are
@@ -1481,7 +1524,10 @@ pub const GrinTranslator = struct {
         //   2. Named LLVM function (direct call to a known def).
         //   3. Forward-declare and call (for functions not yet translated).
         const func: llvm.Value = blk: {
-            if (self.params.get(name.unique.value)) |fn_ptr| break :blk fn_ptr;
+            if (self.params.get(name.unique.value)) |fn_ptr| {
+                std.debug.print("  func resolved from params, null={any}\n", .{@intFromPtr(fn_ptr) == 0});
+                break :blk fn_ptr;
+            }
             const fn_name_z = self.formatName(name);
             if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |existing| break :blk existing;
             break :blk llvm.addFunction(self.module, fn_name_z, fn_type);
@@ -1493,7 +1539,6 @@ pub const GrinTranslator = struct {
             name_buf[result_name.len] = 0;
             break :blk name_buf[0..result_name.len :0];
         } else "";
-
         return c.LLVMBuildCall2(
             self.builder,
             fn_type,
@@ -1916,19 +1961,42 @@ pub const GrinTranslator = struct {
                 //    This handles passing named functions as arguments, e.g.:
                 //      map_it identity xs  =>  identity becomes a global function ptr.
                 const fn_name_z = self.formatName(name);
-                if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |fn_val| {
-                    break :blk fn_val;
-                }
-                // Cross-module function reference: forward-declare as
-                // external so the ORC linker can resolve it from a
-                // previously-loaded module. This mirrors the pattern
-                // used by translateApp for unknown function calls.
-                // Look up arity to create correct signature (issue #595).
+
+                // Look up arity to decide whether this is a CAF (arity 0)
+                // or a higher-order function reference.
                 const arity = if (self.arity_map) |map| map.get(name.unique.value) orelse 0 else 0;
-                var param_types: [8]llvm.Type = undefined;
-                for (0..arity) |i| param_types[i] = ptrType();
-                const ext_fn_type = llvm.functionType(ptrType(), param_types[0..arity], false);
-                break :blk llvm.addFunction(self.module, fn_name_z, ext_fn_type);
+
+                const fn_val = if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |fv|
+                    fv
+                else blk2: {
+                    // Cross-module function reference: forward-declare as
+                    // external so the ORC linker can resolve it from a
+                    // previously-loaded module. This mirrors the pattern
+                    // used by translateApp for unknown function calls.
+                    var param_types: [8]llvm.Type = undefined;
+                    for (0..arity) |i| param_types[i] = ptrType();
+                    const ext_fn_type = llvm.functionType(ptrType(), param_types[0..arity], false);
+                    break :blk2 llvm.addFunction(self.module, fn_name_z, ext_fn_type);
+                };
+
+                // Zero-arity CAFs (e.g. dictionary bindings like
+                // dict$Show$Int) must be CALLED to produce their value,
+                // every time they are referenced.
+                // Higher-arity functions are returned as function pointers
+                // for higher-order use (e.g. `map f xs`).
+                if (arity == 0) {
+                    var caf_param_types: [0]llvm.Type = undefined;
+                    const caf_fn_type = llvm.functionType(ptrType(), &caf_param_types, false);
+                    break :blk c.LLVMBuildCall2(
+                        self.builder,
+                        caf_fn_type,
+                        fn_val,
+                        null,
+                        0,
+                        "caf_val",
+                    );
+                }
+                break :blk fn_val;
             },
             .ConstTagNode => |ctn| blk: {
                 // Allocate a heap node and return the pointer.
@@ -2476,6 +2544,11 @@ pub const GrinTranslator = struct {
 
         // ── 1. Obtain scrutinee and force to WHNF (same as translateCase) ──
         const scrut_llvm = try self.translateValToLlvm(scrutinee);
+        if (@intFromPtr(scrut_llvm) == 0) {
+            std.debug.print("translateCaseToValue: null scrutinee! val={s}\n", .{@tagName(scrutinee)});
+            if (scrutinee == .Var) std.debug.print("  var name={s}_{d}\n", .{ scrutinee.Var.base, scrutinee.Var.unique.value });
+            return null;
+        }
         const scrut_ty = c.LLVMTypeOf(scrut_llvm);
         const scrut_kind = c.LLVMGetTypeKind(scrut_ty);
         const is_ptr = scrut_kind == c.LLVMPointerTypeKind;

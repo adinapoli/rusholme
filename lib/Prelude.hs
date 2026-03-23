@@ -12,7 +12,7 @@ module Prelude
     , putChar, putStr, putStrLn
     , error
     , intToChar, charToInt
-    , Show(..), show, showString
+    , Show(..), show, showString, showListWith, showListTail
     , intToDigit
     ) where
 
@@ -270,13 +270,13 @@ showPosInt n = case n < 10 of
 
 -- ── Show helpers for lists ──────────────────────────────────────────
 
--- showListTail :: Show a => [a] -> String
--- showListTail []     = "]"
--- showListTail (x:xs) = ',' : show x ++ showListTail xs
---
--- showListWith :: Show a => [a] -> String
--- showListWith []     = "[]"
--- showListWith (x:xs) = '[' : show x ++ showListTail xs
+showListTail :: Show a => [a] -> String
+showListTail []     = "]"
+showListTail (x:xs) = ',' : show x ++ showListTail xs
+
+showListWith :: Show a => [a] -> String
+showListWith []     = "[]"
+showListWith (x:xs) = '[' : show x ++ showListTail xs
 
 -- Monomorphic string display (avoids dictionary-passing, see #618).
 -- showLitString must precede showString (callee before caller, #566).
