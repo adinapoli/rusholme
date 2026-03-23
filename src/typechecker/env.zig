@@ -119,7 +119,7 @@ pub const TyScheme = struct {
             subst[i] = .{ .id = id, .node = node };
         }
 
-        const ty = (try instantiateType(self.body, subst, alloc)).*;
+        const ty = (try instantiateType(self.body, subst, alloc, supply)).*;
 
         // Instantiate constraints: substitute binders with fresh metas.
         // IMPORTANT: we store the pointer returned by instantiateType, not
@@ -130,7 +130,7 @@ pub const TyScheme = struct {
         var wanted = try alloc.alloc(ClassConstraint, self.constraints.len);
         var found_any_rigid = false;
         for (self.constraints, 0..) |c, i| {
-            const inst_ty = try instantiateType(c.ty.*, subst, alloc);
+            const inst_ty = try instantiateType(c.ty.*, subst, alloc, supply);
             wanted[i] = .{
                 .class_name = c.class_name,
                 .ty = inst_ty,
@@ -186,11 +186,12 @@ fn instantiateType(
     ty: HType,
     subst: []const SubstEntry,
     alloc: std.mem.Allocator,
+    supply: ?*MetaVarSupply,
 ) std.mem.Allocator.Error!*HType {
     switch (ty) {
         .Meta => |mv| {
             // Follow any solution chain before substituting.
-            if (mv.ref) |next| return instantiateType(next.*, subst, alloc);
+            if (mv.ref) |next| return instantiateType(next.*, subst, alloc, supply);
             // Unsolved metavar — allocate a fresh copy to preserve arena ownership.
             const node = try alloc.create(HType);
             node.* = ty;
@@ -211,22 +212,31 @@ fn instantiateType(
         .Con => |c| {
             const new_args = try alloc.alloc(HType, c.args.len);
             for (c.args, 0..) |arg, i| {
-                new_args[i] = (try instantiateType(arg, subst, alloc)).*;
+                const arg_node = try instantiateType(arg, subst, alloc, supply);
+                // Create a Meta indirection that points to the arena node
+                // returned by instantiateType.  Without this, Con args are
+                // value copies; unification of a copy leaves the original
+                // arena meta unsolved (severing the pointer graph).
+                if (supply) |s| {
+                    new_args[i] = HType{ .Meta = .{ .id = s.fresh().id, .ref = arg_node } };
+                } else {
+                    new_args[i] = arg_node.*;
+                }
             }
             const node = try alloc.create(HType);
             node.* = HType{ .Con = .{ .name = c.name, .args = new_args } };
             return node;
         },
         .AppTy => |at| {
-            const new_head = try instantiateType(at.head.*, subst, alloc);
-            const new_arg = try instantiateType(at.arg.*, subst, alloc);
+            const new_head = try instantiateType(at.head.*, subst, alloc, supply);
+            const new_arg = try instantiateType(at.arg.*, subst, alloc, supply);
             const node = try alloc.create(HType);
             node.* = HType{ .AppTy = .{ .head = new_head, .arg = new_arg } };
             return node;
         },
         .Fun => |f| {
-            const new_arg = try instantiateType(f.arg.*, subst, alloc);
-            const new_res = try instantiateType(f.res.*, subst, alloc);
+            const new_arg = try instantiateType(f.arg.*, subst, alloc, supply);
+            const new_res = try instantiateType(f.res.*, subst, alloc, supply);
             const node = try alloc.create(HType);
             node.* = HType{ .Fun = .{ .arg = new_arg, .res = new_res } };
             return node;
@@ -253,7 +263,7 @@ fn instantiateType(
                     break;
                 }
             }
-            const new_body = try instantiateType(fa.body.*, inner_subst, alloc);
+            const new_body = try instantiateType(fa.body.*, inner_subst, alloc, supply);
             const node = try alloc.create(HType);
             node.* = HType{ .ForAll = .{ .binder = fa.binder, .body = new_body } };
             return node;

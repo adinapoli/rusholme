@@ -192,7 +192,22 @@ pub const SerialisedCoreType = struct {
 
 // ── SerialisedScheme ────────────────────────────────────────────────────
 
-/// A JSON-serialisable type scheme: `forall b0 b1 … . body`.
+/// A serialisable class constraint: `ClassName tyvar`.
+///
+/// Captures the class name (base + unique) and the constrained type
+/// variable's unique ID.  The type variable must reference one of the
+/// scheme's `binder_uniques` — at deserialisation time, we reconstruct
+/// a `ClassConstraint` pointing to the corresponding `Rigid` node.
+pub const SerialisedConstraint = struct {
+    /// Base name of the class (e.g. `"Show"`, `"Eq"`).
+    class_name: []const u8,
+    /// Unique ID of the class name.
+    class_unique: u64,
+    /// Unique ID of the constrained type variable (must appear in binder_uniques).
+    tyvar_unique: u64,
+};
+
+/// A JSON-serialisable type scheme: `forall b0 b1 … . constraints => body`.
 ///
 /// `binder_uniques` holds the unique IDs of the universally-quantified
 /// rigid variables (matching `TyScheme.binders`).
@@ -201,6 +216,8 @@ pub const SerialisedScheme = struct {
     binder_uniques: []const u64,
     /// Base names of the `forall`-bound rigid variables (parallel to binder_uniques).
     binder_names: []const []const u8,
+    /// Class constraints on the type variables (e.g. `Show a =>`).
+    constraints: []const SerialisedConstraint,
     /// The body type.
     body: SerialisedCoreType,
 };
@@ -390,6 +407,24 @@ fn buildExportedValue(
         binder_names[i] = try rigidNameFromBody(scheme.body, uid, alloc);
     }
 
+    // Serialize class constraints.
+    const s_constraints = try alloc.alloc(SerialisedConstraint, scheme.constraints.len);
+    for (scheme.constraints, 0..) |cc, i| {
+        // Chase the constraint type to find the underlying rigid variable.
+        const chased = cc.ty.chase();
+        const tyvar_unique: u64 = switch (chased) {
+            .Rigid => |r| r.unique.value,
+            // Non-rigid constraints (e.g. concrete types) shouldn't appear
+            // in generalised schemes, but handle gracefully.
+            else => 0,
+        };
+        s_constraints[i] = .{
+            .class_name = cc.class_name.base,
+            .class_unique = cc.class_name.unique.value,
+            .tyvar_unique = tyvar_unique,
+        };
+    }
+
     // Convert the HType body to CoreType.
     const core_ty = try scheme.body.toCore(alloc);
     const s_body = try SerialisedCoreType.fromCoreType(core_ty, alloc);
@@ -400,6 +435,7 @@ fn buildExportedValue(
         .scheme = .{
             .binder_uniques = binder_uniques,
             .binder_names = binder_names,
+            .constraints = s_constraints,
             .body = s_body,
         },
     };
@@ -552,6 +588,14 @@ fn deepCopyExportedValue(alloc: std.mem.Allocator, src: ExportedValue) std.mem.A
     for (src.scheme.binder_names, 0..) |n, i| {
         binder_names[i] = try alloc.dupe(u8, n);
     }
+    const constraints = try alloc.alloc(SerialisedConstraint, src.scheme.constraints.len);
+    for (src.scheme.constraints, 0..) |c, i| {
+        constraints[i] = .{
+            .class_name = try alloc.dupe(u8, c.class_name),
+            .class_unique = c.class_unique,
+            .tyvar_unique = c.tyvar_unique,
+        };
+    }
     const body = try deepCopySerialisedCoreType(alloc, src.scheme.body);
     return ExportedValue{
         .name = try alloc.dupe(u8, src.name),
@@ -559,6 +603,7 @@ fn deepCopyExportedValue(alloc: std.mem.Allocator, src: ExportedValue) std.mem.A
         .scheme = .{
             .binder_uniques = binder_uniques,
             .binder_names = binder_names,
+            .constraints = constraints,
             .body = body,
         },
     };
@@ -879,6 +924,7 @@ test "ModIface: writeRhi / readRhi round-trip (value binding)" {
             .scheme = .{
                 .binder_uniques = &.{5},
                 .binder_names = &.{"a"},
+                .constraints = &.{},
                 .body = s_body,
             },
         }},

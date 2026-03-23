@@ -36,6 +36,11 @@ pub const DesugarCtx = struct {
     /// class constraints (e.g., `(Eq a, Ord a) =>`).
     evidence_map: EvidenceMap = .empty,
 
+    /// Maps class unique → dictionary parameter Name for the current
+    /// function.  Populated by `wrapWithDictLambdas`, consumed by
+    /// `buildDictExpr` (.param case) to reference the correct binder.
+    dict_param_names: std.AutoHashMapUnmanaged(u64, Name) = .{},
+
     /// The `True` constructor name, extracted from the renamed module's
     /// `data Bool` declaration. Used by guard desugaring to build
     /// `case cond of { True -> rhs ; _ -> fallback }`.
@@ -229,6 +234,19 @@ pub fn desugarModule(
                             break;
                         }
                     }
+                }
+
+                // Pre-populate dict_param_names so that buildDictExpr (.param
+                // case) can reference the correct binder unique when desugaring
+                // the body.  wrapWithDictLambdas will then reuse these names
+                // instead of generating fresh ones.
+                ctx.dict_param_names.clearRetainingCapacity();
+                for (scheme.constraints) |constraint| {
+                    const dpn = Name{
+                        .base = try std.fmt.allocPrint(alloc, "dict${s}", .{constraint.class_name.base}),
+                        .unique = ctx.u_supply.fresh(),
+                    };
+                    try ctx.dict_param_names.put(alloc, constraint.class_name.unique.value, dpn);
                 }
 
                 if (needs_match_compiler) {
@@ -921,12 +939,13 @@ fn buildEvidenceMap(ctx: *DesugarCtx) std.mem.Allocator.Error!void {
             .Class => |cc| {
                 const ev = cc.evidence orelse continue;
                 const vu = cc.var_unique orelse continue;
-                try ctx.evidence_map.put(ctx.alloc, .{
+                const key = DesugarCtx.EvidenceKey{
                     .var_unique = vu.value,
                     .span_start_line = cc.span.start.line,
                     .span_start_col = cc.span.start.column,
                     .class_unique = cc.class_name.unique.value,
-                }, ev);
+                };
+                try ctx.evidence_map.put(ctx.alloc, key, ev);
             },
             .Eq => {},
         }
@@ -956,8 +975,9 @@ fn wrapWithDictLambdas(
         i -= 1;
         const constraint = scheme.constraints[i];
 
-        // Generate a fresh name for the dictionary parameter.
-        const dict_param_name = Name{
+        // Reuse the pre-populated name if available (set before body desugaring),
+        // otherwise generate a fresh one.
+        const dict_param_name = ctx.dict_param_names.get(constraint.class_name.unique.value) orelse Name{
             .base = try std.fmt.allocPrint(alloc, "dict${s}", .{constraint.class_name.base}),
             .unique = ctx.u_supply.fresh(),
         };
@@ -1038,11 +1058,17 @@ fn buildDictExpr(
         },
         .param => |p| {
             // Reference the dictionary parameter of the enclosing function.
+            // Look up the actual unique from dict_param_names, which was
+            // populated by wrapWithDictLambdas when the enclosing function's
+            // dictionary lambda was created.
             const node = try alloc.create(ast_mod.Expr);
-            const dict_param_name = Name{
-                .base = try std.fmt.allocPrint(alloc, "dict${s}", .{p.class_name.base}),
-                .unique = .{ .value = 0 }, // Placeholder — the actual unique is assigned by wrapWithDictLambdas
-            };
+            const dict_param_name = if (ctx.dict_param_names.get(p.class_name.unique.value)) |name|
+                name
+            else
+                Name{
+                    .base = try std.fmt.allocPrint(alloc, "dict${s}", .{p.class_name.base}),
+                    .unique = .{ .value = 0 },
+                };
             node.* = .{ .Var = .{
                 .name = dict_param_name,
                 .ty = ast_mod.CoreType{ .TyCon = .{
@@ -1404,13 +1430,6 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                 // arguments.
                 const evidences = try findEvidenceForVar(ctx, v.name.unique.value, v.span, scheme);
                 if (evidences.len > 0) {
-                    // Build an App chain: showIt dict1 dict2 ...
-                    // `node` holds the Var; each iteration wraps in a new App
-                    // whose fn_expr points to the *previous* outermost node.
-                    // We must NOT copy the final App back into `node` because
-                    // the App's fn_expr already points to `node` — that would
-                    // create a self-referential cycle.  Instead, return the
-                    // outermost App directly.
                     var current: *const ast_mod.Expr = node;
                     for (evidences) |ev| {
                         const dict_arg = try buildDictExpr(ctx, ev, v.span);
@@ -1426,6 +1445,32 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                 }
             } else {
                 std.debug.panic("Variable {s} (id {d}) not found in type definitions", .{ v.name.base, v.name.unique.value });
+            }
+
+            // Even for variables found in local_binders, check if there's a
+            // polymorphic scheme with constraints.  This handles recursive
+            // calls to constrained functions: `showListTail` is in
+            // local_binders (mono binding from Pass 1) but also has a scheme
+            // with `Show a =>` constraints.  Without this, the dictionary
+            // argument is omitted from the recursive call.
+            if (ctx.types.schemes.get(v.name.unique)) |scheme| {
+                if (scheme.constraints.len > 0) {
+                    const evidences = try findEvidenceForVar(ctx, v.name.unique.value, v.span, scheme);
+                    if (evidences.len > 0) {
+                        var current: *const ast_mod.Expr = node;
+                        for (evidences) |ev| {
+                            const dict_arg = try buildDictExpr(ctx, ev, v.span);
+                            const app_node = try alloc.create(ast_mod.Expr);
+                            app_node.* = .{ .App = .{
+                                .fn_expr = current,
+                                .arg = dict_arg,
+                                .span = v.span,
+                            } };
+                            current = app_node;
+                        }
+                        return @constCast(current);
+                    }
+                }
             }
         },
         .Lit => |l| {

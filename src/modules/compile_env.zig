@@ -353,7 +353,9 @@ pub const CompileEnv = struct {
                 .base = ev.name,
                 .unique = .{ .value = ev.unique },
             };
-            const scheme = try deserialiseTyScheme(ty_env.alloc, ev.scheme);
+            const scheme = deserialiseTyScheme(ty_env.alloc, ev.scheme) catch {
+                continue;
+            };
             try ty_env.bind(name, scheme);
         }
         for (iface.data_decls) |dd| {
@@ -817,6 +819,12 @@ pub fn injectImplicitPrelude(
 /// Since serialised types contain no metavariables (they were fully solved
 /// at the time of serialisation), the result contains only `Rigid` and `Con`
 /// nodes — safe to feed directly into the typechecker's `TyEnv`.
+///
+/// Class constraints are reconstructed from the serialised form: each
+/// constraint gets a fresh `Rigid` HType node matching its type variable
+/// binder, and a synthetic zero span (the original span is not needed
+/// downstream — the desugarer keys evidence by call-site span, not by
+/// the constraint's definition-site span).
 fn deserialiseTyScheme(
     alloc: std.mem.Allocator,
     s: mod_iface.SerialisedScheme,
@@ -824,9 +832,37 @@ fn deserialiseTyScheme(
     const core_ty = try s.body.toCoreType(alloc);
     const hty = try coreTypeToHType(alloc, core_ty);
     const binders = try alloc.dupe(u64, s.binder_uniques);
+
+    // Reconstruct class constraints from the serialised form.
+    const constraints = try alloc.alloc(class_env_mod.ClassConstraint, s.constraints.len);
+    for (s.constraints, 0..) |sc, i| {
+        // Find the binder name corresponding to the type variable unique.
+        var tyvar_name: []const u8 = "_tv";
+        for (s.binder_uniques, s.binder_names) |bu, bn| {
+            if (bu == sc.tyvar_unique) {
+                tyvar_name = bn;
+                break;
+            }
+        }
+        // Allocate a Rigid node for the constrained type variable.
+        const rigid = try alloc.create(htype_mod.HType);
+        rigid.* = .{ .Rigid = .{
+            .base = tyvar_name,
+            .unique = .{ .value = sc.tyvar_unique },
+        } };
+        constraints[i] = .{
+            .class_name = .{
+                .base = sc.class_name,
+                .unique = .{ .value = sc.class_unique },
+            },
+            .ty = rigid,
+            .span = .{ .start = span_mod.SourcePos.invalid(), .end = span_mod.SourcePos.invalid() },
+        };
+    }
+
     return env_mod.TyScheme{
         .binders = binders,
-        .constraints = &.{},
+        .constraints = constraints,
         .body = hty,
     };
 }
