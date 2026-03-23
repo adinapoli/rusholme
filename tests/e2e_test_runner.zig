@@ -307,3 +307,7 @@ test "e2e: e2e_show_basic" {
 test "e2e: e2e_showcase" {
     try testE2e(std.testing.allocator, "e2e_showcase");
 }
+
+test "e2e: e2e_factorial (#624)" {
+    try testE2e(std.testing.allocator, "e2e_factorial");
+}
