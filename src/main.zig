@@ -890,6 +890,22 @@ fn emitNative(
         try llvm_modules.append(arena_alloc, llvm_mod);
     }
 
+    // Emit the shared __rhc_force module.  Per-module code declares
+    // __rhc_force as external; this module provides the definition.
+    // The force module must be emitted after all per-module translations
+    // so the tag table is fully populated with all F-tags.
+    {
+        const force_mod = translator.emitForceModule() catch |err| {
+            var stderr_buf: [4096]u8 = undefined;
+            var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+            const stderr = &stderr_fw.interface;
+            try stderr.print("rhc: failed to emit __rhc_force module: {}\n", .{err});
+            try stderr.flush();
+            std.process.exit(1);
+        };
+        try llvm_modules.append(arena_alloc, force_mod);
+    }
+
     // ── In-process bitcode linking ──────────────────────────────────────
     // Merge all per-module LLVM modules into one for object emission.
     // LLVMLinkModules2 disposes source modules; only the destination survives.
@@ -1011,6 +1027,19 @@ fn emitJit(
             std.process.exit(1);
         };
         try llvm_modules.append(arena_alloc, llvm_mod);
+    }
+
+    // Emit the shared __rhc_force module (same as native backend).
+    {
+        const force_mod = translator.emitForceModule() catch |err| {
+            var stderr_buf: [4096]u8 = undefined;
+            var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+            const stderr = &stderr_fw.interface;
+            try stderr.print("rhc: failed to emit __rhc_force module: {}\n", .{err});
+            try stderr.flush();
+            std.process.exit(1);
+        };
+        try llvm_modules.append(arena_alloc, force_mod);
     }
 
     // ── In-process bitcode linking ──────────────────────────────────────
@@ -1155,6 +1184,19 @@ fn emitWasm(
             std.process.exit(1);
         };
         try llvm_modules.append(arena_alloc, llvm_mod);
+    }
+
+    // Emit the shared __rhc_force module (same as native backend).
+    {
+        const force_mod = translator.emitForceModule() catch |err| {
+            var stderr_buf: [4096]u8 = undefined;
+            var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+            const stderr = &stderr_fw.interface;
+            try stderr.print("rhc: failed to emit __rhc_force module: {}\n", .{err});
+            try stderr.flush();
+            std.process.exit(1);
+        };
+        try llvm_modules.append(arena_alloc, force_mod);
     }
 
     // ── In-process bitcode linking ──────────────────────────────────────

@@ -375,8 +375,18 @@ pub const GrinEvaluator = struct {
     /// IO interface for PrimOp IO operations.
     io: std.Io,
 
+    /// The True constructor name, resolved from the program's tags.
+    /// Comparison primops produce Bool values using these names so that
+    /// case dispatch matches the constructors declared in the Prelude's
+    /// `data Bool = False | True` (which have renamer-assigned uniques,
+    /// not the hardcoded Known.Con.True/False values).
+    true_name: Name,
+    false_name: Name,
+
     /// Initialize a new evaluator with the given program.
     pub fn init(allocator: Allocator, program: *const Program, io: std.Io) error{OutOfMemory}!GrinEvaluator {
+        const known = @import("../naming/known.zig");
+
         var heap = Heap.init(allocator);
         errdefer heap.deinit();
 
@@ -388,13 +398,58 @@ pub const GrinEvaluator = struct {
 
         try funcs.populate(program);
 
+        // Scan the program for True/False constructor tags.
+        // The Prelude's `data Bool` assigns fresh uniques via the renamer;
+        // we must use those same names so primop Bool results match case
+        // alternatives compiled from Prelude code.
+        var true_name = known.Con.True;
+        var false_name = known.Con.False;
+        for (program.defs) |def| {
+            scanForBoolNames(def.body.*, &true_name, &false_name);
+        }
+
         return .{
             .heap = heap,
             .env = env,
             .funcs = funcs,
             .allocator = allocator,
             .io = io,
+            .true_name = true_name,
+            .false_name = false_name,
         };
+    }
+
+    /// Scan a GRIN expression for constructor tags named "True"/"False"
+    /// and record their (renamer-assigned) Names.
+    fn scanForBoolNames(expr: ast.Expr, true_name: *Name, false_name: *Name) void {
+        switch (expr) {
+            .Case => |case_expr| {
+                for (case_expr.alts) |alt| {
+                    switch (alt.pat) {
+                        .TagPat => |tag| {
+                            if (tag.tag_type == .Con) {
+                                if (std.mem.eql(u8, tag.name.base, "True")) true_name.* = tag.name;
+                                if (std.mem.eql(u8, tag.name.base, "False")) false_name.* = tag.name;
+                            }
+                        },
+                        .NodePat => |np| {
+                            if (np.tag.tag_type == .Con) {
+                                if (std.mem.eql(u8, np.tag.name.base, "True")) true_name.* = np.tag.name;
+                                if (std.mem.eql(u8, np.tag.name.base, "False")) false_name.* = np.tag.name;
+                            }
+                        },
+                        .LitPat, .DefaultPat => {},
+                    }
+                    scanForBoolNames(alt.body.*, true_name, false_name);
+                }
+            },
+            .Bind => |bnd| {
+                scanForBoolNames(bnd.lhs.*, true_name, false_name);
+                scanForBoolNames(bnd.rhs.*, true_name, false_name);
+            },
+            .Block => |blk| scanForBoolNames(blk.*, true_name, false_name),
+            else => {},
+        }
     }
 
     /// Deallocate the evaluator and all its state.
@@ -446,33 +501,6 @@ pub const GrinEvaluator = struct {
             return self.fetchHeapVal(val);
         }
         return val;
-    }
-
-    /// Deep-force a Val to normal form by recursively forcing all fields
-    /// of data constructors.  Runtime equivalent of Haskell's `rnf` from
-    /// `Control.DeepSeq`.
-    ///
-    /// Not used for REPL display (that uses Haskell's `show`).  This is
-    /// a general utility for future `seq`/`deepseq`/bang pattern support.
-    pub fn deepForceVal(self: *GrinEvaluator, val: Val, depth: u32) EvalError!Val {
-        const max_depth: u32 = 128;
-        if (depth >= max_depth) return val;
-
-        const whnf = try self.forceVal(val);
-        switch (whnf) {
-            .ConstTagNode => |ctn| {
-                if (ctn.tag.tag_type != .Con) return whnf;
-                if (ctn.fields.len == 0) return whnf;
-
-                var forced_fields = try self.allocator.alloc(Val, ctn.fields.len);
-                for (ctn.fields, 0..) |field, i| {
-                    forced_fields[i] = try self.deepForceVal(field, depth + 1);
-                }
-                try self.trackAllocation(forced_fields);
-                return Val{ .ConstTagNode = .{ .tag = ctn.tag, .fields = forced_fields } };
-            },
-            else => return whnf,
-        }
     }
 
     /// Read a node from the heap.
@@ -989,14 +1017,25 @@ pub const GrinEvaluator = struct {
     }
 
     /// Convert a runtime Value back to a GRIN Val.
+    ///
+    /// Bool values are converted to nullary ConstTagNode (CTrue/CFalse)
+    /// rather than Lit.Bool, because GRIN case dispatch matches on
+    /// constructor tags, not literal booleans.
+    /// Uses the true_name/false_name resolved from the program so that
+    /// case dispatch matches Prelude-declared constructor uniques.
     fn rtValueToVal(self: *GrinEvaluator, v: RtValue) EvalError!Val {
-        _ = self;
         return switch (v) {
             .Int => |i| Val{ .Lit = .{ .Int = i } },
             .Double => |f| Val{ .Lit = .{ .Float = f } },
             .Char => |c| Val{ .Lit = .{ .Char = c } },
             .String => |s| Val{ .Lit = .{ .String = s } },
-            .Bool => |b| Val{ .Lit = .{ .Bool = b } },
+            .Bool => |b| Val{ .ConstTagNode = .{
+                .tag = .{
+                    .tag_type = .{ .Con = {} },
+                    .name = if (b) self.true_name else self.false_name,
+                },
+                .fields = &.{},
+            } },
             .Unit => Val{ .Unit = {} },
             else => error.TypeMismatch,
         };
@@ -2426,12 +2465,18 @@ test "eval: Combined - function that cases on its argument" {
     try testing.expectEqual(@as(i64, 123), result.Lit.Int);
 }
 
-test "PrimOp: fromPreludeName maps Prelude functions to PrimOps" {
+test "PrimOp: fromPreludeName maps IO function aliases to PrimOps" {
     try testing.expectEqual(PrimOp.putStrLn_, PrimOp.fromString("putStrLn_") orelse return);
     try testing.expectEqual(@as(?PrimOp, null), PrimOp.fromString("putStrLn"));
 
-    // fromPreludeName should recognize the high-level name
+    // fromPreludeName maps both user-facing aliases and prim-prefixed
+    // names.  The desugar stage normalises the alias to the canonical
+    // enum name (via op.name()) so downstream stages only see canonical
+    // names in GRIN/LLVM IR.
+    try testing.expectEqual(PrimOp.putStrLn_, PrimOp.fromPreludeName("primPutStrLn") orelse return);
     try testing.expectEqual(PrimOp.putStrLn_, PrimOp.fromPreludeName("putStrLn") orelse return);
+    try testing.expectEqual(PrimOp.write_stdout, PrimOp.fromPreludeName("putStr") orelse return);
+    try testing.expectEqual(PrimOp.putChar_, PrimOp.fromPreludeName("putChar") orelse return);
     try testing.expect(@as(?PrimOp, null) == PrimOp.fromPreludeName("nonexistent"));
 }
 

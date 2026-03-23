@@ -1099,13 +1099,43 @@ fn renameExpr(expr: ast.Expr, env: *RenameEnv) RenameError!RExpr {
             } };
         },
         .If => |i| blk: {
+            // Desugar if-then-else into case on True/False here in the
+            // renamer, where the correct constructor names are in scope.
+            // This is what GHC does: Bool is not special, and the
+            // desugarer/Core never needs to know about it.
+            //
+            //   if c then t else e
+            //   ==>
+            //   case c of { True -> t; False -> e }
             const cond_r = try env.alloc.create(RExpr);
             cond_r.* = try renameExpr(i.condition.*, env);
-            const then_r = try env.alloc.create(RExpr);
-            then_r.* = try renameExpr(i.then_expr.*, env);
-            const else_r = try env.alloc.create(RExpr);
-            else_r.* = try renameExpr(i.else_expr.*, env);
-            break :blk RExpr{ .If = .{ .condition = cond_r, .then_expr = then_r, .else_expr = else_r } };
+            const then_r = try renameExpr(i.then_expr.*, env);
+            const else_r = try renameExpr(i.else_expr.*, env);
+
+            const span = i.condition.getSpan();
+
+            // Resolve True/False via the standard `resolve` path so that
+            // a missing Bool (e.g. under NoImplicitPrelude) produces a
+            // proper `unbound_variable` diagnostic instead of crashing.
+            const true_name = try env.resolve("True", span);
+            const false_name = try env.resolve("False", span);
+
+            var alts = try env.alloc.alloc(RAlt, 2);
+            alts[0] = .{
+                .pattern = .{ .Con = .{ .name = true_name, .con_span = span, .args = &.{} } },
+                .rhs = .{ .UnGuarded = then_r },
+                .span = span,
+            };
+            alts[1] = .{
+                .pattern = .{ .Con = .{ .name = false_name, .con_span = span, .args = &.{} } },
+                .rhs = .{ .UnGuarded = else_r },
+                .span = span,
+            };
+
+            break :blk RExpr{ .Case = .{
+                .scrutinee = cond_r,
+                .alts = alts,
+            } };
         },
         .Do => |stmts| blk: {
             try env.scope.push();
