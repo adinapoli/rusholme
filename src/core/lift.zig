@@ -681,17 +681,29 @@ pub const LambdaLifter = struct {
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
-/// Perform lambda lifting on a Core program.
+/// Lambda-lift a Core program.
 ///
 /// Returns a new program with all nested lambdas lifted to top-level
 /// function definitions.
-pub fn lambdaLift(alloc: std.mem.Allocator, program: core.CoreProgram) !core.CoreProgram {
+///
+/// `external_scope` provides unique IDs of names defined outside this
+/// module (e.g. Prelude/imported functions) that should be considered
+/// globally in-scope when computing free variables.  Without this,
+/// references to imported functions inside nested lambdas would be
+/// mis-classified as free variables and incorrectly captured.
+pub fn lambdaLift(alloc: std.mem.Allocator, program: core.CoreProgram, external_scope: ?[]const u64) !core.CoreProgram {
     var lifter = LambdaLifter.init(alloc);
     defer lifter.deinit();
 
-    // Phase 1: Create initial frame with top-level binders.
+    // Phase 1: Create initial frame with top-level binders + externals.
     var top_level_vars = std.ArrayListUnmanaged(u64){};
     defer top_level_vars.deinit(alloc);
+
+    // Include externally-visible names (Prelude, imports) so that the
+    // free-variable analysis does not capture them as closures.
+    if (external_scope) |ext| {
+        try top_level_vars.appendSlice(alloc, ext);
+    }
 
     for (program.binds) |bind| {
         switch (bind) {
@@ -957,7 +969,7 @@ test "lambdaLift: identity function with no nested lambda" {
         .binds = &.{f_bind},
     };
 
-    const lifted = try lambdaLift(alloc, program);
+    const lifted = try lambdaLift(alloc, program, null);
 
     // No nested lambda → exactly 1 binding, unchanged.
     try testing.expectEqual(@as(usize, 1), lifted.binds.len);
@@ -1013,7 +1025,7 @@ test "lambdaLift: nested lambda is lifted" {
         .binds = &.{f_bind},
     };
 
-    const lifted = try lambdaLift(alloc, program);
+    const lifted = try lambdaLift(alloc, program, null);
 
     // Should have 2 bindings: the lifted inner lambda + the rewritten f.
     try testing.expectEqual(@as(usize, 2), lifted.binds.len);
@@ -1144,7 +1156,7 @@ test "lambdaLift: multi-param leading chain not lifted" {
         .binds = &.{f_bind},
     };
 
-    const lifted = try lambdaLift(alloc, program);
+    const lifted = try lambdaLift(alloc, program, null);
 
     // No expression lambdas → exactly 1 binding.
     try testing.expectEqual(@as(usize, 1), lifted.binds.len);
@@ -1192,7 +1204,7 @@ test "lambdaLift: anonymous lambda in app position (#501)" {
         .binds = &.{it_bind},
     };
 
-    const lifted = try lambdaLift(alloc, program);
+    const lifted = try lambdaLift(alloc, program, null);
 
     // Should have 2 bindings: the lifted lambda + the rewritten `it`.
     try testing.expectEqual(@as(usize, 2), lifted.binds.len);

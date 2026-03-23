@@ -1589,6 +1589,13 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
             //
             // The treatment depends on the RHS shape:
             //
+            //   Lambda (local function definition from let/where):
+            //     Lifted to a top-level GRIN function definition.  GRIN
+            //     has no closures, so local functions must be lambda-lifted.
+            //     The body simply references the lifted function by name.
+            //     Note: this handles closed lambdas only (no free variable
+            //     capture).  Full closure conversion is tracked in #386.
+            //
             //   Simple values (Var, Lit, ValTag):
             //     `pure rhs >>= \x -> body`
             //     These are already-evaluated values that don't need heap
@@ -1613,6 +1620,7 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
             //     `rhs >>= \x -> body`
             //     Kept eager — higher-order applications and control
             //     flow (Case, Bind chains) are evaluated immediately.
+
             const rhs_expr = try translateExpr(ctx, pair.rhs);
 
             const lhs_expr: *GrinExpr = blk: {

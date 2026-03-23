@@ -678,10 +678,11 @@ fn renameDecl(
         },
         .PatBind => |pb| blk: {
             const rpat = try renamePat(pb.pattern, env);
+            const rwhere = try renameWhereClause(pb.where_clause, env);
             const rrhs = try renameRhs(pb.rhs, env);
             break :blk RDecl{ .PatBind = .{
                 .pattern = rpat,
-                .rhs = rrhs,
+                .rhs = if (rwhere) |wc| wrapRhsWithLet(env.alloc, rrhs, wc) else rrhs,
                 .span = pb.span,
             } };
         },
@@ -951,16 +952,82 @@ fn renameMatch(match: ast.Match, env: *RenameEnv) RenameError!RMatch {
     for (match.patterns) |p| {
         try pats.append(env.alloc, try renamePat(p, env));
     }
-    const rrhs = try renameRhs(match.rhs, env);
 
-    // where-clauses share the same scope as the patterns.
-    // M1: where-clauses are ignored for now.
+    // Haskell 2010 §4.4.3: where-clause bindings are in scope for the RHS.
+    // We translate  f p = rhs where { decls }  into  f p = let { decls } in rhs
+    // so that downstream passes (typechecker, desugarer) handle them as normal
+    // let-bindings with no additional machinery.
+    const rwhere = try renameWhereClause(match.where_clause, env);
+    const rrhs = try renameRhs(match.rhs, env);
 
     return RMatch{
         .patterns = try pats.toOwnedSlice(env.alloc),
-        .rhs = rrhs,
+        .rhs = if (rwhere) |wc| wrapRhsWithLet(env.alloc, rrhs, wc) else rrhs,
         .span = match.span,
     };
+}
+
+/// Rename a where-clause's declarations and bring their names into scope.
+/// Returns null if the where-clause is absent.
+fn renameWhereClause(
+    where_clause: ?[]const ast.Decl,
+    env: *RenameEnv,
+) RenameError!?[]const RDecl {
+    const wc = where_clause orelse return null;
+
+    // Pre-bind all FunBind and PatBind names (mutual recursion within where).
+    for (wc) |d| {
+        switch (d) {
+            .FunBind => |fb| {
+                const n = env.freshName(fb.name);
+                try env.scope.bind(fb.name, n);
+            },
+            .PatBind => |pb| {
+                // Simple pattern bindings (e.g. x = 42) define a variable.
+                if (pb.pattern == .Var) {
+                    const n = env.freshName(pb.pattern.Var.name);
+                    try env.scope.bind(pb.pattern.Var.name, n);
+                }
+            },
+            else => {},
+        }
+    }
+
+    // Rename the declarations.
+    var rdecls = std.ArrayListUnmanaged(RDecl){};
+    var top: std.StringHashMapUnmanaged(Name) = .{};
+    defer top.deinit(env.alloc);
+    for (wc) |d| {
+        if (try renameDecl(d, env, &top)) |rd| {
+            try rdecls.append(env.alloc, rd);
+        }
+    }
+    return try rdecls.toOwnedSlice(env.alloc);
+}
+
+/// Wrap a renamed RHS with a let-expression for where-clause bindings.
+fn wrapRhsWithLet(alloc: std.mem.Allocator, rhs: RRhs, binds: []const RDecl) RRhs {
+    return switch (rhs) {
+        .UnGuarded => |e| RRhs{ .UnGuarded = wrapExprWithLet(alloc, e, binds) },
+        .Guarded => |grhs_list| guarded_blk: {
+            // Each guarded RHS expression gets wrapped with the where-clause
+            // bindings, so the typechecker and desugarer see them as lets.
+            var new_grhs = std.ArrayListUnmanaged(RGuardedRhs){};
+            for (grhs_list) |g| {
+                new_grhs.append(alloc, .{
+                    .guards = g.guards,
+                    .rhs = wrapExprWithLet(alloc, g.rhs, binds),
+                }) catch unreachable;
+            }
+            break :guarded_blk RRhs{ .Guarded = new_grhs.toOwnedSlice(alloc) catch unreachable };
+        },
+    };
+}
+
+fn wrapExprWithLet(alloc: std.mem.Allocator, expr: RExpr, binds: []const RDecl) RExpr {
+    const body = alloc.create(RExpr) catch unreachable;
+    body.* = expr;
+    return RExpr{ .Let = .{ .binds = binds, .body = body } };
 }
 
 fn renameRhs(rhs: ast.Rhs, env: *RenameEnv) RenameError!RRhs {
@@ -1248,8 +1315,13 @@ fn renameAlt(alt: ast.Alt, env: *RenameEnv) RenameError!RAlt {
     try env.scope.push();
     defer env.scope.pop();
     const rpat = try renamePat(alt.pattern, env);
+    const rwhere = try renameWhereClause(alt.where_clause, env);
     const rrhs = try renameRhs(alt.rhs, env);
-    return RAlt{ .pattern = rpat, .rhs = rrhs, .span = alt.span };
+    return RAlt{
+        .pattern = rpat,
+        .rhs = if (rwhere) |wc| wrapRhsWithLet(env.alloc, rrhs, wc) else rrhs,
+        .span = alt.span,
+    };
 }
 
 fn renameStmt(stmt: ast.Stmt, env: *RenameEnv) RenameError!RStmt {

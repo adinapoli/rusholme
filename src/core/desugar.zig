@@ -1523,14 +1523,58 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                 switch (bd) {
                     .FunBind => |fb| {
                         if (fb.equations.len > 0) {
-                            const eq = fb.equations[0]; // naive: assume 1 eq, no args
-                            const rhs = try alloc.create(ast_mod.Expr);
-                            rhs.* = try desugarRhs(ctx, eq.rhs);
-
                             const ty_ptr = ctx.types.local_binders.get(fb.name.unique) orelse {
                                 std.debug.panic("Missing type for let funbind {s}", .{fb.name.base});
                             };
                             const ty = try htypeToCore(alloc, ty_ptr);
+
+                            // Check if this let-bound function needs the match compiler
+                            // (multiple equations or non-Var patterns).
+                            var needs_match_compiler = fb.equations.len > 1;
+                            if (!needs_match_compiler) {
+                                for (fb.equations[0].patterns) |pat| {
+                                    if (pat != .Var) {
+                                        needs_match_compiler = true;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            const rhs = try alloc.create(ast_mod.Expr);
+                            if (needs_match_compiler) {
+                                rhs.* = (try desugarMatch(ctx, fb.equations, ty)).*;
+                            } else {
+                                const eq = fb.equations[0];
+                                var body_expr = try desugarRhs(ctx, eq.rhs);
+
+                                // Wrap body in lambdas for parameters (right-to-left).
+                                var i = eq.patterns.len;
+                                while (i > 0) {
+                                    i -= 1;
+                                    const pat = eq.patterns[i];
+                                    switch (pat) {
+                                        .Var => |v| {
+                                            const p_body = try alloc.create(ast_mod.Expr);
+                                            p_body.* = body_expr;
+
+                                            const p_ty_ptr = ctx.types.local_binders.get(v.name.unique) orelse {
+                                                std.debug.panic("Missing type for let param {s}", .{v.name.base});
+                                            };
+                                            const p_ty = try htypeToCore(alloc, p_ty_ptr);
+
+                                            body_expr = ast_mod.Expr{
+                                                .Lam = .{
+                                                    .binder = ast_mod.Id{ .name = v.name, .ty = p_ty, .span = v.span },
+                                                    .body = p_body,
+                                                    .span = syntheticSpan(),
+                                                },
+                                            };
+                                        },
+                                        else => unreachable, // guarded by needs_match_compiler check
+                                    }
+                                }
+                                rhs.* = body_expr;
+                            }
 
                             try pairs.append(alloc, .{
                                 .binder = ast_mod.Id{ .name = fb.name, .ty = ty, .span = fb.span },
@@ -1559,8 +1603,22 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                 }
             }
 
+            // Use NonRec for single bindings (avoids unnecessary heap
+            // indirection in the Rec store/update path). A full dependency
+            // analysis (#566) would allow nested NonRec for multiple
+            // independent bindings; for now, multiple bindings still
+            // default to Rec for safety.
+            const owned_pairs = try pairs.toOwnedSlice(alloc);
+            const bind: ast_mod.Bind = if (owned_pairs.len == 1)
+                .{ .NonRec = .{
+                    .binder = owned_pairs[0].binder,
+                    .rhs = owned_pairs[0].rhs,
+                } }
+            else
+                .{ .Rec = owned_pairs };
+
             node.* = .{ .Let = .{
-                .bind = .{ .Rec = try pairs.toOwnedSlice(alloc) },
+                .bind = bind,
                 .body = body,
                 .span = syntheticSpan(),
             } };
