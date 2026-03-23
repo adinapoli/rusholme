@@ -2109,22 +2109,21 @@ pub fn inferModule(
                 try ctx.local_binders.put(ctx.alloc, fb.name.unique, node);
                 try top_metas.put(ctx.alloc, fb.name.unique, node);
 
-                // If this function has a type signature with class constraints,
-                // also bind the polymorphic scheme so that recursive calls
-                // instantiate it and produce wanted constraints.  Without this,
-                // lookupScheme returns the mono binding (0 binders), the Var
-                // case returns the mono pointer, and no evidence is generated
-                // for the recursive call — causing the desugarer to omit the
-                // dictionary argument.
+                // If this function has a type signature, bind the
+                // polymorphic scheme immediately so that callers processed
+                // before this function (declaration-order issue #566) see
+                // the poly scheme and instantiate with fresh metas.
+                // Without this, callers get the mono binding (0 binders),
+                // return the shared meta pointer, and the conArgIndirection
+                // unification side-effects pollute the meta before the
+                // function's own body is checked.
                 if (sigs.get(fb.name.unique)) |sig_entry| {
-                    if (sig_entry.constraints.len > 0) {
-                        const scheme = TyScheme{
-                            .binders = sig_entry.skolem_ids,
-                            .constraints = sig_entry.constraints,
-                            .body = sig_entry.ty.*,
-                        };
-                        try ctx.env.bind(fb.name, scheme);
-                    }
+                    const scheme = TyScheme{
+                        .binders = sig_entry.skolem_ids,
+                        .constraints = sig_entry.constraints,
+                        .body = sig_entry.ty.*,
+                    };
+                    try ctx.env.bind(fb.name, scheme);
                 }
             },
             .PatBind => |pb| try assignPatMetas(ctx, pb.pattern, &top_metas),
