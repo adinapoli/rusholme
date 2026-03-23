@@ -551,7 +551,8 @@ fn cmdGrin(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     }
 
     // ── Lambda lift ────────────────────────────────────────────────────
-    const core_lifted = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog);
+    const ext_scope_1 = try collectExternalScope(arena_alloc, &module_types);
+    const core_lifted = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog, ext_scope_1);
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
@@ -651,7 +652,8 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     }
 
     // ── Lambda lift ────────────────────────────────────────────────────
-    const core_lifted = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog);
+    const ext_scope_2 = try collectExternalScope(arena_alloc, &module_types);
+    const core_lifted = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog, ext_scope_2);
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
@@ -797,10 +799,29 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     // Each Haskell module is lambda-lifted and GRIN-translated independently.
     // The per-module GRIN programs are collected for global tag table
     // construction and for per-module LLVM emission.
+    // Collect all top-level binding uniques across all modules so that the
+    // lambda lifter for any single module treats cross-module references as
+    // globally in-scope (not free variables).
+    var all_binding_ids = std.ArrayListUnmanaged(u64){};
+    {
+        var prog_it = session.programs.valueIterator();
+        while (prog_it.next()) |prog| {
+            for (prog.binds) |bind| {
+                switch (bind) {
+                    .NonRec => |pair| try all_binding_ids.append(arena_alloc, pair.binder.name.unique.value),
+                    .Rec => |pairs| {
+                        for (pairs) |pair| try all_binding_ids.append(arena_alloc, pair.binder.name.unique.value);
+                    },
+                }
+            }
+        }
+    }
+    const cross_module_scope = try all_binding_ids.toOwnedSlice(arena_alloc);
+
     var per_module_grin = std.ArrayListUnmanaged(rusholme.grin.ast.Program){};
     for (module_order) |mod_name| {
         const core_prog = session.programs.get(mod_name) orelse continue;
-        const core_lifted = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog);
+        const core_lifted = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog, cross_module_scope);
         const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted, null, null);
         try per_module_grin.append(arena_alloc, grin_prog);
     }
@@ -1346,6 +1367,18 @@ fn renderMultiFileDiagnostics(
         });
     }
     try stderr.flush();
+}
+
+/// Collect unique IDs from the type environment's schemes map so that the
+/// lambda lifter treats imported/Prelude names as globally in-scope rather
+/// than capturing them as free variables of nested lambdas.
+fn collectExternalScope(alloc: std.mem.Allocator, module_types: *const infer_mod.ModuleTypes) ![]const u64 {
+    var ids = std.ArrayListUnmanaged(u64){};
+    var it = module_types.schemes.iterator();
+    while (it.next()) |entry| {
+        try ids.append(alloc, entry.key_ptr.value);
+    }
+    return try ids.toOwnedSlice(alloc);
 }
 
 /// Render all collected diagnostics to stderr using the terminal renderer.
