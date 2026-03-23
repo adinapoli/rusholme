@@ -9,9 +9,10 @@ module Prelude
     , map, filter, (++), head, tail, null, length
     , foldr, foldl, concat, take, drop
     , maybe, fromMaybe, either
-    , putChar, putStr, putStrLn
+    , putChar, putStr, putStrLn, print
     , error
     , intToChar, charToInt
+    , max
     , Show(..), show, showString, showListWith, showListTail
     , intToDigit
     ) where
@@ -104,6 +105,9 @@ putStrLn s = do
     putStr s
     primPutChar '\n'
 
+print :: Show a => a -> IO ()
+print x = putStrLn (show x)
+
 -- ========================================================================
 -- Boolean functions
 -- ========================================================================
@@ -147,6 +151,11 @@ div = primQuotInt
 
 mod :: Int -> Int -> Int
 mod = primRemInt
+
+max :: Int -> Int -> Int
+max x y = case x >= y of
+    True  -> x
+    False -> y
 
 -- ========================================================================
 -- Comparison (monomorphic on Int, pending type classes #531)
