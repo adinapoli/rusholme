@@ -366,7 +366,7 @@ pub const Pipeline = struct {
         }
 
         // ── Lambda lift ────────────────────────────────────────────
-        const core_lifted = lift_mod.lambdaLift(alloc, desugar_result.program) catch {
+        const core_lifted = lift_mod.lambdaLift(alloc, desugar_result.program, null) catch {
             module_types.deinit(alloc);
             return CompileError.OutOfMemory;
         };
