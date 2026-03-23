@@ -320,9 +320,7 @@ pub const CompileEnv = struct {
         env: *renamer_mod.RenameEnv,
         iface: ModIface,
     ) std.mem.Allocator.Error!void {
-        std.debug.print("seedRenamerFromIface: {d} values\n", .{iface.values.len});
         for (iface.values) |ev| {
-            std.debug.print("  seeding value: {s} (unique={d})\n", .{ ev.name, ev.unique });
             const name = Name{
                 .base = ev.name,
                 .unique = .{ .value = ev.unique },
@@ -355,11 +353,9 @@ pub const CompileEnv = struct {
                 .base = ev.name,
                 .unique = .{ .value = ev.unique },
             };
-            const scheme = deserialiseTyScheme(ty_env.alloc, ev.scheme) catch |err| {
-                std.debug.print("  seedTyEnv FAIL: {s} (unique={d}) err={any}\n", .{ ev.name, ev.unique, err });
+            const scheme = deserialiseTyScheme(ty_env.alloc, ev.scheme) catch {
                 continue;
             };
-            std.debug.print("  seedTyEnv OK: {s} (unique={d})\n", .{ ev.name, ev.unique });
             try ty_env.bind(name, scheme);
         }
         for (iface.data_decls) |dd| {

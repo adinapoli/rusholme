@@ -1021,7 +1021,6 @@ pub const GrinTranslator = struct {
         }
 
         for (prog.defs) |def| {
-            std.debug.print("translateDef: {s}_{d} params={d}\n", .{ def.name.base, def.name.unique.value, def.params.len });
             try self.translateDef(def);
         }
         self.module = saved_module;
@@ -1093,19 +1092,6 @@ pub const GrinTranslator = struct {
         // Check if function was already forward-declared; if so, reuse it.
         // This prevents LLVM from adding .1 suffix due to name collision.
         const existing_fn = c.LLVMGetNamedFunction(self.module, fn_name_z);
-        if (existing_fn != null) {
-            // Check if forward-declared type matches
-            const existing_type = llvm.getFunctionType(existing_fn.?);
-            const existing_param_count = c.LLVMCountParamTypes(existing_type);
-            std.debug.print("  translateDef {s}: REUSING existing fn, existing_params={d}, def_params={d}\n", .{
-                def.name.base, existing_param_count, def.params.len,
-            });
-            if (existing_param_count != def.params.len) {
-                std.debug.print("  WARNING: param count mismatch! Forward-declared with {d} params but def has {d}\n", .{
-                    existing_param_count, def.params.len,
-                });
-            }
-        }
         const func = existing_fn orelse
             llvm.addFunction(self.module, fn_name_z, fn_type);
         self.current_func = func;
@@ -1363,21 +1349,6 @@ pub const GrinTranslator = struct {
         args: []const grin.Val,
         result_name: []const u8,
     ) TranslationError!?llvm.Value {
-        std.debug.print("translateAppToValue: {s}_{d} args={d}\n", .{ name.base, name.unique.value, args.len });
-        // Debug: check if function and args are in params
-        if (self.params.get(name.unique.value) != null) {
-            std.debug.print("  callee from params (indirect call)\n", .{});
-        }
-        for (args[0..@min(args.len, 8)], 0..) |arg, i| {
-            switch (arg) {
-                .Var => |v| {
-                    const in_params = self.params.get(v.unique.value) != null;
-                    std.debug.print("  arg[{d}]: Var {s}_{d} in_params={any}\n", .{ i, v.base, v.unique.value, in_params });
-                },
-                else => std.debug.print("  arg[{d}]: {s}\n", .{ i, @tagName(arg) }),
-            }
-        }
-
         if (std.mem.eql(u8, name.base, "pure")) {
             // `pure` is a no-op in M1 — the argument is the value.
             if (args.len > 0) {
@@ -1441,11 +1412,8 @@ pub const GrinTranslator = struct {
         var llvm_args: [8]llvm.Value = undefined;
         const arg_count = @min(args.len, 8);
         for (args[0..arg_count], 0..) |val, i| {
-            std.debug.print("  translating arg[{d}] tag={s}...\n", .{ i, @tagName(val) });
             llvm_args[i] = try self.translateValToLlvm(val);
-            std.debug.print("  translated arg[{d}] => 0x{x}\n", .{ i, @intFromPtr(llvm_args[i]) });
         }
-        std.debug.print("  all args translated OK\n", .{});
 
         // Detect calls to `main` from the REPL entry point.
         // `main` was compiled with an i32 return type (C ABI exit code),
@@ -1484,14 +1452,10 @@ pub const GrinTranslator = struct {
         // opaque ptr for all parameters.
         for (0..arg_count) |i| {
             if (@intFromPtr(llvm_args[i]) == 0) {
-                std.debug.print("  NULL llvm_arg[{d}]! arg={s}\n", .{ i, @tagName(args[i]) });
                 return null;
             }
-            std.debug.print("  coerce arg[{d}]: llvm_val=0x{x}, getting type...\n", .{ i, @intFromPtr(llvm_args[i]) });
             const arg_ty = c.LLVMTypeOf(llvm_args[i]);
-            std.debug.print("  coerce arg[{d}]: arg_ty=0x{x}, getting kind...\n", .{ i, @intFromPtr(arg_ty) });
             const arg_kind = c.LLVMGetTypeKind(arg_ty);
-            std.debug.print("  coerce arg[{d}]: kind={d}\n", .{ i, arg_kind });
             if (arg_kind == c.LLVMIntegerTypeKind) {
                 if (args[i] == .ValTag) {
                     // Nullary constructors (e.g. MkA, True, False) are
@@ -1524,10 +1488,7 @@ pub const GrinTranslator = struct {
         //   2. Named LLVM function (direct call to a known def).
         //   3. Forward-declare and call (for functions not yet translated).
         const func: llvm.Value = blk: {
-            if (self.params.get(name.unique.value)) |fn_ptr| {
-                std.debug.print("  func resolved from params, null={any}\n", .{@intFromPtr(fn_ptr) == 0});
-                break :blk fn_ptr;
-            }
+            if (self.params.get(name.unique.value)) |fn_ptr| break :blk fn_ptr;
             const fn_name_z = self.formatName(name);
             if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |existing| break :blk existing;
             break :blk llvm.addFunction(self.module, fn_name_z, fn_type);
@@ -2015,10 +1976,7 @@ pub const GrinTranslator = struct {
                 // Using a heap node (pointer) rather than a bare i64 discriminant
                 // lets the REPL and case analysis distinguish constructors from
                 // integer literals by LLVM type (ptr vs i64).
-                const disc = self.tag_table.discriminant(t) orelse {
-                    std.debug.print("UnsupportedGrinVal: ValTag {s} not in tag table\n", .{t.name.base});
-                    return error.UnsupportedGrinVal;
-                };
+                const disc = self.tag_table.discriminant(t) orelse return error.UnsupportedGrinVal;
                 const alloc_fn = declareRtsAlloc(self.module);
                 var alloc_args2 = [_]llvm.Value{
                     c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0),
@@ -2544,11 +2502,7 @@ pub const GrinTranslator = struct {
 
         // ── 1. Obtain scrutinee and force to WHNF (same as translateCase) ──
         const scrut_llvm = try self.translateValToLlvm(scrutinee);
-        if (@intFromPtr(scrut_llvm) == 0) {
-            std.debug.print("translateCaseToValue: null scrutinee! val={s}\n", .{@tagName(scrutinee)});
-            if (scrutinee == .Var) std.debug.print("  var name={s}_{d}\n", .{ scrutinee.Var.base, scrutinee.Var.unique.value });
-            return null;
-        }
+        if (@intFromPtr(scrut_llvm) == 0) return null;
         const scrut_ty = c.LLVMTypeOf(scrut_llvm);
         const scrut_kind = c.LLVMGetTypeKind(scrut_ty);
         const is_ptr = scrut_kind == c.LLVMPointerTypeKind;

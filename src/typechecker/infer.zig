@@ -1110,11 +1110,6 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                 // Record the variable's unique so the desugarer can key evidence
                 // back to this specific call site.
                 for (inst.wanted) |wc| {
-                    const meta_id: u32 = switch (wc.ty.*) {
-                        .Meta => |mv| mv.id,
-                        else => 9999,
-                    };
-                    std.debug.print("accumulate constraint: var={s}_{d} class={s} meta_id={d} ty_ptr={*}\n", .{ v.name.base, v.name.unique.value, wc.class_name.base, meta_id, wc.ty });
                     try ctx.wanted_constraints.append(ctx.alloc, .{ .Class = .{
                         .class_name = wc.class_name,
                         .ty = wc.ty,
@@ -1124,7 +1119,6 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                 }
                 break :blk try ctx.alloc_ty(inst.ty);
             }
-            std.debug.print("UNBOUND VAR: {s} unique={d}\n", .{ v.name.base, v.name.unique.value });
             const msg = try std.fmt.allocPrint(
                 ctx.alloc,
                 "unbound variable `{s}` in typechecker (renamer bug?)",
@@ -1816,25 +1810,7 @@ fn inferLetDecl(
 
             // If there's a type signature, check the inferred type against it.
             if (sig) |s| {
-                const fn_chased = fun_node.*.chase();
-                const sig_chased = s.ty.*.chase();
-                std.debug.print("SIG UNIFY for {s}_{d}: fun_node={s} sig={s}\n", .{
-                    fb.name.base,
-                    fb.name.unique.value,
-                    @tagName(fn_chased),
-                    @tagName(sig_chased),
-                });
                 try ctx.unifyNow(fun_node, s.ty, fb.span);
-                // Check constraint metas after unification
-                for (ctx.wanted_constraints.items) |wc| {
-                    switch (wc) {
-                        .Class => |cc| {
-                            const after_chase = cc.ty.*.chase();
-                            std.debug.print("  after sig-unify: constraint class={s} chased={s}\n", .{ cc.class_name.base, @tagName(after_chase) });
-                        },
-                        .Eq => {},
-                    }
-                }
             }
 
             // If there's a signature, build the TyScheme directly from
@@ -2240,8 +2216,6 @@ pub fn inferModule(
                 const fun_node = top_metas.get(fb.name.unique) orelse continue;
                 const sig_entry = sigs.get(fb.name.unique);
 
-                std.debug.print("PASS2 FunBind {s}_{d}: has_sig={any}\n", .{ fb.name.base, fb.name.unique.value, sig_entry != null });
-
                 for (fb.equations) |eq| {
                     const eq_ty = try inferMatch(ctx, eq);
 
@@ -2255,49 +2229,6 @@ pub fn inferModule(
                     } else {
                         // Otherwise, unify against the fresh meta node.
                         try ctx.unifyNow(fun_node, eq_ty, fb.span);
-                    }
-                }
-
-                // Check constraint states after body inference + sig unify
-                if (sig_entry != null) {
-                    for (ctx.wanted_constraints.items) |wc| {
-                        switch (wc) {
-                            .Class => |cc| {
-                                const after_chase = cc.ty.*.chase();
-                                switch (after_chase) {
-                                    .Meta => |mv| {
-                                        // Trace the full chain
-                                        var chain_buf: [16]u32 = undefined;
-                                        var chain_len: usize = 0;
-                                        var cur = cc.ty.*;
-                                        while (chain_len < 16) {
-                                            switch (cur) {
-                                                .Meta => |m| {
-                                                    chain_buf[chain_len] = m.id;
-                                                    chain_len += 1;
-                                                    if (m.ref) |next| {
-                                                        cur = next.*;
-                                                    } else break;
-                                                },
-                                                .Rigid => |r| {
-                                                    std.debug.print("  after {s}: constraint {s} chain ends at Rigid({s}_{d})\n", .{ fb.name.base, cc.class_name.base, r.base, r.unique.value });
-                                                    break;
-                                                },
-                                                else => {
-                                                    std.debug.print("  after {s}: constraint {s} chain ends at {s}\n", .{ fb.name.base, cc.class_name.base, @tagName(cur) });
-                                                    break;
-                                                },
-                                            }
-                                        }
-                                        std.debug.print("  after {s}: constraint {s} dead at Meta(id={d}) chain_len={d}\n", .{ fb.name.base, cc.class_name.base, mv.id, chain_len });
-                                    },
-                                    else => {
-                                        std.debug.print("  after {s}: constraint {s} chased={s}\n", .{ fb.name.base, cc.class_name.base, @tagName(after_chase) });
-                                    },
-                                }
-                            },
-                            .Eq => {},
-                        }
                     }
                 }
 
@@ -2350,30 +2281,6 @@ pub fn inferModule(
     // accumulated class constraints.  This resolves instances and fills in
     // DictEvidence on each Constraint.Class entry.
     if (ctx.wanted_constraints.items.len > 0) {
-        for (ctx.wanted_constraints.items) |wc| {
-            switch (wc) {
-                .Class => |cc| {
-                    const chased = cc.ty.*.chase();
-                    switch (chased) {
-                        .Meta => |mv| {
-                            const raw = cc.ty.*;
-                            const raw_id: u32 = switch (raw) {
-                                .Meta => |rmv| rmv.id,
-                                else => 9999,
-                            };
-                            const raw_ref: bool = switch (raw) {
-                                .Meta => |rmv| rmv.ref != null,
-                                else => false,
-                            };
-                            std.debug.print("pre-solve constraint: class={s} raw_id={d} raw_ref={any} chased_id={d} chased_ref={any} ty_ptr={*}\n", .{ cc.class_name.base, raw_id, raw_ref, mv.id, mv.ref != null, cc.ty });
-                        },
-                        .Rigid => |r| std.debug.print("pre-solve constraint: class={s} ty=Rigid({s}_{d}) ty_ptr={*}\n", .{ cc.class_name.base, r.base, r.unique.value, cc.ty }),
-                        else => std.debug.print("pre-solve constraint: class={s} ty=Other ty_ptr={*}\n", .{ cc.class_name.base, cc.ty }),
-                    }
-                },
-                .Eq => {},
-            }
-        }
         try solver_mod.solve(
             ctx.wanted_constraints.items,
             ctx.alloc,

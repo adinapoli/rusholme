@@ -934,18 +934,9 @@ fn instanceHeadName(alloc: std.mem.Allocator, ty: @import("../frontend/ast.zig")
 /// has both a `var_unique` and resolved `evidence`, inserts an entry keyed
 /// by `(var_unique, span_start, class_unique)`.
 fn buildEvidenceMap(ctx: *DesugarCtx) std.mem.Allocator.Error!void {
-    std.debug.print("buildEvidenceMap: {d} constraints\n", .{ctx.types.wanted_constraints.items.len});
     for (ctx.types.wanted_constraints.items) |c| {
         switch (c) {
             .Class => |cc| {
-                const chased_tag: []const u8 = switch (cc.ty.*.chase()) {
-                    .Rigid => "Rigid",
-                    .Meta => "Meta",
-                    .Con => "Con",
-                    .Fun => "Fun",
-                    else => "Other",
-                };
-                std.debug.print("  constraint: class={s}_{d} ev={any} vu={any} ty={s}\n", .{ cc.class_name.base, cc.class_name.unique.value, cc.evidence != null, cc.var_unique != null, chased_tag });
                 const ev = cc.evidence orelse continue;
                 const vu = cc.var_unique orelse continue;
                 const key = DesugarCtx.EvidenceKey{
@@ -954,7 +945,6 @@ fn buildEvidenceMap(ctx: *DesugarCtx) std.mem.Allocator.Error!void {
                     .span_start_col = cc.span.start.column,
                     .class_unique = cc.class_name.unique.value,
                 };
-                std.debug.print("evidence_map PUT: var={d} line={d} col={d} class={d}\n", .{ key.var_unique, key.span_start_line, key.span_start_col, key.class_unique });
                 try ctx.evidence_map.put(ctx.alloc, key, ev);
             },
             .Eq => {},
@@ -1146,8 +1136,6 @@ fn findEvidenceForVar(
         };
         if (ctx.evidence_map.get(key)) |ev| {
             try result.append(ctx.alloc, ev);
-        } else {
-            std.debug.print("findEvidenceForVar MISS: var={d} line={d} col={d} class={d}\n", .{ var_unique, span.start.line, span.start.column, constraint.class_name.unique.value });
         }
     }
     return try result.toOwnedSlice(ctx.alloc);
