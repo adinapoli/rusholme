@@ -117,11 +117,14 @@ pub export fn rts_charlist_to_cstring(list_ptr: *const node_mod.Node, cons_disc:
     for (0..len) |i| {
         const tag_int: u64 = @intFromEnum(cur.tag);
         if (tag_int != cons_disc or cur.n_fields < 2) break;
-        // field[0] is the character value (either raw i64 or pointer to Char node)
+        // field[0] is the character value.  Tagged integers have bit 0
+        // set: ((n << 1) | 1).  Heap pointers are aligned (bit 0 = 0).
         const char_field = node_mod.fieldsConst(cur)[0];
-        // Check if the field is a pointer to a Char node
-        const align_val: u64 = @alignOf(*anyopaque);
-        if (char_field > 0x1000 and char_field % align_val == 0) {
+        if (char_field & 1 != 0) {
+            // Tagged integer — untag by shifting right.
+            buf[i] = @intCast((char_field >> 1) & 0xFF);
+        } else if (char_field > 0x1000) {
+            // Heap pointer — dereference as Char node.
             const char_node: *const node_mod.Node = @ptrFromInt(@as(usize, @intCast(char_field)));
             if (char_node.tag == .Char and char_node.n_fields >= 1) {
                 buf[i] = @intCast(node_mod.fieldsConst(char_node)[0] & 0xFF);
@@ -162,8 +165,11 @@ pub export fn rts_cstring_to_charlist(str: [*:0]const u8, cons_disc: u64, nil_di
     while (i > 0) {
         i -= 1;
         const cons = node_mod.rts_alloc(cons_disc, 2);
-        // field[0] = character value (raw i64)
-        node_mod.rts_store_field(cons, 0, @as(u64, span[i]));
+        // field[0] = character value, tagged ((n << 1) | 1) so that
+        // the LLVM codegen's __rhc_force guard can distinguish integers
+        // from heap pointers by bit 0 when the field is loaded back.
+        const ch: u64 = @as(u64, span[i]);
+        node_mod.rts_store_field(cons, 0, (ch << 1) | 1);
         // field[1] = tail pointer (as u64)
         node_mod.rts_store_field(cons, 1, @intFromPtr(tail));
         tail = cons;

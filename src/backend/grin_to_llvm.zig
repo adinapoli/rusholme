@@ -607,6 +607,34 @@ fn ptrType() llvm.Type {
     return c.LLVMPointerTypeInContext(c.LLVMGetGlobalContext(), 0);
 }
 
+// ── Integer tagging ────────────────────────────────────────────────────
+//
+// Raw Haskell integers (Int, Char) flowing as ptr-typed SSA values are
+// encoded with bit 0 set: `(n << 1) | 1`.  Heap pointers are 8-byte
+// aligned and always have bit 0 = 0.  This lets `__rhc_force` and
+// inline eval guards distinguish the two with a single bit test,
+// eliminating the unreliable address-range heuristic that mis-identified
+// large aligned integers (e.g. factorial(7) = 5040) as heap pointers.
+//
+// Encoding: tagInt(builder, i64_val) -> ptr   (sets bit 0)
+// Decoding: untagInt(builder, ptr_val) -> i64 (clears bit 0, arithmetic shift right)
+
+fn tagInt(builder: llvm.Builder, val: llvm.Value) llvm.Value {
+    const i64_ty = llvm.i64Type();
+    const shifted = c.LLVMBuildShl(builder, val, c.LLVMConstInt(i64_ty, 1, 0), "tag_shl");
+    const tagged = c.LLVMBuildOr(builder, shifted, c.LLVMConstInt(i64_ty, 1, 0), "tag_or");
+    return c.LLVMBuildIntToPtr(builder, tagged, ptrType(), "tagged_int");
+}
+
+fn untagInt(builder: llvm.Builder, val: llvm.Value) llvm.Value {
+    const i64_ty = llvm.i64Type();
+    const as_int = if (c.LLVMGetTypeKind(c.LLVMTypeOf(val)) == c.LLVMPointerTypeKind)
+        c.LLVMBuildPtrToInt(builder, val, i64_ty, "untag_p2i")
+    else
+        val;
+    return c.LLVMBuildAShr(builder, as_int, c.LLVMConstInt(i64_ty, 1, 0), "untagged");
+}
+
 /// Return the LLVM struct type for the unified node header:
 ///   { i64 tag, i32 n_fields, i32 _pad }   (16 bytes)
 ///
@@ -1164,7 +1192,7 @@ pub const GrinTranslator = struct {
                         const coerced = if (val_kind2 == c.LLVMPointerTypeKind)
                             self.callForceIfNeeded(val)
                         else if (val_kind2 == c.LLVMIntegerTypeKind)
-                            c.LLVMBuildIntToPtr(self.builder, val, ptrType(), "ret_as_ptr")
+                            tagInt(self.builder, val)
                         else
                             val;
                         _ = llvm.buildRet(self.builder, coerced);
@@ -1399,7 +1427,7 @@ pub const GrinTranslator = struct {
                         // don't mis-box the value as a heap-node tag via
                         // rts_alloc (which would corrupt the raw Int/Char).
                         if (c.LLVMGetTypeKind(c.LLVMTypeOf(val)) == c.LLVMIntegerTypeKind) {
-                            return c.LLVMBuildIntToPtr(self.builder, val, ptrType(), "arith_ptr");
+                            return tagInt(self.builder, val);
                         }
                         return val;
                     }
@@ -1476,8 +1504,8 @@ pub const GrinTranslator = struct {
                         "boxed_tag",
                     );
                 } else {
-                    // Plain integer literal — use inttoptr to pass through.
-                    llvm_args[i] = c.LLVMBuildIntToPtr(self.builder, llvm_args[i], ptrType(), "arg_to_ptr");
+                    // Plain integer literal — tag and pass through.
+                    llvm_args[i] = tagInt(self.builder, llvm_args[i]);
                 }
             }
         }
@@ -1557,6 +1585,32 @@ pub const GrinTranslator = struct {
         for (0..arg_count) |i| param_types[i] = ptrType();
         const fn_type = llvm.functionType(ptrType(), param_types[0..arg_count], false);
 
+        // Coerce i64 arguments to ptr (same logic as translateAppToValue).
+        for (0..arg_count) |i| {
+            if (@intFromPtr(llvm_args[i]) == 0) return;
+            const arg_ty = c.LLVMTypeOf(llvm_args[i]);
+            const arg_kind = c.LLVMGetTypeKind(arg_ty);
+            if (arg_kind == c.LLVMIntegerTypeKind) {
+                if (args[i] == .ValTag) {
+                    const rts_alloc_fn = declareRtsAlloc(self.module);
+                    var alloc_args = [_]llvm.Value{
+                        llvm_args[i],
+                        c.LLVMConstInt(llvm.i32Type(), 0, 0),
+                    };
+                    llvm_args[i] = c.LLVMBuildCall2(
+                        self.builder,
+                        llvm.getFunctionType(rts_alloc_fn),
+                        rts_alloc_fn,
+                        &alloc_args,
+                        2,
+                        "boxed_tag",
+                    );
+                } else {
+                    llvm_args[i] = tagInt(self.builder, llvm_args[i]);
+                }
+            }
+        }
+
         const func: llvm.Value = blk: {
             if (self.params.get(name.unique.value)) |fn_ptr| break :blk fn_ptr;
             const fn_name_z = self.formatName(name);
@@ -1598,11 +1652,11 @@ pub const GrinTranslator = struct {
                     const raw = try self.translateValToLlvm(val);
                     // If the argument is a heap pointer it might be an
                     // unevaluated thunk (F-tag node). Force it to WHNF
-                    // before passing to the RTS function, then coerce to
-                    // i64 so the callee receives a plain value.
+                    // before passing to the RTS function, then untag the
+                    // tagged integer so the callee receives a plain value.
                     if (c.LLVMGetTypeKind(c.LLVMTypeOf(raw)) == c.LLVMPointerTypeKind) {
                         const forced = self.callForceIfNeeded(raw);
-                        break :blk c.LLVMBuildPtrToInt(self.builder, forced, llvm.i64Type(), "forced_i64");
+                        break :blk untagInt(self.builder, forced);
                     }
                     break :blk raw;
                 },
@@ -1715,8 +1769,8 @@ pub const GrinTranslator = struct {
                 // Already a pointer — force thunks and return as-is.
                 return self.callForceIfNeeded(operand_raw);
             }
-            // Raw i64 — wrap as ptr to avoid mis-boxing downstream.
-            return c.LLVMBuildIntToPtr(self.builder, operand_raw, ptrType(), "identity_ptr");
+            // Raw i64 — tag as ptr to avoid mis-boxing downstream.
+            return tagInt(self.builder, operand_raw);
         }
 
         // Unary instructions (neg_Int, abs_Int)
@@ -1731,7 +1785,7 @@ pub const GrinTranslator = struct {
             else
                 operand_raw;
             const operand = if (c.LLVMGetTypeKind(c.LLVMTypeOf(operand_forced)) == c.LLVMPointerTypeKind)
-                c.LLVMBuildPtrToInt(self.builder, operand_forced, llvm.i64Type(), "operand_i64")
+                untagInt(self.builder, operand_forced)
             else
                 operand_forced;
             // Return ptr (via inttoptr) — same rationale as binary arithmetic.
@@ -1752,7 +1806,7 @@ pub const GrinTranslator = struct {
                 },
                 else => unreachable,
             };
-            return c.LLVMBuildIntToPtr(self.builder, raw_unary, ptrType(), "unary_ptr");
+            return tagInt(self.builder, raw_unary);
         }
 
         if (args.len < 2) return error.UnsupportedGrinVal;
@@ -1775,11 +1829,11 @@ pub const GrinTranslator = struct {
         // Coerce operands to i64: function parameters are ptr-typed in GRIN,
         // but arithmetic/comparison primops operate on integer values.
         const lhs = if (c.LLVMGetTypeKind(c.LLVMTypeOf(lhs_forced)) == c.LLVMPointerTypeKind)
-            c.LLVMBuildPtrToInt(self.builder, lhs_forced, llvm.i64Type(), "lhs_i64")
+            untagInt(self.builder, lhs_forced)
         else
             lhs_forced;
         const rhs = if (c.LLVMGetTypeKind(c.LLVMTypeOf(rhs_forced)) == c.LLVMPointerTypeKind)
-            c.LLVMBuildPtrToInt(self.builder, rhs_forced, llvm.i64Type(), "rhs_i64")
+            untagInt(self.builder, rhs_forced)
         else
             rhs_forced;
 
@@ -1806,7 +1860,7 @@ pub const GrinTranslator = struct {
             .identity => unreachable, // handled above
         };
         if (isComparisonOp(instr)) return raw_result; // i1 — caller wraps
-        return c.LLVMBuildIntToPtr(self.builder, raw_result, ptrType(), "arith_ptr");
+        return tagInt(self.builder, raw_result);
     }
 
     /// Check whether a primop instruction is a comparison (returns i1/Bool).
@@ -2032,11 +2086,16 @@ pub const GrinTranslator = struct {
                     const field_ty = c.LLVMTypeOf(raw_val);
                     const kind = c.LLVMGetTypeKind(field_ty);
                     const is_ptr = kind == c.LLVMPointerTypeKind;
-                    // Convert to i64: ptrtoint for pointers, keep as-is for integers.
+                    // Convert to u64 for storage.  Pointers are stored via
+                    // ptrtoint.  Raw integers are tagged ((n<<1)|1) so that
+                    // when loaded back (inttoptr), __rhc_force can distinguish
+                    // them from heap pointers by bit 0.
                     const as_u64: llvm.Value = if (is_ptr)
                         c.LLVMBuildPtrToInt(self.builder, raw_val, llvm.i64Type(), "field_u64")
-                    else
-                        raw_val;
+                    else blk: {
+                        const tagged = tagInt(self.builder, raw_val);
+                        break :blk c.LLVMBuildPtrToInt(self.builder, tagged, llvm.i64Type(), "field_tagged");
+                    };
                     var store_args = [_]llvm.Value{
                         node_ptr,
                         c.LLVMConstInt(llvm.i32Type(), fi, 0),
@@ -2139,12 +2198,13 @@ pub const GrinTranslator = struct {
             // to case dispatch.
             const eval_check_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.check");
             const guard_raw_tag = c.LLVMBuildPtrToInt(self.builder, phi, llvm.i64Type(), "eval.ptr_int");
+            const untagged_raw = c.LLVMBuildAShr(self.builder, guard_raw_tag, c.LLVMConstInt(llvm.i64Type(), 1, 0), "eval.untagged");
             {
-                const align_bits = c.LLVMBuildAnd(self.builder, guard_raw_tag, c.LLVMConstInt(llvm.i64Type(), 7, 0), "eval.align");
-                const is_aligned = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, align_bits, c.LLVMConstInt(llvm.i64Type(), 0, 0), "eval.aligned");
-                const is_above_min = c.LLVMBuildICmp(self.builder, c.LLVMIntUGT, guard_raw_tag, c.LLVMConstInt(llvm.i64Type(), 4096, 0), "eval.above_min");
-                const is_heap = c.LLVMBuildAnd(self.builder, is_aligned, is_above_min, "eval.is_heap");
-                _ = c.LLVMBuildCondBr(self.builder, is_heap, eval_check_bb, dispatch_bb);
+                const low_bit = c.LLVMBuildAnd(self.builder, guard_raw_tag, c.LLVMConstInt(llvm.i64Type(), 1, 0), "eval.low_bit");
+                const is_heap = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, low_bit, c.LLVMConstInt(llvm.i64Type(), 0, 0), "eval.is_heap");
+                const is_nonnull = c.LLVMBuildICmp(self.builder, c.LLVMIntNE, guard_raw_tag, c.LLVMConstInt(llvm.i64Type(), 0, 0), "eval.nonnull");
+                const is_valid = c.LLVMBuildAnd(self.builder, is_heap, is_nonnull, "eval.valid_heap");
+                _ = c.LLVMBuildCondBr(self.builder, is_valid, eval_check_bb, dispatch_bb);
             }
 
             llvm.positionBuilderAtEnd(self.builder, eval_check_bb);
@@ -2349,10 +2409,10 @@ pub const GrinTranslator = struct {
             // Use a phi for the tag: when arriving from eval.check (the
             // eval switch default), the tag was loaded from the heap node;
             // when arriving from eval.entry (heap-guard fail), use the
-            // raw ptrtoint value as the "tag" (for LitPat matching).
+            // untagged integer value as the "tag" (for LitPat matching).
             llvm.positionBuilderAtEnd(self.builder, dispatch_bb);
             const tag_phi = c.LLVMBuildPhi(self.builder, llvm.i64Type(), "dispatch.tag");
-            var tag_phi_vals = [_]llvm.Value{ tag_val, guard_raw_tag };
+            var tag_phi_vals = [_]llvm.Value{ tag_val, untagged_raw };
             var tag_phi_bbs = [_]llvm.BasicBlock{ eval_check_bb, eval_bb };
             c.LLVMAddIncoming(tag_phi, @ptrCast(&tag_phi_vals), @ptrCast(&tag_phi_bbs), 2);
             cur_scrut = phi;
@@ -2529,15 +2589,16 @@ pub const GrinTranslator = struct {
             const phi = c.LLVMBuildPhi(self.builder, ptrType(), "scrut.eval");
 
             // Heap-pointer guard (same as translateCase): skip eval for
-            // raw integers stored via inttoptr in F-tag thunk fields.
+            // tagged integers in F-tag thunk fields.
             const eval_check_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.check");
             const guard_raw_tag = c.LLVMBuildPtrToInt(self.builder, phi, llvm.i64Type(), "eval.ptr_int");
+            const untagged_raw = c.LLVMBuildAShr(self.builder, guard_raw_tag, c.LLVMConstInt(llvm.i64Type(), 1, 0), "eval.untagged");
             {
-                const align_bits = c.LLVMBuildAnd(self.builder, guard_raw_tag, c.LLVMConstInt(llvm.i64Type(), 7, 0), "eval.align");
-                const is_aligned = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, align_bits, c.LLVMConstInt(llvm.i64Type(), 0, 0), "eval.aligned");
-                const is_above_min = c.LLVMBuildICmp(self.builder, c.LLVMIntUGT, guard_raw_tag, c.LLVMConstInt(llvm.i64Type(), 4096, 0), "eval.above_min");
-                const is_heap = c.LLVMBuildAnd(self.builder, is_aligned, is_above_min, "eval.is_heap");
-                _ = c.LLVMBuildCondBr(self.builder, is_heap, eval_check_bb, dispatch_bb);
+                const low_bit = c.LLVMBuildAnd(self.builder, guard_raw_tag, c.LLVMConstInt(llvm.i64Type(), 1, 0), "eval.low_bit");
+                const is_heap = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, low_bit, c.LLVMConstInt(llvm.i64Type(), 0, 0), "eval.is_heap");
+                const is_nonnull = c.LLVMBuildICmp(self.builder, c.LLVMIntNE, guard_raw_tag, c.LLVMConstInt(llvm.i64Type(), 0, 0), "eval.nonnull");
+                const is_valid = c.LLVMBuildAnd(self.builder, is_heap, is_nonnull, "eval.valid_heap");
+                _ = c.LLVMBuildCondBr(self.builder, is_valid, eval_check_bb, dispatch_bb);
             }
 
             llvm.positionBuilderAtEnd(self.builder, eval_check_bb);
@@ -2652,11 +2713,11 @@ pub const GrinTranslator = struct {
 
             c.LLVMAddIncoming(phi, @ptrCast(phi_incoming_vals.items.ptr), @ptrCast(phi_incoming_bbs.items.ptr), @intCast(phi_incoming_vals.items.len));
 
-            // Tag phi: merge tag_val from eval.check and raw ptrtoint from
+            // Tag phi: merge tag_val from eval.check and untagged integer from
             // eval.entry (heap-guard fail path).
             llvm.positionBuilderAtEnd(self.builder, dispatch_bb);
             const tag_phi = c.LLVMBuildPhi(self.builder, llvm.i64Type(), "dispatch.tag");
-            var tag_phi_vals = [_]llvm.Value{ tag_val, guard_raw_tag };
+            var tag_phi_vals = [_]llvm.Value{ tag_val, untagged_raw };
             var tag_phi_bbs = [_]llvm.BasicBlock{ eval_check_bb, eval_bb };
             c.LLVMAddIncoming(tag_phi, @ptrCast(&tag_phi_vals), @ptrCast(&tag_phi_bbs), 2);
             cur_scrut = phi;
@@ -2779,25 +2840,10 @@ pub const GrinTranslator = struct {
                 const val_ty = c.LLVMTypeOf(val);
                 const val_kind = c.LLVMGetTypeKind(val_ty);
                 const is_i64 = val_kind == c.LLVMIntegerTypeKind and c.LLVMGetIntTypeWidth(val_ty) == 64;
-                const normalized_val: llvm.Value = if (is_i64) blk: {
-                    // Box the i64 value into a 0-field heap node so that
-                    // case analysis can load a tag from the resulting ptr.
-                    // This is needed for nullary constructors whose
-                    // discriminants are i64 values (e.g. True/False).
-                    const rts_alloc_fn = declareRtsAlloc(self.module);
-                    var alloc_args = [_]llvm.Value{
-                        val, // tag discriminant
-                        c.LLVMConstInt(llvm.i32Type(), 0, 0), // 0 fields
-                    };
-                    break :blk c.LLVMBuildCall2(
-                        self.builder,
-                        llvm.getFunctionType(rts_alloc_fn),
-                        rts_alloc_fn,
-                        &alloc_args,
-                        2,
-                        "boxed",
-                    );
-                } else val;
+                const normalized_val: llvm.Value = if (is_i64)
+                    tagInt(self.builder, val)
+                else
+                    val;
                 
                 try phi_values.append(self.allocator, normalized_val);
                 const cur_bb = c.LLVMGetInsertBlock(self.builder);
@@ -2870,8 +2916,10 @@ pub const GrinTranslator = struct {
         const v_kind = c.LLVMGetTypeKind(c.LLVMTypeOf(v_val));
         const v_as_u64: llvm.Value = if (v_kind == c.LLVMPointerTypeKind)
             c.LLVMBuildPtrToInt(self.builder, v_val, llvm.i64Type(), "upd.v_u64")
-        else
-            v_val;
+        else blk: {
+            const tagged = tagInt(self.builder, v_val);
+            break :blk c.LLVMBuildPtrToInt(self.builder, tagged, llvm.i64Type(), "upd.v_tagged");
+        };
         var store_args = [_]llvm.Value{
             p_val,
             c.LLVMConstInt(llvm.i32Type(), 0, 0),
@@ -2942,7 +2990,7 @@ pub const GrinTranslator = struct {
                     if (is_int) {
                         // Integer values (e.g. primop results) need inttoptr
                         // to match the ptr return type of non-entry functions.
-                        const converted = c.LLVMBuildIntToPtr(self.builder, llvm_val, ptrType(), "ret_as_ptr");
+                        const converted = tagInt(self.builder, llvm_val);
                         _ = llvm.buildRet(self.builder, converted);
                         return;
                     }
@@ -3033,11 +3081,11 @@ pub const GrinTranslator = struct {
         // valid heap node (aligned to 8 bytes AND above page zero).
         // Raw integers stored via inttoptr (e.g. 42) fail this check.
         const ptr_as_int = c.LLVMBuildPtrToInt(self.builder, phi, i64_ty, "ptr_int");
-        const align_bits = c.LLVMBuildAnd(self.builder, ptr_as_int, c.LLVMConstInt(i64_ty, 7, 0), "align");
-        const is_aligned = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, align_bits, c.LLVMConstInt(i64_ty, 0, 0), "aligned");
-        const is_above_min = c.LLVMBuildICmp(self.builder, c.LLVMIntUGT, ptr_as_int, c.LLVMConstInt(i64_ty, 4096, 0), "above_min");
-        const is_heap_ptr = c.LLVMBuildAnd(self.builder, is_aligned, is_above_min, "is_heap");
-        _ = c.LLVMBuildCondBr(self.builder, is_heap_ptr, check_bb, done_bb);
+        const low_bit = c.LLVMBuildAnd(self.builder, ptr_as_int, c.LLVMConstInt(i64_ty, 1, 0), "low_bit");
+        const is_heap_ptr = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, low_bit, c.LLVMConstInt(i64_ty, 0, 0), "is_heap");
+        const is_nonnull = c.LLVMBuildICmp(self.builder, c.LLVMIntNE, ptr_as_int, c.LLVMConstInt(i64_ty, 0, 0), "nonnull");
+        const is_valid_heap = c.LLVMBuildAnd(self.builder, is_heap_ptr, is_nonnull, "valid_heap");
+        _ = c.LLVMBuildCondBr(self.builder, is_valid_heap, check_bb, done_bb);
 
         // ── check: tag load + switch ───────────────────────────────────
         llvm.positionBuilderAtEnd(self.builder, check_bb);
@@ -3217,13 +3265,11 @@ pub const GrinTranslator = struct {
         // Raw integers stored via inttoptr (e.g. 42) fail this check
         // and go straight to done_bb.
         const ptr_as_int = c.LLVMBuildPtrToInt(self.builder, phi, i64_ty, "force.ptr_int");
-        const align_mask = c.LLVMConstInt(i64_ty, 7, 0);
-        const align_bits = c.LLVMBuildAnd(self.builder, ptr_as_int, align_mask, "force.align");
-        const is_aligned = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, align_bits, c.LLVMConstInt(i64_ty, 0, 0), "force.is_aligned");
-        const min_addr = c.LLVMConstInt(i64_ty, 4096, 0);
-        const is_above_min = c.LLVMBuildICmp(self.builder, c.LLVMIntUGT, ptr_as_int, min_addr, "force.above_min");
-        const is_heap_ptr = c.LLVMBuildAnd(self.builder, is_aligned, is_above_min, "force.is_heap");
-        _ = c.LLVMBuildCondBr(self.builder, is_heap_ptr, check_bb, done_bb);
+        const low_bit = c.LLVMBuildAnd(self.builder, ptr_as_int, c.LLVMConstInt(i64_ty, 1, 0), "force.low_bit");
+        const is_heap = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, low_bit, c.LLVMConstInt(i64_ty, 0, 0), "force.is_heap");
+        const is_nonnull = c.LLVMBuildICmp(self.builder, c.LLVMIntNE, ptr_as_int, c.LLVMConstInt(i64_ty, 0, 0), "force.nonnull");
+        const is_valid_heap = c.LLVMBuildAnd(self.builder, is_heap, is_nonnull, "force.valid_heap");
+        _ = c.LLVMBuildCondBr(self.builder, is_valid_heap, check_bb, done_bb);
 
         // ── check block: tag load + switch ─────────────────────────────
         llvm.positionBuilderAtEnd(self.builder, check_bb);
