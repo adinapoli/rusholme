@@ -347,31 +347,53 @@ fn expandTilde(path: []const u8, allocator: Allocator) ?[]const u8 {
 /// Returns the contents starting after the `where` keyword and its
 /// following newline, or the original contents if no header is found.
 fn stripModuleHeader(contents: []const u8) []const u8 {
-    // Skip leading whitespace/blank lines.
+    // Find the first non-whitespace, non-empty line that might contain `module`
     var i: usize = 0;
-    while (i < contents.len and (contents[i] == ' ' or contents[i] == '\t' or contents[i] == '\n' or contents[i] == '\r')) {
-        i += 1;
-    }
-
-    // Check for `module` keyword.
-    if (!std.mem.startsWith(u8, contents[i..], "module ")) return contents;
-
-    // Find `where` followed by end-of-line or end-of-file.
-    if (std.mem.indexOf(u8, contents[i..], "where")) |where_offset| {
-        const after_where = i + where_offset + "where".len;
-        // Skip past the newline after `where`.
-        if (after_where < contents.len and contents[after_where] == '\n') {
-            return contents[after_where + 1 ..];
-        } else if (after_where < contents.len and contents[after_where] == '\r') {
-            const skip = if (after_where + 1 < contents.len and contents[after_where + 1] == '\n')
-                after_where + 2
-            else
-                after_where + 1;
-            return contents[skip..];
+    while (i < contents.len) {
+        // Skip past the current line
+        const line_start = i;
+        while (i < contents.len and contents[i] != '\n' and contents[i] != '\r') {
+            i += 1;
         }
-        return contents[after_where..];
+
+        // Extract the line (without newline)
+        const line_end = i;
+        const line = contents[line_start..line_end];
+
+        // Trim whitespace from line
+        var j: usize = 0;
+        while (j < line.len and (line[j] == ' ' or line[j] == '\t')) {
+            j += 1;
+        }
+        const trimmed_line = line[j..];
+
+        // Skip empty lines and comments, check for module keyword
+        if (trimmed_line.len > 0 and trimmed_line[0] != '-' and std.mem.startsWith(u8, trimmed_line, "module ")) {
+            // Found module line, check for where after it
+            const where_keyword = "where";
+            if (std.mem.indexOf(u8, trimmed_line, where_keyword)) |where_offset| {
+                const after_where = line_start + where_offset + where_keyword.len;
+                // Skip past the newline after `where`
+                var k = after_where;
+                while (k < contents.len and (contents[k] == '\n' or contents[k] == '\r')) {
+                    k += 1;
+                }
+                if (k < contents.len) {
+                    return contents[k..];
+                }
+                return contents[after_where..];
+            }
+            // Has module but no where - not a valid module header line, return original
+            return contents;
+        }
+
+        // Skip past newline(s) to next line
+        while (i < contents.len and (contents[i] == '\n' or contents[i] == '\r')) {
+            i += 1;
+        }
     }
 
+    // No module declaration found, return original
     return contents;
 }
 
