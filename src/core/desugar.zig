@@ -2055,13 +2055,92 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                 .span = syntheticSpan(),
             } };
         },
-        .EnumFrom, .EnumFromThen, .EnumFromTo, .EnumFromThenTo => {
-            // Arithmetic sequences
-            // tracked in: https://github.com/adinapoli/rusholme/issues/361
-            node.* = .{ .Var = .{
-                .name = Name{ .base = "todo_seq", .unique = .{ .value = 0 } },
+        .EnumFrom => |enum_from| {
+            // [n..] → enumFrom n
+            const fn_var = try alloc.create(ast_mod.Expr);
+            fn_var.* = .{ .Var = .{
+                .name = enum_from.fn_name,
                 .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
-                .span = syntheticSpan(),
+                .span = enum_from.span,
+            } };
+            const from_arg = try desugarExpr(ctx, enum_from.from.*);
+            node.* = .{ .App = .{
+                .fn_expr = fn_var,
+                .arg = from_arg,
+                .span = enum_from.span,
+            } };
+        },
+        .EnumFromTo => |enum_from_to| {
+            // [n..m] → enumFromTo n m
+            const fn_var = try alloc.create(ast_mod.Expr);
+            fn_var.* = .{ .Var = .{
+                .name = enum_from_to.fn_name,
+                .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
+                .span = enum_from_to.span,
+            } };
+            const from_arg = try desugarExpr(ctx, enum_from_to.from.*);
+            const to_arg = try desugarExpr(ctx, enum_from_to.to.*);
+            const partial = try alloc.create(ast_mod.Expr);
+            partial.* = .{ .App = .{
+                .fn_expr = fn_var,
+                .arg = from_arg,
+                .span = enum_from_to.span,
+            } };
+            node.* = .{ .App = .{
+                .fn_expr = partial,
+                .arg = to_arg,
+                .span = enum_from_to.span,
+            } };
+        },
+        .EnumFromThen => |enum_from_then| {
+            // [n,n2..] → enumFromThen n n2
+            const fn_var = try alloc.create(ast_mod.Expr);
+            fn_var.* = .{ .Var = .{
+                .name = enum_from_then.fn_name,
+                .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
+                .span = enum_from_then.span,
+            } };
+            const from_arg = try desugarExpr(ctx, enum_from_then.from.*);
+            const then_arg = try desugarExpr(ctx, enum_from_then.then.*);
+            const partial = try alloc.create(ast_mod.Expr);
+            partial.* = .{ .App = .{
+                .fn_expr = fn_var,
+                .arg = from_arg,
+                .span = enum_from_then.span,
+            } };
+            node.* = .{ .App = .{
+                .fn_expr = partial,
+                .arg = then_arg,
+                .span = enum_from_then.span,
+            } };
+        },
+        .EnumFromThenTo => |enum_from_then_to| {
+            // [n,n2..m] → enumFromThenTo n n2 m
+            const fn_var = try alloc.create(ast_mod.Expr);
+            fn_var.* = .{ .Var = .{
+                .name = enum_from_then_to.fn_name,
+                .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
+                .span = enum_from_then_to.span,
+            } };
+            const from_arg = try desugarExpr(ctx, enum_from_then_to.from.*);
+            const then_arg = try desugarExpr(ctx, enum_from_then_to.then.*);
+            const to_arg = try desugarExpr(ctx, enum_from_then_to.to.*);
+            const partial1 = try alloc.create(ast_mod.Expr);
+            partial1.* = .{ .App = .{
+                .fn_expr = fn_var,
+                .arg = from_arg,
+                .span = enum_from_then_to.span,
+            } };
+            const partial2 = try alloc.create(ast_mod.Expr);
+            partial2.* = .{ .App = .{
+                .fn_expr = partial1,
+                .arg = then_arg,
+                .span = enum_from_then_to.span,
+            } };
+            node.* = .{ .App = .{
+                .fn_expr = partial2,
+                .arg = to_arg,
+                .span = enum_from_then_to.span,
             } };
         },
         .TypeAnn => {

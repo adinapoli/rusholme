@@ -201,13 +201,7 @@ pub const Session = struct {
             .ty_env = ty_env,
             .mv_supply = .{},
             .next_file_id = 1,
-            .pipeline = blk: {
-                var p = Pipeline.init(allocator, io);
-                // Disable show-wrapping on WASM: the GrinEngine tree-walker
-                // can't execute cross-module Prelude Show functions.
-                if (is_wasi) p.enable_show_wrapping = false;
-                break :blk p;
-            },
+            .pipeline = Pipeline.init(allocator, io),
             .engine = if (is_wasi) GrinEngine.init(allocator, io) else JitEngine.init(allocator) catch return SessionError.InitFailed,
             .last_diagnostics = .{},
             .accumulated_defs = .{},
@@ -732,6 +726,16 @@ test "session: loadPrelude populates accumulated state" {
     try testing.expect(session.accumulated_defs.items.len > 0);
     // Prelude declares data types — accumulated_con_map should have entries.
     try testing.expect(session.accumulated_con_map.count() > 0);
+
+    // Check that enumFromTo is among the Prelude defs.
+    var found_enumFromTo = false;
+    for (session.accumulated_defs.items) |def| {
+        if (std.mem.eql(u8, def.name.base, "enumFromTo")) {
+            found_enumFromTo = true;
+            break;
+        }
+    }
+    try testing.expect(found_enumFromTo);
 }
 
 test "session: Prelude names resolve after loadPrelude" {
