@@ -51,12 +51,11 @@ pub const ReplServer = struct {
         var session = try Session.init(allocator, io);
         errdefer session.deinit();
 
-        // Disable show-wrapping: triggers infinite recursion for polymorphic
-        // expressions (e.g. `42`) during the fallback-to-bare-expression path.
-        // Monomorphic expressions like `True` work fine with show-wrapping.
-        // Root cause: likely deepForceVal creating circular references during
-        // WASM server's accumulated-defs merging, or pipeline retry logic issue.
-        // tracked in: https://github.com/adinapoli/rusholme/issues/627
+        // Show-wrapping is disabled for the WASM server: the output goes
+        // to stdout via putStrLn but the JSON-RPC protocol returns the
+        // result as a value field.  Until stdout capture is wired into
+        // the response, the GRIN evaluator's ad-hoc formatter handles
+        // display.  Tracked as part of the Show-instance follow-up.
         session.pipeline.enable_show_wrapping = false;
 
         return .{

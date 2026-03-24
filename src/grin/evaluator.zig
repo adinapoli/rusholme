@@ -553,20 +553,25 @@ pub const GrinEvaluator = struct {
     /// Resolve a Val to its runtime value, looking up variables if needed.
     fn resolveVal(self: *GrinEvaluator, v: *const Val) EvalError!Val {
         return switch (v.*) {
-            .Var => |name| self.env.lookup(name) orelse
-                // If the variable isn't in the environment, it may be a
-                // top-level function reference (e.g. `identity` passed as a
-                // higher-order argument). Return the Var as-is so the App
-                // handler can resolve it through the function table.
-                if (self.funcs.contains(name))
-                    Val{ .Var = name }
-                else if (std.mem.eql(u8, name.base, "_hptr"))
-                    // Heap pointer values (from Store) are synthetic Var
-                    // nodes that carry the heap index in their unique field.
-                    // They are not environment-bound names — return as-is.
-                    Val{ .Var = name }
-                else
-                    error.UnboundVariable,
+            .Var => |name| blk: {
+                // Heap pointer values (from Store) are synthetic Var
+                // nodes that carry the heap index in their unique field.
+                // They must be checked BEFORE the environment lookup
+                // because heap indices (0, 1, 2, ...) can collide with
+                // renamer-assigned unique values in the environment.
+                if (std.mem.eql(u8, name.base, "_hptr"))
+                    break :blk Val{ .Var = name };
+
+                break :blk self.env.lookup(name) orelse
+                    // If the variable isn't in the environment, it may be a
+                    // top-level function reference (e.g. `identity` passed as a
+                    // higher-order argument). Return the Var as-is so the App
+                    // handler can resolve it through the function table.
+                    if (self.funcs.contains(name))
+                        Val{ .Var = name }
+                    else
+                        error.UnboundVariable;
+            },
             .Unit => Val{ .Unit = {} },
             .Lit => |lit| Val{ .Lit = lit },
             .ValTag => |tag| Val{ .ValTag = tag },
@@ -830,10 +835,17 @@ pub const GrinEvaluator = struct {
                     break :b try self.evalPrimOp(op, app.args);
                 }
 
-                // Check if this is a Prelude function call (e.g., `putStrLn`)
-                // and dispatch to its PrimOp implementation.
-                if (PrimOp.fromPreludeName(app.name.base)) |op| {
-                    break :b try self.evalPrimOp(op, app.args);
+                // Check if this is a prim-prefixed function call
+                // (e.g., `primPutStrLn`) and dispatch to its PrimOp.
+                // Only dispatch names starting with "prim" here; unprefixed
+                // names like `putStrLn` must go through the Haskell wrappers
+                // in the Prelude, which correctly walk lazy cons-cell lists
+                // character-by-character.  Bypassing them causes the evaluator
+                // to call charListToString on unevaluated thunks (#627).
+                if (std.mem.startsWith(u8, app.name.base, "prim")) {
+                    if (PrimOp.fromPreludeName(app.name.base)) |op| {
+                        break :b try self.evalPrimOp(op, app.args);
+                    }
                 }
 
                 // IO monad sequencing operators.
@@ -938,8 +950,6 @@ pub const GrinEvaluator = struct {
                 // Try to match against each alternative
                 for (case_expr.alts) |alt| {
                     if (try self.matchPattern(scrutinee_val, alt.pat)) {
-                        // Pattern matched - bind any variables from the pattern
-                        // (This is handled during matchPattern)
                         const result = try self.eval(alt.body);
                         break :b result;
                     }
@@ -2674,18 +2684,24 @@ test "eval: Combined - function that cases on its argument" {
     try testing.expectEqual(@as(i64, 123), result.Lit.Int);
 }
 
-test "PrimOp: fromPreludeName maps IO function aliases to PrimOps" {
+test "PrimOp: fromPreludeName maps IO function names to PrimOps" {
     try testing.expectEqual(PrimOp.putStrLn_, PrimOp.fromString("putStrLn_") orelse return);
     try testing.expectEqual(@as(?PrimOp, null), PrimOp.fromString("putStrLn"));
 
-    // fromPreludeName maps both user-facing aliases and prim-prefixed
-    // names.  The desugar stage normalises the alias to the canonical
-    // enum name (via op.name()) so downstream stages only see canonical
-    // names in GRIN/LLVM IR.
+    // fromPreludeName maps both prim-prefixed and unprefixed names.
+    // The desugarer and GRIN translator use it at compile time for all
+    // names.  The GRIN evaluator guards against dispatching unprefixed
+    // names as raw primops (they must go through Haskell wrappers that
+    // walk lazy cons-cell lists character-by-character, see #627).
     try testing.expectEqual(PrimOp.putStrLn_, PrimOp.fromPreludeName("primPutStrLn") orelse return);
+    try testing.expectEqual(PrimOp.write_stdout, PrimOp.fromPreludeName("primPutStr") orelse return);
+    try testing.expectEqual(PrimOp.putChar_, PrimOp.fromPreludeName("primPutChar") orelse return);
+
+    // Unprefixed names also resolve (used by desugarer/translator).
     try testing.expectEqual(PrimOp.putStrLn_, PrimOp.fromPreludeName("putStrLn") orelse return);
     try testing.expectEqual(PrimOp.write_stdout, PrimOp.fromPreludeName("putStr") orelse return);
     try testing.expectEqual(PrimOp.putChar_, PrimOp.fromPreludeName("putChar") orelse return);
+    try testing.expectEqual(PrimOp.write_stdout, PrimOp.fromPreludeName("print") orelse return);
     try testing.expect(@as(?PrimOp, null) == PrimOp.fromPreludeName("nonexistent"));
 }
 

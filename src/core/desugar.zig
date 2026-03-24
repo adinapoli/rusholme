@@ -784,6 +784,23 @@ fn desugarInstanceDecl(
         .head_name = head_name,
     }, dict_name);
 
+    // If the instance has context constraints (e.g. `Show a => Show [a]`),
+    // pre-populate dict_param_names so that evidence resolution inside method
+    // bodies can reference the enclosing dictionary parameters.  These names
+    // are reused when wrapping the dictionary expression with lambdas below.
+    var context_param_names = try alloc.alloc(Name, id_decl.context.len);
+    if (id_decl.context.len > 0) {
+        ctx.dict_param_names.clearRetainingCapacity();
+        for (id_decl.context, 0..) |assertion, ci| {
+            const dpn = Name{
+                .base = try std.fmt.allocPrint(alloc, "dict${s}", .{assertion.class_name.base}),
+                .unique = ctx.u_supply.fresh(),
+            };
+            context_param_names[ci] = dpn;
+            try ctx.dict_param_names.put(alloc, assertion.class_name.unique.value, dpn);
+        }
+    }
+
     // Build the dictionary value: MkDict$Class method1_impl method2_impl ...
     // For each method in class declaration order, find the binding in the instance.
     // If not found and the class has a default, use a placeholder.
@@ -799,7 +816,7 @@ fn desugarInstanceDecl(
         }
 
         if (found_binding) |binding| {
-            // Desugar the instance method body
+            // Desugar the instance method body.
             if (binding.equations.len == 1 and binding.equations[0].patterns.len == 0) {
                 // Simple case: no patterns, just an RHS
                 const body = try alloc.create(ast_mod.Expr);
@@ -896,6 +913,35 @@ fn desugarInstanceDecl(
             },
         };
         dict_expr = app;
+    }
+
+    // If the instance has context constraints, wrap the dictionary expression
+    // with lambdas for each constraint.  E.g. for `instance Show a => Show [a]`:
+    //   dict$Show$List = \dict$Show -> MkDict$Show (\xs -> showListWith dict$Show xs)
+    // This makes the dictionary a function that accepts the sub-dictionaries.
+    if (id_decl.context.len > 0) {
+        var i = id_decl.context.len;
+        while (i > 0) {
+            i -= 1;
+            const dict_param_ty = ast_mod.CoreType{ .TyCon = .{
+                .name = Name{
+                    .base = try std.fmt.allocPrint(alloc, "Dict${s}", .{id_decl.context[i].class_name.base}),
+                    .unique = .{ .value = 0 },
+                },
+                .args = &.{},
+            } };
+            const wrapped = try alloc.create(ast_mod.Expr);
+            wrapped.* = .{ .Lam = .{
+                .binder = .{
+                    .name = context_param_names[i],
+                    .ty = dict_param_ty,
+                    .span = id_decl.span,
+                },
+                .body = dict_expr,
+                .span = id_decl.span,
+            } };
+            dict_expr = wrapped;
+        }
     }
 
     // The dictionary binding type (placeholder — not critical for GRIN translation).
@@ -1021,13 +1067,10 @@ fn buildDictExpr(
         .instance => |inst| {
             // Look up the dictionary name by (class, head_type_name).
             const head_name = htypeHeadName(inst.head_ty);
-            const dict_name = ctx.dict_names.get(.{
-                .class_unique = inst.class_name.unique.value,
-                .head_name = head_name,
-            });
+            const dict_name = lookupDictName(&ctx.dict_names, inst.class_name.unique.value, head_name);
 
             if (dict_name) |dn| {
-                const node = try alloc.create(ast_mod.Expr);
+                var node = try alloc.create(ast_mod.Expr);
                 const dict_ty = ast_mod.CoreType{ .TyCon = .{
                     .name = Name{
                         .base = try std.fmt.allocPrint(alloc, "Dict${s}", .{inst.class_name.base}),
@@ -1036,6 +1079,22 @@ fn buildDictExpr(
                     .args = &.{},
                 } };
                 node.* = .{ .Var = .{ .name = dn, .ty = dict_ty, .span = span } };
+
+                // Apply context evidence as arguments for constrained instances.
+                // E.g. for `Show [Int]` resolved via `instance Show a => Show [a]`,
+                // the context_evidence contains [Show Int], so we generate:
+                //   dict$Show$List dict$Show$Int
+                for (inst.context_evidence) |ctx_ev| {
+                    const sub_dict = try buildDictExpr(ctx, &ctx_ev, span);
+                    const app = try alloc.create(ast_mod.Expr);
+                    app.* = .{ .App = .{
+                        .fn_expr = node,
+                        .arg = sub_dict,
+                        .span = span,
+                    } };
+                    node = app;
+                }
+
                 return node;
             } else {
                 // Dictionary not found — emit a placeholder.
@@ -1099,12 +1158,26 @@ fn buildDictExpr(
     }
 }
 
+/// Linear scan lookup for dictionary names.
+///
+/// Works around an issue where `ArrayHashMap.get()` fails to find
+/// entries that were seeded from an external map (likely a hash
+/// function inconsistency when keys are copied between maps).
+fn lookupDictName(map: *const DesugarCtx.DictNameMap, class_unique: u64, head_name: []const u8) ?Name {
+    for (map.keys(), map.values()) |k, v| {
+        if (k.class_unique == class_unique and std.mem.eql(u8, k.head_name, head_name)) {
+            return v;
+        }
+    }
+    return null;
+}
+
 /// Extract a base name from an HType for dictionary name lookup.
 /// Maps concrete types to their base name string (e.g. `Con(Int)` → "Int").
 fn htypeHeadName(ty: htype_mod.HType) []const u8 {
     const chased = ty.chase();
     return switch (chased) {
-        .Con => |c| c.name.base,
+        .Con => |c| if (std.mem.eql(u8, c.name.base, "[]")) "List" else c.name.base,
         .Rigid => |r| r.base,
         .AppTy => |a| htypeHeadName(a.head.*),
         .Meta => "Meta",
