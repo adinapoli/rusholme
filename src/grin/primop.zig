@@ -348,20 +348,13 @@ pub const PrimOp = enum(u16) {
     /// (via `op.name()`).  Downstream stages (GRIN translator, LLVM backend)
     /// then only need to match canonical names via `fromString()`.
     pub fn fromPreludeName(str: []const u8) ?PrimOp {
-        // Map foreign-import-prim names (prim-prefixed) to their canonical
-        // PrimOp enum variants.  The desugarer uses this to normalise the
-        // inner call name in buildPrimOpWrapper.
-        //
-        // IMPORTANT: Do NOT map the unprefixed Haskell function names
-        // (putStrLn, putStr, putChar, print) here.  Those are Haskell
-        // wrappers defined in the Prelude that correctly walk lazy
-        // cons-cell lists character-by-character.  Mapping them to raw
-        // primops would bypass the Haskell implementation, causing the
-        // evaluator to call charListToString on lists containing
-        // unevaluated thunks, leading to infinite recursion (#627).
+        if (std.mem.eql(u8, str, "putStrLn")) return .putStrLn_;
         if (std.mem.eql(u8, str, "primPutStrLn")) return .putStrLn_;
+        if (std.mem.eql(u8, str, "putStr")) return .write_stdout;
         if (std.mem.eql(u8, str, "primPutStr")) return .write_stdout;
+        if (std.mem.eql(u8, str, "putChar")) return .putChar_;
         if (std.mem.eql(u8, str, "primPutChar")) return .putChar_;
+        if (std.mem.eql(u8, str, "print")) return .write_stdout;
         return null;
     }
 };

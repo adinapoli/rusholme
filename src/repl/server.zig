@@ -51,9 +51,12 @@ pub const ReplServer = struct {
         var session = try Session.init(allocator, io);
         errdefer session.deinit();
 
-        // Show-wrapping: enabled so the WASM REPL displays values using
-        // Haskell Show instances (e.g. `42` → "42", `[1,2]` → "[1,2]").
-        session.pipeline.enable_show_wrapping = true;
+        // Show-wrapping is disabled for the WASM server: the output goes
+        // to stdout via putStrLn but the JSON-RPC protocol returns the
+        // result as a value field.  Until stdout capture is wired into
+        // the response, the GRIN evaluator's ad-hoc formatter handles
+        // display.  Tracked as part of the Show-instance follow-up.
+        session.pipeline.enable_show_wrapping = false;
 
         return .{
             .allocator = allocator,

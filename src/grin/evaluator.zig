@@ -837,8 +837,15 @@ pub const GrinEvaluator = struct {
 
                 // Check if this is a prim-prefixed function call
                 // (e.g., `primPutStrLn`) and dispatch to its PrimOp.
-                if (PrimOp.fromPreludeName(app.name.base)) |op| {
-                    break :b try self.evalPrimOp(op, app.args);
+                // Only dispatch names starting with "prim" here; unprefixed
+                // names like `putStrLn` must go through the Haskell wrappers
+                // in the Prelude, which correctly walk lazy cons-cell lists
+                // character-by-character.  Bypassing them causes the evaluator
+                // to call charListToString on unevaluated thunks (#627).
+                if (std.mem.startsWith(u8, app.name.base, "prim")) {
+                    if (PrimOp.fromPreludeName(app.name.base)) |op| {
+                        break :b try self.evalPrimOp(op, app.args);
+                    }
                 }
 
                 // IO monad sequencing operators.
@@ -943,8 +950,6 @@ pub const GrinEvaluator = struct {
                 // Try to match against each alternative
                 for (case_expr.alts) |alt| {
                     if (try self.matchPattern(scrutinee_val, alt.pat)) {
-                        // Pattern matched - bind any variables from the pattern
-                        // (This is handled during matchPattern)
                         const result = try self.eval(alt.body);
                         break :b result;
                     }
@@ -2679,23 +2684,24 @@ test "eval: Combined - function that cases on its argument" {
     try testing.expectEqual(@as(i64, 123), result.Lit.Int);
 }
 
-test "PrimOp: fromPreludeName maps prim-prefixed IO function names to PrimOps" {
+test "PrimOp: fromPreludeName maps IO function names to PrimOps" {
     try testing.expectEqual(PrimOp.putStrLn_, PrimOp.fromString("putStrLn_") orelse return);
     try testing.expectEqual(@as(?PrimOp, null), PrimOp.fromString("putStrLn"));
 
-    // fromPreludeName maps only prim-prefixed names (used in foreign
-    // import prim declarations). The unprefixed names (putStrLn, putStr,
-    // putChar) are Haskell wrapper functions that walk lazy cons-cell
-    // lists and must NOT be intercepted as raw primops (#627).
+    // fromPreludeName maps both prim-prefixed and unprefixed names.
+    // The desugarer and GRIN translator use it at compile time for all
+    // names.  The GRIN evaluator guards against dispatching unprefixed
+    // names as raw primops (they must go through Haskell wrappers that
+    // walk lazy cons-cell lists character-by-character, see #627).
     try testing.expectEqual(PrimOp.putStrLn_, PrimOp.fromPreludeName("primPutStrLn") orelse return);
     try testing.expectEqual(PrimOp.write_stdout, PrimOp.fromPreludeName("primPutStr") orelse return);
     try testing.expectEqual(PrimOp.putChar_, PrimOp.fromPreludeName("primPutChar") orelse return);
 
-    // Unprefixed names must NOT resolve — they are Haskell functions.
-    try testing.expect(@as(?PrimOp, null) == PrimOp.fromPreludeName("putStrLn"));
-    try testing.expect(@as(?PrimOp, null) == PrimOp.fromPreludeName("putStr"));
-    try testing.expect(@as(?PrimOp, null) == PrimOp.fromPreludeName("putChar"));
-    try testing.expect(@as(?PrimOp, null) == PrimOp.fromPreludeName("print"));
+    // Unprefixed names also resolve (used by desugarer/translator).
+    try testing.expectEqual(PrimOp.putStrLn_, PrimOp.fromPreludeName("putStrLn") orelse return);
+    try testing.expectEqual(PrimOp.write_stdout, PrimOp.fromPreludeName("putStr") orelse return);
+    try testing.expectEqual(PrimOp.putChar_, PrimOp.fromPreludeName("putChar") orelse return);
+    try testing.expectEqual(PrimOp.write_stdout, PrimOp.fromPreludeName("print") orelse return);
     try testing.expect(@as(?PrimOp, null) == PrimOp.fromPreludeName("nonexistent"));
 }
 
