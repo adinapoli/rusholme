@@ -353,6 +353,23 @@ fn cmdCheck(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     var rename_env = try renamer_mod.RenameEnv.init(arena_alloc, &u_supply, &diags);
     defer rename_env.deinit();
 
+    // ── Load Prelude before user rename ───────────────────────────────
+    // The Prelude must be compiled and its bindings accumulated BEFORE
+    // the user's module is renamed, so that Prelude symbols are in scope
+    // during renaming.
+    var mv_supply = htype_mod.MetaVarSupply{};
+    var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
+    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
+
+    // Respect the NoImplicitPrelude language extension: only load Prelude
+    // when the user has NOT enabled NoImplicitPrelude.
+    if (!module.language_extensions.contains(.NoImplicitPrelude)) {
+        // Load the Prelude so its functions/operators are available for renaming.
+        // Non-fatal: on failure the check continues with built-in names only.
+        var pipeline_check = rusholme.repl.pipeline.Pipeline.init(arena_alloc, io);
+        loadPrelude(arena_alloc, io, &pipeline_check, &u_supply, &rename_env, &ty_env, &mv_supply, &diags) catch {};
+    }
+
     const renamed = try renamer_mod.rename(module, &rename_env);
 
     if (diags.hasErrors()) {
@@ -361,10 +378,6 @@ fn cmdCheck(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     }
 
     // ── Typecheck ──────────────────────────────────────────────────────
-    var mv_supply = htype_mod.MetaVarSupply{};
-    var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
-    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
-
     var infer_ctx = infer_mod.InferCtx.init(arena_alloc, &ty_env, &mv_supply, &u_supply, &diags);
     var module_types = try infer_mod.inferModule(&infer_ctx, renamed, null);
     defer module_types.deinit(arena_alloc);
@@ -439,15 +452,25 @@ fn cmdCore(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     var u_supply = rusholme.naming.unique.UniqueSupply{};
     var rename_env = try renamer_mod.RenameEnv.init(arena_alloc, &u_supply, &diags);
     defer rename_env.deinit();
+
+    // ── Load Prelude before user rename ───────────────────────────────
+    var mv_supply = htype_mod.MetaVarSupply{};
+    var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
+    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
+
+    // Respect the NoImplicitPrelude language extension: only load Prelude
+    // when the user has NOT enabled NoImplicitPrelude.
+    if (!module.language_extensions.contains(.NoImplicitPrelude)) {
+        var pipeline_core = rusholme.repl.pipeline.Pipeline.init(arena_alloc, io);
+        loadPrelude(arena_alloc, io, &pipeline_core, &u_supply, &rename_env, &ty_env, &mv_supply, &diags) catch {};
+    }
+
     const renamed = try renamer_mod.rename(module, &rename_env);
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
     }
 
-    var mv_supply = htype_mod.MetaVarSupply{};
-    var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
-    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
     var infer_ctx = infer_mod.InferCtx.init(arena_alloc, &ty_env, &mv_supply, &u_supply, &diags);
     var module_types = try infer_mod.inferModule(&infer_ctx, renamed, null);
     defer module_types.deinit(arena_alloc);
@@ -524,6 +547,19 @@ fn cmdGrin(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     var u_supply = rusholme.naming.unique.UniqueSupply{};
     var rename_env = try renamer_mod.RenameEnv.init(arena_alloc, &u_supply, &diags);
     defer rename_env.deinit();
+
+    // ── Load Prelude before user rename ───────────────────────────────
+    var mv_supply = htype_mod.MetaVarSupply{};
+    var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
+    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
+
+    // Respect the NoImplicitPrelude language extension: only load Prelude
+    // when the user has NOT enabled NoImplicitPrelude.
+    if (!module.language_extensions.contains(.NoImplicitPrelude)) {
+        var pipeline_grin = rusholme.repl.pipeline.Pipeline.init(arena_alloc, io);
+        loadPrelude(arena_alloc, io, &pipeline_grin, &u_supply, &rename_env, &ty_env, &mv_supply, &diags) catch {};
+    }
+
     const renamed = try renamer_mod.rename(module, &rename_env);
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
@@ -531,9 +567,6 @@ fn cmdGrin(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     }
 
     // ── Typecheck ──────────────────────────────────────────────────────
-    var mv_supply = htype_mod.MetaVarSupply{};
-    var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
-    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
     var infer_ctx = infer_mod.InferCtx.init(arena_alloc, &ty_env, &mv_supply, &u_supply, &diags);
     var module_types = try infer_mod.inferModule(&infer_ctx, renamed, null);
     defer module_types.deinit(arena_alloc);
@@ -625,6 +658,19 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     var u_supply = rusholme.naming.unique.UniqueSupply{};
     var rename_env = try renamer_mod.RenameEnv.init(arena_alloc, &u_supply, &diags);
     defer rename_env.deinit();
+
+    // ── Load Prelude before user rename ───────────────────────────────
+    var mv_supply = htype_mod.MetaVarSupply{};
+    var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
+    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
+
+    // Respect the NoImplicitPrelude language extension: only load Prelude
+    // when the user has NOT enabled NoImplicitPrelude.
+    if (!module.language_extensions.contains(.NoImplicitPrelude)) {
+        var pipeline_ll = rusholme.repl.pipeline.Pipeline.init(arena_alloc, io);
+        loadPrelude(arena_alloc, io, &pipeline_ll, &u_supply, &rename_env, &ty_env, &mv_supply, &diags) catch {};
+    }
+
     const renamed = try renamer_mod.rename(module, &rename_env);
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
@@ -632,9 +678,6 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     }
 
     // ── Typecheck ──────────────────────────────────────────────────────
-    var mv_supply = htype_mod.MetaVarSupply{};
-    var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
-    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
     var infer_ctx = infer_mod.InferCtx.init(arena_alloc, &ty_env, &mv_supply, &u_supply, &diags);
     var module_types = try infer_mod.inferModule(&infer_ctx, renamed, null);
     defer module_types.deinit(arena_alloc);
@@ -705,6 +748,57 @@ fn cmdRepl(allocator: std.mem.Allocator, io: Io, server_mode: bool) !void {
     } else {
         try rusholme.repl.cli.run(allocator, io);
     }
+}
+
+/// Load and compile the Prelude module, accumulating its bindings into
+/// the rename and type environments. Returns error if loading fails
+/// but makes a best-effort to continue execution (Prelude loading is
+/// non-fatal, preserving CLI usability).
+fn loadPrelude(
+    arena_alloc: std.mem.Allocator,
+    io: Io,
+    pipeline: *rusholme.repl.pipeline.Pipeline,
+    u_supply: *rusholme.naming.unique.UniqueSupply,
+    rename_env: *renamer_mod.RenameEnv,
+    ty_env: *rusholme.tc.env.TyEnv,
+    mv_supply: *htype_mod.MetaVarSupply,
+    diags: *DiagnosticCollector,
+) !void {
+    const prelude_path = getPreludePath();
+
+    // Push scope frames for Prelude bindings (so they persist across parsing).
+    rename_env.scope.push() catch return;
+    errdefer rename_env.scope.pop();
+
+    ty_env.push() catch {
+        rename_env.scope.pop();
+        return;
+    };
+    errdefer ty_env.pop();
+
+    const prelude_source = readSourceFile(arena_alloc, io, prelude_path) catch |err| {
+        // error.FileNotFound is non-fatal — we continue without Prelude
+        // The errdefer will clean up scopes for us
+        if (err == error.FileNotFound) return;
+        return err;
+    };
+
+    _ = try pipeline.compileModule(
+        prelude_source,
+        0, // file_id 0 for Prelude
+        u_supply,
+        rename_env,
+        ty_env,
+        mv_supply,
+        diags,
+        null, // no external arities yet
+        null, // no external con_map yet
+        null, // no external class_env yet
+        null, // no external dict_names yet
+        null, // no external type_con_names yet
+    );
+    // Prelude bindings are now accumulated in rename_env and ty_env.
+    // The GRIN program and other results are ignored for CLI commands.
 }
 
 /// Supports the following backends:
