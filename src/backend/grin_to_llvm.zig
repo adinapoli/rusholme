@@ -886,17 +886,40 @@ pub const GrinTranslator = struct {
         // values, causing tag mismatches at runtime (e.g. [] gets
         // discriminant 5 in the Prelude but 0 in the expression).
         self.tag_table = TagTable.init();
+        // Phase 1: scan extra_tag_defs (Prelude) bodies for F-tags.
         for (self.extra_tag_defs) |def| {
             scanExprForTags(self.allocator, def.body, &self.tag_table) catch return error.OutOfMemory;
         }
-        // Now scan the current program's defs. Tags already registered
-        // by extra_tag_defs are skipped (register is idempotent), so
-        // shared constructors keep their prior discriminants.
+        // Phase 2: pre-register ALL extra_tag_defs as potential F-tags BEFORE
+        // scanning the current program's bodies. This ensures Prelude functions
+        // like `enumFrom` and `enumFromTo` — which never appear as thunk stores
+        // within the Prelude itself — receive their discriminants in the same
+        // order as the shared __rhc_force module (built during `addDeclarations`
+        // from the same extra_tag_defs). Without this, the expression body scan
+        // (Phase 3) might assign `F(enumFrom)` a discriminant different from the
+        // one the force module uses, silently dispatching to the wrong function.
+        for (self.extra_tag_defs) |def| {
+            if (def.params.len > 0) {
+                const fun_tag = grin.Tag{ .name = def.name, .tag_type = .Fun };
+                self.tag_table.register(self.allocator, fun_tag, @intCast(def.params.len)) catch return error.OutOfMemory;
+            }
+        }
+        // Phase 3: scan the current program's defs. Tags already registered in
+        // Phases 1–2 are skipped (register is idempotent), so shared tags keep
+        // their prior discriminants.
         for (program.defs) |def| {
             scanExprForTags(self.allocator, def.body, &self.tag_table) catch return error.OutOfMemory;
         }
+        // Phase 4: pre-register current program defs as potential F-tags.
+        for (program.defs) |def| {
+            if (def.params.len > 0) {
+                const fun_tag = grin.Tag{ .name = def.name, .tag_type = .Fun };
+                self.tag_table.register(self.allocator, fun_tag, @intCast(def.params.len)) catch return error.OutOfMemory;
+            }
+        }
         // Ensure list constructors are available for string↔[Char] conversion.
         self.tag_table.ensureListConstructors(self.allocator) catch return error.OutOfMemory;
+
         // Merge constructor field types from the GRIN program's field_types map.
         {
             var iter = program.field_types.iterator();
@@ -989,14 +1012,34 @@ pub const GrinTranslator = struct {
         // extra_tag_defs. Tags already registered are idempotent, so
         // shared tags keep their prior discriminants.
         self.tag_table = TagTable.init();
+        // Phase 1: scan extra_tag_defs (Prelude) bodies for F-tags.
         for (self.extra_tag_defs) |def| {
             scanExprForTags(self.allocator, def.body, &self.tag_table) catch return error.OutOfMemory;
         }
+        // Phase 2: pre-register ALL extra_tag_defs as potential F-tags BEFORE
+        // scanning all_prog.defs bodies. This mirrors the ordering used by
+        // translateProgramToModule so that expression compilations and the force
+        // module agree on discriminant values for every Prelude function.
+        for (self.extra_tag_defs) |def| {
+            if (def.params.len > 0) {
+                const fun_tag = grin.Tag{ .name = def.name, .tag_type = .Fun };
+                self.tag_table.register(self.allocator, fun_tag, @intCast(def.params.len)) catch return error.OutOfMemory;
+            }
+        }
+        // Phase 3: scan all_prog.defs bodies.
         for (all_prog.defs) |def| {
             scanExprForTags(self.allocator, def.body, &self.tag_table) catch return error.OutOfMemory;
         }
+        // Phase 4: pre-register all_prog.defs as potential F-tags.
+        for (all_prog.defs) |def| {
+            if (def.params.len > 0) {
+                const fun_tag = grin.Tag{ .name = def.name, .tag_type = .Fun };
+                self.tag_table.register(self.allocator, fun_tag, @intCast(def.params.len)) catch return error.OutOfMemory;
+            }
+        }
         // Ensure list constructors are available for string↔[Char] conversion.
         self.tag_table.ensureListConstructors(self.allocator) catch return error.OutOfMemory;
+
         // TypeEnv pointer is refreshed inside translateModuleGrin before each
         // module translation (needed because the tag_table field was reassigned).
     }
