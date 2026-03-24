@@ -80,9 +80,12 @@ pub const JitEngine = struct {
     /// Resource tracker for the shared `__rhc_force` module.
     /// Allows replacing it when new F-tags appear in expressions.
     force_tracker: ?llvm.OrcResourceTrackerRef = null,
-    /// Number of F-tags in the current force module. Used to detect
-    /// when the expression introduces new F-tags that require re-emission.
-    force_ftag_count: u32 = 0,
+    /// Set of F-tag unique IDs covered by the current force module.
+    /// Tracked as a set (not a count) because two expressions can
+    /// introduce different F-tags yet have the same total count —
+    /// e.g. `[1..10]` wraps `enumFromTo` while `[1..]` wraps `enumFrom`,
+    /// both adding exactly one new tag to the same Prelude baseline.
+    force_ftag_uniques: std.AutoHashMapUnmanaged(u64, void) = .{},
     /// Cached pointer to the JIT'd `__rhc_force` function.
     /// Used by the formatter to force thunks when walking heap structures.
     /// Signature: fn(ptr) callconv(.c) *anyopaque — forces a value to WHNF.
@@ -114,6 +117,7 @@ pub const JitEngine = struct {
         if (self.force_tracker) |tracker| {
             c.LLVMOrcReleaseResourceTracker(tracker);
         }
+        self.force_ftag_uniques.deinit(self.allocator);
         self.accumulated_grin_defs.deinit(self.allocator);
         if (self.jit) |jit| {
             const err = c.LLVMOrcDisposeLLJIT(jit);
@@ -154,7 +158,18 @@ pub const JitEngine = struct {
         }
 
         self.force_tracker = tracker;
-        self.force_ftag_count = @intCast(translator.tag_table.fun_tags.count());
+
+        // Rebuild the set of covered F-tag uniques so that execute() can
+        // detect missing tags by set membership rather than count comparison.
+        self.force_ftag_uniques.clearRetainingCapacity();
+        var ftag_iter = translator.tag_table.fun_tags.iterator();
+        while (ftag_iter.next()) |entry| {
+            try self.force_ftag_uniques.put(self.allocator, entry.key_ptr.*, {});
+        }
+
+        // The cached force_fn pointer is now stale; clear it so that
+        // execute() re-resolves it after the new module is materialised.
+        self.force_fn = null;
     }
 
     /// Add declaration definitions permanently to the JIT's main dylib.
@@ -278,12 +293,20 @@ pub const JitEngine = struct {
         // This ensures formatJitResult uses correct discriminants.
         self.known_tags = translator.getKnownTagDiscriminants();
 
-        // Re-emit the shared __rhc_force if the expression introduced
-        // new F-tags that the Prelude-time force module didn't know about.
-        // This ensures per-def modules (which call __rhc_force externally)
-        // can force expression-introduced thunks.
-        const expr_ftag_count: u32 = @intCast(translator.tag_table.fun_tags.count());
-        if (expr_ftag_count > self.force_ftag_count) {
+        // Re-emit __rhc_force if the expression introduces any F-tag not
+        // covered by the current force module. We compare sets, not counts:
+        // two different expressions can introduce different F-tags while
+        // keeping the total count equal (e.g. `[1..10]` wraps enumFromTo
+        // and `[1..]` wraps enumFrom — same count, different set members).
+        var needs_force_reemit = false;
+        var ftag_check_iter = translator.tag_table.fun_tags.iterator();
+        while (ftag_check_iter.next()) |entry| {
+            if (!self.force_ftag_uniques.contains(entry.key_ptr.*)) {
+                needs_force_reemit = true;
+                break;
+            }
+        }
+        if (needs_force_reemit) {
             try self.emitSharedForceModule(&translator);
         }
 
