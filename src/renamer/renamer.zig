@@ -306,10 +306,13 @@ pub const RExpr = union(enum) {
     Tuple: []const RExpr,
     List: []const RExpr,
     /// Arithmetic sequences (Haskell 2010 §3.10)
-    EnumFrom: struct { from: *const RExpr, span: SourceSpan },
-    EnumFromThen: struct { from: *const RExpr, then: *const RExpr, span: SourceSpan },
-    EnumFromTo: struct { from: *const RExpr, to: *const RExpr, span: SourceSpan },
-    EnumFromThenTo: struct { from: *const RExpr, then: *const RExpr, to: *const RExpr, span: SourceSpan },
+    /// Each variant carries the resolved `fn_name` — the Prelude function
+    /// (enumFrom, enumFromTo, …) looked up from the renamer scope so the
+    /// desugarer can emit a correct function call without a second lookup.
+    EnumFrom: struct { from: *const RExpr, fn_name: Name, span: SourceSpan },
+    EnumFromThen: struct { from: *const RExpr, then: *const RExpr, fn_name: Name, span: SourceSpan },
+    EnumFromTo: struct { from: *const RExpr, to: *const RExpr, fn_name: Name, span: SourceSpan },
+    EnumFromThenTo: struct { from: *const RExpr, then: *const RExpr, to: *const RExpr, fn_name: Name, span: SourceSpan },
     TypeAnn: struct { expr: *const RExpr, type: ast.Type },
     /// Type application: f @Int (GHC TypeApplications extension)
     TypeApp: struct { fn_expr: *const RExpr, type: ast.Type, span: SourceSpan },
@@ -1246,21 +1249,24 @@ fn renameExpr(expr: ast.Expr, env: *RenameEnv) RenameError!RExpr {
         .EnumFrom => |e| blk: {
             const from_r = try env.alloc.create(RExpr);
             from_r.* = try renameExpr(e.from.*, env);
-            break :blk RExpr{ .EnumFrom = .{ .from = from_r, .span = e.span } };
+            const fn_name = try env.resolve("enumFrom", e.span);
+            break :blk RExpr{ .EnumFrom = .{ .from = from_r, .fn_name = fn_name, .span = e.span } };
         },
         .EnumFromThen => |e| blk: {
             const from_r = try env.alloc.create(RExpr);
             from_r.* = try renameExpr(e.from.*, env);
             const then_r = try env.alloc.create(RExpr);
             then_r.* = try renameExpr(e.then.*, env);
-            break :blk RExpr{ .EnumFromThen = .{ .from = from_r, .then = then_r, .span = e.span } };
+            const fn_name = try env.resolve("enumFromThen", e.span);
+            break :blk RExpr{ .EnumFromThen = .{ .from = from_r, .then = then_r, .fn_name = fn_name, .span = e.span } };
         },
         .EnumFromTo => |e| blk: {
             const from_r = try env.alloc.create(RExpr);
             from_r.* = try renameExpr(e.from.*, env);
             const to_r = try env.alloc.create(RExpr);
             to_r.* = try renameExpr(e.to.*, env);
-            break :blk RExpr{ .EnumFromTo = .{ .from = from_r, .to = to_r, .span = e.span } };
+            const fn_name = try env.resolve("enumFromTo", e.span);
+            break :blk RExpr{ .EnumFromTo = .{ .from = from_r, .to = to_r, .fn_name = fn_name, .span = e.span } };
         },
         .EnumFromThenTo => |e| blk: {
             const from_r = try env.alloc.create(RExpr);
@@ -1269,7 +1275,8 @@ fn renameExpr(expr: ast.Expr, env: *RenameEnv) RenameError!RExpr {
             then_r.* = try renameExpr(e.then.*, env);
             const to_r = try env.alloc.create(RExpr);
             to_r.* = try renameExpr(e.to.*, env);
-            break :blk RExpr{ .EnumFromThenTo = .{ .from = from_r, .then = then_r, .to = to_r, .span = e.span } };
+            const fn_name = try env.resolve("enumFromThenTo", e.span);
+            break :blk RExpr{ .EnumFromThenTo = .{ .from = from_r, .then = then_r, .to = to_r, .fn_name = fn_name, .span = e.span } };
         },
         .RecordCon => |rc| blk: {
             const con_name = try env.resolve(rc.con.name, rc.con.span);

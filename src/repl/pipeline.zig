@@ -468,11 +468,9 @@ pub const Pipeline = struct {
         // evaluator handles them correctly.  For polymorphic expressions
         // (e.g. numeric literals without defaulting), show-wrapping
         // will fail at the typechecker and fall through to bare display.
-        // Show-wrapping is disabled until JIT cross-module linking is fixed (#618).
-        // The Show class infrastructure is in place (Prelude, expression_io kind,
-        // session suppression), but Show Int's helper functions (showPosInt,
-        // intToDigit) live in the Prelude module and crash when called from
-        // JIT-compiled expression code.
+        // Show-wrapping works for WASM (GrinEngine) after fixes for primop
+        // thunk-forcing and string unpacking.  JIT (native) still has
+        // cross-module linking issues with Prelude Show helpers (#618).
         if (self.enable_show_wrapping) {
             // Scope safety: push a transactional scope frame around this
             // attempt.  If it fails, pop the frame to discard any bindings
@@ -512,11 +510,10 @@ pub const Pipeline = struct {
         // ── String-wrapped expression (Phase A2) ──────────────────────
         //
         // For [Char] expressions (e.g. "hello" ++ " world"), the Show [a]
-        // instance requires dictionary-passing which the LLVM backend
-        // can't handle (#618).  As a workaround, try wrapping as:
+        // instance requires dictionary-passing.  As a workaround, try
+        // wrapping as:
         //   replExpr__ = putStrLn (showString (<input>))
         // where showString :: String -> String is monomorphic.
-        // Disabled along with show-wrapping until #618 is fixed.
         if (self.enable_show_wrapping) {
             rename_env.scope.push() catch return CompileError.OutOfMemory;
             ty_env.push() catch {

@@ -83,6 +83,10 @@ pub const JitEngine = struct {
     /// Number of F-tags in the current force module. Used to detect
     /// when the expression introduces new F-tags that require re-emission.
     force_ftag_count: u32 = 0,
+    /// Cached pointer to the JIT'd `__rhc_force` function.
+    /// Used by the formatter to force thunks when walking heap structures.
+    /// Signature: fn(ptr) callconv(.c) *anyopaque — forces a value to WHNF.
+    force_fn: ?*const fn (*anyopaque) callconv(.c) *anyopaque = null,
 
     /// Create a new JIT engine backed by LLVM ORC LLJIT.
     pub fn init(allocator: Allocator) JitError!JitEngine {
@@ -314,8 +318,21 @@ pub const JitEngine = struct {
         const entry_fn: EntryFn = @ptrFromInt(addr);
         const raw_result = entry_fn();
 
+        // 6b. Lazily resolve __rhc_force for thunk-forcing during display.
+        //     Done here (after the entry point runs) so all dependencies are
+        //     materialized. The lookup is cached for future calls.
+        if (self.force_fn == null) {
+            var force_addr: llvm.OrcExecutorAddress = 0;
+            const flookup_err = c.LLVMOrcLLJITLookup(self.jit, &force_addr, "__rhc_force");
+            if (flookup_err != null) {
+                c.LLVMConsumeError(flookup_err);
+            } else if (force_addr != 0) {
+                self.force_fn = @ptrFromInt(force_addr);
+            }
+        }
+
         // 7. Format the result before cleaning up.
-        const formatted = formatJitResult(self.allocator, raw_result, self.known_tags) catch {
+        const formatted = formatJitResult(self.allocator, raw_result, self.known_tags, self.force_fn) catch {
             const rm_err = c.LLVMOrcResourceTrackerRemove(tracker);
             if (rm_err != null) c.LLVMConsumeError(rm_err);
             c.LLVMOrcReleaseResourceTracker(tracker);
@@ -464,59 +481,58 @@ fn patchEntryPointName(allocator: Allocator, program: *const grin_ast.Program, t
 /// We check if the value looks like a valid heap pointer (non-zero,
 /// aligned) and try to interpret it as a node. If that fails, we
 /// treat it as a plain integer.
-fn formatJitResult(allocator: Allocator, raw: i64, tags: KnownTags) Allocator.Error![]const u8 {
-    // Raw 0 is the Unit value (IO actions return 0 for `()`).
-    // Suppress display, matching GHCi which doesn't print `()`.
-    //
-    // Known limitation: the Haskell integer `0` is also raw 0 (via
-    // inttoptr(0) = null), so bare `0` displays as empty in the
-    // non-show-wrapped path.  With show-wrapping enabled, `0` is
-    // printed via `putStrLn (show 0)` as a side effect, and this
-    // check only sees the Unit return from putStrLn.  A proper fix
-    // requires a distinct Unit representation (e.g. a tagged heap
-    // node), tracked in #621.
-    if (raw == 0) return allocator.dupe(u8, "");
+/// RTS thunk-forcing function. Takes a heap pointer, returns forced WHNF pointer.
+const ForceFn = *const fn (*anyopaque) callconv(.c) *anyopaque;
 
+fn formatJitResult(allocator: Allocator, raw: i64, tags: KnownTags, force_fn: ?ForceFn) Allocator.Error![]const u8 {
+    // Low-bit tagging (see #624):
+    //   bit 0 set   → tagged integer, value = raw >> 1
+    //   bit 0 clear → heap pointer (or null for Unit)
     const as_usize: usize = @bitCast(raw);
 
-    // Check if the result is a valid-looking pointer to a heap node.
-    // Must be above the first page (4096) to exclude small integers
-    // that happen to be aligned (e.g. ASCII characters like 'h' = 104).
-    const MIN_HEAP_PTR: usize = 0x10000;
-    if (as_usize >= MIN_HEAP_PTR and as_usize % @alignOf(*anyopaque) == 0) {
-        const node_ptr: *const rts_node.Node = @ptrFromInt(as_usize);
+    if (as_usize & 1 == 1) {
+        // Tagged integer — arithmetic shift right to recover the value.
+        const value = raw >> 1;
+        return std.fmt.allocPrint(allocator, "{d}", .{value});
+    }
+
+    // Heap pointer (low bit clear). Null (0) is Unit.
+    if (raw == 0) return allocator.dupe(u8, "");
+
+    // Force thunks to WHNF if the RTS force function is available.
+    var effective_usize = as_usize;
+    if (force_fn) |force| {
+        if (as_usize >= 0x1000 and as_usize % @alignOf(*anyopaque) == 0) {
+            const forced: *anyopaque = force(@ptrFromInt(as_usize));
+            const forced_int: usize = @intFromPtr(forced);
+            // After forcing, the result might be a tagged integer.
+            if (forced_int & 1 == 1) {
+                const value: i64 = @bitCast(forced_int);
+                return std.fmt.allocPrint(allocator, "{d}", .{value >> 1});
+            }
+            effective_usize = forced_int;
+        }
+    }
+
+    // Validate that the pointer looks like a heap node before
+    // dereferencing. Must be above the first page to avoid
+    // accidental dereference of small values.
+    const MIN_HEAP_PTR: usize = 0x1000;
+    if (effective_usize >= MIN_HEAP_PTR and effective_usize % @alignOf(*anyopaque) == 0) {
+        const node_ptr: *const rts_node.Node = @ptrFromInt(effective_usize);
         const tag_int: u64 = @intFromEnum(node_ptr.tag);
         if (tag_int <= 0x10000 and node_ptr.n_fields <= 1024) {
-            return formatNode(allocator, node_ptr, tags);
+            return formatNode(allocator, node_ptr, tags, force_fn);
         }
     }
 
-    // Check if it looks like a C string pointer (for raw string results).
-    const MIN_VALID_PTR: usize = 0x1000;
-    if (as_usize >= MIN_VALID_PTR) {
-        const str_ptr: [*]const u8 = @ptrFromInt(as_usize);
-        if (str_ptr[0] >= 32 and str_ptr[0] <= 126) {
-            var len: usize = 0;
-            const max_len: usize = 256;
-            while (len < max_len) {
-                const byte = str_ptr[len];
-                if (byte == 0) break;
-                if (byte < 32 or byte > 126) break;
-                len += 1;
-            }
-            if (len > 0 and len < max_len and str_ptr[len] == 0) {
-                return std.fmt.allocPrint(allocator, "\"{s}\"", .{str_ptr[0..len]});
-            }
-        }
-    }
-
-    // Plain integer literal.
+    // Fallback: display as raw integer (shouldn't normally reach here).
     return std.fmt.allocPrint(allocator, "{d}", .{raw});
 }
 
 /// Format a heap node as a human-readable string using dynamic tag
 /// discriminants from the compilation's tag table.
-fn formatNode(allocator: Allocator, node: *const rts_node.Node, tags: KnownTags) Allocator.Error![]const u8 {
+fn formatNode(allocator: Allocator, node: *const rts_node.Node, tags: KnownTags, force_fn: ?ForceFn) Allocator.Error![]const u8 {
     const tag_int: u64 = @intFromEnum(node.tag);
     const disc: i64 = @bitCast(tag_int);
 
@@ -542,7 +558,7 @@ fn formatNode(allocator: Allocator, node: *const rts_node.Node, tags: KnownTags)
     if (tags.just_disc) |jd| {
         if (disc == jd and node.n_fields == 1) {
             const inner_raw: i64 = @bitCast(rts_node.fieldsConst(node)[0]);
-            const inner = try formatJitResult(allocator, inner_raw, tags);
+            const inner = try formatJitResult(allocator, inner_raw, tags, force_fn);
             defer allocator.free(inner);
             return std.fmt.allocPrint(allocator, "Just {s}", .{inner});
         }
@@ -554,7 +570,7 @@ fn formatNode(allocator: Allocator, node: *const rts_node.Node, tags: KnownTags)
     }
     if (tags.cons_disc) |cd| {
         if (disc == cd and node.n_fields == 2) {
-            return formatList(allocator, node, tags);
+            return formatList(allocator, node, tags, force_fn);
         }
     }
 
@@ -566,8 +582,10 @@ fn formatNode(allocator: Allocator, node: *const rts_node.Node, tags: KnownTags)
     var result = try std.fmt.allocPrint(allocator, "<constructor tag={d}", .{tag_int});
     var i: u32 = 0;
     while (i < node.n_fields) : (i += 1) {
-        const field_val: i64 = @bitCast(rts_node.fieldsConst(node)[i]);
-        const new = try std.fmt.allocPrint(allocator, "{s} {d}", .{ result, field_val });
+        const field_raw: i64 = @bitCast(rts_node.fieldsConst(node)[i]);
+        const field_str = try formatJitResult(allocator, field_raw, tags, force_fn);
+        defer allocator.free(field_str);
+        const new = try std.fmt.allocPrint(allocator, "{s} {s}", .{ result, field_str });
         allocator.free(result);
         result = new;
     }
@@ -578,7 +596,7 @@ fn formatNode(allocator: Allocator, node: *const rts_node.Node, tags: KnownTags)
 
 /// Format a Cons-headed list as "[e1,e2,e3]".
 /// Traverses the spine, collecting elements until Nil or a non-list node.
-fn formatList(allocator: Allocator, head_node: *const rts_node.Node, tags: KnownTags) Allocator.Error![]const u8 {
+fn formatList(allocator: Allocator, head_node: *const rts_node.Node, tags: KnownTags, force_fn: ?ForceFn) Allocator.Error![]const u8 {
     const nil_disc = tags.nil_disc orelse return allocator.dupe(u8, "[...]");
     const cons_disc = tags.cons_disc orelse return allocator.dupe(u8, "[...]");
 
@@ -615,12 +633,19 @@ fn formatList(allocator: Allocator, head_node: *const rts_node.Node, tags: Known
 
         // Format the head element
         const head_raw: i64 = @bitCast(rts_node.fieldsConst(current)[0]);
-        const elem = try formatJitResult(allocator, head_raw, tags);
+        const elem = try formatJitResult(allocator, head_raw, tags, force_fn);
         defer allocator.free(elem);
         try buf.appendSlice(allocator, elem);
 
-        // Advance to the tail
-        const tail_raw: usize = rts_node.fieldsConst(current)[1];
+        // Advance to the tail, forcing thunks if possible.
+        var tail_raw: usize = rts_node.fieldsConst(current)[1];
+        // Force the tail pointer if it's a valid heap pointer (thunk).
+        if (force_fn) |force| {
+            if (tail_raw >= 0x1000 and tail_raw % @alignOf(*anyopaque) == 0) {
+                const forced = force(@ptrFromInt(tail_raw));
+                tail_raw = @intFromPtr(forced);
+            }
+        }
         if (tail_raw == 0 or tail_raw % @alignOf(*anyopaque) != 0) break;
         current = @ptrFromInt(tail_raw);
     }
@@ -643,8 +668,11 @@ fn isCharList(head_node: *const rts_node.Node, cons_disc: i64, nil_disc: i64) bo
         if (cur_disc != cons_disc or current.n_fields != 2) return false;
 
         const head_val: u64 = rts_node.fieldsConst(current)[0];
-        // Characters are Unicode codepoints: 0 to 0x10FFFF.
-        if (head_val > 0x10FFFF) return false;
+        // Characters are tagged integers (low bit set, value = raw >> 1).
+        // Must be a tagged integer with a valid Unicode codepoint.
+        if (head_val & 1 != 1) return false;
+        const codepoint = head_val >> 1;
+        if (codepoint > 0x10FFFF) return false;
 
         const tail_raw: usize = rts_node.fieldsConst(current)[1];
         if (tail_raw == 0 or tail_raw % @alignOf(*anyopaque) != 0) return false;
@@ -667,7 +695,9 @@ fn formatCharList(allocator: Allocator, head_node: *const rts_node.Node, cons_di
         if (cur_disc == nil_disc and current.n_fields == 0) break;
         if (cur_disc != cons_disc or current.n_fields != 2) break;
 
-        const ch: u64 = rts_node.fieldsConst(current)[0];
+        const raw_ch: u64 = rts_node.fieldsConst(current)[0];
+        // Untag: characters are tagged integers (value = raw >> 1).
+        const ch: u64 = raw_ch >> 1;
         if (ch < 128) {
             try buf.append(allocator, @intCast(ch));
         } else {

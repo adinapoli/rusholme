@@ -382,6 +382,11 @@ pub const GrinEvaluator = struct {
     /// not the hardcoded Known.Con.True/False values).
     true_name: Name,
     false_name: Name,
+    /// Renamer-resolved names for list constructors (:) and [].
+    /// Used by stringToCharList to build cons-cell lists that match
+    /// case alternatives compiled from Prelude list functions.
+    cons_name: Name,
+    nil_name: Name,
 
     /// Initialize a new evaluator with the given program.
     pub fn init(allocator: Allocator, program: *const Program, io: std.Io) error{OutOfMemory}!GrinEvaluator {
@@ -398,14 +403,16 @@ pub const GrinEvaluator = struct {
 
         try funcs.populate(program);
 
-        // Scan the program for True/False constructor tags.
-        // The Prelude's `data Bool` assigns fresh uniques via the renamer;
-        // we must use those same names so primop Bool results match case
-        // alternatives compiled from Prelude code.
+        // Scan the program for True/False and []/(:) constructor tags.
+        // The Prelude assigns fresh uniques via the renamer; we must use
+        // those same names so primop results and string unpacking match
+        // case alternatives compiled from Prelude code.
         var true_name = known.Con.True;
         var false_name = known.Con.False;
+        var cons_name = known.Con.Cons;
+        var nil_name = known.Con.Nil;
         for (program.defs) |def| {
-            scanForBoolNames(def.body.*, &true_name, &false_name);
+            scanForKnownNames(def.body.*, &true_name, &false_name, &cons_name, &nil_name);
         }
 
         return .{
@@ -416,40 +423,51 @@ pub const GrinEvaluator = struct {
             .io = io,
             .true_name = true_name,
             .false_name = false_name,
+            .cons_name = cons_name,
+            .nil_name = nil_name,
         };
     }
 
-    /// Scan a GRIN expression for constructor tags named "True"/"False"
-    /// and record their (renamer-assigned) Names.
-    fn scanForBoolNames(expr: ast.Expr, true_name: *Name, false_name: *Name) void {
+    /// Scan a GRIN expression for well-known constructor tags
+    /// (True, False, (:), []) and record their renamer-assigned Names.
+    fn scanForKnownNames(
+        expr: ast.Expr,
+        true_name: *Name,
+        false_name: *Name,
+        cons_name: *Name,
+        nil_name: *Name,
+    ) void {
         switch (expr) {
             .Case => |case_expr| {
                 for (case_expr.alts) |alt| {
                     switch (alt.pat) {
                         .TagPat => |tag| {
-                            if (tag.tag_type == .Con) {
-                                if (std.mem.eql(u8, tag.name.base, "True")) true_name.* = tag.name;
-                                if (std.mem.eql(u8, tag.name.base, "False")) false_name.* = tag.name;
-                            }
+                            if (tag.tag_type == .Con)
+                                recordKnownCon(tag.name, true_name, false_name, cons_name, nil_name);
                         },
                         .NodePat => |np| {
-                            if (np.tag.tag_type == .Con) {
-                                if (std.mem.eql(u8, np.tag.name.base, "True")) true_name.* = np.tag.name;
-                                if (std.mem.eql(u8, np.tag.name.base, "False")) false_name.* = np.tag.name;
-                            }
+                            if (np.tag.tag_type == .Con)
+                                recordKnownCon(np.tag.name, true_name, false_name, cons_name, nil_name);
                         },
                         .LitPat, .DefaultPat => {},
                     }
-                    scanForBoolNames(alt.body.*, true_name, false_name);
+                    scanForKnownNames(alt.body.*, true_name, false_name, cons_name, nil_name);
                 }
             },
             .Bind => |bnd| {
-                scanForBoolNames(bnd.lhs.*, true_name, false_name);
-                scanForBoolNames(bnd.rhs.*, true_name, false_name);
+                scanForKnownNames(bnd.lhs.*, true_name, false_name, cons_name, nil_name);
+                scanForKnownNames(bnd.rhs.*, true_name, false_name, cons_name, nil_name);
             },
-            .Block => |blk| scanForBoolNames(blk.*, true_name, false_name),
+            .Block => |blk| scanForKnownNames(blk.*, true_name, false_name, cons_name, nil_name),
             else => {},
         }
+    }
+
+    fn recordKnownCon(name: Name, true_name: *Name, false_name: *Name, cons_name: *Name, nil_name: *Name) void {
+        if (std.mem.eql(u8, name.base, "True")) true_name.* = name;
+        if (std.mem.eql(u8, name.base, "False")) false_name.* = name;
+        if (std.mem.eql(u8, name.base, "(:)")) cons_name.* = name;
+        if (std.mem.eql(u8, name.base, "[]")) nil_name.* = name;
     }
 
     /// Deallocate the evaluator and all its state.
@@ -540,7 +558,15 @@ pub const GrinEvaluator = struct {
                 // top-level function reference (e.g. `identity` passed as a
                 // higher-order argument). Return the Var as-is so the App
                 // handler can resolve it through the function table.
-                if (self.funcs.contains(name)) Val{ .Var = name } else error.UnboundVariable,
+                if (self.funcs.contains(name))
+                    Val{ .Var = name }
+                else if (std.mem.eql(u8, name.base, "_hptr"))
+                    // Heap pointer values (from Store) are synthetic Var
+                    // nodes that carry the heap index in their unique field.
+                    // They are not environment-bound names — return as-is.
+                    Val{ .Var = name }
+                else
+                    error.UnboundVariable,
             .Unit => Val{ .Unit = {} },
             .Lit => |lit| Val{ .Lit = lit },
             .ValTag => |tag| Val{ .ValTag = tag },
@@ -895,6 +921,20 @@ pub const GrinEvaluator = struct {
                     scrutinee_val = try self.fetchHeapVal(scrutinee_val);
                 }
 
+                // Haskell treats String as [Char].  When a Lit.String
+                // scrutinee is matched against list-constructor
+                // alternatives ([] / (:)), unpack the flat string into a
+                // cons-cell list so that pattern matching can proceed.
+                if (scrutinee_val == .Lit and scrutinee_val.Lit == .String) {
+                    if (self.findListTags(case_expr.alts)) |tags| {
+                        scrutinee_val = try self.stringToCharList(
+                            scrutinee_val.Lit.String,
+                            tags.cons_tag,
+                            tags.nil_tag,
+                        );
+                    }
+                }
+
                 // Try to match against each alternative
                 for (case_expr.alts) |alt| {
                     if (try self.matchPattern(scrutinee_val, alt.pat)) {
@@ -967,7 +1007,12 @@ pub const GrinEvaluator = struct {
 
         for (grin_args, 0..) |arg, i| {
             const resolved = try self.resolveVal(@constCast(&arg));
-            rt_args_buf[i] = try self.valToRtValue(resolved);
+            // Force heap pointers (thunks) to WHNF before converting.
+            // Lazy arguments compiled as F-tagged stores (e.g. `arg <- store (Fadd_Int [1, 1])`)
+            // resolve to heap pointer Vars.  PrimOps expect fully evaluated values,
+            // so we must dereference and force any thunks first.
+            const forced = try self.forceVal(resolved);
+            rt_args_buf[i] = try self.valToRtValue(forced);
         }
         const rt_args = rt_args_buf[0..grin_args.len];
 
@@ -993,7 +1038,6 @@ pub const GrinEvaluator = struct {
 
     /// Convert a GRIN Val to a runtime Value.
     fn valToRtValue(self: *GrinEvaluator, v: Val) EvalError!RtValue {
-        _ = self;
         return switch (v) {
             .Lit => |lit| switch (lit) {
                 .Int => |i| RtValue{ .Int = i },
@@ -1004,16 +1048,181 @@ pub const GrinEvaluator = struct {
             },
             .Unit => RtValue.unit,
             .ConstTagNode => |ctn| b: {
-                // Check for boolean constructors
                 if (ctn.tag.tag_type == .Con) {
                     if (std.mem.eql(u8, ctn.tag.name.base, "True")) break :b RtValue{ .Bool = true };
                     if (std.mem.eql(u8, ctn.tag.name.base, "False")) break :b RtValue{ .Bool = false };
+                    // Char list (String) — walk the (:)/[] spine and
+                    // build an RtValue.String for IO primops like putStrLn_.
+                    if (std.mem.eql(u8, ctn.tag.name.base, ":") or
+                        std.mem.endsWith(u8, ctn.tag.name.base, "(:)"))
+                    {
+                        const s = try self.charListToString(v);
+                        break :b RtValue{ .String = s };
+                    }
+                    // [] (nil) is the empty string.
+                    if (std.mem.eql(u8, ctn.tag.name.base, "[]")) {
+                        break :b RtValue{ .String = "" };
+                    }
                 }
-                // For other constructors, we can't convert directly
                 break :b error.TypeMismatch;
             },
             else => error.TypeMismatch,
         };
+    }
+
+    /// Walk a (:)-list of Chars and produce a []const u8 string.
+    /// Forces thunks in head and tail positions as needed.
+    fn charListToString(self: *GrinEvaluator, list_val: Val) EvalError![]const u8 {
+        var buf = std.ArrayListUnmanaged(u8){};
+        var current = list_val;
+        while (true) {
+            switch (current) {
+                .ConstTagNode => |ctn| {
+                    if (ctn.tag.tag_type != .Con) return error.TypeMismatch;
+                    // Nil — end of list.
+                    if (std.mem.eql(u8, ctn.tag.name.base, "[]")) break;
+                    // Cons — extract head (Char) and tail.
+                    if (!(std.mem.eql(u8, ctn.tag.name.base, ":") or
+                        std.mem.endsWith(u8, ctn.tag.name.base, "(:)")))
+                        return error.TypeMismatch;
+                    if (ctn.fields.len < 2) return error.TypeMismatch;
+                    // Force the head field to get a Char.
+                    const head = try self.forceToWhnf(ctn.fields[0]);
+                    const ch: u8 = switch (head) {
+                        .Lit => |lit| switch (lit) {
+                            .Char => |c| @intCast(c & 0xFF),
+                            .Int => |i| @intCast(@as(u64, @bitCast(i)) & 0xFF),
+                            else => return error.TypeMismatch,
+                        },
+                        else => return error.TypeMismatch,
+                    };
+                    buf.append(self.allocator, ch) catch return error.OutOfMemory;
+                    // Advance to tail, forcing if needed.
+                    current = try self.forceToWhnf(ctn.fields[1]);
+                },
+                .ValTag => |tag| {
+                    // Bare [] tag (nullary).
+                    if (std.mem.eql(u8, tag.name.base, "[]")) break;
+                    return error.TypeMismatch;
+                },
+                else => return error.TypeMismatch,
+            }
+        }
+        return buf.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+    }
+
+    /// Force a Val to WHNF: if it is a heap pointer, dereference and
+    /// force thunks; otherwise return as-is.
+    fn forceToWhnf(self: *GrinEvaluator, v: Val) EvalError!Val {
+        if (v == .Var and std.mem.eql(u8, v.Var.base, "_hptr")) {
+            return self.fetchHeapVal(v);
+        }
+        return v;
+    }
+
+    // ── String ↔ Char-list bridging ──────────────────────────────────────
+
+    const ListTags = struct { cons_tag: Tag, nil_tag: Tag };
+
+    /// Scan case alternatives for (:) or [] constructor patterns.
+    ///
+    /// GRIN may split list pattern matches into nested case expressions
+    /// (first matching [] then (:) in an inner case, or vice versa), so
+    /// we trigger on *either* tag being present.  When only one tag is
+    /// found, we synthesise the other with a generic base name — the
+    /// synthesised tag is only used to build the cons-cell list; the
+    /// actual pattern matching uses the tags from the alternatives.
+    fn findListTags(self: *const GrinEvaluator, alts: []const ast.Alt) ?ListTags {
+        var cons_tag: ?Tag = null;
+        var nil_tag: ?Tag = null;
+        for (alts) |alt| {
+            switch (alt.pat) {
+                .NodePat => |np| {
+                    if (np.tag.tag_type == .Con) {
+                        if (std.mem.eql(u8, np.tag.name.base, ":") or
+                            std.mem.endsWith(u8, np.tag.name.base, "(:)"))
+                        {
+                            cons_tag = np.tag;
+                        }
+                        // [] can also appear as a NodePat with 0 fields.
+                        if (std.mem.eql(u8, np.tag.name.base, "[]") and
+                            np.fields.len == 0)
+                        {
+                            nil_tag = np.tag;
+                        }
+                    }
+                },
+                .TagPat => |tp| {
+                    if (tp.tag_type == .Con) {
+                        if (std.mem.eql(u8, tp.name.base, "[]")) {
+                            nil_tag = tp;
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+        // Synthesise the missing tag from the program-level known names.
+        if (cons_tag != null and nil_tag == null) {
+            nil_tag = Tag{ .tag_type = .{ .Con = {} }, .name = self.nil_name };
+        } else if (nil_tag != null and cons_tag == null) {
+            cons_tag = Tag{ .tag_type = .{ .Con = {} }, .name = self.cons_name };
+        }
+        if (cons_tag != null and nil_tag != null) {
+            return .{ .cons_tag = cons_tag.?, .nil_tag = nil_tag.? };
+        }
+        return null;
+    }
+
+    /// Unpack a flat string into a GRIN cons-cell list:
+    ///   "abc" → (:) 'a' ((:) 'b' ((:) 'c' []))
+    /// Uses the supplied tags so that the nodes carry the correct
+    /// renamer-assigned unique names for pattern matching.
+    fn stringToCharList(self: *GrinEvaluator, s: []const u8, cons_tag: Tag, nil_tag: Tag) EvalError!Val {
+        // Build from the end: start with [], then prepend each char.
+        var current = Val{ .ConstTagNode = .{
+            .tag = nil_tag,
+            .fields = &.{},
+        } };
+        var i: usize = s.len;
+        while (i > 0) {
+            i -= 1;
+            const fields = self.allocator.alloc(Val, 2) catch return error.OutOfMemory;
+            fields[0] = Val{ .Lit = .{ .Char = @intCast(s[i]) } };
+            fields[1] = current;
+            current = Val{ .ConstTagNode = .{
+                .tag = cons_tag,
+                .fields = fields,
+            } };
+        }
+        return current;
+    }
+
+    /// Recursively force all heap pointers in a Val's ConstTagNode fields.
+    /// This produces a fully-resolved value suitable for display.
+    pub fn deepForceVal(self: *GrinEvaluator, val: Val) EvalError!Val {
+        switch (val) {
+            .Var => |name| {
+                if (std.mem.eql(u8, name.base, "_hptr")) {
+                    const forced = try self.fetchHeapVal(val);
+                    return self.deepForceVal(forced);
+                }
+                return val;
+            },
+            .ConstTagNode => |ctn| {
+                if (ctn.fields.len == 0) return val;
+                const new_fields = self.allocator.alloc(Val, ctn.fields.len) catch
+                    return error.OutOfMemory;
+                for (ctn.fields, 0..) |field, j| {
+                    new_fields[j] = try self.deepForceVal(field);
+                }
+                return Val{ .ConstTagNode = .{
+                    .tag = ctn.tag,
+                    .fields = new_fields,
+                } };
+            },
+            else => return val,
+        }
     }
 
     /// Convert a runtime Value back to a GRIN Val.

@@ -15,6 +15,7 @@ module Prelude
     , max
     , Show(..), show, showString, showListWith, showListTail
     , intToDigit
+    , enumFrom, enumFromTo, enumFromThen, enumFromThenTo
     ) where
 
 -- ========================================================================
@@ -345,6 +346,30 @@ fromMaybe d (Just x) = x
 either :: (a -> c) -> (b -> c) -> Either a b -> c
 either f g (Left x)  = f x
 either f g (Right y) = g y
+
+-- ========================================================================
+-- Arithmetic sequences
+-- ========================================================================
+
+-- [n..] infinite list starting at n
+enumFrom :: Int -> [Int]
+enumFrom n = n : enumFrom (n + 1)
+
+-- [n..m] finite list from n to m inclusive
+enumFromTo :: Int -> Int -> [Int]
+enumFromTo n m = if n > m then [] else n : enumFromTo (n + 1) m
+
+-- [n,n2..] infinite list with step (n2 - n)
+enumFromThen :: Int -> Int -> [Int]
+enumFromThen n n2 = n : enumFromThen n2 (n2 + (n2 - n))
+
+-- [n,n2..m] finite list with step, up to m
+enumFromThenTo :: Int -> Int -> Int -> [Int]
+enumFromThenTo n n2 m =
+    let step = n2 - n
+    in if step >= 0
+       then if n > m then [] else n : enumFromThenTo n2 (n2 + step) m
+       else if n < m then [] else n : enumFromThenTo n2 (n2 + step) m
 
 -- ========================================================================
 -- Polymorphic functions still blocked:

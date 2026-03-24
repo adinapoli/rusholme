@@ -69,10 +69,11 @@ pub const GrinEngine = struct {
             return ExecError.EntryPointNotFound;
 
         const raw_val = try grin_eval.eval(entry.body);
-        // Force the result to WHNF: if eval returned a heap pointer
-        // (e.g. from a constructor field extraction), dereference and
-        // force any thunks before formatting.
-        const val = try grin_eval.forceVal(raw_val);
+        // Deep-force the result: recursively dereference all heap
+        // pointers in constructor fields so that the formatter receives
+        // fully-resolved values (e.g. char-lists with Lit.Char heads
+        // instead of _hptr placeholders).
+        const val = try grin_eval.deepForceVal(raw_val);
 
         const formatted = formatVal(self.allocator, val) catch {
             return ExecError.FormatError;
@@ -128,6 +129,19 @@ fn formatConstTagNode(
     allocator: Allocator,
     ctn: anytype,
 ) Allocator.Error![]const u8 {
+    // Detect char-lists (String) and display as quoted strings.
+    if (ctn.tag.tag_type == .Con) {
+        if (std.mem.eql(u8, ctn.tag.name.base, ":") or
+            std.mem.endsWith(u8, ctn.tag.name.base, "(:)"))
+        {
+            if (tryFormatCharList(allocator, ctn)) |s| return s;
+            // Fall through to generic display if not a valid char list.
+        }
+        if (std.mem.eql(u8, ctn.tag.name.base, "[]") and ctn.fields.len == 0) {
+            return try std.fmt.allocPrint(allocator, "\"\"", .{});
+        }
+    }
+
     if (ctn.fields.len == 0) {
         return try allocator.dupe(u8, ctn.tag.name.base);
     }
@@ -144,6 +158,49 @@ fn formatConstTagNode(
     }
 
     return result;
+}
+
+/// Try to format a (:)-list as a quoted string.  Returns null if
+/// any element is not a Char literal (e.g. an unforced thunk).
+fn tryFormatCharList(allocator: Allocator, ctn: anytype) ?[]const u8 {
+    var buf = std.ArrayListUnmanaged(u8){};
+    buf.append(allocator, '"') catch return null;
+    var current_fields = ctn.fields;
+    while (true) {
+        if (current_fields.len < 2) return null;
+        // Head must be a Char literal.
+        const head = current_fields[0];
+        const ch: u8 = switch (head) {
+            .Lit => |lit| switch (lit) {
+                .Char => |c| @intCast(c & 0xFF),
+                else => return null,
+            },
+            else => return null, // thunk / heap ptr — can't format statically
+        };
+        buf.append(allocator, ch) catch return null;
+        // Tail.
+        const tail = current_fields[1];
+        switch (tail) {
+            .ConstTagNode => |next_ctn| {
+                if (next_ctn.tag.tag_type != .Con) return null;
+                if (std.mem.eql(u8, next_ctn.tag.name.base, "[]")) break;
+                if (std.mem.eql(u8, next_ctn.tag.name.base, ":") or
+                    std.mem.endsWith(u8, next_ctn.tag.name.base, "(:)"))
+                {
+                    current_fields = next_ctn.fields;
+                    continue;
+                }
+                return null;
+            },
+            .ValTag => |tag| {
+                if (std.mem.eql(u8, tag.name.base, "[]")) break;
+                return null;
+            },
+            else => return null,
+        }
+    }
+    buf.append(allocator, '"') catch return null;
+    return buf.toOwnedSlice(allocator) catch return null;
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
