@@ -114,6 +114,12 @@ const TranslateCtx = struct {
     // Non-App complex expressions in constructor arguments are lifted into
     // helper functions so they can be suspended as F-tagged thunks (issue #518).
     lifted_defs: std.ArrayListUnmanaged(GrinDef) = .{},
+    // Cache for translated Core expressions, preserving pointer sharing.
+    // The sequential pattern-match desugarer creates shared fallback nodes
+    // (a DAG).  Without this cache, each shared node produces a separate
+    // GRIN expression, and the LLVM backend's eval-loop-per-case construction
+    // causes exponential blowup (see e2e_007_inductive_list).
+    expr_cache: std.AutoHashMapUnmanaged(usize, *GrinExpr) = .{},
 
     pub fn init(alloc: std.mem.Allocator) TranslateCtx {
         return .{
@@ -130,6 +136,7 @@ const TranslateCtx = struct {
         // arity_map ownership is transferred to GrinProgram - do not deinit
         self.con_map.deinit(self.alloc);
         self.lifted_defs.deinit(self.alloc);
+        self.expr_cache.deinit(self.alloc);
 
         // Note: con_field_types and arities ownership transferred to GrinProgram in translateProgram
         // The caller (translateProgram) takes ownership and handles cleanup
@@ -682,6 +689,13 @@ fn translateDef(ctx: *TranslateCtx, pair: CoreBindPair) !GrinDef {
 
 /// Translate a Core expression to a GRIN expression.
 fn translateExpr(ctx: *TranslateCtx, expr: *const CoreExpr) !*GrinExpr {
+    // Preserve pointer sharing from the Core AST.  The sequential
+    // pattern-match desugarer produces shared fallback nodes (a DAG);
+    // without this cache each occurrence creates a separate GRIN tree,
+    // which the LLVM backend then translates exponentially many times.
+    const expr_key = @intFromPtr(expr);
+    if (ctx.expr_cache.get(expr_key)) |cached| return cached;
+
     const new_expr = try ctx.alloc.create(GrinExpr);
 
     switch (expr.*) {
@@ -766,6 +780,7 @@ fn translateExpr(ctx: *TranslateCtx, expr: *const CoreExpr) !*GrinExpr {
         },
     }
 
+    try ctx.expr_cache.put(ctx.alloc, expr_key, new_expr);
     return new_expr;
 }
 

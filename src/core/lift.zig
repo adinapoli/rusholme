@@ -139,6 +139,12 @@ pub const LambdaLifter = struct {
     expr_to_lambda: std.AutoHashMapUnmanaged(usize, u64),
     /// Stack of frames representing nested scopes.
     frames: std.ArrayListUnmanaged(Frame),
+    /// Memoization cache for rewriteExpr, keyed by source expression pointer.
+    /// Preserves pointer sharing from the desugarer: the sequential
+    /// pattern-match algorithm produces shared fallback nodes (a DAG), and
+    /// without this cache rewriteExpr would clone each shared subtree at
+    /// every occurrence, causing exponential blowup in AST size.
+    rewrite_cache: std.AutoHashMapUnmanaged(usize, *Expr) = .{},
 
     pub fn init(alloc: std.mem.Allocator) LambdaLifter {
         return .{
@@ -160,6 +166,7 @@ pub const LambdaLifter = struct {
         self.lambdas.deinit(self.alloc);
         self.expr_to_lambda.deinit(self.alloc);
         self.frames.deinit(self.alloc);
+        self.rewrite_cache.deinit(self.alloc);
     }
 
     /// Push a new scope frame.
@@ -499,6 +506,12 @@ pub const LambdaLifter = struct {
 
     /// Rewrite an expression, replacing lifted lambdas with function calls.
     fn rewriteExpr(self: *LambdaLifter, expr: *const Expr, current_binders: []const u64) LifterError!*Expr {
+        // Memoize: if we've already rewritten this exact expression, reuse
+        // the result.  This preserves pointer sharing from the desugarer's
+        // sequential pattern-match algorithm (shared fallback nodes).
+        const expr_key = @intFromPtr(expr);
+        if (self.rewrite_cache.get(expr_key)) |cached| return cached;
+
         const new_expr = try self.alloc.create(Expr);
 
         switch (expr.*) {
@@ -629,6 +642,7 @@ pub const LambdaLifter = struct {
             },
         }
 
+        self.rewrite_cache.put(self.alloc, expr_key, new_expr) catch return error.OutOfMemory;
         return new_expr;
     }
 

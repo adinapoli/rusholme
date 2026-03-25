@@ -824,6 +824,13 @@ pub const GrinTranslator = struct {
     /// Keyed by `Name.unique.value` so that variables with the same base name
     /// but different uniques (e.g. `arg_20`, `arg_21`) are kept distinct.
     params: std.AutoHashMap(u64, llvm.Value),
+    /// Per-function cache for translated GRIN Case expressions.  The
+    /// sequential pattern-match desugarer creates shared fallback nodes
+    /// (a DAG) that would be re-translated exponentially without caching.
+    /// Keyed by the GRIN expression pointer (as usize); value is the LLVM
+    /// basic block where the translated case's dispatch logic starts.
+    /// Cleared at the start of each `translateDef` call.
+    case_entry_cache: std.AutoHashMap(usize, llvm.BasicBlock),
     /// Constructor tag discriminants, built before translation.
     tag_table: TagTable,
     /// HPT-lite type environment for type-correct LLVM codegen.
@@ -861,6 +868,7 @@ pub const GrinTranslator = struct {
             .builder = llvm.createBuilder(ctx),
             .allocator = allocator,
             .params = std.AutoHashMap(u64, llvm.Value).init(allocator),
+            .case_entry_cache = std.AutoHashMap(usize, llvm.BasicBlock).init(allocator),
             .tag_table = TagTable.init(),
             .type_env = TypeEnv.init(),
             .current_func = null,
@@ -869,6 +877,7 @@ pub const GrinTranslator = struct {
 
     pub fn deinit(self: *GrinTranslator) void {
         self.params.deinit();
+        self.case_entry_cache.deinit();
         self.tag_table.deinit(self.allocator);
         self.type_env.deinit(self.allocator);
         llvm.disposeBuilder(self.builder);
@@ -1226,6 +1235,11 @@ pub const GrinTranslator = struct {
         self.params.deinit();
         self.params = std.AutoHashMap(u64, llvm.Value).init(self.allocator);
 
+        // Clear the per-function case expression cache.  The cache prevents
+        // exponential re-translation of shared GRIN expressions produced by the
+        // sequential pattern-match compiler.
+        self.case_entry_cache.clearRetainingCapacity();
+
         // Store each parameter as a named value in the params map.
         for (def.params, 0..) |param_name, i| {
             const param_val = c.LLVMGetParam(func, @intCast(i));
@@ -1330,7 +1344,28 @@ pub const GrinTranslator = struct {
         switch (expr.*) {
             .App => |app| try self.translateApp(app.name, app.args),
             .Bind => |b| try self.translateBind(b.lhs, b.pat, b.rhs),
-            .Case => |case_| try self.translateCase(case_.scrutinee, case_.alts),
+            .Case => |case_| {
+                // The sequential pattern-match desugarer creates shared
+                // fallback nodes (a DAG).  Without caching, each shared
+                // node is re-translated at every occurrence, causing
+                // exponential blowup in basic blocks and compile time.
+                //
+                // Cache by GRIN expression pointer: if we've already
+                // translated this exact Case node, branch to its entry
+                // block instead of re-emitting the dispatch logic.
+                const expr_key = @intFromPtr(expr);
+                if (self.case_entry_cache.get(expr_key)) |cached_entry| {
+                    _ = c.LLVMBuildBr(self.builder, cached_entry);
+                    return;
+                }
+                // First encounter: create an entry block, cache it, then
+                // translate the case normally.
+                const case_entry = c.LLVMAppendBasicBlock(self.current_func, "case.shared");
+                _ = c.LLVMBuildBr(self.builder, case_entry);
+                llvm.positionBuilderAtEnd(self.builder, case_entry);
+                self.case_entry_cache.put(expr_key, case_entry) catch return error.OutOfMemory;
+                try self.translateCase(case_.scrutinee, case_.alts);
+            },
             .Store => |val| try self.translateStore(val),
             .Fetch => |f| try self.translateFetch(f.ptr, f.index),
             .Update => |u| try self.translateUpdate(u.ptr, u.val),
@@ -1454,7 +1489,27 @@ pub const GrinTranslator = struct {
             },
             .Case => |case_expr| {
                 // Case expression in value-producing context (e.g., nested in a bind RHS).
-                // Use translateCaseToValue to generate phi nodes instead of returns.
+                //
+                // Shared GRIN Case nodes (from the desugarer's DAG) may appear
+                // multiple times in alt bodies.  If we've already translated this
+                // exact Case node, branch to its cached entry block instead of
+                // re-translating.  The cached code terminates with ret/br so
+                // control never returns — we emit a dead placeholder block for
+                // the caller to continue emitting without LLVM errors.
+                const expr_key = @intFromPtr(expr);
+                if (self.case_entry_cache.get(expr_key)) |cached_entry| {
+                    _ = c.LLVMBuildBr(self.builder, cached_entry);
+                    const dead_bb = c.LLVMAppendBasicBlock(self.current_func, "dead.cached");
+                    llvm.positionBuilderAtEnd(self.builder, dead_bb);
+                    return @as(?llvm.Value, c.LLVMConstPointerNull(ptrType()));
+                }
+                // First encounter: create an entry block and cache it before
+                // translating, so that subsequent encounters of this shared
+                // Case node can branch here directly.
+                const case_entry = c.LLVMAppendBasicBlock(self.current_func, "caseval.shared");
+                _ = c.LLVMBuildBr(self.builder, case_entry);
+                llvm.positionBuilderAtEnd(self.builder, case_entry);
+                self.case_entry_cache.put(expr_key, case_entry) catch return error.OutOfMemory;
                 return try self.translateCaseToValue(case_expr.scrutinee, case_expr.alts, result_name);
             },
             else => {
