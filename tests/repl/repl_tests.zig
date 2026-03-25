@@ -995,3 +995,46 @@ test "repl: load file with comments then evaluate main (issue #494)" {
     };
     try testing.expectEqual(Status.silent, main_result.status);
 }
+
+// ── Regression: :l + expression must not segfault ────────────────────
+
+test "repl: expression after :l file does not crash (tag table stability)" {
+    // Regression test: loading a file via :l adds defs to accumulated_grin_defs.
+    // Without persistent tag table pre-seeding, the extra defs shift Prelude
+    // F-tag discriminants in subsequent expression compilations, causing a
+    // segfault when Prelude code forces thunks with mismatched tags.
+    //
+    // Reproduction: :l file-with-main, evaluate main, evaluate "a" ++ "b" → segfault.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    // Step 1: load declarations (simulates :l with a file that uses infinite lists)
+    const file_body =
+        \\main :: IO ()
+        \\main = print (length (take 3 [1..]))
+    ;
+    const load_result = evaluate(alloc, &session, file_body) catch |err| {
+        std.debug.panic("load evaluate failed: {s}", .{@errorName(err)});
+    };
+    try testing.expectEqual(Status.silent, load_result.status);
+
+    // Step 2: evaluate main (exercises Prelude functions and creates thunks)
+    const main_result = evaluate(alloc, &session, "main") catch |err| {
+        std.debug.panic("main evaluate failed: {s}", .{@errorName(err)});
+    };
+    try testing.expectEqual(Status.silent, main_result.status);
+
+    // Step 3: evaluate a string expression — this used to segfault because
+    // the Prelude's (++) code was JIT'd with discriminant X for F-tags
+    // but the expression's tag table assigned discriminant Y.
+    const concat_result = evaluate(alloc, &session, "\"a\" ++ \"b\"") catch |err| {
+        std.debug.panic("concat evaluate failed: {s}", .{@errorName(err)});
+    };
+    try testing.expectEqual(Status.silent, concat_result.status);
+}
