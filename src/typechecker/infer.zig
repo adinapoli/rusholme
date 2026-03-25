@@ -2268,7 +2268,98 @@ pub fn inferModule(
             },
             .TypeSig => {},
             .ClassDecl => {}, // Handled in Pass 0a
-            .InstanceDecl => {}, // Handled in Pass 0a
+            .InstanceDecl => |id_decl| {
+                // Pass 0a registered the instance in ClassEnv.  Pass 2 infers
+                // the bodies of instance method bindings so that the constraint
+                // solver can produce evidence (DictEvidence) for calls inside
+                // instance methods.
+                //
+                // For `instance Show a => Show [a] where show xs = showListWith xs`,
+                // the call to `showListWith` has scheme `Show a => [a] -> String`.
+                // Instantiation creates `Show ?meta`, and we unify ?meta with
+                // `[a_rigid]` (the instance head expressed in the same Rigids
+                // allocated during Pass 0a).  The solver then resolves
+                // `Show [a_rigid]` via instance match with context evidence
+                // `Show a_rigid` which becomes `DictEvidence.param`.
+
+                // 1. Retrieve the InstanceInfo from ClassEnv to get the rigid_scope.
+                const instances = ctx.class_env.lookupInstances(id_decl.class_name.unique.value);
+                var inst_info: ?InstanceInfo = null;
+                for (instances) |inst| {
+                    if (inst.span.start.line == id_decl.span.start.line and
+                        inst.span.start.column == id_decl.span.start.column)
+                    {
+                        inst_info = inst;
+                        break;
+                    }
+                }
+                const info = inst_info orelse continue; // Should not happen; defensive.
+
+                // 2. Rebuild the TypeVarMap from rigid_scope so type variable
+                //    names resolve to the same Rigid nodes as in Pass 0a.
+                var inst_scope = TypeVarMap{};
+                defer inst_scope.deinit(ctx.alloc);
+                for (info.rigid_scope) |rb| {
+                    try inst_scope.put(ctx.alloc, rb.tyvar, @constCast(rb.rigid));
+                }
+
+                // Convert the instance head type to HType using the Rigid scope.
+                const head_htype = try astTypeToHTypeWithScope(id_decl.instance_type, ctx, &inst_scope);
+
+                // 3. Infer each method binding body.
+                for (id_decl.bindings) |binding| {
+                    // Look up the class method's type scheme (registered in Pass 0a).
+                    const method_scheme = ctx.env.lookupScheme(binding.name.unique) orelse continue;
+
+                    // Instantiate: replace the class tyvar binder with a fresh meta.
+                    // For `show :: Show a => a -> String` with binders=[a_id]:
+                    //   inst_result.ty    = ?meta -> String
+                    //   inst_result.wanted = [Show ?meta]
+                    const inst_result = try method_scheme.instantiate(ctx.alloc, ctx.mv_supply);
+                    const inst_ty_ptr = try ctx.alloc_ty(inst_result.ty);
+
+                    // Unify the fresh meta (in the constraint) with the instance
+                    // head type.  Since the constraint's ty shares the same arena
+                    // node as the meta in inst_ty_ptr, this propagates: the
+                    // constraint becomes e.g. `Show [a_rigid]` and inst_ty_ptr
+                    // becomes `[a_rigid] -> String`.
+                    if (inst_result.wanted.len > 0) {
+                        try ctx.unifyNow(
+                            @constCast(inst_result.wanted[0].ty),
+                            head_htype,
+                            id_decl.span,
+                        );
+                    }
+
+                    // Push a scope for the method body so pattern bindings are local.
+                    try ctx.env.push();
+                    defer ctx.env.pop();
+
+                    for (binding.equations) |eq| {
+                        const eq_ty = try inferMatch(ctx, eq);
+
+                        // Unify the inferred equation type against the instantiated
+                        // (now specialised) method type.  This ensures type
+                        // correctness and — critically — propagates Rigids from
+                        // the instance head into the constraint types.
+                        try ctx.unifyNow(eq_ty, inst_ty_ptr, binding.span);
+                    }
+
+                    // Record wanted constraints so the solver can discharge them.
+                    // Each constraint is keyed by the bindings inside the method
+                    // body (the Var case already appended constraints for calls
+                    // like `showListWith`), but we also need the constraints from
+                    // the method scheme instantiation itself.
+                    for (inst_result.wanted) |wc| {
+                        try ctx.wanted_constraints.append(ctx.alloc, .{ .Class = .{
+                            .class_name = wc.class_name,
+                            .ty = wc.ty,
+                            .span = id_decl.span,
+                            .var_unique = binding.name.unique,
+                        } });
+                    }
+                }
+            },
             .DataDecl => {},
             .ForeignPrim => |fp| {
                 // Foreign prim has no body to infer — just unify the meta
