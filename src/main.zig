@@ -914,12 +914,36 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     }
     const cross_module_scope = try all_binding_ids.toOwnedSlice(arena_alloc);
 
+    // Build a cross-module constructor map so that each module's GRIN
+    // translation knows about data constructors declared in prior modules
+    // (e.g. Prelude's `Just`, `Nothing`, `Left`, `Right`).
+    //
+    // Without this, a user module that applies `Just 42` would not find
+    // `Just` in its local con_map and would emit a function call instead of
+    // a heap Store — producing an undefined linker reference at link time.
+    var cross_module_con_map = std.AutoHashMapUnmanaged(u64, u32){};
+    defer cross_module_con_map.deinit(arena_alloc);
+
     var per_module_grin = std.ArrayListUnmanaged(rusholme.grin.ast.Program){};
     for (module_order) |mod_name| {
         const core_prog = session.programs.get(mod_name) orelse continue;
         const core_lifted = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog, cross_module_scope);
-        const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted, null, null);
+        const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted, null, &cross_module_con_map);
         try per_module_grin.append(arena_alloc, grin_prog);
+
+        // After translating this module, accumulate its constructor field
+        // counts so that subsequent modules can use them as cross-module
+        // constructors.  The field count is extracted from the CoreProgram's
+        // data declarations, matching the REPL's accumulated_con_map logic.
+        for (core_prog.data_decls) |decl| {
+            for (decl.constructors) |con| {
+                try cross_module_con_map.put(
+                    arena_alloc,
+                    con.name.unique.value,
+                    rusholme.grin.translate.countConFields(con.ty),
+                );
+            }
+        }
     }
 
     // ── Build merged GRIN for global tag table ──────────────────────────
