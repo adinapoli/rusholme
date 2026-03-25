@@ -1517,34 +1517,6 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                     return @constCast(current);
                 }
 
-                // Fallback for instance method bodies: the typechecker skips
-                // Pass 0a instance body type-checking, so wanted_constraints
-                // has no entries for calls inside instance methods.  When
-                // dict_param_names is populated (set by desugarInstanceDecl
-                // for each context constraint), use those parameters directly
-                // as evidence for any matching class constraint.
-                if (scheme.constraints.len > 0) {
-                    var current: *const ast_mod.Expr = node;
-                    var injected_any = false;
-                    for (scheme.constraints) |constraint| {
-                        if (ctx.dict_param_names.get(constraint.class_name.unique.value)) |dict_param| {
-                            const dict_ty = ast_mod.CoreType{ .TyCon = .{
-                                .name = Name{
-                                    .base = try std.fmt.allocPrint(alloc, "Dict${s}", .{constraint.class_name.base}),
-                                    .unique = .{ .value = 0 },
-                                },
-                                .args = &.{},
-                            } };
-                            const dict_arg = try alloc.create(ast_mod.Expr);
-                            dict_arg.* = .{ .Var = .{ .name = dict_param, .ty = dict_ty, .span = v.span } };
-                            const app_node = try alloc.create(ast_mod.Expr);
-                            app_node.* = .{ .App = .{ .fn_expr = current, .arg = dict_arg, .span = v.span } };
-                            current = app_node;
-                            injected_any = true;
-                        }
-                    }
-                    if (injected_any) return @constCast(current);
-                }
             } else {
                 std.debug.panic("Variable {s} (id {d}) not found in type definitions", .{ v.name.base, v.name.unique.value });
             }
@@ -1572,28 +1544,6 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                         }
                         return @constCast(current);
                     }
-
-                    // Same fallback as above for the local_binders path.
-                    var current: *const ast_mod.Expr = node;
-                    var injected_any = false;
-                    for (scheme.constraints) |constraint| {
-                        if (ctx.dict_param_names.get(constraint.class_name.unique.value)) |dict_param| {
-                            const dict_ty = ast_mod.CoreType{ .TyCon = .{
-                                .name = Name{
-                                    .base = try std.fmt.allocPrint(alloc, "Dict${s}", .{constraint.class_name.base}),
-                                    .unique = .{ .value = 0 },
-                                },
-                                .args = &.{},
-                            } };
-                            const dict_arg = try alloc.create(ast_mod.Expr);
-                            dict_arg.* = .{ .Var = .{ .name = dict_param, .ty = dict_ty, .span = v.span } };
-                            const app_node = try alloc.create(ast_mod.Expr);
-                            app_node.* = .{ .App = .{ .fn_expr = current, .arg = dict_arg, .span = v.span } };
-                            current = app_node;
-                            injected_any = true;
-                        }
-                    }
-                    if (injected_any) return @constCast(current);
                 }
             }
         },
