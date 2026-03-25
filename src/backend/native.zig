@@ -19,7 +19,9 @@ const emit = struct {
         const self_native: *const NativeBackend = @ptrCast(@alignCast(backend));
 
         // Translate GRIN to LLVM using existing translator
-        var translator = grin_to_llvm.GrinTranslator.init(self_native.allocator);
+        var registry = grin_to_llvm.TagRegistry.init();
+        defer registry.deinit(self_native.allocator);
+        var translator = grin_to_llvm.GrinTranslator.init(self_native.allocator, &registry);
         defer translator.deinit();
 
         const llvm_module = try translator.translateProgramToModule(context.grin_program.*);

@@ -71,17 +71,13 @@ pub const JitEngine = struct {
     /// Buffer for formatting the entry point name as a null-terminated
     /// C string for LLVM symbol lookup.
     entry_name_buf: [64]u8 = undefined,
-    /// GRIN defs from prior `addDeclarations` calls. Accumulated so
-    /// that expression compilation can scan them for F-tag registration,
-    /// enabling `forceValueToWhnf` to handle thunks from any session.
-    accumulated_grin_defs: std.ArrayListUnmanaged(grin_ast.Def) = .{},
-    /// Persistent tag table accumulated across `addDeclarations` calls.
-    /// Cloned into each new translator to ensure discriminant stability:
-    /// once a tag receives a discriminant, all future compilations reuse
-    /// it.  Without this, loading a file via `:l` can shift Prelude
-    /// F-tag discriminants, causing segfaults when expression code
-    /// creates thunks that the Prelude's already-JIT'd code forces.
-    base_tag_table: grin_to_llvm.TagTable = grin_to_llvm.TagTable.init(),
+    /// Persistent tag registry accumulated across `addDeclarations` calls.
+    /// New tags are appended but existing discriminants never change,
+    /// ensuring discriminant stability across REPL sessions.  Without
+    /// this, loading a file via `:l` can shift Prelude F-tag
+    /// discriminants, causing segfaults when expression code creates
+    /// thunks that already-JIT'd code forces (#631, #637).
+    registry: grin_to_llvm.TagRegistry = grin_to_llvm.TagRegistry.init(),
     /// Constructor discriminants from Prelude compilation for result formatting.
     known_tags: KnownTags = .{},
     /// Resource tracker for the shared `__rhc_force` module.
@@ -125,8 +121,7 @@ pub const JitEngine = struct {
             c.LLVMOrcReleaseResourceTracker(tracker);
         }
         self.force_ftag_uniques.deinit(self.allocator);
-        self.base_tag_table.deinit(self.allocator);
-        self.accumulated_grin_defs.deinit(self.allocator);
+        self.registry.deinit(self.allocator);
         if (self.jit) |jit| {
             const err = c.LLVMOrcDisposeLLJIT(jit);
             if (err != null) c.LLVMConsumeError(err);
@@ -170,7 +165,7 @@ pub const JitEngine = struct {
         // Rebuild the set of covered F-tag uniques so that execute() can
         // detect missing tags by set membership rather than count comparison.
         self.force_ftag_uniques.clearRetainingCapacity();
-        var ftag_iter = translator.tag_table.fun_tags.iterator();
+        var ftag_iter = self.registry.fun_tags.iterator();
         while (ftag_iter.next()) |entry| {
             try self.force_ftag_uniques.put(self.allocator, entry.key_ptr.*, {});
         }
@@ -187,13 +182,18 @@ pub const JitEngine = struct {
     pub fn addDeclarations(self: *JitEngine, program: *const grin_ast.Program) JitError!void {
         if (program.defs.len == 0) return;
 
-        // Accumulate defs for tag scanning in future expression compilations.
-        for (program.defs) |def| {
-            self.accumulated_grin_defs.append(self.allocator, def) catch
-                return JitError.OutOfMemory;
-        }
+        // Register all new tags into the persistent registry.  The registry
+        // is append-only: existing discriminants are never changed, so
+        // already-JIT'd code remains valid.
+        self.registry.registerDefsAndBodies(self.allocator, program.defs) catch
+            return JitError.OutOfMemory;
+        self.registry.registerFieldTypes(self.allocator, program.field_types) catch
+            return JitError.OutOfMemory;
 
-        // Use a single translator with a global tag table so that
+        // Update known discriminants for result formatting.
+        self.known_tags = self.registry.getKnownDiscriminants();
+
+        // Use a single translator with the shared registry so that
         // discriminant assignments are consistent across all defs.
         // Then translate each def individually into its own LLVM module.
         //
@@ -205,36 +205,9 @@ pub const JitEngine = struct {
         // materialization unit. Per-def modules avoid this by keeping
         // each module small — intra-program function references become
         // cross-module external declarations that ORC resolves at link time.
-        var translator = GrinTranslator.init(self.allocator);
+        var translator = GrinTranslator.init(self.allocator, &self.registry);
         defer translator.deinit();
         translator.repl_entry_point = "__decl__";
-        // Seed with accumulated defs from prior sessions (e.g. Prelude)
-        // so that discriminant assignments are consistent with future
-        // expression compilations that also scan these defs.
-        translator.extra_tag_defs = self.accumulated_grin_defs.items;
-
-        // Pre-seed the translator's tag table from the persistent base
-        // so that all prior discriminant assignments are preserved.
-        // prepareGlobalTagTable will skip Phases 1–2 (extra_tag_defs
-        // scanning) and only scan the new program's defs.
-        if (self.base_tag_table.discriminants.count() > 0) {
-            translator.tag_table.deinit(self.allocator);
-            translator.tag_table = self.base_tag_table.clone(self.allocator) catch
-                return JitError.OutOfMemory;
-        }
-
-        // Build the tag table: extends the pre-seeded base (or builds
-        // from scratch on first call) with the new program's tags.
-        translator.prepareGlobalTagTable(program.*) catch
-            return JitError.TranslationFailed;
-
-        // Persist the extended tag table for future compilations.
-        self.base_tag_table.deinit(self.allocator);
-        self.base_tag_table = translator.tag_table.clone(self.allocator) catch
-            return JitError.OutOfMemory;
-
-        // Capture constructor discriminants for result formatting.
-        self.known_tags = translator.getKnownTagDiscriminants();
 
         // Emit a shared __rhc_force module BEFORE per-def modules.
         // Per-def modules declare __rhc_force as external and ORC JIT
@@ -293,37 +266,30 @@ pub const JitEngine = struct {
             return JitError.OutOfMemory;
         };
 
-        // 3. Translate GRIN → LLVM IR text.
+        // 3. Register any new tags from this expression into the persistent
+        //    registry, then translate GRIN → LLVM IR text.
         //    We use a temporary GrinTranslator to produce IR text, then
         //    parse it into a fresh module owned by a ThreadSafeContext.
         //    This avoids a double-free: GrinTranslator.deinit() destroys
         //    its own LLVM context, but LLJIT also takes ownership of the
         //    module. Going through IR text decouples the two ownership
         //    domains.
-        var translator = GrinTranslator.init(self.allocator);
+        self.registry.registerDefsAndBodies(self.allocator, patched_program.defs) catch
+            return JitError.OutOfMemory;
+        self.registry.registerFieldTypes(self.allocator, patched_program.field_types) catch
+            return JitError.OutOfMemory;
+
+        var translator = GrinTranslator.init(self.allocator, &self.registry);
         defer translator.deinit();
         translator.repl_entry_point = entry_name;
-        // Seed with accumulated defs from prior declaration sessions so
-        // that the tag table includes F-tags for all known functions.
-        translator.extra_tag_defs = self.accumulated_grin_defs.items;
-
-        // Pre-seed the translator's tag table from the persistent base
-        // so that discriminants are consistent with already-JIT'd code.
-        if (self.base_tag_table.discriminants.count() > 0) {
-            translator.tag_table.deinit(self.allocator);
-            translator.tag_table = self.base_tag_table.clone(self.allocator) catch
-                return JitError.OutOfMemory;
-        }
 
         const ir_text = translator.translateProgram(patched_program) catch {
             return JitError.TranslationFailed;
         };
         defer self.allocator.free(ir_text);
 
-        // Update known_tags from the expression's translator, which has
-        // the complete tag table (seeded from all accumulated defs).
-        // This ensures formatJitResult uses correct discriminants.
-        self.known_tags = translator.getKnownTagDiscriminants();
+        // Update known_tags (discriminants may have been extended by new tags).
+        self.known_tags = self.registry.getKnownDiscriminants();
 
         // Re-emit __rhc_force if the expression introduces any F-tag not
         // covered by the current force module. We compare sets, not counts:
@@ -331,7 +297,7 @@ pub const JitEngine = struct {
         // keeping the total count equal (e.g. `[1..10]` wraps enumFromTo
         // and `[1..]` wraps enumFrom — same count, different set members).
         var needs_force_reemit = false;
-        var ftag_check_iter = translator.tag_table.fun_tags.iterator();
+        var ftag_check_iter = self.registry.fun_tags.iterator();
         while (ftag_check_iter.next()) |entry| {
             if (!self.force_ftag_uniques.contains(entry.key_ptr.*)) {
                 needs_force_reemit = true;

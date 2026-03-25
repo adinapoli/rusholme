@@ -709,7 +709,9 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
         std.process.exit(1);
     }
     // ── Translate to LLVM ──────────────────────────────────────────────
-    var translator = rusholme.backend.grin_to_llvm.GrinTranslator.init(arena_alloc);
+    var registry = rusholme.backend.grin_to_llvm.TagRegistry.init();
+    defer registry.deinit(arena_alloc);
+    var translator = rusholme.backend.grin_to_llvm.GrinTranslator.init(arena_alloc, &registry);
     defer translator.deinit();
 
     const llvm_ir = translator.translateProgram(grin_prog) catch |err| {
@@ -967,10 +969,9 @@ fn emitNative(
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    var translator = rusholme.backend.grin_to_llvm.GrinTranslator.init(arena_alloc);
-    defer translator.deinit();
-
-    translator.prepareGlobalTagTable(all_grin) catch |err| {
+    var registry = rusholme.backend.grin_to_llvm.TagRegistry.init();
+    defer registry.deinit(arena_alloc);
+    registry.registerDefsAndBodies(arena_alloc, all_grin.defs) catch |err| {
         var stderr_buf: [4096]u8 = undefined;
         var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
         const stderr = &stderr_fw.interface;
@@ -978,6 +979,16 @@ fn emitNative(
         try stderr.flush();
         std.process.exit(1);
     };
+    registry.registerFieldTypes(arena_alloc, all_grin.field_types) catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: LLVM field type registration failed: {}\n", .{err});
+        try stderr.flush();
+        std.process.exit(1);
+    };
+    var translator = rusholme.backend.grin_to_llvm.GrinTranslator.init(arena_alloc, &registry);
+    defer translator.deinit();
 
     // Translate each module to a separate LLVM module and emit its bitcode.
     // Per-module .bc files are durable artifacts (kept after linking).
@@ -1118,10 +1129,9 @@ fn emitJit(
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    var translator = rusholme.backend.grin_to_llvm.GrinTranslator.init(arena_alloc);
-    defer translator.deinit();
-
-    translator.prepareGlobalTagTable(all_grin) catch |err| {
+    var registry = rusholme.backend.grin_to_llvm.TagRegistry.init();
+    defer registry.deinit(arena_alloc);
+    registry.registerDefsAndBodies(arena_alloc, all_grin.defs) catch |err| {
         var stderr_buf: [4096]u8 = undefined;
         var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
         const stderr = &stderr_fw.interface;
@@ -1129,6 +1139,16 @@ fn emitJit(
         try stderr.flush();
         std.process.exit(1);
     };
+    registry.registerFieldTypes(arena_alloc, all_grin.field_types) catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: LLVM field type registration failed: {}\n", .{err});
+        try stderr.flush();
+        std.process.exit(1);
+    };
+    var translator = rusholme.backend.grin_to_llvm.GrinTranslator.init(arena_alloc, &registry);
+    defer translator.deinit();
 
     // ── Per-module LLVM translation ───────────────────────────────────────
     var llvm_modules = std.ArrayListUnmanaged(llvm.Module){};
@@ -1273,10 +1293,9 @@ fn emitWasm(
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    var translator = rusholme.backend.grin_to_llvm.GrinTranslator.init(arena_alloc);
-    defer translator.deinit();
-
-    translator.prepareGlobalTagTable(all_grin) catch |err| {
+    var registry = rusholme.backend.grin_to_llvm.TagRegistry.init();
+    defer registry.deinit(arena_alloc);
+    registry.registerDefsAndBodies(arena_alloc, all_grin.defs) catch |err| {
         var stderr_buf: [4096]u8 = undefined;
         var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
         const stderr = &stderr_fw.interface;
@@ -1284,6 +1303,16 @@ fn emitWasm(
         try stderr.flush();
         std.process.exit(1);
     };
+    registry.registerFieldTypes(arena_alloc, all_grin.field_types) catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: LLVM field type registration failed: {}\n", .{err});
+        try stderr.flush();
+        std.process.exit(1);
+    };
+    var translator = rusholme.backend.grin_to_llvm.GrinTranslator.init(arena_alloc, &registry);
+    defer translator.deinit();
 
     // ── Per-module LLVM translation ───────────────────────────────────────
     // For WASM, we translate each module separately (like native) and then
