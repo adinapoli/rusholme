@@ -28,7 +28,9 @@ const emit = struct {
         const self_wasm: *const WasmBackend = @ptrCast(@alignCast(backend));
 
         // Translate GRIN to LLVM using existing translator
-        var translator = grin_to_llvm.GrinTranslator.init(self_wasm.allocator);
+        var registry = grin_to_llvm.TagRegistry.init();
+        defer registry.deinit(self_wasm.allocator);
+        var translator = grin_to_llvm.GrinTranslator.init(self_wasm.allocator, &registry);
         defer translator.deinit();
 
         const llvm_module = try translator.translateProgramToModule(context.grin_program.*);

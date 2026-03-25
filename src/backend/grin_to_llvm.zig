@@ -42,23 +42,15 @@
 const std = @import("std");
 
 const grin = @import("../grin/ast.zig");
-const FieldType = grin.FieldType;
 const rts_node = @import("../rts/node.zig");
 
 const llvm = @import("llvm.zig");
 const c = llvm.c;
 
-/// Well-known constructor discriminants captured from the tag table.
-/// Used by the JIT engine to format results correctly.
-pub const KnownTags = struct {
-    true_disc: ?i64 = null,
-    false_disc: ?i64 = null,
-    nil_disc: ?i64 = null,
-    cons_disc: ?i64 = null,
-    nothing_disc: ?i64 = null,
-    just_disc: ?i64 = null,
-    unit_disc: ?i64 = null,
-};
+const tag_registry_mod = @import("tag_registry.zig");
+pub const TagRegistry = tag_registry_mod.TagRegistry;
+pub const KnownTags = tag_registry_mod.KnownTags;
+const FieldType = tag_registry_mod.FieldType;
 
 // Known Prelude constants with stable unique IDs
 // These are used when variables reference Prelude literals like True, False, etc.
@@ -275,387 +267,6 @@ const PrimOpResult = union(enum) {
     instruction: LLVMInstruction,
 };
 
-// ═══════════════════════════════════════════════════════════════════════
-// Tag Table
-// ═══════════════════════════════════════════════════════════════════════
-
-/// Maps every constructor `Tag` in the GRIN program to a stable `i64`
-/// discriminant (0, 1, 2, …), records the number of fields, and tracks
-/// the FieldType of each field for HPT-lite.
-///
-/// Built once before translation starts by scanning all `ConstTagNode`
-/// values in the program.  A composite key (encoding tag type + name
-/// unique + partial-application missing count) ensures that `C:Foo`,
-/// `F:Foo`, `P(1):Foo`, and `P(2):Foo` all receive distinct
-/// discriminants even when they share the same name unique.
-///
-/// See: https://github.com/adinapoli/rusholme/issues/449
-pub const TagTable = struct {
-    /// Discriminant assigned to each tag, keyed by composite `tagKey`.
-    discriminants: std.AutoHashMapUnmanaged(u64, i64),
-    /// Number of fields for each tag, keyed by composite `tagKey`.
-    field_counts: std.AutoHashMapUnmanaged(u64, u32),
-    /// Field types per tag, keyed by composite `tagKey`.
-    /// Each slice contains FieldType for each field position.
-    /// This is HPT-lite: a simplified type tracking that will be
-    /// extended when implementing full HPT (M2.4).
-    field_types: std.AutoHashMapUnmanaged(u64, []const FieldType),
-    /// Set of composite keys that are F-tags (function thunks).
-    /// Used by the inline eval loop to distinguish thunks from constructors.
-    fun_tags: std.AutoHashMapUnmanaged(u64, void),
-    /// Maps F-tag composite keys to their GRIN names for LLVM function lookup.
-    fun_tag_names: std.AutoHashMapUnmanaged(u64, grin.Name),
-    /// Set of composite keys that are P-tags (partial applications).
-    /// Used by the apply function to dispatch on partial application nodes.
-    partial_tags: std.AutoHashMapUnmanaged(u64, void),
-    /// Maps P-tag composite keys to their tag info (name + missing count + field count).
-    partial_tag_info: std.AutoHashMapUnmanaged(u64, PartialTagInfo),
-    /// Maps constructor base name strings to their discriminants.
-    /// Populated during register() for Con tags. Used by findByName()
-    /// to look up well-known constructors (True, False, [], (:), etc.)
-    /// regardless of which unique ID the renamer assigned.
-    con_name_to_disc: std.StringHashMapUnmanaged(i64),
-    /// Next discriminant to assign.
-    next: i64,
-
-    const PartialTagInfo = struct {
-        name: grin.Name,
-        missing: u32,
-        n_fields: u32,
-    };
-
-    // Start discriminants at 0x1000 to avoid colliding with RTS special
-    // tags (Unit=0, Int=1, Char=2, String=3, Thunk=0x100, Ind=0x101,
-    // Closure=0x200). This matches rts/node.zig Tag.Data = 0x1000.
-    const first_discriminant: i64 = 0x1000;
-
-    pub fn init() TagTable {
-        return .{
-            .discriminants = .{},
-            .field_counts = .{},
-            .field_types = .{},
-            .fun_tags = .{},
-            .fun_tag_names = .{},
-            .partial_tags = .{},
-            .partial_tag_info = .{},
-            .con_name_to_disc = .{},
-            .next = first_discriminant,
-        };
-    }
-
-    /// Deep-copy this tag table.  The clone owns independent copies of
-    /// all heap-allocated field-type slices, so it can be mutated and
-    /// freed without affecting the original.
-    pub fn clone(self: *const TagTable, alloc: std.mem.Allocator) !TagTable {
-        var result = TagTable{
-            .discriminants = .{},
-            .field_counts = .{},
-            .field_types = .{},
-            .fun_tags = .{},
-            .fun_tag_names = .{},
-            .partial_tags = .{},
-            .partial_tag_info = .{},
-            .con_name_to_disc = .{},
-            .next = self.next,
-        };
-        errdefer result.deinit(alloc);
-
-        // Clone simple maps (values are scalars or small structs).
-        {
-            var it = self.discriminants.iterator();
-            while (it.next()) |e| try result.discriminants.put(alloc, e.key_ptr.*, e.value_ptr.*);
-        }
-        {
-            var it = self.field_counts.iterator();
-            while (it.next()) |e| try result.field_counts.put(alloc, e.key_ptr.*, e.value_ptr.*);
-        }
-        {
-            var it = self.fun_tags.iterator();
-            while (it.next()) |e| try result.fun_tags.put(alloc, e.key_ptr.*, {});
-        }
-        {
-            var it = self.fun_tag_names.iterator();
-            while (it.next()) |e| try result.fun_tag_names.put(alloc, e.key_ptr.*, e.value_ptr.*);
-        }
-        {
-            var it = self.partial_tags.iterator();
-            while (it.next()) |e| try result.partial_tags.put(alloc, e.key_ptr.*, {});
-        }
-        {
-            var it = self.partial_tag_info.iterator();
-            while (it.next()) |e| try result.partial_tag_info.put(alloc, e.key_ptr.*, e.value_ptr.*);
-        }
-        {
-            var it = self.con_name_to_disc.iterator();
-            while (it.next()) |e| try result.con_name_to_disc.put(alloc, e.key_ptr.*, e.value_ptr.*);
-        }
-
-        // Deep-copy field_types: each value is a heap-allocated []FieldType.
-        {
-            var it = self.field_types.iterator();
-            while (it.next()) |e| {
-                const duped = try alloc.dupe(FieldType, e.value_ptr.*);
-                try result.field_types.put(alloc, e.key_ptr.*, duped);
-            }
-        }
-
-        return result;
-    }
-
-    pub fn deinit(self: *TagTable, alloc: std.mem.Allocator) void {
-        self.discriminants.deinit(alloc);
-        self.field_counts.deinit(alloc);
-        // Free each field_types slice
-        var iter = self.field_types.iterator();
-        while (iter.next()) |entry| {
-            alloc.free(entry.value_ptr.*);
-        }
-        self.field_types.deinit(alloc);
-        self.fun_tags.deinit(alloc);
-        self.fun_tag_names.deinit(alloc);
-        self.partial_tags.deinit(alloc);
-        self.partial_tag_info.deinit(alloc);
-        self.con_name_to_disc.deinit(alloc);
-    }
-
-    /// Compute a composite key that distinguishes tag types sharing
-    /// the same name unique.  Without this, `F:map` and `P(1):map`
-    /// would collide when both have `unique = 5`.
-    ///
-    /// Encoding:
-    ///   Con:        unique * 4
-    ///   Fun:        unique * 4 + 1
-    ///   Partial(n): (unique * 4 + 2) * 31 + n
-    fn tagKey(tag: grin.Tag) u64 {
-        const base = tag.name.unique.value;
-        return switch (tag.tag_type) {
-            .Con => base *% 4,
-            .Fun => base *% 4 +% 1,
-            .Partial => |n| (base *% 4 +% 2) *% 31 +% @as(u64, n),
-        };
-    }
-
-    /// Register a tag with the given field count.
-    /// If already registered, this is a no-op (idempotent).
-    /// F-tags (Fun) are recorded in the fun_tags set for eval dispatch.
-    /// P-tags (Partial) are recorded in the partial_tags set for apply dispatch.
-    fn register(self: *TagTable, alloc: std.mem.Allocator, tag: grin.Tag, n_fields: u32) !void {
-        const key = tagKey(tag);
-        if (self.discriminants.contains(key)) return;
-
-        // For constructors, deduplicate by base name: if a constructor with
-        // the same name but a different unique already exists (e.g., the
-        // built-in True with unique 200 vs the Prelude-renamed True with
-        // unique 1103), reuse its discriminant.  This prevents cross-module
-        // discriminant mismatches when comparisons produce Bool heap nodes
-        // with one discriminant but case alternatives expect another.
-        const disc = if (tag.tag_type == .Con)
-            if (self.con_name_to_disc.get(tag.name.base)) |existing_disc|
-                existing_disc
-            else
-                self.next
-        else
-            self.next;
-
-        const is_new = (disc == self.next);
-
-        try self.discriminants.put(alloc, key, disc);
-        try self.field_counts.put(alloc, key, n_fields);
-        // Default: all fields are ptr (conservative for HPT-lite)
-        const types = try alloc.alloc(FieldType, n_fields);
-        for (types) |*t| t.* = .ptr;
-        try self.field_types.put(alloc, key, types);
-        // Track Con-tags by base name for reverse lookup (findByName).
-        if (tag.tag_type == .Con) {
-            try self.con_name_to_disc.put(alloc, tag.name.base, disc);
-        }
-        // Track F-tags for the inline eval loop in translateCase.
-        if (tag.tag_type == .Fun) {
-            try self.fun_tags.put(alloc, key, {});
-            try self.fun_tag_names.put(alloc, key, tag.name);
-        }
-        // Track P-tags for the apply function dispatch.
-        if (tag.tag_type == .Partial) {
-            try self.partial_tags.put(alloc, key, {});
-            try self.partial_tag_info.put(alloc, key, .{
-                .name = tag.name,
-                .missing = tag.tag_type.Partial,
-                .n_fields = n_fields,
-            });
-        }
-        if (is_new) self.next += 1;
-    }
-
-    /// Return the discriminant for a tag, or null if unknown.
-    fn discriminant(self: *const TagTable, tag: grin.Tag) ?i64 {
-        return self.discriminants.get(tagKey(tag));
-    }
-
-    /// Return the field count for a tag, or null if unknown.
-    fn fieldCount(self: *const TagTable, tag: grin.Tag) ?u32 {
-        return self.field_counts.get(tagKey(tag));
-    }
-
-    /// Return field types for a tag, or null if unknown.
-    fn fieldTypes(self: *const TagTable, tag: grin.Tag) ?[]const FieldType {
-        return self.field_types.get(tagKey(tag));
-    }
-
-    /// Return true if the named variable is a known nullary constructor.
-    /// Uses the Con-specific composite key since nullary constructors
-    /// are always C-tagged.
-    fn isNullaryByName(self: *const TagTable, name: grin.Name) bool {
-        const con_key = name.unique.value *% 4; // Con key encoding
-        const fc = self.field_counts.get(con_key) orelse return false;
-        return fc == 0;
-    }
-
-    /// Return the discriminant for a variable if it is a known nullary
-    /// constructor, otherwise null.
-    fn discriminantByName(self: *const TagTable, name: grin.Name) ?i64 {
-        if (!self.isNullaryByName(name)) return null;
-        const con_key = name.unique.value *% 4; // Con key encoding
-        return self.discriminants.get(con_key);
-    }
-    
-    /// Find a constructor discriminant by base name string.
-    /// Returns the discriminant if a constructor with this name exists in the table.
-    /// Used for well-known constructors (True, False, [], (:), etc.) whose
-    /// unique IDs vary between compilation contexts (the renamer assigns fresh
-    /// uniques to data declaration constructors).
-    fn findByName(self: *const TagTable, name_base: []const u8) ?i64 {
-        return self.con_name_to_disc.get(name_base);
-    }
-
-    /// Ensure list constructors ([] and (:)) are registered in the tag table.
-    /// These are needed whenever string literals appear in the program, because
-    /// strings are converted to [Char] lists at runtime via rts_cstring_to_charlist.
-    /// If a program doesn't explicitly use list constructors in GRIN patterns,
-    /// they won't be found by the tag scanner — this method fills that gap
-    /// using the well-known unique IDs from naming/known.zig.
-    fn ensureListConstructors(self: *TagTable, alloc: std.mem.Allocator) !void {
-        if (self.con_name_to_disc.get("[]") == null) {
-            const nil_tag = grin.Tag{
-                .tag_type = .Con,
-                .name = .{ .base = "[]", .unique = .{ .value = known.nil_val } },
-            };
-            try self.register(alloc, nil_tag, 0);
-        }
-        if (self.con_name_to_disc.get("(:)") == null) {
-            const cons_tag = grin.Tag{
-                .tag_type = .Con,
-                .name = .{ .base = "(:)", .unique = .{ .value = known.cons_val } },
-            };
-            try self.register(alloc, cons_tag, 2);
-        }
-    }
-
-    /// Ensure that intermediate partial tags exist for the apply function.
-    /// If the program contains `P(n)func` with `n > 1`, the apply function
-    /// needs to construct `P(n-1)func` nodes. This pre-registers all such
-    /// intermediate tags so they have valid discriminants.
-    fn registerIntermediatePartialTags(self: *TagTable, alloc: std.mem.Allocator) !void {
-        var to_add = std.ArrayListUnmanaged(struct { tag: grin.Tag, n_fields: u32 }){};
-        defer to_add.deinit(alloc);
-
-        var iter = self.partial_tag_info.iterator();
-        while (iter.next()) |entry| {
-            const info = entry.value_ptr.*;
-            if (info.missing > 1) {
-                const new_tag = grin.Tag{
-                    .tag_type = .{ .Partial = info.missing - 1 },
-                    .name = info.name,
-                };
-                try to_add.append(alloc, .{ .tag = new_tag, .n_fields = info.n_fields + 1 });
-            }
-        }
-        for (to_add.items) |item| {
-            try self.register(alloc, item.tag, item.n_fields);
-        }
-    }
-};
-
-/// Scan the entire GRIN program and populate the tag table.
-fn buildTagTable(alloc: std.mem.Allocator, program: grin.Program) !TagTable {
-    var table = TagTable.init();
-    errdefer table.deinit(alloc);
-    for (program.defs) |def| {
-        try scanExprForTags(alloc, def.body, &table);
-    }
-    // Ensure list constructors are available for string↔[Char] conversion.
-    try table.ensureListConstructors(alloc);
-
-    // Merge constructor field types from the GRIN program's field_types map.
-    // This allows dictionary constructors with function-typed fields to be
-    // properly tracked (issue #569).
-    // Note: program.field_types.keys() are constructor unique IDs. The TagTable
-    // internally encodes these as unique * 4 for Con tags (see tagKey() above).
-    var iter = program.field_types.iterator();
-    while (iter.next()) |entry| {
-        const unique = entry.key_ptr.*;
-        const field_types = entry.value_ptr.*;
-        const key = unique *% 4; // Con key encoding
-
-        // Update the field types array in the tag table
-        if (table.field_types.get(key)) |existing| {
-            alloc.free(existing);
-        }
-
-        // Deep copy the field types array
-        const types = try alloc.alloc(FieldType, field_types.len);
-        @memcpy(types, field_types);
-        try table.field_types.put(alloc, key, types);
-    }
-
-    return table;
-}
-
-fn scanExprForTags(alloc: std.mem.Allocator, expr: *const grin.Expr, table: *TagTable) !void {
-    switch (expr.*) {
-        .Return => |v| try scanValForTags(alloc, v, table),
-        .Store => |v| try scanValForTags(alloc, v, table),
-        .App => |a| for (a.args) |arg| try scanValForTags(alloc, arg, table),
-        .Bind => |b| {
-            try scanExprForTags(alloc, b.lhs, table);
-            try scanValForTags(alloc, b.pat, table);
-            try scanExprForTags(alloc, b.rhs, table);
-        },
-        .Case => |k| {
-            try scanValForTags(alloc, k.scrutinee, table);
-            for (k.alts) |alt| {
-                // Register the pattern tag too.
-                switch (alt.pat) {
-                    .NodePat => |np| try table.register(alloc, np.tag, @intCast(np.fields.len)),
-                    .TagPat => |t| try table.register(alloc, t, 0),
-                    else => {},
-                }
-                try scanExprForTags(alloc, alt.body, table);
-            }
-        },
-        .Update => |u| try scanValForTags(alloc, u.val, table),
-        .Fetch => {},
-        .Block => |inner| try scanExprForTags(alloc, inner, table),
-    }
-}
-
-fn scanValForTags(alloc: std.mem.Allocator, val: grin.Val, table: *TagTable) !void {
-    switch (val) {
-        .ConstTagNode => |ctn| {
-            try table.register(alloc, ctn.tag, @intCast(ctn.fields.len));
-            for (ctn.fields) |f| try scanValForTags(alloc, f, table);
-        },
-        .ValTag => |t| try table.register(alloc, t, 0),
-        .VarTagNode => |vtn| for (vtn.fields) |f| try scanValForTags(alloc, f, table),
-        // Variables (function references, parameters) - skip tag registration
-        // Dictionary constructor fields can be function references that don't
-        // need to be registered as tags. See: https://github.com/adinapoli/rusholme/issues/569
-        .Var => {},
-        // Literals - skip tag registration
-        .Lit => {},
-        // Unit value - skip tag registration
-        .Unit => {},
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // Heap node helpers
@@ -762,13 +373,13 @@ pub const TranslationError = error{
 const TypeEnv = struct {
     /// Maps variable unique IDs to their FieldType.
     var_types: std.AutoHashMapUnmanaged(u64, FieldType),
-    /// Reference to the tag table for constructor field types.
-    tag_table: *const TagTable,
+    /// Reference to the tag registry for constructor field types.
+    registry: *const TagRegistry,
 
     fn init() TypeEnv {
         return .{
             .var_types = .{},
-            .tag_table = undefined,
+            .registry = undefined,
         };
     }
 
@@ -776,8 +387,8 @@ const TypeEnv = struct {
         self.var_types.deinit(alloc);
     }
 
-    fn setTagTable(self: *TypeEnv, table: *const TagTable) void {
-        self.tag_table = table;
+    fn setRegistry(self: *TypeEnv, reg: *const TagRegistry) void {
+        self.registry = reg;
     }
 
     fn setVarType(self: *TypeEnv, alloc: std.mem.Allocator, name: grin.Name, ft: FieldType) !void {
@@ -809,7 +420,7 @@ const TypeEnv = struct {
 
     /// Get the type of a field at the given index for a constructor.
     fn getFieldTagType(self: *const TypeEnv, tag: grin.Tag, index: u32) FieldType {
-        const types = self.tag_table.fieldTypes(tag) orelse return .ptr;
+        const types = self.registry.fieldTypes(tag) orelse return .ptr;
         if (index >= types.len) return .ptr;
         return types[index];
     }
@@ -831,8 +442,8 @@ pub const GrinTranslator = struct {
     /// basic block where the translated case's dispatch logic starts.
     /// Cleared at the start of each `translateDef` call.
     case_entry_cache: std.AutoHashMap(usize, llvm.BasicBlock),
-    /// Constructor tag discriminants, built before translation.
-    tag_table: TagTable,
+    /// Persistent tag registry — owned externally (JIT engine or caller).
+    registry: *TagRegistry,
     /// HPT-lite type environment for type-correct LLVM codegen.
     /// See: https://github.com/adinapoli/rusholme/issues/449
     type_env: TypeEnv,
@@ -849,17 +460,11 @@ pub const GrinTranslator = struct {
     /// "repl_expr_0", "repl_expr_1") instead of always colliding on "main".
     repl_entry_point: ?[]const u8 = null,
 
-    /// Extra GRIN defs to scan for tag registration but NOT translate.
-    /// Used by the REPL JIT to propagate F-tags from prior declaration
-    /// sessions so that the inline eval loop in `forceValueToWhnf` can
-    /// handle thunks created by previously-compiled functions.
-    extra_tag_defs: []const grin.Def = &.{},
-
     /// Function arity map for correct forward declarations (issue #595).
     /// Maps function unique IDs to their parameter counts.
     arity_map: ?*const std.AutoHashMapUnmanaged(u64, u32) = null,
 
-    pub fn init(allocator: std.mem.Allocator) GrinTranslator {
+    pub fn init(allocator: std.mem.Allocator, registry: *TagRegistry) GrinTranslator {
         llvm.initialize();
         const ctx = llvm.createContext();
         return .{
@@ -869,7 +474,7 @@ pub const GrinTranslator = struct {
             .allocator = allocator,
             .params = std.AutoHashMap(u64, llvm.Value).init(allocator),
             .case_entry_cache = std.AutoHashMap(usize, llvm.BasicBlock).init(allocator),
-            .tag_table = TagTable.init(),
+            .registry = registry,
             .type_env = TypeEnv.init(),
             .current_func = null,
         };
@@ -878,7 +483,7 @@ pub const GrinTranslator = struct {
     pub fn deinit(self: *GrinTranslator) void {
         self.params.deinit();
         self.case_entry_cache.deinit();
-        self.tag_table.deinit(self.allocator);
+        // registry is not owned — do not deinit it.
         self.type_env.deinit(self.allocator);
         llvm.disposeBuilder(self.builder);
         // Disposing the context also disposes modules created within it.
@@ -889,17 +494,7 @@ pub const GrinTranslator = struct {
     /// (True, False, [], (:), etc.) from the current tag table.
     /// Used by the JIT engine to format results correctly.
     pub fn getKnownTagDiscriminants(self: *const GrinTranslator) KnownTags {
-        // Look up by name base instead of unique ID, since different compilation
-        // contexts may assign different uniques to the same constructor.
-        return .{
-            .true_disc = self.tag_table.findByName("True"),
-            .false_disc = self.tag_table.findByName("False"),
-            .nil_disc = self.tag_table.findByName("[]"),
-            .cons_disc = self.tag_table.findByName("(:)"),
-            .nothing_disc = self.tag_table.findByName("Nothing"),
-            .just_disc = self.tag_table.findByName("Just"),
-            .unit_disc = self.tag_table.findByName("()"),
-        };
+        return self.registry.getKnownDiscriminants();
     }
 
     /// Returns true if `base` is an entry-point name — either the standard
@@ -944,86 +539,24 @@ pub const GrinTranslator = struct {
     /// The module is owned by this translator's context — do not dispose it
     /// separately; it is freed when the translator is deinited.
     pub fn translateProgramToModule(self: *GrinTranslator, program: grin.Program) TranslationError!llvm.Module {
-        // If the tag table has been pre-seeded by the JIT engine (from
-        // a persistent base_tag_table), all prior discriminant assignments
-        // are already present.  Skip Phases 1–2 (extra_tag_defs scanning)
-        // so that new defs in extra_tag_defs cannot shift existing
-        // discriminants — only the current program's defs are scanned.
-        //
-        // Without pre-seeding, build from scratch (batch compiler path
-        // and first REPL compilation before a base table exists).
-        const preseeded = self.tag_table.discriminants.count() > 0;
-        if (!preseeded) {
-            self.tag_table = TagTable.init();
-            // Phase 1: scan extra_tag_defs (Prelude) bodies for tags.
-            for (self.extra_tag_defs) |def| {
-                scanExprForTags(self.allocator, def.body, &self.tag_table) catch return error.OutOfMemory;
-            }
-            // Phase 2: pre-register ALL extra_tag_defs as potential F-tags
-            // BEFORE scanning the current program's bodies.
-            for (self.extra_tag_defs) |def| {
-                if (def.params.len > 0) {
-                    const fun_tag = grin.Tag{ .name = def.name, .tag_type = .Fun };
-                    self.tag_table.register(self.allocator, fun_tag, @intCast(def.params.len)) catch return error.OutOfMemory;
-                }
-            }
-        }
-        // Phase 3: scan the current program's defs. Tags already registered
-        // (from pre-seeding or Phases 1–2) are skipped (register is
-        // idempotent), so existing tags keep their prior discriminants.
-        for (program.defs) |def| {
-            scanExprForTags(self.allocator, def.body, &self.tag_table) catch return error.OutOfMemory;
-        }
-        // Phase 4: pre-register current program defs as potential F-tags.
-        for (program.defs) |def| {
-            if (def.params.len > 0) {
-                const fun_tag = grin.Tag{ .name = def.name, .tag_type = .Fun };
-                self.tag_table.register(self.allocator, fun_tag, @intCast(def.params.len)) catch return error.OutOfMemory;
-            }
-        }
-        // Ensure list constructors are available for string↔[Char] conversion.
-        self.tag_table.ensureListConstructors(self.allocator) catch return error.OutOfMemory;
+        // Register tags from the current program into the shared registry.
+        // The registry is append-only: prior discriminants are preserved.
+        self.registry.registerDefsAndBodies(self.allocator, program.defs) catch return error.OutOfMemory;
 
         // Merge constructor field types from the GRIN program's field_types map.
-        {
-            var iter = program.field_types.iterator();
-            while (iter.next()) |entry| {
-                const unique = entry.key_ptr.*;
-                const field_types = entry.value_ptr.*;
-                const key = unique *% 4;
-                if (self.tag_table.field_types.get(key)) |existing| {
-                    self.allocator.free(existing);
-                }
-                const types = self.allocator.alloc(FieldType, field_types.len) catch return error.OutOfMemory;
-                @memcpy(types, field_types);
-                self.tag_table.field_types.put(self.allocator, key, types) catch return error.OutOfMemory;
-            }
-        }
-        // Link TypeEnv to the tag table for field type lookups.
-        self.type_env.setTagTable(&self.tag_table);
+        self.registry.registerFieldTypes(self.allocator, program.field_types) catch return error.OutOfMemory;
+
+        // Link TypeEnv to the registry for field type lookups.
+        self.type_env.setRegistry(self.registry);
         // Link arity map for correct forward declarations (issue #595).
         self.arity_map = &program.arities;
 
-        // Pre-register intermediate partial tags (P(n) → P(n-1) chains)
-        // so that __rhc_apply can construct them with valid discriminants.
-        // Iterate until no new tags are added to handle chains like
-        // P(3) → P(2) → P(1).
-        {
-            var prev_count = self.tag_table.partial_tags.count();
-            while (true) {
-                self.tag_table.registerIntermediatePartialTags(self.allocator) catch return error.OutOfMemory;
-                const new_count = self.tag_table.partial_tags.count();
-                if (new_count == prev_count) break;
-                prev_count = new_count;
-            }
-        }
-
-        // Emit __rhc_force(ptr) → ptr once the tag table is complete.
+        // Emit __rhc_force(ptr) → ptr once the registry is complete.
         // In whole-program mode, emit it here.  In REPL mode, the JIT
         // engine manages a shared external __rhc_force via
         // `emitForceModuleIr` / `emitSharedForceModule` — expression
         // modules must NOT define it to avoid duplicate-symbol errors.
-        if (self.tag_table.fun_tags.count() > 0) {
+        if (self.registry.fun_tags.count() > 0) {
             if (self.repl_entry_point == null) {
                 // Whole-program mode: emit the force function here.
                 try self.emitForceFunction();
@@ -1038,7 +571,7 @@ pub const GrinTranslator = struct {
         }
 
         // Emit __rhc_apply(ptr, ptr) → ptr for partial application dispatch.
-        if (self.tag_table.partial_tags.count() > 0) {
+        if (self.registry.partial_tags.count() > 0) {
             try self.emitApplyFunction();
         }
 
@@ -1057,54 +590,6 @@ pub const GrinTranslator = struct {
     }
 
     // ── Multi-module translation ──────────────────────────────────────────
-
-    /// Pre-compute the global tag table from the union of all modules' GRIN
-    /// programs.
-    ///
-    /// Call this ONCE before calling `translateModuleGrin` for each module in
-    /// a multi-module build.  The tag table must cover all constructors from
-    /// all modules because module B may pattern-match on constructors from
-    /// module A.
-    ///
-    /// Any previously held tag table is released.
-    pub fn prepareGlobalTagTable(self: *GrinTranslator, all_prog: grin.Program) TranslationError!void {
-        // If the tag table has been pre-seeded by the JIT engine, all
-        // prior discriminant assignments are present.  Skip Phases 1–2
-        // (extra_tag_defs scanning) to avoid shifting discriminants.
-        const preseeded = self.tag_table.discriminants.count() > 0;
-        if (!preseeded) {
-            self.tag_table.deinit(self.allocator);
-            self.tag_table = TagTable.init();
-            // Phase 1: scan extra_tag_defs bodies for tags.
-            for (self.extra_tag_defs) |def| {
-                scanExprForTags(self.allocator, def.body, &self.tag_table) catch return error.OutOfMemory;
-            }
-            // Phase 2: pre-register ALL extra_tag_defs as potential F-tags.
-            for (self.extra_tag_defs) |def| {
-                if (def.params.len > 0) {
-                    const fun_tag = grin.Tag{ .name = def.name, .tag_type = .Fun };
-                    self.tag_table.register(self.allocator, fun_tag, @intCast(def.params.len)) catch return error.OutOfMemory;
-                }
-            }
-        }
-        // Phase 3: scan all_prog.defs bodies.  Existing tags are
-        // skipped (register is idempotent).
-        for (all_prog.defs) |def| {
-            scanExprForTags(self.allocator, def.body, &self.tag_table) catch return error.OutOfMemory;
-        }
-        // Phase 4: pre-register all_prog.defs as potential F-tags.
-        for (all_prog.defs) |def| {
-            if (def.params.len > 0) {
-                const fun_tag = grin.Tag{ .name = def.name, .tag_type = .Fun };
-                self.tag_table.register(self.allocator, fun_tag, @intCast(def.params.len)) catch return error.OutOfMemory;
-            }
-        }
-        // Ensure list constructors are available for string↔[Char] conversion.
-        self.tag_table.ensureListConstructors(self.allocator) catch return error.OutOfMemory;
-
-        // TypeEnv pointer is refreshed inside translateModuleGrin before each
-        // module translation (needed because the tag_table field was reassigned).
-    }
 
     /// Translate a single module's GRIN program into a fresh LLVM module.
     ///
@@ -1125,10 +610,8 @@ pub const GrinTranslator = struct {
         module_name: []const u8,
         prog: grin.Program,
     ) TranslationError!llvm.Module {
-        // Refresh the TypeEnv pointer in case prepareGlobalTagTable rebuilt the
-        // tag table (which moves it in memory when the old table is deinited and
-        // a new one is allocated).
-        self.type_env.setTagTable(&self.tag_table);
+        // Refresh the TypeEnv pointer to the registry.
+        self.type_env.setRegistry(self.registry);
         // Link arity map for correct forward declarations (issue #595).
         self.arity_map = &prog.arities;
 
@@ -1144,7 +627,7 @@ pub const GrinTranslator = struct {
         // emitted by `emitForceModuleIr`.  This ensures per-def code can
         // force thunks with F-tags introduced by later REPL expressions
         // that the per-def tag table didn't know about at compile time.
-        if (self.tag_table.fun_tags.count() > 0) {
+        if (self.registry.fun_tags.count() > 0) {
             // Declare __rhc_force as an external function so that
             // callForceIfNeeded can find it via LLVMGetNamedFunction.
             const ptr_ty = ptrType();
@@ -1177,7 +660,7 @@ pub const GrinTranslator = struct {
         self.module = mod;
         defer self.module = saved_module;
 
-        if (self.tag_table.fun_tags.count() > 0) {
+        if (self.registry.fun_tags.count() > 0) {
             try self.emitForceFunction();
         }
 
@@ -1284,7 +767,7 @@ pub const GrinTranslator = struct {
                                 // Force any F-tagged thunks to WHNF before
                                 // returning. The user expects REPL results
                                 // in normal form, not unevaluated thunks.
-                                const forced = if (self.tag_table.fun_tags.count() > 0)
+                                const forced = if (self.registry.fun_tags.count() > 0)
                                     try self.forceValueToWhnf(val)
                                 else
                                     val;
@@ -1839,8 +1322,8 @@ pub const GrinTranslator = struct {
         };
 
         // Look up the (:) and [] discriminants from the tag table
-        const cons_disc: i64 = self.tag_table.findByName("(:)") orelse 0;
-        const nil_disc: i64 = self.tag_table.findByName("[]") orelse 0;
+        const cons_disc: i64 = self.registry.findByName("(:)") orelse 0;
+        const nil_disc: i64 = self.registry.findByName("[]") orelse 0;
 
         // Ensure list_val is a pointer (it may be an i64 if from PtrToInt)
         const list_ptr = if (c.LLVMGetTypeKind(c.LLVMTypeOf(list_val)) == c.LLVMIntegerTypeKind)
@@ -1879,8 +1362,8 @@ pub const GrinTranslator = struct {
             break :blk llvm.addFunction(self.module, "rts_cstring_to_charlist", ft);
         };
 
-        const cons_disc: i64 = self.tag_table.findByName("(:)") orelse 0;
-        const nil_disc: i64 = self.tag_table.findByName("[]") orelse 0;
+        const cons_disc: i64 = self.registry.findByName("(:)") orelse 0;
+        const nil_disc: i64 = self.registry.findByName("[]") orelse 0;
 
         var call_args = [_]llvm.Value{
             str_val,
@@ -2039,10 +1522,10 @@ pub const GrinTranslator = struct {
         const false_tag = grin.Tag{ .tag_type = .Con, .name = false_name };
         // Try exact unique match first, then fall back to name-based lookup
         // for contexts where the Prelude assigned fresh uniques to Bool.
-        const true_disc: i64 = self.tag_table.discriminant(true_tag) orelse
-            self.tag_table.findByName("True") orelse 2;
-        const false_disc: i64 = self.tag_table.discriminant(false_tag) orelse
-            self.tag_table.findByName("False") orelse 3;
+        const true_disc: i64 = self.registry.discriminant(true_tag) orelse
+            self.registry.findByName("True") orelse 2;
+        const false_disc: i64 = self.registry.discriminant(false_tag) orelse
+            self.registry.findByName("False") orelse 3;
 
         const true_i64 = c.LLVMConstInt(llvm.i64Type(), @bitCast(true_disc), 0);
         const false_i64 = c.LLVMConstInt(llvm.i64Type(), @bitCast(false_disc), 0);
@@ -2106,7 +1589,7 @@ pub const GrinTranslator = struct {
                 //    Allocate a heap node so that the REPL and case analysis can
                 //    distinguish constructors from integer literals by type (ptr vs i64).
                 //    Tracked in: https://github.com/adinapoli/rusholme/issues/410
-                if (self.tag_table.discriminantByName(name)) |disc| {
+                if (self.registry.discriminantByName(name)) |disc| {
                     const alloc_fn = declareRtsAlloc(self.module);
                     var alloc_args2 = [_]llvm.Value{
                         c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0),
@@ -2181,7 +1664,7 @@ pub const GrinTranslator = struct {
                 // Using a heap node (pointer) rather than a bare i64 discriminant
                 // lets the REPL and case analysis distinguish constructors from
                 // integer literals by LLVM type (ptr vs i64).
-                const disc = self.tag_table.discriminant(t) orelse return error.UnsupportedGrinVal;
+                const disc = self.registry.discriminant(t) orelse return error.UnsupportedGrinVal;
                 const alloc_fn = declareRtsAlloc(self.module);
                 var alloc_args2 = [_]llvm.Value{
                     c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0),
@@ -2206,7 +1689,7 @@ pub const GrinTranslator = struct {
             .ConstTagNode => |ctn| {
                 const tag = ctn.tag;
                 const n_fields: u32 = @intCast(ctn.fields.len);
-                const disc = self.tag_table.discriminant(tag) orelse return error.UnsupportedGrinVal;
+                const disc = self.registry.discriminant(tag) orelse return error.UnsupportedGrinVal;
 
                 // Allocate a node via rts_alloc(tag, n_fields).
                 const rts_alloc_fn = declareRtsAlloc(self.module);
@@ -2327,7 +1810,7 @@ pub const GrinTranslator = struct {
         var cur_tag: llvm.Value = undefined;
 
         // Create eval loop if we have F-tags (thunks) or P-tags (partial applications) to force
-        const has_forceable_tags = self.tag_table.fun_tags.count() > 0 or self.tag_table.partial_tags.count() > 0;
+        const has_forceable_tags = self.registry.fun_tags.count() > 0 or self.registry.partial_tags.count() > 0;
         if (is_ptr and has_forceable_tags) {
             const entry_bb = c.LLVMGetInsertBlock(self.builder);
 
@@ -2368,7 +1851,7 @@ pub const GrinTranslator = struct {
             const tag_val = c.LLVMBuildLoad2(self.builder, llvm.i64Type(), tag_gep, "eval.tag");
 
             // Count F-tags + 1 for Ind.
-            const n_eval_cases = @as(u32, @intCast(self.tag_table.fun_tags.count())) + 1;
+            const n_eval_cases = @as(u32, @intCast(self.registry.fun_tags.count())) + 1;
             const eval_switch = c.LLVMBuildSwitch(self.builder, tag_val, dispatch_bb, n_eval_cases);
 
             // ── Ind case: follow indirection ─────────────────────────────
@@ -2406,12 +1889,12 @@ pub const GrinTranslator = struct {
             phi_incoming_vals.append(self.allocator, ind_target) catch return error.OutOfMemory;
             phi_incoming_bbs.append(self.allocator, ind_bb) catch return error.OutOfMemory;
 
-            var ftag_iter = self.tag_table.fun_tags.iterator();
+            var ftag_iter = self.registry.fun_tags.iterator();
             while (ftag_iter.next()) |ftag_entry| {
                 const ftag_unique = ftag_entry.key_ptr.*;
-                const ftag_disc = self.tag_table.discriminants.get(ftag_unique) orelse continue;
-                const ftag_name = self.tag_table.fun_tag_names.get(ftag_unique) orelse continue;
-                const ftag_n_fields = self.tag_table.field_counts.get(ftag_unique) orelse 0;
+                const ftag_disc = self.registry.discriminants.get(ftag_unique) orelse continue;
+                const ftag_name = self.registry.fun_tag_names.get(ftag_unique) orelse continue;
+                const ftag_n_fields = self.registry.field_counts.get(ftag_unique) orelse 0;
 
                 const ftag_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.ftag");
                 c.LLVMAddCase(eval_switch, c.LLVMConstInt(llvm.i64Type(), @bitCast(ftag_disc), 0), ftag_bb);
@@ -2489,10 +1972,10 @@ pub const GrinTranslator = struct {
             // For each P-tag, we need to apply it (possibly multiple times)
             // until it's fully saturated, then force the result.
             // We use __rhc_apply with a dummy argument (null) to trigger evaluation.
-            var ptag_iter = self.tag_table.partial_tags.iterator();
+            var ptag_iter = self.registry.partial_tags.iterator();
             while (ptag_iter.next()) |ptag_entry| {
                 const ptag_unique = ptag_entry.key_ptr.*;
-                const ptag_disc = self.tag_table.discriminants.get(ptag_unique) orelse continue;
+                const ptag_disc = self.registry.discriminants.get(ptag_unique) orelse continue;
 
                 const ptag_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.ptag");
                 c.LLVMAddCase(eval_switch, c.LLVMConstInt(llvm.i64Type(), @bitCast(ptag_disc), 0), ptag_bb);
@@ -2502,7 +1985,7 @@ pub const GrinTranslator = struct {
                 // A P-tag partial application in a case scrutinee needs to be fully applied.
                 // If the stored fields represent all the arguments the function needs,
                 // we can call it directly. Otherwise, it's an error.
-                const ptag_info = self.tag_table.partial_tag_info.get(ptag_unique) orelse continue;
+                const ptag_info = self.registry.partial_tag_info.get(ptag_unique) orelse continue;
                 
                 // Extract and call the function with all stored arguments
                 const fn_name_z = self.formatName(ptag_info.name);
@@ -2622,12 +2105,12 @@ pub const GrinTranslator = struct {
             switch (alt.pat) {
                 .DefaultPat => {}, // already set as default above
                 .NodePat => |np| {
-                    const disc = self.tag_table.discriminant(np.tag) orelse return error.UnsupportedGrinVal;
+                    const disc = self.registry.discriminant(np.tag) orelse return error.UnsupportedGrinVal;
                     const case_val = c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0);
                     c.LLVMAddCase(switch_inst, case_val, alt_bbs[i]);
                 },
                 .TagPat => |t| {
-                    const disc = self.tag_table.discriminant(t) orelse return error.UnsupportedGrinVal;
+                    const disc = self.registry.discriminant(t) orelse return error.UnsupportedGrinVal;
                     const case_val = c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0);
                     c.LLVMAddCase(switch_inst, case_val, alt_bbs[i]);
                 },
@@ -2728,7 +2211,7 @@ pub const GrinTranslator = struct {
         var cur_tag: llvm.Value = undefined;
 
         // Create eval loop if we have F-tags (thunks) or P-tags (partial applications) to force
-        const has_forceable_tags = self.tag_table.fun_tags.count() > 0 or self.tag_table.partial_tags.count() > 0;
+        const has_forceable_tags = self.registry.fun_tags.count() > 0 or self.registry.partial_tags.count() > 0;
         if (is_ptr and has_forceable_tags) {
             const entry_bb = c.LLVMGetInsertBlock(self.builder);
             const eval_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.entry");
@@ -2761,7 +2244,7 @@ pub const GrinTranslator = struct {
             const tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, phi, &tag_idx, 2, "eval.tag_gep");
             const tag_val = c.LLVMBuildLoad2(self.builder, llvm.i64Type(), tag_gep, "eval.tag");
 
-            const n_eval_cases = @as(u32, @intCast(self.tag_table.fun_tags.count())) + 1;
+            const n_eval_cases = @as(u32, @intCast(self.registry.fun_tags.count())) + 1;
             const eval_switch = c.LLVMBuildSwitch(self.builder, tag_val, dispatch_bb, n_eval_cases);
 
             // Ind case
@@ -2788,12 +2271,12 @@ pub const GrinTranslator = struct {
             phi_incoming_bbs.append(self.allocator, ind_bb) catch return error.OutOfMemory;
 
             // F-tag cases
-            var ftag_iter = self.tag_table.fun_tags.iterator();
+            var ftag_iter = self.registry.fun_tags.iterator();
             while (ftag_iter.next()) |ftag_entry| {
                 const ftag_unique = ftag_entry.key_ptr.*;
-                const ftag_disc = self.tag_table.discriminants.get(ftag_unique) orelse continue;
-                const ftag_name = self.tag_table.fun_tag_names.get(ftag_unique) orelse continue;
-                const ftag_n_fields = self.tag_table.field_counts.get(ftag_unique) orelse 0;
+                const ftag_disc = self.registry.discriminants.get(ftag_unique) orelse continue;
+                const ftag_name = self.registry.fun_tag_names.get(ftag_unique) orelse continue;
+                const ftag_n_fields = self.registry.field_counts.get(ftag_unique) orelse 0;
 
                 const ftag_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.ftag");
                 c.LLVMAddCase(eval_switch, c.LLVMConstInt(llvm.i64Type(), @bitCast(ftag_disc), 0), ftag_bb);
@@ -2832,15 +2315,15 @@ pub const GrinTranslator = struct {
             }
 
             // P-tag cases
-            var ptag_iter = self.tag_table.partial_tags.iterator();
+            var ptag_iter = self.registry.partial_tags.iterator();
             while (ptag_iter.next()) |ptag_entry| {
                 const ptag_unique = ptag_entry.key_ptr.*;
-                const ptag_disc = self.tag_table.discriminants.get(ptag_unique) orelse continue;
+                const ptag_disc = self.registry.discriminants.get(ptag_unique) orelse continue;
                 const ptag_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.ptag");
                 c.LLVMAddCase(eval_switch, c.LLVMConstInt(llvm.i64Type(), @bitCast(ptag_disc), 0), ptag_bb);
                 llvm.positionBuilderAtEnd(self.builder, ptag_bb);
 
-                const ptag_info = self.tag_table.partial_tag_info.get(ptag_unique) orelse continue;
+                const ptag_info = self.registry.partial_tag_info.get(ptag_unique) orelse continue;
                 const fn_name_z = self.formatName(ptag_info.name);
                 const n_fields = ptag_info.n_fields;
 
@@ -2918,12 +2401,12 @@ pub const GrinTranslator = struct {
             switch (alt.pat) {
                 .DefaultPat => {},
                 .NodePat => |np| {
-                    const disc = self.tag_table.discriminant(np.tag) orelse return error.UnsupportedGrinVal;
+                    const disc = self.registry.discriminant(np.tag) orelse return error.UnsupportedGrinVal;
                     const case_val = c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0);
                     c.LLVMAddCase(switch_inst, case_val, alt_bbs[i]);
                 },
                 .TagPat => |t| {
-                    const disc = self.tag_table.discriminant(t) orelse return error.UnsupportedGrinVal;
+                    const disc = self.registry.discriminant(t) orelse return error.UnsupportedGrinVal;
                     const case_val = c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0);
                     c.LLVMAddCase(switch_inst, case_val, alt_bbs[i]);
                 },
@@ -3110,7 +2593,7 @@ pub const GrinTranslator = struct {
                     if (is_ptr) {
                         // Force any F-tagged thunks to WHNF before returning.
                         // The user expects REPL results in normal form.
-                        const forced = if (self.tag_table.fun_tags.count() > 0)
+                        const forced = if (self.registry.fun_tags.count() > 0)
                             try self.forceValueToWhnf(llvm_val)
                         else
                             llvm_val;
@@ -3247,7 +2730,7 @@ pub const GrinTranslator = struct {
         const tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, phi, &tag_idx, 2, "tag_gep");
         const tag_val = c.LLVMBuildLoad2(self.builder, i64_ty, tag_gep, "tag");
 
-        const n_cases = @as(u32, @intCast(self.tag_table.fun_tags.count())) + 1;
+        const n_cases = @as(u32, @intCast(self.registry.fun_tags.count())) + 1;
         const sw = c.LLVMBuildSwitch(self.builder, tag_val, done_bb, n_cases);
 
         // ── Ind case: follow indirection ───────────────────────────────
@@ -3282,12 +2765,12 @@ pub const GrinTranslator = struct {
         phi_bbs.append(self.allocator, ind_bb) catch return error.OutOfMemory;
 
         // ── F-tag cases: force thunk ───────────────────────────────────
-        var ftag_iter = self.tag_table.fun_tags.iterator();
+        var ftag_iter = self.registry.fun_tags.iterator();
         while (ftag_iter.next()) |ftag_entry| {
             const ftag_unique = ftag_entry.key_ptr.*;
-            const ftag_disc = self.tag_table.discriminants.get(ftag_unique) orelse continue;
-            const ftag_name = self.tag_table.fun_tag_names.get(ftag_unique) orelse continue;
-            const ftag_n_fields = self.tag_table.field_counts.get(ftag_unique) orelse 0;
+            const ftag_disc = self.registry.discriminants.get(ftag_unique) orelse continue;
+            const ftag_name = self.registry.fun_tag_names.get(ftag_unique) orelse continue;
+            const ftag_n_fields = self.registry.field_counts.get(ftag_unique) orelse 0;
 
             const ftag_bb = c.LLVMAppendBasicBlock(func, "ftag");
             c.LLVMAddCase(sw, c.LLVMConstInt(i64_ty, @bitCast(ftag_disc), 0), ftag_bb);
@@ -3370,7 +2853,7 @@ pub const GrinTranslator = struct {
     /// Returns the forced pointer value, or the original value unchanged
     /// if no F-tags exist (i.e. `__rhc_force` was never emitted).
     fn callForceIfNeeded(self: *GrinTranslator, val: llvm.Value) llvm.Value {
-        if (self.tag_table.fun_tags.count() == 0) return val;
+        if (self.registry.fun_tags.count() == 0) return val;
         const force_fn = c.LLVMGetNamedFunction(self.module, "__rhc_force") orelse return val;
         var args = [_]llvm.Value{val};
         return c.LLVMBuildCall2(
@@ -3432,7 +2915,7 @@ pub const GrinTranslator = struct {
         const tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, phi, &tag_idx, 2, "force.tag_gep");
         const tag_val = c.LLVMBuildLoad2(self.builder, i64_ty, tag_gep, "force.tag");
 
-        const n_cases = @as(u32, @intCast(self.tag_table.fun_tags.count())) + 1; // F-tags + Ind
+        const n_cases = @as(u32, @intCast(self.registry.fun_tags.count())) + 1; // F-tags + Ind
         const sw = c.LLVMBuildSwitch(self.builder, tag_val, done_bb, n_cases);
 
         // ── Ind case: follow indirection ───────────────────────────────
@@ -3467,12 +2950,12 @@ pub const GrinTranslator = struct {
         phi_bbs.append(self.allocator, ind_bb) catch return error.OutOfMemory;
 
         // ── F-tag cases: force thunk ───────────────────────────────────
-        var ftag_iter = self.tag_table.fun_tags.iterator();
+        var ftag_iter = self.registry.fun_tags.iterator();
         while (ftag_iter.next()) |ftag_entry| {
             const ftag_unique = ftag_entry.key_ptr.*;
-            const ftag_disc = self.tag_table.discriminants.get(ftag_unique) orelse continue;
-            const ftag_name = self.tag_table.fun_tag_names.get(ftag_unique) orelse continue;
-            const ftag_n_fields = self.tag_table.field_counts.get(ftag_unique) orelse 0;
+            const ftag_disc = self.registry.discriminants.get(ftag_unique) orelse continue;
+            const ftag_name = self.registry.fun_tag_names.get(ftag_unique) orelse continue;
+            const ftag_n_fields = self.registry.field_counts.get(ftag_unique) orelse 0;
 
             const ftag_bb = c.LLVMAppendBasicBlock(self.current_func, "force.ftag");
             c.LLVMAddCase(sw, c.LLVMConstInt(llvm.i64Type(), @bitCast(ftag_disc), 0), ftag_bb);
@@ -3597,7 +3080,7 @@ pub const GrinTranslator = struct {
         const tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, f_param, &tag_idx, 2, "tag_gep");
         const tag_val = c.LLVMBuildLoad2(self.builder, i64_ty, tag_gep, "tag");
 
-        const n_cases: u32 = @intCast(self.tag_table.partial_tags.count());
+        const n_cases: u32 = @intCast(self.registry.partial_tags.count());
         const sw = c.LLVMBuildSwitch(self.builder, tag_val, default_bb, n_cases);
 
         // ── default: not a partial application — return f_ptr ──────────
@@ -3605,11 +3088,11 @@ pub const GrinTranslator = struct {
         _ = llvm.buildRet(self.builder, f_param);
 
         // ── P-tag cases ────────────────────────────────────────────────
-        var ptag_iter = self.tag_table.partial_tags.iterator();
+        var ptag_iter = self.registry.partial_tags.iterator();
         while (ptag_iter.next()) |ptag_entry| {
             const ptag_key = ptag_entry.key_ptr.*;
-            const ptag_disc = self.tag_table.discriminants.get(ptag_key) orelse continue;
-            const ptag_info = self.tag_table.partial_tag_info.get(ptag_key) orelse continue;
+            const ptag_disc = self.registry.discriminants.get(ptag_key) orelse continue;
+            const ptag_info = self.registry.partial_tag_info.get(ptag_key) orelse continue;
 
             const ptag_bb = c.LLVMAppendBasicBlock(func, "ptag");
             c.LLVMAddCase(sw, c.LLVMConstInt(i64_ty, @bitCast(ptag_disc), 0), ptag_bb);
@@ -3622,7 +3105,7 @@ pub const GrinTranslator = struct {
                     .tag_type = .{ .Partial = ptag_info.missing - 1 },
                     .name = ptag_info.name,
                 };
-                const new_disc = self.tag_table.discriminant(new_tag) orelse
+                const new_disc = self.registry.discriminant(new_tag) orelse
                     return error.UnsupportedGrinVal;
                 const new_n_fields: u32 = ptag_info.n_fields + 1;
 
@@ -3803,52 +3286,6 @@ test "PrimOpMapping: canonical putStrLn_ always maps regardless of unique" {
     try std.testing.expectEqualStrings("rts_putStrLn", std.mem.span(result.?.libcall.name));
 }
 
-test "TagTable: register and discriminant" {
-    const alloc = std.testing.allocator;
-    var table = TagTable.init();
-    defer table.deinit(alloc);
-
-    const nil_tag = grin.Tag{ .tag_type = .Con, .name = .{ .base = "Nil", .unique = .{ .value = 1 } } };
-    const cons_tag = grin.Tag{ .tag_type = .Con, .name = .{ .base = "Cons", .unique = .{ .value = 2 } } };
-
-    try table.register(alloc, nil_tag, 0);
-    try table.register(alloc, cons_tag, 2);
-
-    try std.testing.expectEqual(@as(?i64, 0x1000), table.discriminant(nil_tag));
-    try std.testing.expectEqual(@as(?i64, 0x1001), table.discriminant(cons_tag));
-    try std.testing.expectEqual(@as(?u32, 0), table.fieldCount(nil_tag));
-    try std.testing.expectEqual(@as(?u32, 2), table.fieldCount(cons_tag));
-}
-
-test "TagTable: isNullaryByName" {
-    const alloc = std.testing.allocator;
-    var table = TagTable.init();
-    defer table.deinit(alloc);
-
-    const nil_tag = grin.Tag{ .tag_type = .Con, .name = .{ .base = "Nil", .unique = .{ .value = 5 } } };
-    const cons_tag = grin.Tag{ .tag_type = .Con, .name = .{ .base = "Cons", .unique = .{ .value = 6 } } };
-
-    try table.register(alloc, nil_tag, 0);
-    try table.register(alloc, cons_tag, 2);
-
-    const nil_name = grin.Name{ .base = "Nil", .unique = .{ .value = 5 } };
-    const cons_name = grin.Name{ .base = "Cons", .unique = .{ .value = 6 } };
-    try std.testing.expect(table.isNullaryByName(nil_name));
-    try std.testing.expect(!table.isNullaryByName(cons_name));
-}
-
-test "TagTable: idempotent re-registration" {
-    const alloc = std.testing.allocator;
-    var table = TagTable.init();
-    defer table.deinit(alloc);
-
-    const tag = grin.Tag{ .tag_type = .Con, .name = .{ .base = "Just", .unique = .{ .value = 10 } } };
-    try table.register(alloc, tag, 1);
-    try table.register(alloc, tag, 1); // second call must not change discriminant
-
-    try std.testing.expectEqual(@as(?i64, 0x1000), table.discriminant(tag));
-}
-
 test "Store emits rts_alloc and rts_store_field instead of malloc" {
     // Build a minimal GRIN program:
     //   main = store (CJust []) ; return ()
@@ -3879,7 +3316,9 @@ test "Store emits rts_alloc and rts_store_field instead of malloc" {
         .arities = .{},
     };
 
-    var translator = GrinTranslator.init(alloc);
+    var registry = tag_registry_mod.TagRegistry.init();
+    defer registry.deinit(alloc);
+    var translator = GrinTranslator.init(alloc, &registry);
     defer translator.deinit();
 
     // translateProgram → printModuleToString → dupeZ allocates len+1 bytes
@@ -3894,103 +3333,6 @@ test "Store emits rts_alloc and rts_store_field instead of malloc" {
     try std.testing.expect(std.mem.indexOf(u8, ir, "rts_store_field") != null);
     // Must NOT call malloc (the old layout is removed).
     try std.testing.expect(std.mem.indexOf(u8, ir, "@malloc") == null);
-}
-
-// ── Partial application tag tests (#583) ──────────────────────────────
-
-test "TagTable: composite keying distinguishes Con, Fun, and Partial tags" {
-    const alloc = std.testing.allocator;
-    var table = TagTable.init();
-    defer table.deinit(alloc);
-
-    const name = grin.Name{ .base = "Foo", .unique = .{ .value = 7 } };
-    const con_tag = grin.Tag{ .tag_type = .Con, .name = name };
-    const fun_tag = grin.Tag{ .tag_type = .Fun, .name = name };
-    const p1_tag = grin.Tag{ .tag_type = .{ .Partial = 1 }, .name = name };
-
-    try table.register(alloc, con_tag, 2);
-    try table.register(alloc, fun_tag, 2);
-    try table.register(alloc, p1_tag, 1);
-
-    // All three should get distinct discriminants.
-    const con_disc = table.discriminant(con_tag).?;
-    const fun_disc = table.discriminant(fun_tag).?;
-    const p1_disc = table.discriminant(p1_tag).?;
-    try std.testing.expect(con_disc != fun_disc);
-    try std.testing.expect(con_disc != p1_disc);
-    try std.testing.expect(fun_disc != p1_disc);
-
-    // Each should report correct field counts.
-    try std.testing.expectEqual(@as(?u32, 2), table.fieldCount(con_tag));
-    try std.testing.expectEqual(@as(?u32, 2), table.fieldCount(fun_tag));
-    try std.testing.expectEqual(@as(?u32, 1), table.fieldCount(p1_tag));
-
-    // Fun tag tracked in fun_tags, Partial in partial_tags.
-    try std.testing.expect(table.fun_tags.contains(TagTable.tagKey(fun_tag)));
-    try std.testing.expect(table.partial_tags.contains(TagTable.tagKey(p1_tag)));
-    try std.testing.expect(!table.partial_tags.contains(TagTable.tagKey(con_tag)));
-}
-
-test "TagTable: P(1) and P(2) get distinct discriminants" {
-    const alloc = std.testing.allocator;
-    var table = TagTable.init();
-    defer table.deinit(alloc);
-
-    const name = grin.Name{ .base = "map", .unique = .{ .value = 5 } };
-    const p2_tag = grin.Tag{ .tag_type = .{ .Partial = 2 }, .name = name };
-    const p1_tag = grin.Tag{ .tag_type = .{ .Partial = 1 }, .name = name };
-
-    try table.register(alloc, p2_tag, 0);
-    try table.register(alloc, p1_tag, 1);
-
-    const p2_disc = table.discriminant(p2_tag).?;
-    const p1_disc = table.discriminant(p1_tag).?;
-    try std.testing.expect(p2_disc != p1_disc);
-
-    try std.testing.expectEqual(@as(?u32, 0), table.fieldCount(p2_tag));
-    try std.testing.expectEqual(@as(?u32, 1), table.fieldCount(p1_tag));
-
-    // Both should be in partial_tag_info.
-    const p2_info = table.partial_tag_info.get(TagTable.tagKey(p2_tag)).?;
-    try std.testing.expectEqual(@as(u32, 2), p2_info.missing);
-    const p1_info = table.partial_tag_info.get(TagTable.tagKey(p1_tag)).?;
-    try std.testing.expectEqual(@as(u32, 1), p1_info.missing);
-}
-
-test "TagTable: registerIntermediatePartialTags creates P(n-1) from P(n)" {
-    const alloc = std.testing.allocator;
-    var table = TagTable.init();
-    defer table.deinit(alloc);
-
-    const name = grin.Name{ .base = "add", .unique = .{ .value = 3 } };
-    const p3_tag = grin.Tag{ .tag_type = .{ .Partial = 3 }, .name = name };
-
-    try table.register(alloc, p3_tag, 0);
-    try std.testing.expectEqual(@as(u32, 1), table.partial_tags.count());
-
-    // First round: P(3) → P(2)
-    try table.registerIntermediatePartialTags(alloc);
-    try std.testing.expectEqual(@as(u32, 2), table.partial_tags.count());
-
-    // Second round: P(2) → P(1)
-    try table.registerIntermediatePartialTags(alloc);
-    try std.testing.expectEqual(@as(u32, 3), table.partial_tags.count());
-
-    // Third round: P(1) has missing == 1, no new tags.
-    try table.registerIntermediatePartialTags(alloc);
-    try std.testing.expectEqual(@as(u32, 3), table.partial_tags.count());
-
-    // Verify all three exist with distinct discriminants.
-    const p2_tag = grin.Tag{ .tag_type = .{ .Partial = 2 }, .name = name };
-    const p1_tag = grin.Tag{ .tag_type = .{ .Partial = 1 }, .name = name };
-    try std.testing.expect(table.discriminant(p3_tag) != null);
-    try std.testing.expect(table.discriminant(p2_tag) != null);
-    try std.testing.expect(table.discriminant(p1_tag) != null);
-
-    // Field counts should cascade: P(3):0, P(2):1, P(1):2
-    try std.testing.expectEqual(@as(?u32, 0), table.fieldCount(p3_tag));
-    try std.testing.expectEqual(@as(?u32, 1), table.fieldCount(p2_tag));
-    try std.testing.expectEqual(@as(?u32, 2), table.fieldCount(p1_tag));
 }
 
 test "Partial application store emits rts_alloc with TagTable discriminant" {
@@ -4025,7 +3367,9 @@ test "Partial application store emits rts_alloc with TagTable discriminant" {
         .arities = .{},
     };
 
-    var translator = GrinTranslator.init(alloc);
+    var registry = tag_registry_mod.TagRegistry.init();
+    defer registry.deinit(alloc);
+    var translator = GrinTranslator.init(alloc, &registry);
     defer translator.deinit();
 
     const ir_raw = try translator.translateProgram(program);
@@ -4068,7 +3412,9 @@ test "Partial application emits __rhc_apply when P-tags exist" {
         .arities = .{},
     };
 
-    var translator = GrinTranslator.init(alloc);
+    var registry = tag_registry_mod.TagRegistry.init();
+    defer registry.deinit(alloc);
+    var translator = GrinTranslator.init(alloc, &registry);
     defer translator.deinit();
 
     const ir_raw = try translator.translateProgram(program);
