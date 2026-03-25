@@ -664,7 +664,8 @@ pub const GrinEvaluator = struct {
                     const heap_update: HeapNode = switch (result) {
                         .ConstTagNode => |ctn| switch (ctn.tag.tag_type) {
                             .Fun => .{ .Thunk = .{ .func_name = ctn.tag.name, .captured = ctn.fields } },
-                            else => .{ .Con = .{ .tag = ctn.tag, .fields = ctn.fields } },
+                            .Partial => |missing| .{ .Partial = .{ .func_name = ctn.tag.name, .args = ctn.fields, .missing = missing } },
+                            .Con => .{ .Con = .{ .tag = ctn.tag, .fields = ctn.fields } },
                         },
                         .Unit => .{ .Unit = {} },
                         .Lit => |lit| .{ .Lit = lit },
@@ -678,7 +679,12 @@ pub const GrinEvaluator = struct {
                     return result;
                 },
                 .Blackhole => return error.TypeMismatch, // TODO: proper blackhole error (#521)
-                .Partial => return error.TypeMismatch, // Partial apps not yet supported in eval
+                // A partial application is already in WHNF — return it as a ConstTagNode
+                // so the App handler can detect it via the Partial tag and dispatch accordingly.
+                .Partial => |partial| return Val{ .ConstTagNode = .{
+                    .tag = .{ .tag_type = .{ .Partial = partial.missing }, .name = partial.func_name },
+                    .fields = partial.args,
+                } },
             }
         }
     }
@@ -704,13 +710,15 @@ pub const GrinEvaluator = struct {
                 const heap_node: HeapNode = switch (resolved) {
                     .ConstTagNode => |ctn| switch (ctn.tag.tag_type) {
                         .Fun => .{ .Thunk = .{ .func_name = ctn.tag.name, .captured = ctn.fields } },
-                        else => .{ .Con = .{ .tag = ctn.tag, .fields = ctn.fields } },
+                        .Partial => |missing| .{ .Partial = .{ .func_name = ctn.tag.name, .args = ctn.fields, .missing = missing } },
+                        .Con => .{ .Con = .{ .tag = ctn.tag, .fields = ctn.fields } },
                     },
                     .Unit => .{ .Unit = {} },
                     .Lit => |lit| .{ .Lit = lit },
                     .ValTag => |tag| switch (tag.tag_type) {
                         .Fun => .{ .Thunk = .{ .func_name = tag.name, .captured = &.{} } },
-                        else => .{ .Con = .{ .tag = tag, .fields = &.{} } },
+                        .Partial => |missing| .{ .Partial = .{ .func_name = tag.name, .args = &.{}, .missing = missing } },
+                        .Con => .{ .Con = .{ .tag = tag, .fields = &.{} } },
                     },
                     .Var => unreachable, // Already resolved
                     .VarTagNode => unreachable, // Already resolved
@@ -779,13 +787,15 @@ pub const GrinEvaluator = struct {
                 const heap_node: HeapNode = switch (resolved) {
                     .ConstTagNode => |ctn| switch (ctn.tag.tag_type) {
                         .Fun => .{ .Thunk = .{ .func_name = ctn.tag.name, .captured = ctn.fields } },
-                        else => .{ .Con = .{ .tag = ctn.tag, .fields = ctn.fields } },
+                        .Partial => |missing| .{ .Partial = .{ .func_name = ctn.tag.name, .args = ctn.fields, .missing = missing } },
+                        .Con => .{ .Con = .{ .tag = ctn.tag, .fields = ctn.fields } },
                     },
                     .Unit => .{ .Unit = {} },
                     .Lit => |lit| .{ .Lit = lit },
                     .ValTag => |tag| switch (tag.tag_type) {
                         .Fun => .{ .Thunk = .{ .func_name = tag.name, .captured = &.{} } },
-                        else => .{ .Con = .{ .tag = tag, .fields = &.{} } },
+                        .Partial => |missing| .{ .Partial = .{ .func_name = tag.name, .args = &.{}, .missing = missing } },
+                        .Con => .{ .Con = .{ .tag = tag, .fields = &.{} } },
                     },
                     .Var => unreachable, // Already resolved
                     .VarTagNode => unreachable, // Already resolved
@@ -892,10 +902,47 @@ pub const GrinEvaluator = struct {
                 // top-level function, it may be a local variable bound to a
                 // function reference (higher-order parameter). Resolve through
                 // the environment to find the actual function.
+                //
+                // A variable may also resolve to a heap pointer pointing to a
+                // partial application (P-tagged node), produced when a lambda
+                // capturing a free variable is stored inside a constructor field
+                // (e.g. the show method of `instance Show a => Show [a]`).  In
+                // that case we combine the captured arguments with the new
+                // arguments and call the underlying function directly.
                 const def = self.funcs.lookup(app.name) orelse blk: {
                     const fn_val = self.env.lookup(app.name) orelse return error.UnboundFunction;
                     switch (fn_val) {
-                        .Var => |resolved_name| break :blk self.funcs.lookup(resolved_name) orelse return error.UnboundFunction,
+                        .Var => |resolved_name| {
+                            if (std.mem.eql(u8, resolved_name.base, "_hptr") and
+                                resolved_name.unique.value < @as(u64, std.math.maxInt(u32)))
+                            {
+                                const hp = HeapPtr{ .index = @intCast(resolved_name.unique.value) };
+                                const heap_node = self.heap.read(hp) orelse return error.InvalidHeapPointer;
+                                switch (heap_node) {
+                                    .Partial => |partial| {
+                                        const fn_def = self.funcs.lookup(partial.func_name) orelse
+                                            return error.UnboundFunction;
+                                        if (partial.args.len + app.args.len != fn_def.params.len)
+                                            return error.ArityMismatch;
+                                        try self.env.pushScope();
+                                        errdefer self.env.popScope();
+                                        for (partial.args, fn_def.params[0..partial.args.len]) |arg, param| {
+                                            const resolved_arg = try self.resolveVal(@constCast(&arg));
+                                            try self.env.bind(param, resolved_arg);
+                                        }
+                                        for (app.args, fn_def.params[partial.args.len..]) |arg, param| {
+                                            const resolved_arg = try self.resolveVal(@constCast(&arg));
+                                            try self.env.bind(param, resolved_arg);
+                                        }
+                                        const result = try self.eval(fn_def.body);
+                                        self.env.popScope();
+                                        break :b result;
+                                    },
+                                    else => return error.TypeMismatch,
+                                }
+                            }
+                            break :blk self.funcs.lookup(resolved_name) orelse return error.UnboundFunction;
+                        },
                         else => return error.TypeMismatch,
                     }
                 };

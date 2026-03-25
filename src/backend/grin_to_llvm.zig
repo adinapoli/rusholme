@@ -571,8 +571,21 @@ pub const GrinTranslator = struct {
         }
 
         // Emit __rhc_apply(ptr, ptr) → ptr for partial application dispatch.
+        // Same REPL-mode pattern as __rhc_force: expression modules must NOT
+        // define __rhc_apply to avoid duplicate-symbol errors in ORC JIT.
+        // The shared force/apply module (emitForceModule) provides the definition.
         if (self.registry.partial_tags.count() > 0) {
-            try self.emitApplyFunction();
+            if (self.repl_entry_point == null) {
+                // Whole-program mode: emit the apply function here.
+                try self.emitApplyFunction();
+            } else {
+                // REPL mode: declare __rhc_apply as external; the shared
+                // force/apply module (emitted by JitEngine) provides the definition.
+                const ptr_ty = ptrType();
+                var apply_params = [_]llvm.Type{ ptr_ty, ptr_ty };
+                const apply_fn_type = c.LLVMFunctionType(ptr_ty, &apply_params, 2, 0);
+                _ = llvm.addFunction(self.module, "__rhc_apply", apply_fn_type);
+            }
         }
 
         for (program.defs) |def| {
@@ -636,6 +649,17 @@ pub const GrinTranslator = struct {
             _ = llvm.addFunction(mod, "__rhc_force", fn_type);
         }
 
+        // Declare __rhc_apply as external so that per-def modules that route
+        // single-argument indirect calls through it can resolve the symbol.
+        // The definition lives in the shared force/apply module emitted by
+        // `emitForceModule`.  Mirrors the __rhc_force pattern above.
+        if (self.registry.partial_tags.count() > 0) {
+            const ptr_ty = ptrType();
+            var apply_params = [_]llvm.Type{ ptr_ty, ptr_ty };
+            const apply_fn_type = c.LLVMFunctionType(ptr_ty, &apply_params, 2, 0);
+            _ = llvm.addFunction(mod, "__rhc_apply", apply_fn_type);
+        }
+
         for (prog.defs) |def| {
             try self.translateDef(def);
         }
@@ -662,6 +686,16 @@ pub const GrinTranslator = struct {
 
         if (self.registry.fun_tags.count() > 0) {
             try self.emitForceFunction();
+        }
+
+        // Emit __rhc_apply alongside __rhc_force so that per-def modules that
+        // declare it as external can resolve it through the same shared module.
+        // This is safe for all paths: per-module AOT (translateModuleGrin +
+        // emitForceModule) and REPL (per-def + shared force module). The
+        // whole-program AOT path (translateProgramToModule) does NOT call
+        // emitForceModule, so there is no duplicate definition risk.
+        if (self.registry.partial_tags.count() > 0) {
+            try self.emitApplyFunction();
         }
 
         return mod;
@@ -1149,8 +1183,12 @@ pub const GrinTranslator = struct {
         //      an indirect call via the pointer stored in `params`.
         //   2. Named LLVM function (direct call to a known def).
         //   3. Forward-declare and call (for functions not yet translated).
+        var callee_from_params = false;
         const func: llvm.Value = blk: {
-            if (self.params.get(name.unique.value)) |fn_ptr| break :blk fn_ptr;
+            if (self.params.get(name.unique.value)) |fn_ptr| {
+                callee_from_params = true;
+                break :blk fn_ptr;
+            }
             const fn_name_z = self.formatName(name);
             if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |existing| break :blk existing;
             break :blk llvm.addFunction(self.module, fn_name_z, fn_type);
@@ -1162,6 +1200,32 @@ pub const GrinTranslator = struct {
             name_buf[result_name.len] = 0;
             break :blk name_buf[0..result_name.len :0];
         } else "";
+
+        // For single-argument calls through case-bound variables (e.g. method
+        // selectors extracting `fn` from a dictionary), route through __rhc_apply
+        // when Partial application nodes exist.  Dictionary fields for constrained
+        // instances (e.g. Show [a]) store P-tagged heap nodes, not direct function
+        // pointers; __rhc_apply dispatches correctly for both.
+        // tracked in: https://github.com/adinapoli/rusholme/issues/629
+        if (callee_from_params and arg_count == 1 and
+            self.registry.partial_tags.count() > 0)
+        {
+            const apply_fn = c.LLVMGetNamedFunction(self.module, "__rhc_apply") orelse blk: {
+                var ap = [_]llvm.Type{ ptrType(), ptrType() };
+                const at = llvm.functionType(ptrType(), &ap, false);
+                break :blk llvm.addFunction(self.module, "__rhc_apply", at);
+            };
+            var apply_args = [_]llvm.Value{ func, llvm_args[0] };
+            return c.LLVMBuildCall2(
+                self.builder,
+                llvm.getFunctionType(apply_fn),
+                apply_fn,
+                &apply_args,
+                2,
+                res_z,
+            );
+        }
+
         return c.LLVMBuildCall2(
             self.builder,
             fn_type,
@@ -1245,12 +1309,39 @@ pub const GrinTranslator = struct {
             }
         }
 
+        var callee_from_params_app = false;
         const func: llvm.Value = blk: {
-            if (self.params.get(name.unique.value)) |fn_ptr| break :blk fn_ptr;
+            if (self.params.get(name.unique.value)) |fn_ptr| {
+                callee_from_params_app = true;
+                break :blk fn_ptr;
+            }
             const fn_name_z = self.formatName(name);
             if (c.LLVMGetNamedFunction(self.module, fn_name_z)) |existing| break :blk existing;
             break :blk llvm.addFunction(self.module, fn_name_z, fn_type);
         };
+
+        // Route single-arg params-based calls through __rhc_apply when P-tags exist.
+        // tracked in: https://github.com/adinapoli/rusholme/issues/629
+        if (callee_from_params_app and arg_count == 1 and
+            self.registry.partial_tags.count() > 0)
+        {
+            const apply_fn = c.LLVMGetNamedFunction(self.module, "__rhc_apply") orelse blk: {
+                var ap = [_]llvm.Type{ ptrType(), ptrType() };
+                const at = llvm.functionType(ptrType(), &ap, false);
+                break :blk llvm.addFunction(self.module, "__rhc_apply", at);
+            };
+            var apply_args = [_]llvm.Value{ func, llvm_args[0] };
+            _ = c.LLVMBuildCall2(
+                self.builder,
+                llvm.getFunctionType(apply_fn),
+                apply_fn,
+                &apply_args,
+                2,
+                "",
+            );
+            return;
+        }
+
         _ = c.LLVMBuildCall2(
             self.builder,
             fn_type,
@@ -3083,9 +3174,24 @@ pub const GrinTranslator = struct {
         const n_cases: u32 = @intCast(self.registry.partial_tags.count());
         const sw = c.LLVMBuildSwitch(self.builder, tag_val, default_bb, n_cases);
 
-        // ── default: not a partial application — return f_ptr ──────────
+        // ── default: not a partial application — call f_ptr as a direct
+        // single-argument function pointer.  Dictionary fields for monomorphic
+        // instances (e.g. Show Int) store plain LLVM function pointers; calling
+        // them directly here handles the case where __rhc_apply is invoked on a
+        // non-P-tagged value (e.g. a method extracted from a MkDict$Show node).
         llvm.positionBuilderAtEnd(self.builder, default_bb);
-        _ = llvm.buildRet(self.builder, f_param);
+        var default_args = [_]llvm.Value{x_param};
+        var default_param_types = [_]llvm.Type{ptr_ty};
+        const default_fn_type = llvm.functionType(ptr_ty, &default_param_types, false);
+        const default_result = c.LLVMBuildCall2(
+            self.builder,
+            default_fn_type,
+            f_param,
+            &default_args,
+            1,
+            "direct_call",
+        );
+        _ = llvm.buildRet(self.builder, default_result);
 
         // ── P-tag cases ────────────────────────────────────────────────
         var ptag_iter = self.registry.partial_tags.iterator();

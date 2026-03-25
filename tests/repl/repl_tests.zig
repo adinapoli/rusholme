@@ -1038,3 +1038,77 @@ test "repl: expression after :l file does not crash (tag table stability)" {
     };
     try testing.expectEqual(Status.silent, concat_result.status);
 }
+
+// ── Test: polymorphic Show instances (#629) ───────────────────────────────
+
+test "repl: show [a] — showListWith on Int list evaluates without crash" {
+    // Exercises the `instance Show a => Show [a]` Prelude instance.
+    // `showListWith [1,2,3]` returns a String; show-wrapping then wraps
+    // it in `putStrLn (show (showListWith [1,2,3]))`, which requires
+    // Show [Char] (also via Show [a]).  Verifies no crash occurs.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    const result = evaluate(alloc, &session, "showListWith [1,2,3]") catch |err| {
+        std.debug.panic("evaluate failed: {s}", .{@errorName(err)});
+    };
+    try testing.expectEqual(Status.silent, result.status);
+}
+
+test "repl: show [a] — list literal evaluates without crash" {
+    // Show-wrapping of `[1,2,3]` becomes `putStrLn (show [1,2,3])`,
+    // triggering `instance Show a => Show [a]` with `Show Int`.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    const result = evaluate(alloc, &session, "[1,2,3]") catch |err| {
+        std.debug.panic("evaluate failed: {s}", .{@errorName(err)});
+    };
+    try testing.expectEqual(Status.silent, result.status);
+}
+
+test "repl: show (Maybe a) — Just branch evaluates without crash" {
+    // Exercises `instance Show a => Show (Maybe a)` for the Just branch.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    const result = evaluate(alloc, &session, "show (Just 42)") catch |err| {
+        std.debug.panic("evaluate failed: {s}", .{@errorName(err)});
+    };
+    try testing.expectEqual(Status.silent, result.status);
+}
+
+test "repl: show (Maybe a) — Nothing branch evaluates without crash" {
+    // Exercises the Nothing branch of `instance Show a => Show (Maybe a)`.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = Session.init(alloc, testing_io) catch |err| {
+        std.debug.panic("Failed to init session: {}", .{err});
+    };
+    defer session.deinit();
+
+    const result = evaluate(alloc, &session, "show (Nothing :: Maybe Int)") catch |err| {
+        std.debug.panic("evaluate failed: {s}", .{@errorName(err)});
+    };
+    try testing.expectEqual(Status.silent, result.status);
+}

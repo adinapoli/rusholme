@@ -2035,11 +2035,23 @@ pub fn inferModule(
                     };
                 }
 
+                // Collect the Rigid bindings so Pass 2 can reuse the exact
+                // same Rigid nodes (same unique IDs) when inferring instance
+                // method bodies.
+                var rigid_bindings = try ctx.alloc.alloc(class_env_mod.RigidBinding, inst_scope.count());
+                var scope_iter = inst_scope.iterator();
+                var ri: usize = 0;
+                while (scope_iter.next()) |entry| {
+                    rigid_bindings[ri] = .{ .tyvar = entry.key_ptr.*, .rigid = entry.value_ptr.* };
+                    ri += 1;
+                }
+
                 try ctx.class_env.addInstance(.{
                     .class_name = id_decl.class_name,
                     .head = head_htype.*,
                     .context = context,
                     .span = id_decl.span,
+                    .rigid_scope = rigid_bindings,
                 });
             },
             else => {},

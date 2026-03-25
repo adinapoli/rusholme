@@ -90,6 +90,16 @@ pub const MethodInfo = struct {
 
 // ── InstanceInfo ──────────────────────────────────────────────────────
 
+/// A binding from a type variable name to the Rigid HType node created
+/// for it during Pass 0a instance registration.  Stored so that Pass 2
+/// (instance method body inference) can reuse the *exact same* Rigid
+/// nodes — matching by unique ID — that appear in the instance head and
+/// context.
+pub const RigidBinding = struct {
+    tyvar: []const u8,
+    rigid: *const HType,
+};
+
 /// Information about a type class instance declaration.
 pub const InstanceInfo = struct {
     /// The class this is an instance of (e.g. `Eq`).
@@ -103,6 +113,12 @@ pub const InstanceInfo = struct {
     context: []const ClassConstraint,
     /// Source location (for diagnostics).
     span: SourceSpan,
+    /// Rigid scope from Pass 0a.  Maps each instance type variable name
+    /// to the Rigid HType node allocated during instance registration.
+    /// Pass 2 uses this to set up the same type variable scope when
+    /// inferring instance method bodies, ensuring Rigid unique IDs match
+    /// those in `head` and `context`.
+    rigid_scope: []const RigidBinding = &.{},
 };
 
 // ── ClassEnv ──────────────────────────────────────────────────────────
