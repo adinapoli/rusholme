@@ -470,6 +470,8 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | [#621](https://github.com/adinapoli/rusholme/issues/621) | Unit and integer 0 are indistinguishable in JIT result formatting | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
 | [#623](https://github.com/adinapoli/rusholme/issues/623) | Where-clause bindings not in scope during renaming/typechecking | — | :white_circle: |
 | [#624](https://github.com/adinapoli/rusholme/issues/624) | Runtime segfault in programs combining many different thunk types in long do-blocks | [#618](https://github.com/adinapoli/rusholme/issues/618) | :green_circle: |
+| [#631](https://github.com/adinapoli/rusholme/issues/631) | Regression in infinite list support: REPL crashes on `take 3 [1..]` after prior range expression | [#624](https://github.com/adinapoli/rusholme/issues/624) | :green_circle: |
+| [#636](https://github.com/adinapoli/rusholme/issues/636) | Refactor TagTable into persistent TagRegistry + transient TranslationContext | [#631](https://github.com/adinapoli/rusholme/issues/631) | :green_circle: |
 | [#558](https://github.com/adinapoli/rusholme/issues/558) | Implement recursive instance context constraint resolution | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#559](https://github.com/adinapoli/rusholme/issues/559) | Support class constraints in user-written type signatures | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#566](https://github.com/adinapoli/rusholme/issues/566) | Typechecker: support declaration-order-independent inference | — | :white_circle: |
