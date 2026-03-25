@@ -290,7 +290,7 @@ const PrimOpResult = union(enum) {
 /// discriminants even when they share the same name unique.
 ///
 /// See: https://github.com/adinapoli/rusholme/issues/449
-const TagTable = struct {
+pub const TagTable = struct {
     /// Discriminant assigned to each tag, keyed by composite `tagKey`.
     discriminants: std.AutoHashMapUnmanaged(u64, i64),
     /// Number of fields for each tag, keyed by composite `tagKey`.
@@ -329,7 +329,7 @@ const TagTable = struct {
     // Closure=0x200). This matches rts/node.zig Tag.Data = 0x1000.
     const first_discriminant: i64 = 0x1000;
 
-    fn init() TagTable {
+    pub fn init() TagTable {
         return .{
             .discriminants = .{},
             .field_counts = .{},
@@ -343,7 +343,66 @@ const TagTable = struct {
         };
     }
 
-    fn deinit(self: *TagTable, alloc: std.mem.Allocator) void {
+    /// Deep-copy this tag table.  The clone owns independent copies of
+    /// all heap-allocated field-type slices, so it can be mutated and
+    /// freed without affecting the original.
+    pub fn clone(self: *const TagTable, alloc: std.mem.Allocator) !TagTable {
+        var result = TagTable{
+            .discriminants = .{},
+            .field_counts = .{},
+            .field_types = .{},
+            .fun_tags = .{},
+            .fun_tag_names = .{},
+            .partial_tags = .{},
+            .partial_tag_info = .{},
+            .con_name_to_disc = .{},
+            .next = self.next,
+        };
+        errdefer result.deinit(alloc);
+
+        // Clone simple maps (values are scalars or small structs).
+        {
+            var it = self.discriminants.iterator();
+            while (it.next()) |e| try result.discriminants.put(alloc, e.key_ptr.*, e.value_ptr.*);
+        }
+        {
+            var it = self.field_counts.iterator();
+            while (it.next()) |e| try result.field_counts.put(alloc, e.key_ptr.*, e.value_ptr.*);
+        }
+        {
+            var it = self.fun_tags.iterator();
+            while (it.next()) |e| try result.fun_tags.put(alloc, e.key_ptr.*, {});
+        }
+        {
+            var it = self.fun_tag_names.iterator();
+            while (it.next()) |e| try result.fun_tag_names.put(alloc, e.key_ptr.*, e.value_ptr.*);
+        }
+        {
+            var it = self.partial_tags.iterator();
+            while (it.next()) |e| try result.partial_tags.put(alloc, e.key_ptr.*, {});
+        }
+        {
+            var it = self.partial_tag_info.iterator();
+            while (it.next()) |e| try result.partial_tag_info.put(alloc, e.key_ptr.*, e.value_ptr.*);
+        }
+        {
+            var it = self.con_name_to_disc.iterator();
+            while (it.next()) |e| try result.con_name_to_disc.put(alloc, e.key_ptr.*, e.value_ptr.*);
+        }
+
+        // Deep-copy field_types: each value is a heap-allocated []FieldType.
+        {
+            var it = self.field_types.iterator();
+            while (it.next()) |e| {
+                const duped = try alloc.dupe(FieldType, e.value_ptr.*);
+                try result.field_types.put(alloc, e.key_ptr.*, duped);
+            }
+        }
+
+        return result;
+    }
+
+    pub fn deinit(self: *TagTable, alloc: std.mem.Allocator) void {
         self.discriminants.deinit(alloc);
         self.field_counts.deinit(alloc);
         // Free each field_types slice
@@ -876,37 +935,33 @@ pub const GrinTranslator = struct {
     /// The module is owned by this translator's context — do not dispose it
     /// separately; it is freed when the translator is deinited.
     pub fn translateProgramToModule(self: *GrinTranslator, program: grin.Program) TranslationError!llvm.Module {
-        // Build the tag table by scanning extra defs FIRST (from prior
-        // REPL sessions like the Prelude), then the current program.
-        // Order matters: scanning extra defs first ensures that
-        // constructors from prior sessions receive the same discriminants
-        // they had when they were originally compiled. If we scanned the
-        // current program first, its constructors would claim discriminants
-        // 0, 1, 2... and prior session constructors would get different
-        // values, causing tag mismatches at runtime (e.g. [] gets
-        // discriminant 5 in the Prelude but 0 in the expression).
-        self.tag_table = TagTable.init();
-        // Phase 1: scan extra_tag_defs (Prelude) bodies for F-tags.
-        for (self.extra_tag_defs) |def| {
-            scanExprForTags(self.allocator, def.body, &self.tag_table) catch return error.OutOfMemory;
-        }
-        // Phase 2: pre-register ALL extra_tag_defs as potential F-tags BEFORE
-        // scanning the current program's bodies. This ensures Prelude functions
-        // like `enumFrom` and `enumFromTo` — which never appear as thunk stores
-        // within the Prelude itself — receive their discriminants in the same
-        // order as the shared __rhc_force module (built during `addDeclarations`
-        // from the same extra_tag_defs). Without this, the expression body scan
-        // (Phase 3) might assign `F(enumFrom)` a discriminant different from the
-        // one the force module uses, silently dispatching to the wrong function.
-        for (self.extra_tag_defs) |def| {
-            if (def.params.len > 0) {
-                const fun_tag = grin.Tag{ .name = def.name, .tag_type = .Fun };
-                self.tag_table.register(self.allocator, fun_tag, @intCast(def.params.len)) catch return error.OutOfMemory;
+        // If the tag table has been pre-seeded by the JIT engine (from
+        // a persistent base_tag_table), all prior discriminant assignments
+        // are already present.  Skip Phases 1–2 (extra_tag_defs scanning)
+        // so that new defs in extra_tag_defs cannot shift existing
+        // discriminants — only the current program's defs are scanned.
+        //
+        // Without pre-seeding, build from scratch (batch compiler path
+        // and first REPL compilation before a base table exists).
+        const preseeded = self.tag_table.discriminants.count() > 0;
+        if (!preseeded) {
+            self.tag_table = TagTable.init();
+            // Phase 1: scan extra_tag_defs (Prelude) bodies for tags.
+            for (self.extra_tag_defs) |def| {
+                scanExprForTags(self.allocator, def.body, &self.tag_table) catch return error.OutOfMemory;
+            }
+            // Phase 2: pre-register ALL extra_tag_defs as potential F-tags
+            // BEFORE scanning the current program's bodies.
+            for (self.extra_tag_defs) |def| {
+                if (def.params.len > 0) {
+                    const fun_tag = grin.Tag{ .name = def.name, .tag_type = .Fun };
+                    self.tag_table.register(self.allocator, fun_tag, @intCast(def.params.len)) catch return error.OutOfMemory;
+                }
             }
         }
-        // Phase 3: scan the current program's defs. Tags already registered in
-        // Phases 1–2 are skipped (register is idempotent), so shared tags keep
-        // their prior discriminants.
+        // Phase 3: scan the current program's defs. Tags already registered
+        // (from pre-seeding or Phases 1–2) are skipped (register is
+        // idempotent), so existing tags keep their prior discriminants.
         for (program.defs) |def| {
             scanExprForTags(self.allocator, def.body, &self.tag_table) catch return error.OutOfMemory;
         }
@@ -1004,29 +1059,27 @@ pub const GrinTranslator = struct {
     ///
     /// Any previously held tag table is released.
     pub fn prepareGlobalTagTable(self: *GrinTranslator, all_prog: grin.Program) TranslationError!void {
-        self.tag_table.deinit(self.allocator);
-        // Scan extra_tag_defs FIRST (from prior REPL sessions like the
-        // Prelude), then the current program's defs. Order matters:
-        // scanning extra defs first ensures discriminant assignments are
-        // consistent with expression compilations that also use
-        // extra_tag_defs. Tags already registered are idempotent, so
-        // shared tags keep their prior discriminants.
-        self.tag_table = TagTable.init();
-        // Phase 1: scan extra_tag_defs (Prelude) bodies for F-tags.
-        for (self.extra_tag_defs) |def| {
-            scanExprForTags(self.allocator, def.body, &self.tag_table) catch return error.OutOfMemory;
-        }
-        // Phase 2: pre-register ALL extra_tag_defs as potential F-tags BEFORE
-        // scanning all_prog.defs bodies. This mirrors the ordering used by
-        // translateProgramToModule so that expression compilations and the force
-        // module agree on discriminant values for every Prelude function.
-        for (self.extra_tag_defs) |def| {
-            if (def.params.len > 0) {
-                const fun_tag = grin.Tag{ .name = def.name, .tag_type = .Fun };
-                self.tag_table.register(self.allocator, fun_tag, @intCast(def.params.len)) catch return error.OutOfMemory;
+        // If the tag table has been pre-seeded by the JIT engine, all
+        // prior discriminant assignments are present.  Skip Phases 1–2
+        // (extra_tag_defs scanning) to avoid shifting discriminants.
+        const preseeded = self.tag_table.discriminants.count() > 0;
+        if (!preseeded) {
+            self.tag_table.deinit(self.allocator);
+            self.tag_table = TagTable.init();
+            // Phase 1: scan extra_tag_defs bodies for tags.
+            for (self.extra_tag_defs) |def| {
+                scanExprForTags(self.allocator, def.body, &self.tag_table) catch return error.OutOfMemory;
+            }
+            // Phase 2: pre-register ALL extra_tag_defs as potential F-tags.
+            for (self.extra_tag_defs) |def| {
+                if (def.params.len > 0) {
+                    const fun_tag = grin.Tag{ .name = def.name, .tag_type = .Fun };
+                    self.tag_table.register(self.allocator, fun_tag, @intCast(def.params.len)) catch return error.OutOfMemory;
+                }
             }
         }
-        // Phase 3: scan all_prog.defs bodies.
+        // Phase 3: scan all_prog.defs bodies.  Existing tags are
+        // skipped (register is idempotent).
         for (all_prog.defs) |def| {
             scanExprForTags(self.allocator, def.body, &self.tag_table) catch return error.OutOfMemory;
         }

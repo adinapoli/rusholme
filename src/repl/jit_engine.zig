@@ -75,6 +75,13 @@ pub const JitEngine = struct {
     /// that expression compilation can scan them for F-tag registration,
     /// enabling `forceValueToWhnf` to handle thunks from any session.
     accumulated_grin_defs: std.ArrayListUnmanaged(grin_ast.Def) = .{},
+    /// Persistent tag table accumulated across `addDeclarations` calls.
+    /// Cloned into each new translator to ensure discriminant stability:
+    /// once a tag receives a discriminant, all future compilations reuse
+    /// it.  Without this, loading a file via `:l` can shift Prelude
+    /// F-tag discriminants, causing segfaults when expression code
+    /// creates thunks that the Prelude's already-JIT'd code forces.
+    base_tag_table: grin_to_llvm.TagTable = grin_to_llvm.TagTable.init(),
     /// Constructor discriminants from Prelude compilation for result formatting.
     known_tags: KnownTags = .{},
     /// Resource tracker for the shared `__rhc_force` module.
@@ -118,6 +125,7 @@ pub const JitEngine = struct {
             c.LLVMOrcReleaseResourceTracker(tracker);
         }
         self.force_ftag_uniques.deinit(self.allocator);
+        self.base_tag_table.deinit(self.allocator);
         self.accumulated_grin_defs.deinit(self.allocator);
         if (self.jit) |jit| {
             const err = c.LLVMOrcDisposeLLJIT(jit);
@@ -205,9 +213,25 @@ pub const JitEngine = struct {
         // expression compilations that also scan these defs.
         translator.extra_tag_defs = self.accumulated_grin_defs.items;
 
-        // Build a global tag table from all defs.
+        // Pre-seed the translator's tag table from the persistent base
+        // so that all prior discriminant assignments are preserved.
+        // prepareGlobalTagTable will skip Phases 1–2 (extra_tag_defs
+        // scanning) and only scan the new program's defs.
+        if (self.base_tag_table.discriminants.count() > 0) {
+            translator.tag_table.deinit(self.allocator);
+            translator.tag_table = self.base_tag_table.clone(self.allocator) catch
+                return JitError.OutOfMemory;
+        }
+
+        // Build the tag table: extends the pre-seeded base (or builds
+        // from scratch on first call) with the new program's tags.
         translator.prepareGlobalTagTable(program.*) catch
             return JitError.TranslationFailed;
+
+        // Persist the extended tag table for future compilations.
+        self.base_tag_table.deinit(self.allocator);
+        self.base_tag_table = translator.tag_table.clone(self.allocator) catch
+            return JitError.OutOfMemory;
 
         // Capture constructor discriminants for result formatting.
         self.known_tags = translator.getKnownTagDiscriminants();
@@ -282,6 +306,14 @@ pub const JitEngine = struct {
         // Seed with accumulated defs from prior declaration sessions so
         // that the tag table includes F-tags for all known functions.
         translator.extra_tag_defs = self.accumulated_grin_defs.items;
+
+        // Pre-seed the translator's tag table from the persistent base
+        // so that discriminants are consistent with already-JIT'd code.
+        if (self.base_tag_table.discriminants.count() > 0) {
+            translator.tag_table.deinit(self.allocator);
+            translator.tag_table = self.base_tag_table.clone(self.allocator) catch
+                return JitError.OutOfMemory;
+        }
 
         const ir_text = translator.translateProgram(patched_program) catch {
             return JitError.TranslationFailed;
