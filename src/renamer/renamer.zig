@@ -2169,11 +2169,11 @@ test "Scope.collectNames returns all bound names across frames" {
     var scope = try Scope.init(std.testing.allocator);
     defer scope.deinit();
 
-    try scope.bind("foo", .{ .base = "foo", .unique = 1 });
-    try scope.bind("bar", .{ .base = "bar", .unique = 2 });
+    try scope.bind("foo", .{ .base = "foo", .unique = .{ .value = 1 } });
+    try scope.bind("bar", .{ .base = "bar", .unique = .{ .value = 2 } });
 
     try scope.push();
-    try scope.bind("baz", .{ .base = "baz", .unique = 3 });
+    try scope.bind("baz", .{ .base = "baz", .unique = .{ .value = 3 } });
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(std.testing.allocator);
