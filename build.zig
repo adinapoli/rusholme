@@ -43,6 +43,23 @@ fn configureLlvm(b: *std.Build, mod: *std.Build.Module) void {
     mod.link_libc = true;
 }
 
+/// Configure replxx headers and library on a module.
+///
+/// replxx ships no pkg-config file. Discover the include and library
+/// paths from the REPLXX_PREFIX environment variable, which is set by
+/// the Nix devShell shellHook (see flake.nix).
+///
+/// Without REPLXX_PREFIX the paths are omitted; the linker will still
+/// find libreplxx.so if it is on the default library search path.
+fn configureReplxx(b: *std.Build, mod: *std.Build.Module) void {
+    if (b.graph.environ_map.get("REPLXX_PREFIX")) |prefix| {
+        mod.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "include" }) });
+        mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
+    }
+    mod.linkSystemLibrary("replxx", .{});
+    mod.link_libcpp = true;
+}
+
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
 // executed by an external runner. The functions in `std.Build` implement a DSL
@@ -88,6 +105,7 @@ pub fn build(b: *std.Build) void {
     // This must be called before any compilation step that transitively
     // imports src/backend/llvm.zig (which uses @cImport for LLVM-C).
     configureLlvm(b, mod);
+    configureReplxx(b, mod);
 
     // Embed the Prelude source text so the REPL session can compile it
     // at init time without reading from disk.  The WASM REPL has no
