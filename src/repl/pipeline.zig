@@ -420,6 +420,14 @@ pub const Pipeline = struct {
         const alloc = self.allocator;
         const file_id: FileId = 0;
 
+        // Blank input: fail immediately before any show-wrapping.
+        // Empty modules are rejected by the parser, so blank input would
+        // fall through to show () which desugars () to todo_tuple_0 and
+        // corrupts the JIT session state with an unresolvable symbol.
+        if (std.mem.trim(u8, input, " \t\n\r").len == 0) {
+            return CompileError.CompilationFailed;
+        }
+
         // Try as a declaration first: wrap as a module body.
         // Strip leading "let" keyword if present, as top-level module
         // declarations don't use "let" (that's GHCi-specific syntax).
@@ -456,7 +464,47 @@ pub const Pipeline = struct {
             }
         }
 
-        // ── Show-wrapped expression (Phase A) ─────────────────────────
+        // ── String-wrapped expression (Phase A1) ──────────────────────
+        //
+        // Try String-specific wrapping first:
+        //   replExpr__ = putStrLn (showString (<input>))
+        // where showString :: String -> String produces the correct quoted
+        // form (e.g. "hello" → "\"hello\"") without going through the
+        // polymorphic Show [a] instance.  Show [a] now exists and would
+        // succeed for [Char], but it produces ['h','e','l','l','o'] rather
+        // than the GHCi-style "hello" output.  showString preserves the
+        // right representation for String values (#629).
+        // For non-String expressions, this attempt fails at typechecking
+        // and falls through to the generic show phase below.
+        if (self.enable_show_wrapping) {
+            rename_env.scope.push() catch return CompileError.OutOfMemory;
+            ty_env.push() catch {
+                rename_env.scope.pop();
+                return CompileError.OutOfMemory;
+            };
+
+            var str_diags = DiagnosticCollector.init();
+            defer str_diags.deinit(alloc);
+
+            const str_source = std.fmt.allocPrint(alloc, "module ReplInput where\nreplExpr__ = putStrLn (showString ({s}))\n", .{input}) catch {
+                ty_env.pop();
+                rename_env.scope.pop();
+                return CompileError.OutOfMemory;
+            };
+            self.last_source = str_source;
+            self.last_input_kind = .expression;
+
+            if (self.compileModule(str_source, file_id, u_supply, rename_env, ty_env, mv_supply, &str_diags, external_arities, external_con_map, external_class_env, external_dict_names, external_type_con_names)) |result| {
+                const decl_diag_count = diags.diagnostics.items.len;
+                clearLeadingDiags(alloc, diags, decl_diag_count);
+                return .{ .program = result.grin_prog, .kind = .expression_io, .core_data_decls = result.core_data_decls, .class_env = result.class_env, .dict_names = result.dict_names };
+            } else |_| {
+                ty_env.pop();
+                rename_env.scope.pop();
+            }
+        }
+
+        // ── Show-wrapped expression (Phase A2) ─────────────────────────
         //
         // Attempt to wrap the expression as:
         //   replExpr__ = putStrLn (show (<input>))
@@ -468,9 +516,6 @@ pub const Pipeline = struct {
         // evaluator handles them correctly.  For polymorphic expressions
         // (e.g. numeric literals without defaulting), show-wrapping
         // will fail at the typechecker and fall through to bare display.
-        // Show-wrapping works for WASM (GrinEngine) after fixes for primop
-        // thunk-forcing and string unpacking.  JIT (native) still has
-        // cross-module linking issues with Prelude Show helpers (#618).
         if (self.enable_show_wrapping) {
             // Scope safety: push a transactional scope frame around this
             // attempt.  If it fails, pop the frame to discard any bindings
@@ -501,42 +546,7 @@ pub const Pipeline = struct {
                 return .{ .program = result.grin_prog, .kind = .expression_io, .core_data_decls = result.core_data_decls, .class_env = result.class_env, .dict_names = result.dict_names };
             } else |_| {
                 // No Show instance or other error — rollback the scope
-                // frame and fall through to showString or bare expression.
-                ty_env.pop();
-                rename_env.scope.pop();
-            }
-        }
-
-        // ── String-wrapped expression (Phase A2) ──────────────────────
-        //
-        // For [Char] expressions (e.g. "hello" ++ " world"), the Show [a]
-        // instance requires dictionary-passing.  As a workaround, try
-        // wrapping as:
-        //   replExpr__ = putStrLn (showString (<input>))
-        // where showString :: String -> String is monomorphic.
-        if (self.enable_show_wrapping) {
-            rename_env.scope.push() catch return CompileError.OutOfMemory;
-            ty_env.push() catch {
-                rename_env.scope.pop();
-                return CompileError.OutOfMemory;
-            };
-
-            var str_diags = DiagnosticCollector.init();
-            defer str_diags.deinit(alloc);
-
-            const str_source = std.fmt.allocPrint(alloc, "module ReplInput where\nreplExpr__ = putStrLn (showString ({s}))\n", .{input}) catch {
-                ty_env.pop();
-                rename_env.scope.pop();
-                return CompileError.OutOfMemory;
-            };
-            self.last_source = str_source;
-            self.last_input_kind = .expression;
-
-            if (self.compileModule(str_source, file_id, u_supply, rename_env, ty_env, mv_supply, &str_diags, external_arities, external_con_map, external_class_env, external_dict_names, external_type_con_names)) |result| {
-                const decl_diag_count = diags.diagnostics.items.len;
-                clearLeadingDiags(alloc, diags, decl_diag_count);
-                return .{ .program = result.grin_prog, .kind = .expression_io, .core_data_decls = result.core_data_decls, .class_env = result.class_env, .dict_names = result.dict_names };
-            } else |_| {
+                // frame and fall through to bare expression.
                 ty_env.pop();
                 rename_env.scope.pop();
             }

@@ -1516,6 +1516,7 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                     }
                     return @constCast(current);
                 }
+
             } else {
                 std.debug.panic("Variable {s} (id {d}) not found in type definitions", .{ v.name.base, v.name.unique.value });
             }

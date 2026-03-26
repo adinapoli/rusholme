@@ -311,3 +311,7 @@ test "e2e: e2e_showcase" {
 test "e2e: e2e_factorial (#624)" {
     try testE2e(std.testing.allocator, "e2e_factorial");
 }
+
+test "e2e: e2e_show_polymorphic" {
+    try testE2e(std.testing.allocator, "e2e_show_polymorphic");
+}

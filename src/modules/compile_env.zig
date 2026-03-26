@@ -246,11 +246,14 @@ pub const CompileEnv = struct {
                         .base = con.name,
                         .unique = .{ .value = con.unique },
                     };
-                    // Constructors are serialised as monomorphic CoreTypes under
-                    // the data decl's foralls.  Convert to HType and bind.
+                    // Constructors are serialised with ForAllTy wrappers by
+                    // schemeToCore.  Peel them off and register as a proper
+                    // polymorphic scheme so that call sites instantiate fresh
+                    // metas for each type variable.
                     const core_ty = try con.ty.toCoreType(ty_env.alloc);
                     const hty = try coreTypeToHType(ty_env.alloc, core_ty);
-                    try ty_env.bindMono(con_name, hty);
+                    const scheme = try conTypeToScheme(ty_env.alloc, hty);
+                    try ty_env.bind(con_name, scheme);
                 }
             }
         }
@@ -364,9 +367,14 @@ pub const CompileEnv = struct {
                     .base = con.name,
                     .unique = .{ .value = con.unique },
                 };
+                // Constructors are serialised with ForAllTy wrappers by
+                // schemeToCore.  Peel them off and register as a proper
+                // polymorphic scheme so that call sites instantiate fresh
+                // metas for each type variable.
                 const core_ty = try con.ty.toCoreType(ty_env.alloc);
                 const hty = try coreTypeToHType(ty_env.alloc, core_ty);
-                try ty_env.bindMono(con_name, hty);
+                const scheme = try conTypeToScheme(ty_env.alloc, hty);
+                try ty_env.bind(con_name, scheme);
             }
         }
     }
@@ -898,6 +906,40 @@ fn coreTypeToHType(alloc: std.mem.Allocator, ty: core_ast.CoreType) std.mem.Allo
             body_p.* = try coreTypeToHType(alloc, fa.body.*);
             break :blk htype_mod.HType{ .ForAll = .{ .binder = fa.binder, .body = body_p } };
         },
+    };
+}
+
+/// Peel leading `ForAll` binders from an `HType` and build a `TyScheme`.
+///
+/// Data constructors are serialised as `forall a b. FieldTy → … → TyCon a b`
+/// (the `schemeToCore` + `coreTypeToHType` pipeline wraps binders in `ForAll`
+/// nodes).  When we load them back into the type environment they must be
+/// registered as *polymorphic* schemes — otherwise the typechecker treats
+/// `Just` as monomorphically typed `forall a. a -> Maybe a` and fails to
+/// instantiate it at call sites.
+///
+/// This function strips the leading `ForAll` nodes, collects their binder IDs,
+/// and returns a `TyScheme` ready for `TyEnv.bind`.
+fn conTypeToScheme(
+    alloc: std.mem.Allocator,
+    hty: htype_mod.HType,
+) std.mem.Allocator.Error!env_mod.TyScheme {
+    var binders = std.ArrayListUnmanaged(u64){};
+    // We never free this — all allocations live on the arena.
+
+    // Peel outer ForAll nodes, collecting binder unique IDs.
+    var body: htype_mod.HType = hty;
+    while (body == .ForAll) {
+        const fa = body.ForAll;
+        try binders.append(alloc, fa.binder.unique.value);
+        body = fa.body.*;
+    }
+
+    const binders_slice = try binders.toOwnedSlice(alloc);
+    return env_mod.TyScheme{
+        .binders = binders_slice,
+        .constraints = &.{},
+        .body = body,
     };
 }
 

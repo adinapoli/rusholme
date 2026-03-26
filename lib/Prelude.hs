@@ -318,18 +318,16 @@ instance Show Ordering where
 instance Show Char where
   show c = '\'' : c : '\'' : []
 
--- Polymorphic Show instances require evidence plumbing in instance
--- method bodies (tracked as a follow-up to #627).
--- instance Show a => Show [a] where
---   show xs = showListWith xs
+instance Show a => Show [a] where
+  show xs = showListWith xs
 
--- instance Show a => Show (Maybe a) where
---   show Nothing  = "Nothing"
---   show (Just x) = "Just " ++ show x
+instance Show a => Show (Maybe a) where
+  show Nothing  = "Nothing"
+  show (Just x) = "Just " ++ show x
 
--- instance (Show a, Show b) => Show (Either a b) where
---   show (Left x)  = "Left " ++ show x
---   show (Right y) = "Right " ++ show y
+instance (Show a, Show b) => Show (Either a b) where
+  show (Left x)  = "Left " ++ show x
+  show (Right y) = "Right " ++ show y
 
 -- ========================================================================
 -- Maybe / Either
