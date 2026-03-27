@@ -13,6 +13,7 @@ module Prelude
     , error
     , intToChar, charToInt
     , max
+    , Eq(..)
     , Show(..), show, showString, showListWith, showListTail
     , intToDigit
     , enumFrom, enumFromTo, enumFromThen, enumFromThenTo
@@ -159,14 +160,8 @@ max x y = case x >= y of
     False -> y
 
 -- ========================================================================
--- Comparison (monomorphic on Int, pending type classes #531)
+-- Comparison (monomorphic on Int, pending Ord class in #531)
 -- ========================================================================
-
-(==) :: Int -> Int -> Bool
-(==) = primEqInt
-
-(/=) :: Int -> Int -> Bool
-(/=) = primNeInt
 
 (<) :: Int -> Int -> Bool
 (<) = primLtInt
@@ -179,6 +174,39 @@ max x y = case x >= y of
 
 (>=) :: Int -> Int -> Bool
 (>=) = primGeInt
+
+-- ========================================================================
+-- Eq type class
+-- ========================================================================
+
+-- Helper functions for Eq Bool — top-level to avoid nested-lambda free-variable
+-- issues in the lambda lifter (tracked in: https://github.com/adinapoli/rusholme/issues/659).
+eqBool :: Bool -> Bool -> Bool
+eqBool True  True  = True
+eqBool True  False = False
+eqBool False True  = False
+eqBool False False = True
+
+neBool :: Bool -> Bool -> Bool
+neBool True  True  = False
+neBool True  False = True
+neBool False True  = True
+neBool False False = False
+
+-- Note: the default method `x /= y = not (x == y)` is intentionally omitted.
+-- A default method in the first class causes subsequent class methods to be
+-- unbound in the typechecker (tracked in: https://github.com/adinapoli/rusholme/issues/660).
+class Eq a where
+  (==) :: a -> a -> Bool
+  (/=) :: a -> a -> Bool
+
+instance Eq Int where
+  (==) = primEqInt
+  (/=) = primNeInt
+
+instance Eq Bool where
+  (==) = eqBool
+  (/=) = neBool
 
 -- ========================================================================
 -- Higher-order combinators
