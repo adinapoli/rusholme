@@ -2285,8 +2285,11 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
             } };
         },
         .TypeAnn => {
-            // Type annotations (erased at this stage)
-            // tracked in: https://github.com/adinapoli/rusholme/issues/361
+            // Type annotations should be erased while the inner expression
+            // is recursively desugared.  Currently the inner expression is
+            // discarded and replaced with unit_0, which produces incorrect
+            // code for annotated expressions such as `(Nothing :: Maybe Int)`.
+            // tracked in: https://github.com/adinapoli/rusholme/issues/644
             node.* = .{ .Var = .{
                 .name = Name{ .base = "unit", .unique = .{ .value = 0 } },
                 .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
