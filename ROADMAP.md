@@ -474,6 +474,9 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | [#636](https://github.com/adinapoli/rusholme/issues/636) | Refactor TagTable into persistent TagRegistry + transient TranslationContext | [#631](https://github.com/adinapoli/rusholme/issues/631) | :green_circle: |
 | [#558](https://github.com/adinapoli/rusholme/issues/558) | Implement recursive instance context constraint resolution | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#559](https://github.com/adinapoli/rusholme/issues/559) | Support class constraints in user-written type signatures | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
+| [#641](https://github.com/adinapoli/rusholme/issues/641) | Polymorphic Show instances fail in native AOT path for Maybe/Either | [#629](https://github.com/adinapoli/rusholme/issues/629) | :green_circle: |
+| [#644](https://github.com/adinapoli/rusholme/issues/644) | Desugarer discards annotated expression in TypeAnn — replaces with unit_0 | [#641](https://github.com/adinapoli/rusholme/issues/641) | :white_circle: |
+| [#645](https://github.com/adinapoli/rusholme/issues/645) | Single-file CLI commands do not propagate Prelude class env | [#641](https://github.com/adinapoli/rusholme/issues/641) | :white_circle: |
 | [#566](https://github.com/adinapoli/rusholme/issues/566) | Typechecker: support declaration-order-independent inference | — | :white_circle: |
 | [#567](https://github.com/adinapoli/rusholme/issues/567) | Parser: support parenthesised-pattern LHS in function bindings | — | :white_circle: |
 | [#591](https://github.com/adinapoli/rusholme/issues/591) | Wire Prelude into REPL session for WASM target | [#529](https://github.com/adinapoli/rusholme/issues/529) | :green_circle: |
@@ -517,7 +520,7 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#75](https://github.com/adinapoli/rusholme/issues/75) | Implement basic REPL loop (read-eval-print with interpreter) | [#50](https://github.com/adinapoli/rusholme/issues/50), [#51](https://github.com/adinapoli/rusholme/issues/51) | :green_circle: |
-| [#76](https://github.com/adinapoli/rusholme/issues/76) | Implement REPL auto-completion and multi-line input | [#75](https://github.com/adinapoli/rusholme/issues/75) | :white_circle: |
+| [#76](https://github.com/adinapoli/rusholme/issues/76) | Implement REPL auto-completion and multi-line input | [#75](https://github.com/adinapoli/rusholme/issues/75) | :green_circle: |
 | [#487](https://github.com/adinapoli/rusholme/issues/487) | REPL stdin reader drops first byte of subsequent lines in piped mode | [#75](https://github.com/adinapoli/rusholme/issues/75) | :white_circle: |
 | [#514](https://github.com/adinapoli/rusholme/issues/514) | Show type error diagnostics in REPL :type command | [#75](https://github.com/adinapoli/rusholme/issues/75) | :green_circle: |
 
