@@ -315,3 +315,7 @@ test "e2e: e2e_factorial (#624)" {
 test "e2e: e2e_show_polymorphic" {
     try testE2e(std.testing.allocator, "e2e_show_polymorphic");
 }
+
+test "e2e: e2e_eq_bool (#531)" {
+    try testE2e(std.testing.allocator, "e2e_eq_bool");
+}
