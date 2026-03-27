@@ -89,9 +89,12 @@ pub fn run(allocator: Allocator, io: Io) !void {
     try printBanner(io);
 
     // Obtain the history file path, then try to initialise the line editor.
-    // Both steps are allowed to fail (no TTY, no HOME, etc.) — fall back
-    // to plain stdin reading if either does.
-    const hist_path = historyFilePath(io, alloc) catch null;
+    // Only use replxx when stdin is an interactive terminal.
+    // When piped (e.g. in tests or scripts), replxx does not write the prompt
+    // to stdout and may suppress output — fall back to runSimple instead.
+    const stdin_is_tty = std.c.isatty(std.c.STDIN_FILENO) != 0;
+
+    const hist_path = if (stdin_is_tty) historyFilePath(io, alloc) catch null else null;
     var editor: ?LineEditor = if (hist_path) |hp|
         LineEditor.init(alloc, io, &session, hp) catch null
     else
