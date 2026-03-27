@@ -1815,6 +1815,15 @@ pub const Parser = struct {
         var bindings: std.ArrayListUnmanaged(ast_mod.FunBinding) = .empty;
         if (try self.match(.kw_where) != null) {
             _ = try self.expectOpenBrace();
+
+            // Collect raw decls so we can merge multi-equation method bindings
+            // before handing them to the desugarer.  Without this step a method
+            // like `show Nothing = …; show (Just x) = …` would be parsed as two
+            // *separate* FunBindings; the desugarer only ever picks up the first
+            // one, producing non-exhaustive patterns at runtime.
+            var raw_decls: std.ArrayListUnmanaged(ast_mod.Decl) = .empty;
+            defer raw_decls.deinit(self.allocator);
+
             while (true) {
                 if (try self.checkCloseBrace()) break;
                 if (try self.atEnd()) break;
@@ -1828,14 +1837,19 @@ pub const Parser = struct {
                     else => return err,
                 };
                 if (decl) |d| {
-                    switch (d) {
-                        .FunBind => |fb| try bindings.append(self.allocator, fb),
-                        else => {},
-                    }
+                    if (d == .FunBind) try raw_decls.append(self.allocator, d);
                 }
                 while (try self.matchSemi()) {}
             }
             _ = try self.expectCloseBrace();
+
+            // Merge equations that belong to the same method name, mirroring
+            // the top-level `mergeFunBinds` call in `parseModule`.
+            const merged = try self.mergeFunBinds(try raw_decls.toOwnedSlice(self.allocator));
+            defer self.allocator.free(merged);
+            for (merged) |d| {
+                if (d == .FunBind) try bindings.append(self.allocator, d.FunBind);
+            }
         }
 
         return .{ .Instance = .{
@@ -4884,7 +4898,12 @@ test "decl: instance declaration" {
 
     const inst_decl = mod.declarations[0].Instance;
     try std.testing.expect(inst_decl.context == null);
-    try std.testing.expectEqual(3, inst_decl.bindings.len);
+    // After merging, `eqFalse` (2 equations) is folded into one FunBinding.
+    try std.testing.expectEqual(2, inst_decl.bindings.len);
+    // `eqFalse` has two equations: `False = True` and `_ = False`.
+    const eq_false = inst_decl.bindings[1];
+    try std.testing.expectEqualStrings("eqFalse", eq_false.name);
+    try std.testing.expectEqual(2, eq_false.equations.len);
 }
 
 test "decl: instance with context" {
