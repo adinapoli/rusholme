@@ -494,6 +494,60 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 
 ---
 
+## M2.5: Package Ecosystem
+
+> **Design:** `docs/decisions/0008-rhc-internal-package-ecosystem.md`
+>
+> **Rule:** Anything requiring Rusholme internals or PrimOps goes in an `rhc-*`
+> package. Pure Haskell code goes in `base`. This decouples `base` from the
+> compiler version (GHC's "relocatable base" lesson).
+
+### Epic [#648](https://github.com/adinapoli/rusholme/issues/648): rhc-internal and the Package Ecosystem
+
+#### Phase 0 — Compiler correctness (prerequisite)
+
+These existing issues must be resolved before any Phase 1 work begins:
+
+| # | Issue | Deps | Status |
+|---|-------|------|--------|
+| [#531](https://github.com/adinapoli/rusholme/issues/531) | Add `Eq`/`Ord`/`Num` type classes to `lib/Prelude.hs` | [#530](https://github.com/adinapoli/rusholme/issues/530) | :white_circle: |
+| [#616](https://github.com/adinapoli/rusholme/issues/616) | Module interface cache (`.rhi`) does not store `ClassEnv` or `DictNameMap` | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
+| [#615](https://github.com/adinapoli/rusholme/issues/615) | GRIN evaluator: support dictionary-passing for typeclass dispatch | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
+| [#566](https://github.com/adinapoli/rusholme/issues/566) | Typechecker: support declaration-order-independent inference | — | :white_circle: |
+| [#623](https://github.com/adinapoli/rusholme/issues/623) | Where-clause bindings not in scope during renaming/typechecking | — | :white_circle: |
+
+#### Phase 1 — Package infrastructure
+
+| # | Issue | Deps | Status |
+|---|-------|------|--------|
+| [#649](https://github.com/adinapoli/rusholme/issues/649) | Implement `.rhc-pkg` package descriptor format and parser | — | :white_circle: |
+| [#650](https://github.com/adinapoli/rusholme/issues/650) | Implement package store layout at `~/.rhc/store/` | [#649](https://github.com/adinapoli/rusholme/issues/649) | :white_circle: |
+| [#651](https://github.com/adinapoli/rusholme/issues/651) | Implement `rhc-pkg` tool (list/describe/install/unregister/check) | [#650](https://github.com/adinapoli/rusholme/issues/650) | :white_circle: |
+| [#652](https://github.com/adinapoli/rusholme/issues/652) | Add `--package-db` flag to `rhc` compiler | [#650](https://github.com/adinapoli/rusholme/issues/650) | :white_circle: |
+
+#### Phase 2 — Boot packages as real packages
+
+| # | Issue | Deps | Status |
+|---|-------|------|--------|
+| [#653](https://github.com/adinapoli/rusholme/issues/653) | Extract `rhc-prim` boot package from `lib/Prelude.hs` | Phase 1 complete | :white_circle: |
+| [#654](https://github.com/adinapoli/rusholme/issues/654) | Create `rhc-internal` boot package (magic types + primitive instances) | [#653](https://github.com/adinapoli/rusholme/issues/653), Phase 0 complete | :white_circle: |
+| [#655](https://github.com/adinapoli/rusholme/issues/655) | Create `base` boot package (pure Haskell standard library) | [#654](https://github.com/adinapoli/rusholme/issues/654) | :white_circle: |
+| [#656](https://github.com/adinapoli/rusholme/issues/656) | Shrink `known.zig` and `env.zig` to boot package names only | [#655](https://github.com/adinapoli/rusholme/issues/655), [#652](https://github.com/adinapoli/rusholme/issues/652) | :white_circle: |
+
+#### Phase 3 — base as pure Haskell (stub)
+
+| # | Issue | Deps | Status |
+|---|-------|------|--------|
+| [#657](https://github.com/adinapoli/rusholme/issues/657) | Epic: Phase 3 — base as pure Haskell (version boundary enforcement) | Phase 2 complete | :white_circle: |
+
+#### Phase 4 — Cabal compatibility (stub)
+
+| # | Issue | Deps | Status |
+|---|-------|------|--------|
+| [#658](https://github.com/adinapoli/rusholme/issues/658) | Epic: Phase 4 — Cabal compatibility (long-term north star) | Phase 3 complete | :white_circle: |
+
+---
+
 ## M3: GRIN Optimisations
 
 > **Goal:** Dead code elimination, unboxing, heap-to-stack, heap points-to analysis.
