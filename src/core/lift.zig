@@ -798,8 +798,16 @@ pub fn lambdaLift(alloc: std.mem.Allocator, program: core.CoreProgram, external_
             current_body = lam_expr;
         }
 
-        // Wrap free variable parameters (outermost)
-        for (info.free_vars) |fv| {
+        // Wrap free variable parameters (outermost).
+        //
+        // Iterate in REVERSE so that free_vars[0] ends up as the outermost
+        // lambda (first parameter), matching Phase 4 which applies free_vars[0]
+        // first.  Forward iteration produces LIFO wrapping, making free_vars[0]
+        // the innermost param — the opposite of what Phase 4 expects.
+        var fv_i = info.free_vars.len;
+        while (fv_i > 0) {
+            fv_i -= 1;
+            const fv = info.free_vars[fv_i];
             const fv_binder = Id{
                 .name = .{ .base = "fv", .unique = .{ .value = fv } },
                 .ty = intType(), // tracked in: follow-up issue for placeholder types

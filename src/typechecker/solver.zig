@@ -125,6 +125,11 @@ pub const DictEvidence = union(enum) {
     param: struct {
         param_index: u32,
         class_name: class_env_mod.Name,
+        /// Unique ID of the Rigid type variable this constraint is over.
+        /// Used by the desugarer to distinguish multiple constraints on the
+        /// same class — e.g. `(Show a, Show b) =>` has two Show params with
+        /// different tyvar_uniques.  Zero means unknown / not a Rigid.
+        tyvar_unique: u64,
     },
     /// Satisfied by extracting a superclass dictionary.
     /// E.g., `Eq` from an `Ord` dictionary via a superclass selector.
@@ -226,14 +231,18 @@ fn solveClassConstraintWithDepth(
     // If the type is a rigid (polymorphic context), the constraint becomes
     // a dictionary parameter — evidence is recorded as `param`.
     switch (chased) {
-        .Rigid => {
+        .Rigid => |rigid_name| {
             // Polymorphic: will become a dictionary parameter.
             // The param_index is set to 0 here; the desugarer determines
             // the actual index from the enclosing function's constraint list.
+            // tyvar_unique identifies which Rigid this constraint is over,
+            // allowing the desugarer to distinguish e.g. `Show a` from
+            // `Show b` in `instance (Show a, Show b) => Show (Either a b)`.
             const ev = try alloc.create(DictEvidence);
             ev.* = .{ .param = .{
                 .param_index = 0,
                 .class_name = cc.class_name,
+                .tyvar_unique = rigid_name.unique.value,
             } };
             cc.evidence = ev;
             return;
@@ -324,6 +333,7 @@ fn solveClassConstraintWithDepth(
                     ctx_ev[i] = .{ .param = .{
                         .param_index = 0,
                         .class_name = ctx_constraint.class_name,
+                        .tyvar_unique = 0,
                     } };
                 }
             }

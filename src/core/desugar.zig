@@ -36,16 +36,28 @@ pub const DesugarCtx = struct {
     /// class constraints (e.g., `(Eq a, Ord a) =>`).
     evidence_map: EvidenceMap = .empty,
 
-    /// Maps class unique → dictionary parameter Name for the current
-    /// function.  Populated by `wrapWithDictLambdas`, consumed by
-    /// `buildDictExpr` (.param case) to reference the correct binder.
-    dict_param_names: std.AutoHashMapUnmanaged(u64, Name) = .{},
+    /// Maps (class_unique, tyvar_unique) → dictionary parameter Name for the
+    /// current function.  Populated by `desugarInstanceDecl` and the FunBind
+    /// path; consumed by `buildDictExpr` (.param case) and `wrapWithDictLambdas`.
+    ///
+    /// The compound key avoids collisions when the same class appears in
+    /// multiple constraints with different type variables, e.g.
+    /// `(Show a, Show b) =>` where both constraints share the `Show` class
+    /// unique but differ in the Rigid type variable they range over.
+    dict_param_names: std.AutoHashMapUnmanaged(DictParamKey, Name) = .{},
 
     /// The `True` constructor name, extracted from the renamed module's
     /// `data Bool` declaration. Used by guard desugaring to build
     /// `case cond of { True -> rhs ; _ -> fallback }`.
     /// Falls back to `Known.Con.True` if no `data Bool` is in scope.
     true_name: Name = Known.Con.True,
+
+    /// Compound key for `dict_param_names`.
+    pub const DictParamKey = struct {
+        class_unique: u64,
+        /// Unique ID of the Rigid type variable.  Zero for non-Rigid or unknown.
+        tyvar_unique: u64,
+    };
 
     pub const DictNameKey = struct {
         class_unique: u64,
@@ -246,7 +258,15 @@ pub fn desugarModule(
                         .base = try std.fmt.allocPrint(alloc, "dict${s}", .{constraint.class_name.base}),
                         .unique = ctx.u_supply.fresh(),
                     };
-                    try ctx.dict_param_names.put(alloc, constraint.class_name.unique.value, dpn);
+                    const chased_ty = constraint.ty.*.chase();
+                    const tyvar_unique: u64 = switch (chased_ty) {
+                        .Rigid => |r| r.unique.value,
+                        else => 0,
+                    };
+                    try ctx.dict_param_names.put(alloc, .{
+                        .class_unique = constraint.class_name.unique.value,
+                        .tyvar_unique = tyvar_unique,
+                    }, dpn);
                 }
 
                 if (needs_match_compiler) {
@@ -788,6 +808,30 @@ fn desugarInstanceDecl(
     // pre-populate dict_param_names so that evidence resolution inside method
     // bodies can reference the enclosing dictionary parameters.  These names
     // are reused when wrapping the dictionary expression with lambdas below.
+    //
+    // We key by (class_unique, tyvar_unique) to correctly handle instances
+    // with multiple constraints on the same class, e.g.:
+    //   instance (Show a, Show b) => Show (Either a b)
+    // Without the Rigid unique as part of the key, the second constraint
+    // would overwrite the first in the map, causing the wrong dict parameter
+    // to be used inside the method body.
+    //
+    // To obtain the Rigid unique, we look up the InstanceInfo from the
+    // ClassEnv (which stores the HType context with Rigid references) and
+    // match it to our current instance declaration by source span.
+    var inst_context: []const class_env_mod.ClassConstraint = &.{};
+    {
+        const instances_for_class = ctx.types.class_env.lookupInstances(id_decl.class_name.unique.value);
+        for (instances_for_class) |inst| {
+            if (inst.span.start.line == id_decl.span.start.line and
+                inst.span.start.column == id_decl.span.start.column)
+            {
+                inst_context = inst.context;
+                break;
+            }
+        }
+    }
+
     var context_param_names = try alloc.alloc(Name, id_decl.context.len);
     if (id_decl.context.len > 0) {
         ctx.dict_param_names.clearRetainingCapacity();
@@ -797,7 +841,17 @@ fn desugarInstanceDecl(
                 .unique = ctx.u_supply.fresh(),
             };
             context_param_names[ci] = dpn;
-            try ctx.dict_param_names.put(alloc, assertion.class_name.unique.value, dpn);
+            const tyvar_unique: u64 = if (ci < inst_context.len) blk: {
+                const chased = inst_context[ci].ty.*.chase();
+                break :blk switch (chased) {
+                    .Rigid => |r| r.unique.value,
+                    else => 0,
+                };
+            } else 0;
+            try ctx.dict_param_names.put(alloc, .{
+                .class_unique = assertion.class_name.unique.value,
+                .tyvar_unique = tyvar_unique,
+            }, dpn);
         }
     }
 
@@ -1023,7 +1077,15 @@ fn wrapWithDictLambdas(
 
         // Reuse the pre-populated name if available (set before body desugaring),
         // otherwise generate a fresh one.
-        const dict_param_name = ctx.dict_param_names.get(constraint.class_name.unique.value) orelse Name{
+        const cty_chased = constraint.ty.*.chase();
+        const cty_unique: u64 = switch (cty_chased) {
+            .Rigid => |r| r.unique.value,
+            else => 0,
+        };
+        const dict_param_name = ctx.dict_param_names.get(.{
+            .class_unique = constraint.class_name.unique.value,
+            .tyvar_unique = cty_unique,
+        }) orelse Name{
             .base = try std.fmt.allocPrint(alloc, "dict${s}", .{constraint.class_name.base}),
             .unique = ctx.u_supply.fresh(),
         };
@@ -1118,10 +1180,15 @@ fn buildDictExpr(
         .param => |p| {
             // Reference the dictionary parameter of the enclosing function.
             // Look up the actual unique from dict_param_names, which was
-            // populated by wrapWithDictLambdas when the enclosing function's
-            // dictionary lambda was created.
+            // populated by desugarInstanceDecl / the FunBind path before
+            // body desugaring.  The compound key (class_unique, tyvar_unique)
+            // correctly identifies which parameter to use when the same class
+            // appears multiple times, e.g. `(Show a, Show b) =>`.
             const node = try alloc.create(ast_mod.Expr);
-            const dict_param_name = if (ctx.dict_param_names.get(p.class_name.unique.value)) |name|
+            const dict_param_name = if (ctx.dict_param_names.get(.{
+                .class_unique = p.class_name.unique.value,
+                .tyvar_unique = p.tyvar_unique,
+            })) |name|
                 name
             else
                 Name{
@@ -2218,8 +2285,11 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
             } };
         },
         .TypeAnn => {
-            // Type annotations (erased at this stage)
-            // tracked in: https://github.com/adinapoli/rusholme/issues/361
+            // Type annotations should be erased while the inner expression
+            // is recursively desugared.  Currently the inner expression is
+            // discarded and replaced with unit_0, which produces incorrect
+            // code for annotated expressions such as `(Nothing :: Maybe Int)`.
+            // tracked in: https://github.com/adinapoli/rusholme/issues/644
             node.* = .{ .Var = .{
                 .name = Name{ .base = "unit", .unique = .{ .value = 0 } },
                 .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
