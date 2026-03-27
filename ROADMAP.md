@@ -454,7 +454,7 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | [#528](https://github.com/adinapoli/rusholme/issues/528) | Write `lib/Prelude.hs` with basic types and functions (no type classes) | [#527](https://github.com/adinapoli/rusholme/issues/527) | :green_circle: |
 | [#529](https://github.com/adinapoli/rusholme/issues/529) | Bootstrap Prelude: compile `lib/Prelude.hs` and wire into implicit import | [#527](https://github.com/adinapoli/rusholme/issues/527), [#528](https://github.com/adinapoli/rusholme/issues/528) | :green_circle: |
 | [#530](https://github.com/adinapoli/rusholme/issues/530) | Implement dictionary-passing translation for type classes | — | :green_circle: |
-| [#531](https://github.com/adinapoli/rusholme/issues/531) | Add type class definitions and instances to `lib/Prelude.hs` | [#528](https://github.com/adinapoli/rusholme/issues/528), [#529](https://github.com/adinapoli/rusholme/issues/529), [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
+| [#531](https://github.com/adinapoli/rusholme/issues/531) | Add type class definitions and instances to `lib/Prelude.hs` | [#528](https://github.com/adinapoli/rusholme/issues/528), [#529](https://github.com/adinapoli/rusholme/issues/529), [#530](https://github.com/adinapoli/rusholme/issues/530) | :white_circle: |
 | [#555](https://github.com/adinapoli/rusholme/issues/555) | Implement default method compilation for type classes | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#556](https://github.com/adinapoli/rusholme/issues/556) | Insert dictionary arguments at type class method call sites | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#557](https://github.com/adinapoli/rusholme/issues/557) | Persist ClassEnv across REPL inputs in session state | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
@@ -474,6 +474,9 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | [#636](https://github.com/adinapoli/rusholme/issues/636) | Refactor TagTable into persistent TagRegistry + transient TranslationContext | [#631](https://github.com/adinapoli/rusholme/issues/631) | :green_circle: |
 | [#558](https://github.com/adinapoli/rusholme/issues/558) | Implement recursive instance context constraint resolution | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#559](https://github.com/adinapoli/rusholme/issues/559) | Support class constraints in user-written type signatures | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
+| [#641](https://github.com/adinapoli/rusholme/issues/641) | Polymorphic Show instances fail in native AOT path for Maybe/Either | [#629](https://github.com/adinapoli/rusholme/issues/629) | :green_circle: |
+| [#644](https://github.com/adinapoli/rusholme/issues/644) | Desugarer discards annotated expression in TypeAnn — replaces with unit_0 | [#641](https://github.com/adinapoli/rusholme/issues/641) | :white_circle: |
+| [#645](https://github.com/adinapoli/rusholme/issues/645) | Single-file CLI commands do not propagate Prelude class env | [#641](https://github.com/adinapoli/rusholme/issues/641) | :white_circle: |
 | [#566](https://github.com/adinapoli/rusholme/issues/566) | Typechecker: support declaration-order-independent inference | — | :white_circle: |
 | [#567](https://github.com/adinapoli/rusholme/issues/567) | Parser: support parenthesised-pattern LHS in function bindings | — | :white_circle: |
 | [#591](https://github.com/adinapoli/rusholme/issues/591) | Wire Prelude into REPL session for WASM target | [#529](https://github.com/adinapoli/rusholme/issues/529) | :green_circle: |
@@ -488,6 +491,60 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | [#72](https://github.com/adinapoli/rusholme/issues/72) | Implement Immix mark-and-sweep collection | [#71](https://github.com/adinapoli/rusholme/issues/71) | :white_circle: |
 | [#73](https://github.com/adinapoli/rusholme/issues/73) | Implement Immix opportunistic defragmentation | [#72](https://github.com/adinapoli/rusholme/issues/72) | :white_circle: |
 | [#74](https://github.com/adinapoli/rusholme/issues/74) | Research: ASAP-style static deallocation via GRIN analysis | [#44](https://github.com/adinapoli/rusholme/issues/44) | :white_circle: |
+
+---
+
+## M2.5: Package Ecosystem
+
+> **Design:** `docs/decisions/0008-rhc-internal-package-ecosystem.md`
+>
+> **Rule:** Anything requiring Rusholme internals or PrimOps goes in an `rhc-*`
+> package. Pure Haskell code goes in `base`. This decouples `base` from the
+> compiler version (GHC's "relocatable base" lesson).
+
+### Epic [#648](https://github.com/adinapoli/rusholme/issues/648): rhc-internal and the Package Ecosystem
+
+#### Phase 0 — Compiler correctness (prerequisite)
+
+These existing issues must be resolved before any Phase 1 work begins:
+
+| # | Issue | Deps | Status |
+|---|-------|------|--------|
+| [#531](https://github.com/adinapoli/rusholme/issues/531) | Add `Eq`/`Ord`/`Num` type classes to `lib/Prelude.hs` | [#530](https://github.com/adinapoli/rusholme/issues/530) | :white_circle: |
+| [#616](https://github.com/adinapoli/rusholme/issues/616) | Module interface cache (`.rhi`) does not store `ClassEnv` or `DictNameMap` | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
+| [#615](https://github.com/adinapoli/rusholme/issues/615) | GRIN evaluator: support dictionary-passing for typeclass dispatch | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
+| [#566](https://github.com/adinapoli/rusholme/issues/566) | Typechecker: support declaration-order-independent inference | — | :white_circle: |
+| [#623](https://github.com/adinapoli/rusholme/issues/623) | Where-clause bindings not in scope during renaming/typechecking | — | :white_circle: |
+
+#### Phase 1 — Package infrastructure
+
+| # | Issue | Deps | Status |
+|---|-------|------|--------|
+| [#649](https://github.com/adinapoli/rusholme/issues/649) | Implement `.rhc-pkg` package descriptor format and parser | — | :white_circle: |
+| [#650](https://github.com/adinapoli/rusholme/issues/650) | Implement package store layout at `~/.rhc/store/` | [#649](https://github.com/adinapoli/rusholme/issues/649) | :white_circle: |
+| [#651](https://github.com/adinapoli/rusholme/issues/651) | Implement `rhc-pkg` tool (list/describe/install/unregister/check) | [#650](https://github.com/adinapoli/rusholme/issues/650) | :white_circle: |
+| [#652](https://github.com/adinapoli/rusholme/issues/652) | Add `--package-db` flag to `rhc` compiler | [#650](https://github.com/adinapoli/rusholme/issues/650) | :white_circle: |
+
+#### Phase 2 — Boot packages as real packages
+
+| # | Issue | Deps | Status |
+|---|-------|------|--------|
+| [#653](https://github.com/adinapoli/rusholme/issues/653) | Extract `rhc-prim` boot package from `lib/Prelude.hs` | Phase 1 complete | :white_circle: |
+| [#654](https://github.com/adinapoli/rusholme/issues/654) | Create `rhc-internal` boot package (magic types + primitive instances) | [#653](https://github.com/adinapoli/rusholme/issues/653), Phase 0 complete | :white_circle: |
+| [#655](https://github.com/adinapoli/rusholme/issues/655) | Create `base` boot package (pure Haskell standard library) | [#654](https://github.com/adinapoli/rusholme/issues/654) | :white_circle: |
+| [#656](https://github.com/adinapoli/rusholme/issues/656) | Shrink `known.zig` and `env.zig` to boot package names only | [#655](https://github.com/adinapoli/rusholme/issues/655), [#652](https://github.com/adinapoli/rusholme/issues/652) | :white_circle: |
+
+#### Phase 3 — base as pure Haskell (stub)
+
+| # | Issue | Deps | Status |
+|---|-------|------|--------|
+| [#657](https://github.com/adinapoli/rusholme/issues/657) | Epic: Phase 3 — base as pure Haskell (version boundary enforcement) | Phase 2 complete | :white_circle: |
+
+#### Phase 4 — Cabal compatibility (stub)
+
+| # | Issue | Deps | Status |
+|---|-------|------|--------|
+| [#658](https://github.com/adinapoli/rusholme/issues/658) | Epic: Phase 4 — Cabal compatibility (long-term north star) | Phase 3 complete | :white_circle: |
 
 ---
 
@@ -517,7 +574,7 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#75](https://github.com/adinapoli/rusholme/issues/75) | Implement basic REPL loop (read-eval-print with interpreter) | [#50](https://github.com/adinapoli/rusholme/issues/50), [#51](https://github.com/adinapoli/rusholme/issues/51) | :green_circle: |
-| [#76](https://github.com/adinapoli/rusholme/issues/76) | Implement REPL auto-completion and multi-line input | [#75](https://github.com/adinapoli/rusholme/issues/75) | :white_circle: |
+| [#76](https://github.com/adinapoli/rusholme/issues/76) | Implement REPL auto-completion and multi-line input | [#75](https://github.com/adinapoli/rusholme/issues/75) | :green_circle: |
 | [#487](https://github.com/adinapoli/rusholme/issues/487) | REPL stdin reader drops first byte of subsequent lines in piped mode | [#75](https://github.com/adinapoli/rusholme/issues/75) | :white_circle: |
 | [#514](https://github.com/adinapoli/rusholme/issues/514) | Show type error diagnostics in REPL :type command | [#75](https://github.com/adinapoli/rusholme/issues/75) | :green_circle: |
 
