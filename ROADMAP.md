@@ -510,8 +510,8 @@ These existing issues must be resolved before any Phase 1 work begins:
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#531](https://github.com/adinapoli/rusholme/issues/531) | Add `Eq`/`Ord`/`Num` type classes to `lib/Prelude.hs` | [#530](https://github.com/adinapoli/rusholme/issues/530) | :yellow_circle: |
-| [#659](https://github.com/adinapoli/rusholme/issues/659) | Lambda lifter propagates outer lambda's parameter as free variable from inner lifted lambda | [#531](https://github.com/adinapoli/rusholme/issues/531) | :white_circle: |
+| [#531](https://github.com/adinapoli/rusholme/issues/531) | Add `Eq`/`Ord`/`Num` type classes to `lib/Prelude.hs` | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
+| [#659](https://github.com/adinapoli/rusholme/issues/659) | Lambda lifter propagates outer lambda's parameter as free variable from inner lifted lambda | [#531](https://github.com/adinapoli/rusholme/issues/531) | :yellow_circle: |
 | [#660](https://github.com/adinapoli/rusholme/issues/660) | Default method in class declaration causes subsequent class method to be unbound in typechecker | [#531](https://github.com/adinapoli/rusholme/issues/531) | :white_circle: |
 | [#616](https://github.com/adinapoli/rusholme/issues/616) | Module interface cache (`.rhi`) does not store `ClassEnv` or `DictNameMap` | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
 | [#615](https://github.com/adinapoli/rusholme/issues/615) | GRIN evaluator: support dictionary-passing for typeclass dispatch | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
