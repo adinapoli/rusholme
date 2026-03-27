@@ -12,6 +12,8 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
+const Dir = std.Io.Dir;
 const Session = @import("session.zig").Session;
 
 const c = @cImport({
@@ -96,6 +98,7 @@ fn commandCompletions(
 
 /// Build completions for filesystem paths matching `prefix`.
 fn fileCompletions(
+    io: Io,
     alloc: Allocator,
     prefix: []const u8,
     out: *std.ArrayListUnmanaged(Completion),
@@ -104,15 +107,17 @@ fn fileCompletions(
     const dir_part = if (dir_end > 0) prefix[0..dir_end] else ".";
     const file_part = prefix[dir_end..];
 
-    var dir = std.fs.cwd().openDir(dir_part, .{ .iterate = true }) catch return;
-    defer dir.close();
+    var dir = Dir.cwd().openDir(io, dir_part, .{ .iterate = true }) catch return;
+    defer dir.close(io);
 
     var it = dir.iterate();
-    while (it.next() catch null) |entry| {
+    while (it.next(io) catch null) |entry| {
         if (!std.mem.startsWith(u8, entry.name, file_part)) continue;
-        const text: [:0]u8 = if (dir_end > 0)
-            try std.fmt.allocPrintZ(alloc, "{s}{s}", .{ prefix[0..dir_end], entry.name })
-        else
+        const text: [:0]u8 = if (dir_end > 0) blk: {
+            const joined = try std.fmt.allocPrint(alloc, "{s}{s}", .{ prefix[0..dir_end], entry.name });
+            defer alloc.free(joined);
+            break :blk try alloc.dupeZ(u8, joined);
+        } else
             try alloc.dupeZ(u8, entry.name);
         try out.append(alloc, .{ .text = text, .color = c.REPLXX_COLOR_WHITE });
     }
@@ -142,6 +147,7 @@ fn nameCompletions(
 
 /// Dispatch completion candidates based on input context.
 pub fn completionsFor(
+    io: Io,
     session: *Session,
     alloc: Allocator,
     prefix: []const u8,
@@ -150,7 +156,7 @@ pub fn completionsFor(
 ) !void {
     if (line.len > 0 and line[0] == ':') {
         if (isFileCompletionContext(line)) {
-            try fileCompletions(alloc, prefix, out);
+            try fileCompletions(io, alloc, prefix, out);
         } else {
             try commandCompletions(alloc, prefix, out);
         }
@@ -297,6 +303,7 @@ fn isOperatorChar(ch: u8) bool {
 
 /// Passed to all replxx callbacks via the `userData` void pointer.
 const CallbackCtx = struct {
+    io: Io,
     session: *Session,
     allocator: Allocator,
 };
@@ -304,11 +311,11 @@ const CallbackCtx = struct {
 // ── C callbacks ───────────────────────────────────────────────────────
 
 fn completionCallback(
-    input: [*:0]const u8,
-    completions: *c.replxx_completions,
-    context_len: *c_int,
+    input: [*c]const u8,
+    completions: ?*c.replxx_completions,
+    context_len: [*c]c_int,
     user_data: ?*anyopaque,
-) callconv(.C) void {
+) callconv(.c) void {
     const ctx: *CallbackCtx = @ptrCast(@alignCast(user_data orelse return));
     var arena = std.heap.ArenaAllocator.init(ctx.allocator);
     defer arena.deinit();
@@ -319,7 +326,7 @@ fn completionCallback(
     context_len.* = @intCast(prefix.len);
 
     var candidates: std.ArrayListUnmanaged(Completion) = .empty;
-    completionsFor(ctx.session, alloc, prefix, line, &candidates) catch return;
+    completionsFor(ctx.io, ctx.session, alloc, prefix, line, &candidates) catch return;
 
     for (candidates.items) |cand| {
         c.replxx_add_color_completion(completions, @ptrCast(cand.text.ptr), cand.color);
@@ -327,12 +334,12 @@ fn completionCallback(
 }
 
 fn hintCallback(
-    input: [*:0]const u8,
-    hints: *c.replxx_hints,
-    context_len: *c_int,
-    color: *c.ReplxxColor,
+    input: [*c]const u8,
+    hints: ?*c.replxx_hints,
+    context_len: [*c]c_int,
+    color: [*c]c.ReplxxColor,
     user_data: ?*anyopaque,
-) callconv(.C) void {
+) callconv(.c) void {
     const ctx: *CallbackCtx = @ptrCast(@alignCast(user_data orelse return));
     var arena = std.heap.ArenaAllocator.init(ctx.allocator);
     defer arena.deinit();
@@ -348,11 +355,11 @@ fn hintCallback(
 }
 
 fn highlightCallback(
-    input: [*:0]const u8,
-    colors: [*]c.ReplxxColor,
+    input: [*c]const u8,
+    colors: [*c]c.ReplxxColor,
     size: c_int,
     user_data: ?*anyopaque,
-) callconv(.C) void {
+) callconv(.c) void {
     _ = user_data;
     const line = std.mem.sliceTo(input, 0);
     const n: usize = @intCast(size);
@@ -373,6 +380,7 @@ pub const LineEditor = struct {
     /// Loads history from `history_path` if the file exists.
     pub fn init(
         allocator: Allocator,
+        io: Io,
         session: *Session,
         history_path: []const u8,
     ) !LineEditor {
@@ -381,7 +389,7 @@ pub const LineEditor = struct {
 
         const ctx = try allocator.create(CallbackCtx);
         errdefer allocator.destroy(ctx);
-        ctx.* = .{ .session = session, .allocator = allocator };
+        ctx.* = .{ .io = io, .session = session, .allocator = allocator };
 
         c.replxx_set_max_history_size(rx, max_history_entries);
         c.replxx_set_unique_history(rx, 1);
