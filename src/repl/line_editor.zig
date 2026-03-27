@@ -361,9 +361,13 @@ fn highlightCallback(
     user_data: ?*anyopaque,
 ) callconv(.c) void {
     _ = user_data;
+    // replxx may pass a null colors buffer when size == 0.
+    // Guard before slicing: [*c]T performs a null check in safe builds.
+    if (size <= 0 or colors == null) return;
     const line = std.mem.sliceTo(input, 0);
     const n: usize = @intCast(size);
-    highlightLine(line, colors[0..n]);
+    const colors_buf: [*]c.ReplxxColor = @ptrCast(colors);
+    highlightLine(line, colors_buf[0..n]);
 }
 
 // ── LineEditor ────────────────────────────────────────────────────────
