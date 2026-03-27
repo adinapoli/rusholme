@@ -53,6 +53,7 @@
               pre-commit
               wasmtime
               graalvmPackages.graalvm-ce  # Provides lli for the JIT backend
+              replxx                      # C API line editor for the native REPL
             ]) ++ pkgs.lib.optionals (!isDarwin) [
               pkgs.valgrind
             ];
@@ -64,6 +65,7 @@
               echo "   Wasmtime: $(wasmtime --version 2>&1 | head -n1 || echo 'not found')"
               echo "   lli:      $(lli --version 2>&1 | head -n1 || echo 'not found')"
               echo ""
+              export REPLXX_PREFIX="${pkgs.replxx}"
             '';
           };
 

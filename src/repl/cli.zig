@@ -4,8 +4,9 @@
 //! Haskell expressions from stdin, compiles them through the full
 //! Rusholme pipeline, executes via LLVM JIT, and prints the result.
 //!
-//! Line editing is basic (no history or completion). A proper line
-//! editor (e.g. linenoise) is deferred to issue #75.
+//! Line editing is provided by the replxx C library (via LineEditor),
+//! offering tab completion, inline hints, syntax highlighting, and
+//! persistent history at ~/.rhc/repl_history (issue #76).
 //!
 //! See docs/decisions/0006-repl-architecture.md for the full design.
 
@@ -27,11 +28,29 @@ const evaluate = protocol_mod.evaluate;
 const TerminalRenderer = @import("../diagnostics/terminal.zig").TerminalRenderer;
 const pipeline_mod = @import("pipeline.zig");
 const translateSpan = pipeline_mod.translateSpan;
+const LineEditor = @import("line_editor.zig").LineEditor;
 
 const InputMode = enum {
     normal,
     multiline,
 };
+
+// ── History path ──────────────────────────────────────────────────────
+
+/// Return the absolute path to the REPL history file: ~/.rhc/repl_history.
+///
+/// Creates ~/.rhc/ if it does not exist.
+/// The caller owns the returned slice (allocated with `allocator`).
+fn historyFilePath(io: Io, allocator: Allocator) ![]const u8 {
+    const home_ptr = std.c.getenv("HOME") orelse return error.NoHomeDir;
+    const home = std.mem.sliceTo(home_ptr, 0);
+    const dir_path = try std.fs.path.join(allocator, &.{ home, ".rhc" });
+    defer allocator.free(dir_path);
+
+    try Dir.cwd().createDirPath(io, dir_path);
+
+    return std.fs.path.join(allocator, &.{ home, ".rhc", "repl_history" });
+}
 
 // ── Server Mode ─────────────────────────────────────────────────────
 
@@ -50,8 +69,9 @@ pub fn runServer(allocator: Allocator, io: Io) !void {
 
 /// Run the interactive REPL.
 ///
-/// Reads lines from stdin, evaluates each via a Session backed by the
-/// LLVM JIT engine, and prints results or diagnostics to stdout/stderr.
+/// Attempts to initialise a LineEditor (replxx) for tab completion,
+/// inline hints, syntax highlighting, and persistent history.
+/// Falls back to `runSimple` when not on a TTY or replxx fails to init.
 pub fn run(allocator: Allocator, io: Io) !void {
     // Use an arena allocator for the session lifetime. The typechecker's
     // initBuiltins allocates type structures that outlive the session's
@@ -68,21 +88,37 @@ pub fn run(allocator: Allocator, io: Io) !void {
 
     try printBanner(io);
 
-    // Main loop: read a line, evaluate, print result.
-    var line_buf: [4096]u8 = undefined;
+    // Obtain the history file path, then try to initialise the line editor.
+    // Only use replxx when stdin is an interactive terminal.
+    // When piped (e.g. in tests or scripts), replxx does not write the prompt
+    // to stdout and may suppress output — fall back to runSimple instead.
+    const stdin_is_tty = std.c.isatty(std.c.STDIN_FILENO) != 0;
+
+    const hist_path = if (stdin_is_tty) historyFilePath(io, alloc) catch null else null;
+    var editor: ?LineEditor = if (hist_path) |hp|
+        LineEditor.init(alloc, io, &session, hp) catch null
+    else
+        null;
+    defer if (editor) |*ed| ed.deinit();
+
+    if (editor == null) {
+        return runSimple(alloc, io, &session);
+    }
+    const ed = &editor.?;
+
+    // Main loop: read a line via replxx, evaluate, print result.
     var mode: InputMode = .normal;
     var multiline_buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer multiline_buf.deinit(allocator);
+    defer multiline_buf.deinit(alloc);
 
     while (true) {
         const prompt = switch (mode) {
             .normal => "rusholme> ",
             .multiline => "rusholme| ",
         };
-        try writeStdout(io, prompt);
 
-        const line = readLine(io, &line_buf) catch {
-            // EOF or read error — cancel any multiline block and exit.
+        // readLine passes the prompt to replxx; null means EOF (Ctrl+D).
+        const line = (ed.readLine(prompt) catch null) orelse {
             if (mode == .multiline) {
                 multiline_buf.clearRetainingCapacity();
                 mode = .normal;
@@ -126,8 +162,8 @@ pub fn run(allocator: Allocator, io: Io) !void {
             }
 
             // Otherwise, accumulate the line.
-            try multiline_buf.appendSlice(allocator, line);
-            try multiline_buf.append(allocator, '\n');
+            try multiline_buf.appendSlice(alloc, line);
+            try multiline_buf.append(alloc, '\n');
             continue;
         }
 
@@ -150,12 +186,10 @@ pub fn run(allocator: Allocator, io: Io) !void {
 
         // Evaluate the input using Protocol.
         const result = evaluate(alloc, &session, line) catch |err| {
-            // Fallback error handling (shouldn't be reached if Protocol returns errors)
             try printError(io, err);
             continue;
         };
 
-        // Handle status
         if (result.status == .success) {
             try writeStdout(io, result.value);
             try writeStdout(io, "\n");
@@ -166,12 +200,104 @@ pub fn run(allocator: Allocator, io: Io) !void {
     }
 }
 
+/// Fallback REPL loop used when LineEditor cannot be initialised.
+///
+/// Reads lines from raw stdin with no editing, completion, or history.
+/// Shares the same session and multiline-block logic as `run`.
+fn runSimple(alloc: Allocator, io: Io, session: *Session) !void {
+    var line_buf: [4096]u8 = undefined;
+    var mode: InputMode = .normal;
+    var multiline_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer multiline_buf.deinit(alloc);
+
+    while (true) {
+        const prompt = switch (mode) {
+            .normal => "rusholme> ",
+            .multiline => "rusholme| ",
+        };
+        try writeStdout(io, prompt);
+
+        const line = readLineRaw(io, &line_buf) catch {
+            if (mode == .multiline) {
+                multiline_buf.clearRetainingCapacity();
+                mode = .normal;
+            }
+            try writeStdout(io, "\n");
+            break;
+        };
+
+        if (line.len == 0) continue;
+
+        // ── Multiline mode handling ───────────────────────────────
+        if (mode == .multiline) {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+
+            if (std.mem.eql(u8, trimmed, ":}")) {
+                const input = multiline_buf.items;
+                defer multiline_buf.clearRetainingCapacity();
+                mode = .normal;
+
+                if (input.len == 0) continue;
+
+                const result = evaluate(alloc, session, input) catch |err| {
+                    try printError(io, err);
+                    continue;
+                };
+                if (result.status == .success) {
+                    try writeStdout(io, result.value);
+                    try writeStdout(io, "\n");
+                } else if (result.status == .failed) {
+                    renderDiagnostics(io, alloc, session, result.diagnostics);
+                }
+                continue;
+            }
+
+            if (std.mem.eql(u8, trimmed, ":quit") or std.mem.eql(u8, trimmed, ":q")) {
+                multiline_buf.clearRetainingCapacity();
+                mode = .normal;
+                break;
+            }
+
+            try multiline_buf.appendSlice(alloc, line);
+            try multiline_buf.append(alloc, '\n');
+            continue;
+        }
+
+        // ── Normal mode ───────────────────────────────────────────
+
+        if (line[0] == ':') {
+            const cmd = std.mem.trim(u8, line[1..], " \t\r");
+
+            if (std.mem.eql(u8, cmd, "{")) {
+                mode = .multiline;
+                continue;
+            }
+
+            const should_continue = handleCommand(io, line, alloc, session);
+            if (!should_continue) break;
+            continue;
+        }
+
+        const result = evaluate(alloc, session, line) catch |err| {
+            try printError(io, err);
+            continue;
+        };
+
+        if (result.status == .success) {
+            try writeStdout(io, result.value);
+            try writeStdout(io, "\n");
+        } else if (result.status == .failed) {
+            renderDiagnostics(io, alloc, session, result.diagnostics);
+        }
+    }
+}
+
 // ── Line reading ──────────────────────────────────────────────────────
 
 /// Read a line from stdin into the provided buffer.
 /// Returns the line contents without the trailing newline.
 /// Returns error on EOF or read failure.
-fn readLine(io: Io, buf: []u8) ![]const u8 {
+fn readLineRaw(io: Io, buf: []u8) ![]const u8 {
     var pos: usize = 0;
     var stdin_buf: [1]u8 = undefined;
     var stdin_rdr = File.stdin().reader(io, &stdin_buf);

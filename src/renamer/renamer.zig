@@ -145,6 +145,27 @@ pub const Scope = struct {
     pub fn boundInCurrentFrame(self: *const Scope, src_name: []const u8) bool {
         return self.current.bindings.contains(src_name);
     }
+
+    /// Collect all source names bound in any scope frame into `results`.
+    ///
+    /// Walks from the innermost frame outward. Inner-frame names shadow
+    /// outer ones at runtime, but for completion all names are included.
+    /// The returned slices point into the scope's hash maps and are
+    /// valid as long as the scope (and its frames) live.
+    pub fn collectNames(
+        self: *const Scope,
+        alloc: std.mem.Allocator,
+        results: *std.ArrayListUnmanaged([]const u8),
+    ) !void {
+        var frame: ?*Frame = self.current;
+        while (frame) |f| {
+            var it = f.bindings.keyIterator();
+            while (it.next()) |key| {
+                try results.append(alloc, key.*);
+            }
+            frame = f.parent;
+        }
+    }
 };
 
 // ── RenameEnv ──────────────────────────────────────────────────────────
@@ -2142,4 +2163,21 @@ test "rename #316: repeated field within the same constructor emits error" {
 
     try testing.expect(diags.hasErrors());
     try testing.expectEqual(DiagnosticCode.duplicate_definition, diags.diagnostics.items[0].code);
+}
+
+test "Scope.collectNames returns all bound names across frames" {
+    var scope = try Scope.init(std.testing.allocator);
+    defer scope.deinit();
+
+    try scope.bind("foo", .{ .base = "foo", .unique = .{ .value = 1 } });
+    try scope.bind("bar", .{ .base = "bar", .unique = .{ .value = 2 } });
+
+    try scope.push();
+    try scope.bind("baz", .{ .base = "baz", .unique = .{ .value = 3 } });
+
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer names.deinit(std.testing.allocator);
+    try scope.collectNames(std.testing.allocator, &names);
+
+    try testing.expect(names.items.len == 3);
 }
