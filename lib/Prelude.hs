@@ -179,8 +179,9 @@ max x y = case x >= y of
 -- Eq type class
 -- ========================================================================
 
--- Helper functions for Eq Bool — top-level to avoid nested-lambda free-variable
--- issues in the lambda lifter (tracked in: https://github.com/adinapoli/rusholme/issues/659).
+-- Helper functions for Eq Bool — can be inlined into the instance now that
+-- #659 is fixed, but kept as top-level helpers until multi-equation instance
+-- methods are verified to work end-to-end.
 eqBool :: Bool -> Bool -> Bool
 eqBool True  True  = True
 eqBool True  False = False

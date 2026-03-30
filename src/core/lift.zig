@@ -111,16 +111,6 @@ const VarSet = struct {
     }
 };
 
-// ── Expression Stack Frame ───────────────────────────────────────────────
-
-/// Represents a scope level with binders and their IDs.
-const Frame = struct {
-    /// Variables bound in this frame.
-    vars: []const u64,
-    /// Lambda IDs defined in this frame.
-    lambdas: []const u64,
-};
-
 /// Set of expression pointers identifying leading parameter lambdas.
 const LeadingLamSet = std.AutoHashMapUnmanaged(usize, void);
 
@@ -137,8 +127,9 @@ pub const LambdaLifter = struct {
     lambdas: std.AutoHashMapUnmanaged(u64, LambdaInfo),
     /// Map from expression pointer to lambda ID (for identifying lambdas during rewrite).
     expr_to_lambda: std.AutoHashMapUnmanaged(usize, u64),
-    /// Stack of frames representing nested scopes.
-    frames: std.ArrayListUnmanaged(Frame),
+    /// Variables visible at top-level scope (program binders + external imports).
+    /// Populated in Phase 1 of lambdaLift; read-only during Phase 2 traversal.
+    top_level_vars: VarSet,
     /// Memoization cache for rewriteExpr, keyed by source expression pointer.
     /// Preserves pointer sharing from the desugarer: the sequential
     /// pattern-match algorithm produces shared fallback nodes (a DAG), and
@@ -151,7 +142,7 @@ pub const LambdaLifter = struct {
             .alloc = alloc,
             .lambdas = .{},
             .expr_to_lambda = .{},
-            .frames = .{},
+            .top_level_vars = VarSet.init(alloc),
         };
     }
 
@@ -165,35 +156,8 @@ pub const LambdaLifter = struct {
 
         self.lambdas.deinit(self.alloc);
         self.expr_to_lambda.deinit(self.alloc);
-        self.frames.deinit(self.alloc);
+        self.top_level_vars.deinit(self.alloc);
         self.rewrite_cache.deinit(self.alloc);
-    }
-
-    /// Push a new scope frame.
-    fn pushFrame(self: *LambdaLifter, vars: []const u64) !void {
-        try self.frames.append(self.alloc, .{
-            .vars = vars,
-            .lambdas = &.{},
-        });
-    }
-
-    /// Pop the current scope frame.
-    fn popFrame(self: *LambdaLifter) void {
-        _ = self.frames.pop();
-    }
-
-    /// Check if a variable is in scope (not free) in the current context.
-    fn inScope(self: *LambdaLifter, id: u64) bool {
-        // Iterate frames from top to bottom
-        var i = self.frames.items.len;
-        while (i > 0) {
-            i -= 1;
-            const frame = self.frames.items[i];
-            for (frame.vars) |var_id| {
-                if (var_id == id) return true;
-            }
-        }
-        return false;
     }
 
     /// Walk the leading Lam chain of an expression and record the pointer
@@ -246,92 +210,84 @@ pub const LambdaLifter = struct {
     }
 
     /// Collect all lambdas in an expression and compute their free variables.
-    /// Returns the set of free variables in the entire expression.
+    /// Returns a fresh VarSet containing the free variables of the expression.
+    ///
+    /// `scope` is an immutable snapshot of variables currently in scope.
+    /// It is passed by value (shallow copy) and never mutated — when the
+    /// scope must be extended (let binders, case binders, lambda params),
+    /// a deep clone is created via `scope.clone()`.
+    ///
+    /// For expression lambdas (needs_lifting), the scope resets to
+    /// `self.top_level_vars ∪ {param}` — enclosing lambda parameters
+    /// become free variables that are passed as extra arguments.
+    /// The "contribution" propagated to the caller is filtered by the
+    /// caller's scope, preventing variables already in scope from leaking
+    /// upward.  This is the fix for #659.
     ///
     /// `leading_lams` contains the pointer addresses of Lam nodes that form
     /// leading parameter chains on top-level binding RHS. Lambdas in this set
     /// are NOT lifted (translateDef peels them).
-    fn collectLambdas(
+    fn collectFreeVarsOf(
         self: *LambdaLifter,
         expr: *const Expr,
+        scope: VarSet,
         leading_lams: *const LeadingLamSet,
-        current_frame: *Frame,
-        free_vars: *VarSet,
-        ty: CoreType,
     ) !VarSet {
+        var fvs = VarSet.init(self.alloc);
+        errdefer fvs.deinit(self.alloc);
+
         switch (expr.*) {
             .Var => |v| {
                 // Data constructors are globally available and must never be
                 // captured as free variables.  In Haskell, constructor names
                 // start with an uppercase letter or ':'.
-                if (!isDataCon(v.name.base) and !self.inScope(v.name.unique.value)) {
-                    try free_vars.add(self.alloc, v.name.unique.value);
+                if (!isDataCon(v.name.base) and !scope.contains(v.name.unique.value)) {
+                    try fvs.add(self.alloc, v.name.unique.value);
                 }
             },
             .Lit => {},
             .App => |a| {
-                var fn_free = try self.collectLambdas(a.fn_expr, leading_lams, current_frame, free_vars, ty);
-                defer fn_free.deinit(self.alloc);
-                var arg_free = try self.collectLambdas(a.arg, leading_lams, current_frame, free_vars, ty);
-                defer arg_free.deinit(self.alloc);
-                try free_vars.merge(self.alloc, &fn_free);
-                try free_vars.merge(self.alloc, &arg_free);
+                var fn_fvs = try self.collectFreeVarsOf(a.fn_expr, scope, leading_lams);
+                defer fn_fvs.deinit(self.alloc);
+                var arg_fvs = try self.collectFreeVarsOf(a.arg, scope, leading_lams);
+                defer arg_fvs.deinit(self.alloc);
+                try fvs.merge(self.alloc, &fn_fvs);
+                try fvs.merge(self.alloc, &arg_fvs);
             },
             .Lam => |l| {
                 const is_leading = leading_lams.contains(@intFromPtr(expr));
                 const needs_lifting = !is_leading;
 
                 const lambda_id = try self.registerLambda(expr);
-
                 const param_id = l.binder.name.unique.value;
 
                 if (needs_lifting) {
                     // Expression lambda: will be lifted to top level.
                     //
-                    // For free-variable computation, only the top-level frame
-                    // (index 0) and this lambda's own parameter should be
-                    // visible. Enclosing lambda parameters are NOT in scope
-                    // for the lifted function — they become free variables
-                    // that are passed as extra arguments at the call site.
-                    //
-                    // We use a temporary frame list so that `append` inside
-                    // the recursive call cannot invalidate the saved frames.
-                    const saved_frames = self.frames;
-                    self.frames = .{};
-                    try self.frames.append(self.alloc, saved_frames.items[0]); // top-level frame
+                    // Scope resets to top-level vars + own parameter.
+                    // Enclosing lambda parameters are NOT in scope for the
+                    // lifted function — they become free variables passed as
+                    // extra arguments at the call site.
+                    var inner_scope = try self.top_level_vars.clone(self.alloc);
+                    defer inner_scope.deinit(self.alloc);
+                    try inner_scope.add(self.alloc, param_id);
 
-                    var new_frame_vars = try self.alloc.alloc(u64, 1);
-                    new_frame_vars[0] = param_id;
-
-                    var new_frame = Frame{
-                        .vars = new_frame_vars,
-                        .lambdas = &.{},
-                    };
-                    try self.frames.append(self.alloc, new_frame);
-
-                    // Collect free variables in the lambda body.
-                    var body_free_vars = VarSet.init(self.alloc);
-                    defer body_free_vars.deinit(self.alloc);
-                    _ = try self.collectLambdas(l.body, leading_lams, &new_frame, &body_free_vars, ty);
-
-                    // Discard temporary frame list and restore the saved one.
-                    self.alloc.free(new_frame_vars);
-                    self.frames.deinit(self.alloc);
-                    self.frames = saved_frames;
+                    var inner_fvs = try self.collectFreeVarsOf(l.body, inner_scope, leading_lams);
+                    defer inner_fvs.deinit(self.alloc);
 
                     // Complete lambda registration with free variables.
-                    const free_vars_slice = try body_free_vars.toSlice(self.alloc);
+                    const fvs_slice = try inner_fvs.toSlice(self.alloc);
                     // Heap-allocate the params slice so it outlives this scope.
                     // Using a temporary `&.{l.binder}` would create a dangling
                     // reference — all lifted lambdas would share the same
                     // (overwritten) stack slot.
                     const param_slice = try self.alloc.alloc(Id, 1);
                     param_slice[0] = l.binder;
-                    try self.completeLambda(lambda_id, free_vars_slice, param_slice, l.body, l.binder.ty, needs_lifting);
+                    try self.completeLambda(lambda_id, fvs_slice, param_slice, l.body, l.binder.ty, needs_lifting);
 
                     // Compute function type with free vars added as parameters.
                     var lifted_ty = l.binder.ty;
-                    for (free_vars_slice) |_| {
+                    for (fvs_slice) |_| {
                         const p_ty = try self.alloc.create(CoreType);
                         p_ty.* = intType(); // tracked in: follow-up issue for placeholder types
                         const param_ty = try self.alloc.create(CoreType);
@@ -344,164 +300,104 @@ pub const LambdaLifter = struct {
                         info_ptr.ty = lifted_ty;
                     }
 
-                    // Propagate free variables of the lifted lambda to the
-                    // enclosing scope so that the caller knows these variables
-                    // are needed.
-                    for (free_vars_slice) |fv_id| {
-                        try free_vars.add(self.alloc, fv_id);
+                    // Propagate: only free vars NOT already in the caller's
+                    // scope.  This is the key fix for #659 — without the
+                    // filter, an enclosing lambda's own parameter leaks
+                    // upward as a spurious free variable.
+                    for (fvs_slice) |fv_id| {
+                        if (!scope.contains(fv_id)) {
+                            try fvs.add(self.alloc, fv_id);
+                        }
                     }
                 } else {
                     // Parameter lambda: part of the leading chain on a
                     // top-level binding RHS. Keep in place — translateDef
                     // will peel it as a function parameter.
                     //
-                    // Scope handling: add the parameter to the current frame
-                    // so that the body sees it as in-scope (not free).
-                    var new_frame_vars = try self.alloc.alloc(u64, current_frame.vars.len + 1);
-                    @memcpy(new_frame_vars[0..current_frame.vars.len], current_frame.vars);
-                    new_frame_vars[current_frame.vars.len] = param_id;
+                    // Scope handling: clone scope and add the parameter so
+                    // that the body sees it as in-scope (not free).
+                    var extended_scope = try scope.clone(self.alloc);
+                    defer extended_scope.deinit(self.alloc);
+                    try extended_scope.add(self.alloc, param_id);
 
-                    var new_frame = Frame{
-                        .vars = new_frame_vars,
-                        .lambdas = &.{},
-                    };
-                    try self.frames.append(self.alloc, new_frame);
-
-                    // Collect free variables in the lambda body.
-                    var body_free_vars = VarSet.init(self.alloc);
-                    defer body_free_vars.deinit(self.alloc);
-                    _ = try self.collectLambdas(l.body, leading_lams, &new_frame, &body_free_vars, ty);
-
-                    // Pop the frame.
-                    _ = self.frames.pop();
-                    self.alloc.free(new_frame_vars);
+                    var body_fvs = try self.collectFreeVarsOf(l.body, extended_scope, leading_lams);
+                    defer body_fvs.deinit(self.alloc);
 
                     // Complete lambda registration (not lifted, but still tracked).
-                    const free_vars_slice = try body_free_vars.toSlice(self.alloc);
-                    try self.completeLambda(lambda_id, free_vars_slice, &.{l.binder}, l.body, l.binder.ty, needs_lifting);
+                    const fvs_slice = try body_fvs.toSlice(self.alloc);
+                    try self.completeLambda(lambda_id, fvs_slice, &.{l.binder}, l.body, l.binder.ty, needs_lifting);
+
+                    // Leading lambdas contribute their body's free vars to the parent.
+                    try fvs.merge(self.alloc, &body_fvs);
                 }
             },
             .Let => |l| {
                 switch (l.bind) {
                     .NonRec => |pair| {
-                        // Create new frame with binder.
-                        var new_frame_vars = try self.alloc.alloc(u64, current_frame.vars.len + 1);
-                        @memcpy(new_frame_vars[0..current_frame.vars.len], current_frame.vars);
-                        new_frame_vars[current_frame.vars.len] = pair.binder.name.unique.value;
+                        // RHS is evaluated in the current scope (the binder
+                        // is not yet visible to its own definition).
+                        var rhs_fvs = try self.collectFreeVarsOf(pair.rhs, scope, leading_lams);
+                        defer rhs_fvs.deinit(self.alloc);
+                        try fvs.merge(self.alloc, &rhs_fvs);
 
-                        var new_frame = Frame{
-                            .vars = new_frame_vars,
-                            .lambdas = &.{},
-                        };
-                        try self.frames.append(self.alloc, new_frame);
+                        // Body sees the binder in scope.
+                        var body_scope = try scope.clone(self.alloc);
+                        defer body_scope.deinit(self.alloc);
+                        try body_scope.add(self.alloc, pair.binder.name.unique.value);
 
-                        // Collect free vars in RHS.
-                        var rhs_free = try self.collectLambdas(pair.rhs, leading_lams, &new_frame, free_vars, ty);
-                        defer rhs_free.deinit(self.alloc);
-
-                        // Collect free vars in body.
-                        var body_free = try self.collectLambdas(l.body, leading_lams, &new_frame, free_vars, ty);
-                        defer body_free.deinit(self.alloc);
-
-                        try free_vars.merge(self.alloc, &rhs_free);
-                        try free_vars.merge(self.alloc, &body_free);
-
-                        // Pop frame.
-                        _ = self.frames.pop();
-                        self.alloc.free(new_frame_vars);
+                        var body_fvs = try self.collectFreeVarsOf(l.body, body_scope, leading_lams);
+                        defer body_fvs.deinit(self.alloc);
+                        try fvs.merge(self.alloc, &body_fvs);
                     },
                     .Rec => |pairs| {
-                        // Create new frame with all binders.
-                        const old_len = current_frame.vars.len;
-                        var new_frame_vars = try self.alloc.alloc(u64, old_len + pairs.len);
-                        @memcpy(new_frame_vars[0..old_len], current_frame.vars);
-                        for (pairs, 0..) |pair, i| {
-                            new_frame_vars[old_len + i] = pair.binder.name.unique.value;
-                        }
-
-                        var new_frame = Frame{
-                            .vars = new_frame_vars,
-                            .lambdas = &.{},
-                        };
-                        try self.frames.append(self.alloc, new_frame);
-
-                        var all_rhs_free = VarSet.init(self.alloc);
-                        defer all_rhs_free.deinit(self.alloc);
-
-                        // Collect free vars in all RHS.
+                        // All binders are in scope for every RHS and the body.
+                        var rec_scope = try scope.clone(self.alloc);
+                        defer rec_scope.deinit(self.alloc);
                         for (pairs) |pair| {
-                            var rhs_free = try self.collectLambdas(pair.rhs, leading_lams, &new_frame, free_vars, ty);
-                            defer rhs_free.deinit(self.alloc);
-                            try all_rhs_free.merge(self.alloc, &rhs_free);
+                            try rec_scope.add(self.alloc, pair.binder.name.unique.value);
                         }
 
-                        // Collect free vars in body.
-                        var body_free = try self.collectLambdas(l.body, leading_lams, &new_frame, free_vars, ty);
-                        defer body_free.deinit(self.alloc);
+                        for (pairs) |pair| {
+                            var rhs_fvs = try self.collectFreeVarsOf(pair.rhs, rec_scope, leading_lams);
+                            defer rhs_fvs.deinit(self.alloc);
+                            try fvs.merge(self.alloc, &rhs_fvs);
+                        }
 
-                        try free_vars.merge(self.alloc, &all_rhs_free);
-                        try free_vars.merge(self.alloc, &body_free);
-
-                        // Pop frame.
-                        _ = self.frames.pop();
-                        self.alloc.free(new_frame_vars);
+                        var body_fvs = try self.collectFreeVarsOf(l.body, rec_scope, leading_lams);
+                        defer body_fvs.deinit(self.alloc);
+                        try fvs.merge(self.alloc, &body_fvs);
                     },
                 }
             },
             .Case => |c| {
-                // Collect free vars in scrutinee.
-                var scrut_free = try self.collectLambdas(c.scrutinee, leading_lams, current_frame, free_vars, ty);
-                defer scrut_free.deinit(self.alloc);
-                try free_vars.merge(self.alloc, &scrut_free);
+                // Scrutinee is evaluated in the current scope.
+                var scrut_fvs = try self.collectFreeVarsOf(c.scrutinee, scope, leading_lams);
+                defer scrut_fvs.deinit(self.alloc);
+                try fvs.merge(self.alloc, &scrut_fvs);
 
-                // Create new frame with case binder.
-                var new_frame_vars = try self.alloc.alloc(u64, current_frame.vars.len + 1);
-                @memcpy(new_frame_vars[0..current_frame.vars.len], current_frame.vars);
-                new_frame_vars[current_frame.vars.len] = c.binder.name.unique.value;
-
-                var new_frame = Frame{
-                    .vars = new_frame_vars,
-                    .lambdas = &.{},
-                };
-                try self.frames.append(self.alloc, new_frame);
-
-                var all_alt_free = VarSet.init(self.alloc);
-                defer all_alt_free.deinit(self.alloc);
+                // Case binder is in scope for all alternatives.
+                var case_scope = try scope.clone(self.alloc);
+                defer case_scope.deinit(self.alloc);
+                try case_scope.add(self.alloc, c.binder.name.unique.value);
 
                 for (c.alts) |alt| {
-                    // Create frame with alt binders.
-                    var alt_frame_vars = try self.alloc.alloc(u64, new_frame.vars.len + alt.binders.len);
-                    @memcpy(alt_frame_vars[0..new_frame.vars.len], new_frame.vars);
-                    for (alt.binders, 0..) |binder, i| {
-                        alt_frame_vars[new_frame.vars.len + i] = binder.name.unique.value;
+                    // Each alt adds its pattern binders to scope.
+                    var alt_scope = try case_scope.clone(self.alloc);
+                    defer alt_scope.deinit(self.alloc);
+                    for (alt.binders) |binder| {
+                        try alt_scope.add(self.alloc, binder.name.unique.value);
                     }
 
-                    var alt_frame = Frame{
-                        .vars = alt_frame_vars,
-                        .lambdas = &.{},
-                    };
-                    try self.frames.append(self.alloc, alt_frame);
-
-                    var alt_free = try self.collectLambdas(alt.body, leading_lams, &alt_frame, free_vars, ty);
-                    defer alt_free.deinit(self.alloc);
-                    try all_alt_free.merge(self.alloc, &alt_free);
-
-                    // Pop alt frame.
-                    _ = self.frames.pop();
-                    self.alloc.free(alt_frame_vars);
+                    var alt_fvs = try self.collectFreeVarsOf(alt.body, alt_scope, leading_lams);
+                    defer alt_fvs.deinit(self.alloc);
+                    try fvs.merge(self.alloc, &alt_fvs);
                 }
-
-                try free_vars.merge(self.alloc, &all_alt_free);
-
-                // Pop case frame.
-                _ = self.frames.pop();
-                self.alloc.free(new_frame_vars);
             },
             .Type => {},
             .Coercion => {},
         }
 
-        return free_vars.clone(self.alloc) catch free_vars.*;
+        return fvs;
     }
 
     /// Rewrite an expression, replacing lifted lambdas with function calls.
@@ -709,31 +605,27 @@ pub fn lambdaLift(alloc: std.mem.Allocator, program: core.CoreProgram, external_
     var lifter = LambdaLifter.init(alloc);
     defer lifter.deinit();
 
-    // Phase 1: Create initial frame with top-level binders + externals.
-    var top_level_vars = std.ArrayListUnmanaged(u64){};
-    defer top_level_vars.deinit(alloc);
-
+    // Phase 1: Build top-level scope (program binders + externals).
     // Include externally-visible names (Prelude, imports) so that the
     // free-variable analysis does not capture them as closures.
     if (external_scope) |ext| {
-        try top_level_vars.appendSlice(alloc, ext);
+        for (ext) |id| {
+            try lifter.top_level_vars.add(alloc, id);
+        }
     }
 
     for (program.binds) |bind| {
         switch (bind) {
             .NonRec => |pair| {
-                try top_level_vars.append(alloc, pair.binder.name.unique.value);
+                try lifter.top_level_vars.add(alloc, pair.binder.name.unique.value);
             },
             .Rec => |pairs| {
                 for (pairs) |pair| {
-                    try top_level_vars.append(alloc, pair.binder.name.unique.value);
+                    try lifter.top_level_vars.add(alloc, pair.binder.name.unique.value);
                 }
             },
         }
     }
-
-    const top_level_slice = try top_level_vars.toOwnedSlice(alloc);
-    try lifter.pushFrame(top_level_slice);
 
     // Phase 2: Collect all lambdas and their free variables.
     // For each binding, compute the leading Lam set (parameter lambdas that
@@ -746,24 +638,22 @@ pub fn lambdaLift(alloc: std.mem.Allocator, program: core.CoreProgram, external_
             .NonRec => |pair| {
                 leading_lams.clearRetainingCapacity();
                 try LambdaLifter.collectLeadingLamPtrs(pair.rhs, &leading_lams, alloc);
-                var free_vars = VarSet.init(alloc);
-                defer free_vars.deinit(alloc);
-                _ = try lifter.collectLambdas(pair.rhs, &leading_lams, &lifter.frames.items[0], &free_vars, intType());
+                var result_fvs = try lifter.collectFreeVarsOf(pair.rhs, lifter.top_level_vars, &leading_lams);
+                result_fvs.deinit(alloc);
             },
             .Rec => |pairs| {
-                var free_vars = VarSet.init(alloc);
-                defer free_vars.deinit(alloc);
                 for (pairs) |pair| {
                     leading_lams.clearRetainingCapacity();
                     try LambdaLifter.collectLeadingLamPtrs(pair.rhs, &leading_lams, alloc);
-                    _ = try lifter.collectLambdas(pair.rhs, &leading_lams, &lifter.frames.items[0], &free_vars, intType());
+                    var result_fvs = try lifter.collectFreeVarsOf(pair.rhs, lifter.top_level_vars, &leading_lams);
+                    result_fvs.deinit(alloc);
                 }
             },
         }
     }
 
-    // Pop the top-level frame.
-    lifter.popFrame();
+    // Derive top-level slice for Phase 4 (rewriteBind needs []const u64).
+    const top_level_slice = try lifter.top_level_vars.toSlice(alloc);
 
     // Phase 3: Generate lifted function bindings.
     var lifted_binds = std.ArrayListUnmanaged(Bind){};
@@ -1105,25 +995,18 @@ test "lambdaLift: nested lambda free vars include enclosing lambda params" {
         .rhs = outer_lambda,
     } };
 
-    const program: core.CoreProgram = .{
-        .data_decls = &.{},
-        .binds = &.{},
-    };
-    _ = program;
-
     // Use a separate lifter to inspect the lambda info directly.
     var lifter = LambdaLifter.init(alloc);
     defer lifter.deinit();
 
-    try lifter.pushFrame(&.{f_bind.NonRec.binder.name.unique.value});
+    try lifter.top_level_vars.add(alloc, f_bind.NonRec.binder.name.unique.value);
 
     var leading_lams = LeadingLamSet{};
     defer leading_lams.deinit(alloc);
     try LambdaLifter.collectLeadingLamPtrs(f_bind.NonRec.rhs, &leading_lams, alloc);
 
-    var free_vars = VarSet.init(alloc);
-    defer free_vars.deinit(alloc);
-    _ = try lifter.collectLambdas(f_bind.NonRec.rhs, &leading_lams, &lifter.frames.items[0], &free_vars, intType());
+    var result_fvs = try lifter.collectFreeVarsOf(f_bind.NonRec.rhs, lifter.top_level_vars, &leading_lams);
+    result_fvs.deinit(alloc);
 
     // Find the lifted lambda (the one with needs_lifting = true).
     var found_lifted = false;
@@ -1284,6 +1167,96 @@ test "VarSet: clone" {
     try testing.expect(!set1.contains(3));
 }
 
+test "lambdaLift: two-arg expression lambda does not propagate own param as free var (#659)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // g = (\x -> (\y -> x)) 5
+    //
+    // Both \x and \y are expression lambdas (inside App, not leading).
+    // \y -> x should capture x as free var.
+    // \x should have ZERO free vars — x is its own parameter.
+    // Bug #659: the old code propagated x to \x's free vars.
+
+    const x_id = testId("x", 1);
+    const y_id = testId("y", 2);
+    const five_lit = try alloc.create(Expr);
+    five_lit.* = .{ .Lit = .{ .val = .{ .Int = 5 }, .span = testSpan() } };
+
+    const x_var = try alloc.create(Expr);
+    x_var.* = .{ .Var = x_id };
+
+    // Inner lambda: \y -> x
+    const inner_lambda = try alloc.create(Expr);
+    inner_lambda.* = .{ .Lam = .{
+        .binder = y_id,
+        .body = x_var,
+        .span = testSpan(),
+    } };
+
+    // Outer lambda: \x -> (\y -> x)
+    const outer_lambda = try alloc.create(Expr);
+    outer_lambda.* = .{ .Lam = .{
+        .binder = x_id,
+        .body = inner_lambda,
+        .span = testSpan(),
+    } };
+
+    // Application: (\x -> (\y -> x)) 5
+    // Makes \x an expression lambda (not leading — it's inside App).
+    const app = try alloc.create(Expr);
+    app.* = .{ .App = .{
+        .fn_expr = outer_lambda,
+        .arg = five_lit,
+        .span = testSpan(),
+    } };
+
+    const g_bind = Bind{ .NonRec = .{
+        .binder = testId("g", 10),
+        .rhs = app,
+    } };
+
+    const program: core.CoreProgram = .{
+        .data_decls = &.{},
+        .binds = &.{g_bind},
+    };
+
+    const lifted = try lambdaLift(alloc, program, null);
+
+    // Should have 3 bindings: lifted \y, lifted \x, rewritten g.
+    try testing.expectEqual(@as(usize, 3), lifted.binds.len);
+
+    // Also verify via direct lifter inspection.
+    var lifter = LambdaLifter.init(alloc);
+    defer lifter.deinit();
+    try lifter.top_level_vars.add(alloc, g_bind.NonRec.binder.name.unique.value);
+
+    var leading_lams = LeadingLamSet{};
+    defer leading_lams.deinit(alloc);
+    // No leading lams — RHS is an App, not a Lam chain.
+
+    var result_fvs = try lifter.collectFreeVarsOf(g_bind.NonRec.rhs, lifter.top_level_vars, &leading_lams);
+    result_fvs.deinit(alloc);
+
+    // Check each lifted lambda.
+    var lifted_it = lifter.lambdas.iterator();
+    while (lifted_it.next()) |entry| {
+        const info = &entry.value_ptr.*;
+        if (!info.needs_lifting) continue;
+
+        if (info.params.len == 1 and info.params[0].name.unique.value == y_id.name.unique.value) {
+            // \y -> x: should have x (unique=1) as free var.
+            try testing.expectEqual(@as(usize, 1), info.free_vars.len);
+            try testing.expectEqual(@as(u64, 1), info.free_vars[0]);
+        } else if (info.params.len == 1 and info.params[0].name.unique.value == x_id.name.unique.value) {
+            // \x -> (\y -> x): x is own param, so ZERO free vars.
+            // This is the core assertion for #659.
+            try testing.expectEqual(@as(usize, 0), info.free_vars.len);
+        }
+    }
+}
+
 test "LambdaLifter: initialization" {
     const alloc = testing.allocator;
 
@@ -1292,23 +1265,5 @@ test "LambdaLifter: initialization" {
 
     try testing.expectEqual(@as(u64, 0), lifter.lambda_counter);
     try testing.expectEqual(@as(usize, 0), lifter.lambdas.count());
-}
-
-test "LambdaLifter: frame management" {
-    const alloc = testing.allocator;
-
-    var lifter = LambdaLifter.init(alloc);
-    defer lifter.deinit();
-
-    const vars = [_]u64{ 1, 2, 3 };
-    try lifter.pushFrame(&vars);
-
-    try testing.expect(lifter.inScope(1));
-    try testing.expect(lifter.inScope(2));
-    try testing.expect(lifter.inScope(3));
-    try testing.expect(!lifter.inScope(99));
-
-    lifter.popFrame();
-
-    try testing.expect(!lifter.inScope(1));
+    try testing.expectEqual(@as(usize, 0), lifter.top_level_vars.set.count());
 }
