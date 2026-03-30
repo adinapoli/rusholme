@@ -366,7 +366,7 @@ pub const Pipeline = struct {
         }
 
         // ── Lambda lift ────────────────────────────────────────────
-        const core_lifted = lift_mod.lambdaLift(alloc, desugar_result.program, null) catch {
+        const lift_result = lift_mod.lambdaLift(alloc, desugar_result.program, null, 0) catch {
             module_types.deinit(alloc);
             return CompileError.OutOfMemory;
         };
@@ -376,7 +376,7 @@ pub const Pipeline = struct {
         }
 
         // ── Translate to GRIN ──────────────────────────────────────
-        const grin_prog = translate_mod.translateProgram(alloc, core_lifted, external_arities, external_con_map) catch {
+        const grin_prog = translate_mod.translateProgram(alloc, lift_result.program, external_arities, external_con_map) catch {
             module_types.deinit(alloc);
             return CompileError.OutOfMemory;
         };
@@ -394,7 +394,7 @@ pub const Pipeline = struct {
 
         return .{
             .grin_prog = grin_prog,
-            .core_data_decls = core_lifted.data_decls,
+            .core_data_decls = lift_result.program.data_decls,
             .class_env = result_class_env,
             .dict_names = desugar_result.dict_names,
         };
