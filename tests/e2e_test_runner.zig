@@ -335,3 +335,11 @@ test "e2e: e2e_020_where_constant (#623)" {
 test "e2e: e2e_021_type_annotation (#644)" {
     try testE2e(std.testing.allocator, "e2e_021_type_annotation");
 }
+
+test "e2e: e2e_022_declaration_order (#566)" {
+    try testE2e(std.testing.allocator, "e2e_022_declaration_order");
+}
+
+test "e2e: e2e_023_mutual_recursion (#566)" {
+    try testE2e(std.testing.allocator, "e2e_023_mutual_recursion");
+}

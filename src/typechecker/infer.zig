@@ -79,6 +79,7 @@ const env_mod = @import("env.zig");
 const unify_mod = @import("unify.zig");
 const solver_mod = @import("solver.zig");
 const class_env_mod = @import("class_env.zig");
+const decl_groups_mod = @import("decl_groups.zig");
 const renamer_mod = @import("../renamer/renamer.zig");
 const diag_mod = @import("../diagnostics/diagnostic.zig");
 const span_mod = @import("../diagnostics/span.zig");
@@ -2101,55 +2102,18 @@ pub fn inferModule(
         }
     }
 
-    // Snapshot env free metas before any top-level binders are added.
-    // All top-level bindings are mutually recursive peers, so they share
-    // this one snapshot for the active-variables check during generalisation.
-    var env_metas = std.AutoHashMapUnmanaged(u32, void){};
-    defer env_metas.deinit(ctx.alloc);
-    try ctx.env.collectFreeMetas(&env_metas, ctx.alloc);
-
     var data_schemes = std.AutoHashMapUnmanaged(naming_mod.Unique, TyScheme){};
     defer data_schemes.deinit(ctx.alloc);
 
-    // Pass 1: allocate fresh meta nodes for all top-level binders.
     var top_metas = std.AutoHashMapUnmanaged(naming_mod.Unique, *HType){};
+
+    // ── Pre-pass: register non-value declarations ───────────────────────
+    //
+    // Data declarations, foreign prims, and instance method bodies don't
+    // participate in the SCC analysis. Process them first so their
+    // schemes are available during value declaration inference.
     for (module.declarations) |decl| {
         switch (decl) {
-            .FunBind => |fb| {
-                const node = try ctx.freshMeta();
-                try ctx.env.bindMono(fb.name, node.*);
-                try ctx.local_binders.put(ctx.alloc, fb.name.unique, node);
-                try top_metas.put(ctx.alloc, fb.name.unique, node);
-
-                // If this function has a type signature, bind the
-                // polymorphic scheme immediately so that callers processed
-                // before this function (declaration-order issue #566) see
-                // the poly scheme and instantiate with fresh metas.
-                // Without this, callers get the mono binding (0 binders),
-                // return the shared meta pointer, and the conArgIndirection
-                // unification side-effects pollute the meta before the
-                // function's own body is checked.
-                if (sigs.get(fb.name.unique)) |sig_entry| {
-                    const scheme = TyScheme{
-                        .binders = sig_entry.skolem_ids,
-                        .constraints = sig_entry.constraints,
-                        .body = sig_entry.ty.*,
-                    };
-                    try ctx.env.bind(fb.name, scheme);
-                }
-            },
-            .PatBind => |pb| try assignPatMetas(ctx, pb.pattern, &top_metas),
-            .TypeSig => {},
-            .ClassDecl => {}, // Handled in Pass 0a
-            .InstanceDecl => {}, // Handled in Pass 0a
-            .ForeignPrim => |fp| {
-                // Foreign prim declarations have a mandatory type signature.
-                // Allocate a fresh meta and bind it, just like FunBind.
-                const node = try ctx.freshMeta();
-                try ctx.env.bindMono(fp.name, node.*);
-                try ctx.local_binders.put(ctx.alloc, fp.name.unique, node);
-                try top_metas.put(ctx.alloc, fp.name.unique, node);
-            },
             .DataDecl => |dd| {
                 var scope_dd = TypeVarMap{};
                 defer scope_dd.deinit(ctx.alloc);
@@ -2217,72 +2181,130 @@ pub fn inferModule(
                     try data_schemes.put(ctx.alloc, selector_info.name.unique, selector_scheme);
                 }
             },
+            .ForeignPrim => |fp| {
+                const node = try ctx.freshMeta();
+                try ctx.env.bindMono(fp.name, node.*);
+                try ctx.local_binders.put(ctx.alloc, fp.name.unique, node);
+                try top_metas.put(ctx.alloc, fp.name.unique, node);
+
+                // Foreign prim has no body to infer — just unify the meta
+                // with the skolemised signature and build the type scheme.
+                const sig_entry = sigs.get(fp.name.unique) orelse continue;
+                try ctx.unifyNow(node, sig_entry.ty, fp.span);
+                const scheme = TyScheme{
+                    .binders = sig_entry.skolem_ids,
+                    .constraints = sig_entry.constraints,
+                    .body = sig_entry.ty.*,
+                };
+                try ctx.env.bind(fp.name, scheme);
+            },
+            else => {},
         }
     }
 
-    // Pass 2: infer each declaration body, unify through the node, generalise.
-    for (module.declarations) |decl| {
-        switch (decl) {
-            .FunBind => |fb| {
-                const fun_node = top_metas.get(fb.name.unique) orelse continue;
-                const sig_entry = sigs.get(fb.name.unique);
+    // ── SCC-based value declaration inference (Haskell 2010 §4.5.1) ────
+    //
+    // Compute dependency groups among top-level value declarations and
+    // process them in topological order. Within each group, all binders
+    // share metas and are generalised together. Between groups, earlier
+    // groups are fully generalised before later groups start — so later
+    // groups see polymorphic types, not unsolved metas.
+    const decl_groups = try decl_groups_mod.computeDeclGroups(module.declarations, ctx.alloc);
 
-                for (fb.equations) |eq| {
-                    const eq_ty = try inferMatch(ctx, eq);
+    for (decl_groups) |group| {
+        // Snapshot env free metas for this group's generalisation.
+        var env_metas = std.AutoHashMapUnmanaged(u32, void){};
+        defer env_metas.deinit(ctx.alloc);
+        try ctx.env.collectFreeMetas(&env_metas, ctx.alloc);
+
+        // Group Pass 1: allocate metas and pre-bind signatures.
+        for (group.decl_indices) |di| {
+            const decl = module.declarations[di];
+            switch (decl) {
+                .FunBind => |fb| {
+                    const node = try ctx.freshMeta();
+                    try ctx.env.bindMono(fb.name, node.*);
+                    try ctx.local_binders.put(ctx.alloc, fb.name.unique, node);
+                    try top_metas.put(ctx.alloc, fb.name.unique, node);
+
+                    // Pre-bind signature so references within the group
+                    // (and from later groups) see the polymorphic scheme.
+                    if (sigs.get(fb.name.unique)) |sig_entry| {
+                        const scheme = TyScheme{
+                            .binders = sig_entry.skolem_ids,
+                            .constraints = sig_entry.constraints,
+                            .body = sig_entry.ty.*,
+                        };
+                        try ctx.env.bind(fb.name, scheme);
+                    }
+                },
+                .PatBind => |pb| try assignPatMetas(ctx, pb.pattern, &top_metas),
+                else => {},
+            }
+        }
+
+        // Group Pass 2: infer bodies.
+        for (group.decl_indices) |di| {
+            const decl = module.declarations[di];
+            switch (decl) {
+                .FunBind => |fb| {
+                    const fun_node = top_metas.get(fb.name.unique) orelse continue;
+                    const sig_entry = sigs.get(fb.name.unique);
+
+                    for (fb.equations) |eq| {
+                        const eq_ty = try inferMatch(ctx, eq);
+
+                        if (sig_entry) |s| {
+                            try ctx.unifyNow(eq_ty, s.ty, fb.span);
+                            try ctx.unifyNow(fun_node, s.ty, fb.span);
+                        } else {
+                            try ctx.unifyNow(fun_node, eq_ty, fb.span);
+                        }
+                    }
+                },
+                .PatBind => |pb| {
+                    const rhs_ty = try inferRhs(ctx, pb.rhs);
+                    const pat_ty = try inferPat(ctx, pb.pattern);
+                    try ctx.unifyNow(rhs_ty, pat_ty, pb.span);
+                },
+                else => {},
+            }
+        }
+
+        // Group generalisation: generalise all binders together.
+        for (group.decl_indices) |di| {
+            const decl = module.declarations[di];
+            switch (decl) {
+                .FunBind => |fb| {
+                    const fun_node = top_metas.get(fb.name.unique) orelse continue;
+                    const sig_entry = sigs.get(fb.name.unique);
 
                     if (sig_entry) |s| {
-                        // If there's a signature, unify the inferred type against it.
-                        try ctx.unifyNow(eq_ty, s.ty, fb.span);
-                        // Also unify fun_node with the signature so that local_binders
-                        // has the solved type. Without this, fun_node remains an unsolved
-                        // meta and causes a panic in HType.toCore during desugaring.
-                        try ctx.unifyNow(fun_node, s.ty, fb.span);
+                        const scheme = TyScheme{
+                            .binders = s.skolem_ids,
+                            .constraints = s.constraints,
+                            .body = s.ty.*,
+                        };
+                        try ctx.env.bind(fb.name, scheme);
                     } else {
-                        // Otherwise, unify against the fresh meta node.
-                        try ctx.unifyNow(fun_node, eq_ty, fb.span);
+                        const scheme = try generalisePtr(ctx, fun_node, &env_metas);
+                        try ctx.env.bind(fb.name, scheme);
                     }
-                }
+                },
+                .PatBind => {}, // PatBind generalisation handled via top_metas lookup below
+                else => {},
+            }
+        }
+    }
 
-                if (sig_entry) |s| {
-                    // For bindings with signatures, build the TyScheme directly from
-                    // the skolemised signature. The signature has already been skolemised
-                    // in Pass 0, so we use its rigid (skolem) binders directly instead of
-                    // generalising metavariables. This enforces that the function body must
-                    // work for all instantiations of the skolemised variables.
-                    const scheme = TyScheme{
-                        .binders = s.skolem_ids,
-                        .constraints = s.constraints,
-                        .body = s.ty.*,
-                    };
-                    try ctx.env.bind(fb.name, scheme);
-                } else {
-                    // For bindings without signatures, generalise the inferred type.
-                    const scheme = try generalisePtr(ctx, fun_node, &env_metas);
-                    try ctx.env.bind(fb.name, scheme);
-                }
-            },
-            .PatBind => |pb| {
-                const rhs_ty = try inferRhs(ctx, pb.rhs);
-                const pat_ty = try inferPat(ctx, pb.pattern);
-                try ctx.unifyNow(rhs_ty, pat_ty, pb.span);
-            },
-            .TypeSig => {},
-            .ClassDecl => {}, // Handled in Pass 0a
+    // ── Instance method body inference ──────────────────────────────────
+    //
+    // Runs AFTER the SCC value-declaration loop so that all Prelude/module
+    // value declarations are fully generalised and visible. Instance
+    // method bodies reference these values (e.g. eqBool, showPosInt).
+    for (module.declarations) |decl| {
+        switch (decl) {
             .InstanceDecl => |id_decl| {
-                // Pass 0a registered the instance in ClassEnv.  Pass 2 infers
-                // the bodies of instance method bindings so that the constraint
-                // solver can produce evidence (DictEvidence) for calls inside
-                // instance methods.
-                //
-                // For `instance Show a => Show [a] where show xs = showListWith xs`,
-                // the call to `showListWith` has scheme `Show a => [a] -> String`.
-                // Instantiation creates `Show ?meta`, and we unify ?meta with
-                // `[a_rigid]` (the instance head expressed in the same Rigids
-                // allocated during Pass 0a).  The solver then resolves
-                // `Show [a_rigid]` via instance match with context evidence
-                // `Show a_rigid` which becomes `DictEvidence.param`.
-
-                // 1. Retrieve the InstanceInfo from ClassEnv to get the rigid_scope.
                 const instances = ctx.class_env.lookupInstances(id_decl.class_name.unique.value);
                 var inst_info: ?InstanceInfo = null;
                 for (instances) |inst| {
@@ -2293,36 +2315,21 @@ pub fn inferModule(
                         break;
                     }
                 }
-                const info = inst_info orelse continue; // Should not happen; defensive.
+                const info = inst_info orelse continue;
 
-                // 2. Rebuild the TypeVarMap from rigid_scope so type variable
-                //    names resolve to the same Rigid nodes as in Pass 0a.
                 var inst_scope = TypeVarMap{};
                 defer inst_scope.deinit(ctx.alloc);
                 for (info.rigid_scope) |rb| {
                     try inst_scope.put(ctx.alloc, rb.tyvar, @constCast(rb.rigid));
                 }
 
-                // Convert the instance head type to HType using the Rigid scope.
                 const head_htype = try astTypeToHTypeWithScope(id_decl.instance_type, ctx, &inst_scope);
 
-                // 3. Infer each method binding body.
                 for (id_decl.bindings) |binding| {
-                    // Look up the class method's type scheme (registered in Pass 0a).
                     const method_scheme = ctx.env.lookupScheme(binding.name.unique) orelse continue;
-
-                    // Instantiate: replace the class tyvar binder with a fresh meta.
-                    // For `show :: Show a => a -> String` with binders=[a_id]:
-                    //   inst_result.ty    = ?meta -> String
-                    //   inst_result.wanted = [Show ?meta]
                     const inst_result = try method_scheme.instantiate(ctx.alloc, ctx.mv_supply);
                     const inst_ty_ptr = try ctx.alloc_ty(inst_result.ty);
 
-                    // Unify the fresh meta (in the constraint) with the instance
-                    // head type.  Since the constraint's ty shares the same arena
-                    // node as the meta in inst_ty_ptr, this propagates: the
-                    // constraint becomes e.g. `Show [a_rigid]` and inst_ty_ptr
-                    // becomes `[a_rigid] -> String`.
                     if (inst_result.wanted.len > 0) {
                         try ctx.unifyNow(
                             @constCast(inst_result.wanted[0].ty),
@@ -2331,25 +2338,14 @@ pub fn inferModule(
                         );
                     }
 
-                    // Push a scope for the method body so pattern bindings are local.
                     try ctx.env.push();
                     defer ctx.env.pop();
 
                     for (binding.equations) |eq| {
                         const eq_ty = try inferMatch(ctx, eq);
-
-                        // Unify the inferred equation type against the instantiated
-                        // (now specialised) method type.  This ensures type
-                        // correctness and — critically — propagates Rigids from
-                        // the instance head into the constraint types.
                         try ctx.unifyNow(eq_ty, inst_ty_ptr, binding.span);
                     }
 
-                    // Record wanted constraints so the solver can discharge them.
-                    // Each constraint is keyed by the bindings inside the method
-                    // body (the Var case already appended constraints for calls
-                    // like `showListWith`), but we also need the constraints from
-                    // the method scheme instantiation itself.
                     for (inst_result.wanted) |wc| {
                         try ctx.wanted_constraints.append(ctx.alloc, .{ .Class = .{
                             .class_name = wc.class_name,
@@ -2360,20 +2356,7 @@ pub fn inferModule(
                     }
                 }
             },
-            .DataDecl => {},
-            .ForeignPrim => |fp| {
-                // Foreign prim has no body to infer — just unify the meta
-                // with the skolemised signature and build the type scheme.
-                const fun_node = top_metas.get(fp.name.unique) orelse continue;
-                const sig_entry = sigs.get(fp.name.unique) orelse continue;
-                try ctx.unifyNow(fun_node, sig_entry.ty, fp.span);
-                const scheme = TyScheme{
-                    .binders = sig_entry.skolem_ids,
-                    .constraints = sig_entry.constraints,
-                    .body = sig_entry.ty.*,
-                };
-                try ctx.env.bind(fp.name, scheme);
-            },
+            else => {},
         }
     }
 
