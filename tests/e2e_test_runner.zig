@@ -331,3 +331,7 @@ test "e2e: e2e_019_where_local_function (#623)" {
 test "e2e: e2e_020_where_constant (#623)" {
     try testE2e(std.testing.allocator, "e2e_020_where_constant");
 }
+
+test "e2e: e2e_021_type_annotation (#644)" {
+    try testE2e(std.testing.allocator, "e2e_021_type_annotation");
+}
