@@ -874,6 +874,11 @@ pub const GrinEvaluator = struct {
                 // argument as its parameter.
                 if (std.mem.eql(u8, app.name.base, ">>")) {
                     if (app.args.len != 2) return error.ArityMismatch;
+                    // Evaluate the first action for its side effects (#592).
+                    // Without this, eta-reduced IO bindings like
+                    // `putStrLn = primPutStrLn` lose the first action's
+                    // side effects when `>>` reaches the App handler.
+                    _ = try self.resolveVal(@constCast(&app.args[0]));
                     break :b try self.resolveVal(@constCast(&app.args[1]));
                 }
                 if (std.mem.eql(u8, app.name.base, ">>=")) {

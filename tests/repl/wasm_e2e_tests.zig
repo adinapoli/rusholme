@@ -548,11 +548,8 @@ test "wasm e2e: putStrLn produces output" {
 }
 
 test "wasm e2e: do-notation with multiple putStrLn" {
-    // Known issue: with the Prelude loaded (#591), putStrLn resolves to
-    // the Prelude's eta-reduced `putStrLn = primPutStrLn` instead of the
-    // built-in primop. The GRIN evaluator drops the first IO action in
-    // a do-block when putStrLn is an eta-reduced alias. Only the last
-    // action produces output. Tracked in: https://github.com/adinapoli/rusholme/issues/592
+    // Both IO actions should produce output — the >> operator must
+    // evaluate the first action for its side effects (#592).
     const input =
         \\{"jsonrpc":"2.0","id":1,"method":"init"}
         \\{"jsonrpc":"2.0","id":2,"method":"eval","params":["do { putStrLn \"Hello\" ; putStrLn \"World\" }"]}
@@ -563,8 +560,7 @@ test "wasm e2e: do-notation with multiple putStrLn" {
 
     try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
 
-    // Once the Prelude eta-reduced IO issue is fixed (#592), both lines
-    // should appear. For now only the last action produces output.
+    try expectContains(result.stdout, "Hello\n");
     try expectContains(result.stdout, "World\n");
 }
 
