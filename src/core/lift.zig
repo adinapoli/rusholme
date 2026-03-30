@@ -1292,6 +1292,105 @@ test "lambdaLift: two-arg expression lambda does not propagate own param as free
     }
 }
 
+test "lambdaLift: doubly-nested expression lambda — lifted body is rewritten (#623)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // f = \x -> (\y -> (\z -> x) 42) 5
+    //
+    // Expression lambdas:
+    //   A: \y -> (\z -> x) 42    — lifted to lifted_A
+    //   B: \z -> x               — lifted to lifted_B
+    //
+    // Phase 3 generates lifted_A with body = (\z -> x) 42 (un-rewritten).
+    // Phase 4 must also rewrite lifted_A's body to replace \z -> x with
+    // App(lifted_B, x). Without the #623 fix, lifted_A's body would
+    // retain the raw \z -> x pointer, causing a downstream panic.
+
+    const x_id = testId("x", 1);
+    const y_id = testId("y", 2);
+    const z_id = testId("z", 3);
+
+    const x_var = try alloc.create(Expr);
+    x_var.* = .{ .Var = x_id };
+
+    // Innermost lambda B: \z -> x
+    const inner_b = try alloc.create(Expr);
+    inner_b.* = .{ .Lam = .{
+        .binder = z_id,
+        .body = x_var,
+        .span = testSpan(),
+    } };
+
+    // (\z -> x) 42
+    const lit_42 = try alloc.create(Expr);
+    lit_42.* = .{ .Lit = .{ .val = .{ .Int = 42 }, .span = testSpan() } };
+    const app_b = try alloc.create(Expr);
+    app_b.* = .{ .App = .{
+        .fn_expr = inner_b,
+        .arg = lit_42,
+        .span = testSpan(),
+    } };
+
+    // Expression lambda A: \y -> (\z -> x) 42
+    const inner_a = try alloc.create(Expr);
+    inner_a.* = .{ .Lam = .{
+        .binder = y_id,
+        .body = app_b,
+        .span = testSpan(),
+    } };
+
+    // (\y -> (\z -> x) 42) 5
+    const lit_5 = try alloc.create(Expr);
+    lit_5.* = .{ .Lit = .{ .val = .{ .Int = 5 }, .span = testSpan() } };
+    const app_a = try alloc.create(Expr);
+    app_a.* = .{ .App = .{
+        .fn_expr = inner_a,
+        .arg = lit_5,
+        .span = testSpan(),
+    } };
+
+    // f = \x -> (\y -> (\z -> x) 42) 5
+    const f_lambda = try alloc.create(Expr);
+    f_lambda.* = .{ .Lam = .{
+        .binder = x_id,
+        .body = app_a,
+        .span = testSpan(),
+    } };
+
+    const f_bind = Bind{ .NonRec = .{
+        .binder = testId("f", 10),
+        .rhs = f_lambda,
+    } };
+
+    const program: core.CoreProgram = .{
+        .data_decls = &.{},
+        .binds = &.{f_bind},
+    };
+
+    const lifted = try lambdaLift(alloc, program, null, 0);
+
+    // 3 bindings: lifted_B (\z), lifted_A (\y, rewritten), f (rewritten).
+    try testing.expectEqual(@as(usize, 3), lifted.program.binds.len);
+
+    // No binding should contain un-rewritten expression lambdas.
+    // This is the key assertion: without the Phase 4 fix for lifted binding
+    // bodies, lifted_A would still contain the raw \z -> x pointer.
+    for (lifted.program.binds) |bind| {
+        switch (bind) {
+            .NonRec => |pair| {
+                try testing.expect(!containsExprLambdaInRhs(pair.rhs));
+            },
+            .Rec => |pairs| {
+                for (pairs) |pair| {
+                    try testing.expect(!containsExprLambdaInRhs(pair.rhs));
+                }
+            },
+        }
+    }
+}
+
 test "LambdaLifter: initialization" {
     const alloc = testing.allocator;
 
