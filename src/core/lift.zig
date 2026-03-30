@@ -744,13 +744,25 @@ pub fn lambdaLift(alloc: std.mem.Allocator, program: core.CoreProgram, external_
         } });
     }
 
-    // Phase 4: Rewrite the original bindings.
+    // Phase 4: Rewrite original bindings and lifted binding bodies.
+    //
+    // Lifted binding bodies are generated in Phase 3 with the original
+    // (un-rewritten) body pointers.  If a lifted lambda's body itself
+    // contains expression lambdas (e.g. nested where-clause functions),
+    // those inner lambdas are registered in Phase 2 but their pointers
+    // inside the Phase 3 bodies are never rewritten unless we explicitly
+    // pass them through rewriteExpr here.
     var new_binds = std.ArrayListUnmanaged(Bind){};
     defer new_binds.deinit(alloc);
 
     for (program.binds) |bind| {
         const new_bind = try lifter.rewriteBind(bind, top_level_slice);
         try new_binds.append(alloc, new_bind);
+    }
+
+    // Rewrite lifted binding bodies (nested where-clause lambdas, #623).
+    for (lifted_binds.items) |*bind| {
+        bind.* = try lifter.rewriteBind(bind.*, top_level_slice);
     }
 
     // Phase 5: Combine lifted bindings with original bindings.
