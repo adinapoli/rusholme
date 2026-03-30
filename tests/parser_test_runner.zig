@@ -242,6 +242,7 @@ test "should_compile: sc049_export_list_blank_lines" { try testShouldCompile(std
 test "should_compile: sc049_infix_op_definitions" { try testShouldCompile(std.testing.allocator, "sc049_infix_op_definitions"); }
 test "should_compile: sc049_minimal" { try testShouldCompile(std.testing.allocator, "sc049_minimal"); }
 test "should_compile: sc049_no_fixity" { try testShouldCompile(std.testing.allocator, "sc049_no_fixity"); }
+test "should_compile: sc050_class_default_method" { try testShouldCompile(std.testing.allocator, "sc050_class_default_method"); }
 
 // ── should_fail test declarations ─────────────────────────────────────────
 
