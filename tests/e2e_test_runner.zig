@@ -323,3 +323,11 @@ test "e2e: e2e_eq_bool (#531)" {
 test "e2e: e2e_660_class_after_default_method (#660)" {
     try testE2e(std.testing.allocator, "e2e_660_class_after_default_method");
 }
+
+test "e2e: e2e_019_where_local_function (#623)" {
+    try testE2e(std.testing.allocator, "e2e_019_where_local_function");
+}
+
+test "e2e: e2e_020_where_constant (#623)" {
+    try testE2e(std.testing.allocator, "e2e_020_where_constant");
+}

@@ -744,13 +744,25 @@ pub fn lambdaLift(alloc: std.mem.Allocator, program: core.CoreProgram, external_
         } });
     }
 
-    // Phase 4: Rewrite the original bindings.
+    // Phase 4: Rewrite original bindings and lifted binding bodies.
+    //
+    // Lifted binding bodies are generated in Phase 3 with the original
+    // (un-rewritten) body pointers.  If a lifted lambda's body itself
+    // contains expression lambdas (e.g. nested where-clause functions),
+    // those inner lambdas are registered in Phase 2 but their pointers
+    // inside the Phase 3 bodies are never rewritten unless we explicitly
+    // pass them through rewriteExpr here.
     var new_binds = std.ArrayListUnmanaged(Bind){};
     defer new_binds.deinit(alloc);
 
     for (program.binds) |bind| {
         const new_bind = try lifter.rewriteBind(bind, top_level_slice);
         try new_binds.append(alloc, new_bind);
+    }
+
+    // Rewrite lifted binding bodies (nested where-clause lambdas, #623).
+    for (lifted_binds.items) |*bind| {
+        bind.* = try lifter.rewriteBind(bind.*, top_level_slice);
     }
 
     // Phase 5: Combine lifted bindings with original bindings.
@@ -1276,6 +1288,105 @@ test "lambdaLift: two-arg expression lambda does not propagate own param as free
             // \x -> (\y -> x): x is own param, so ZERO free vars.
             // This is the core assertion for #659.
             try testing.expectEqual(@as(usize, 0), info.free_vars.len);
+        }
+    }
+}
+
+test "lambdaLift: doubly-nested expression lambda — lifted body is rewritten (#623)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // f = \x -> (\y -> (\z -> x) 42) 5
+    //
+    // Expression lambdas:
+    //   A: \y -> (\z -> x) 42    — lifted to lifted_A
+    //   B: \z -> x               — lifted to lifted_B
+    //
+    // Phase 3 generates lifted_A with body = (\z -> x) 42 (un-rewritten).
+    // Phase 4 must also rewrite lifted_A's body to replace \z -> x with
+    // App(lifted_B, x). Without the #623 fix, lifted_A's body would
+    // retain the raw \z -> x pointer, causing a downstream panic.
+
+    const x_id = testId("x", 1);
+    const y_id = testId("y", 2);
+    const z_id = testId("z", 3);
+
+    const x_var = try alloc.create(Expr);
+    x_var.* = .{ .Var = x_id };
+
+    // Innermost lambda B: \z -> x
+    const inner_b = try alloc.create(Expr);
+    inner_b.* = .{ .Lam = .{
+        .binder = z_id,
+        .body = x_var,
+        .span = testSpan(),
+    } };
+
+    // (\z -> x) 42
+    const lit_42 = try alloc.create(Expr);
+    lit_42.* = .{ .Lit = .{ .val = .{ .Int = 42 }, .span = testSpan() } };
+    const app_b = try alloc.create(Expr);
+    app_b.* = .{ .App = .{
+        .fn_expr = inner_b,
+        .arg = lit_42,
+        .span = testSpan(),
+    } };
+
+    // Expression lambda A: \y -> (\z -> x) 42
+    const inner_a = try alloc.create(Expr);
+    inner_a.* = .{ .Lam = .{
+        .binder = y_id,
+        .body = app_b,
+        .span = testSpan(),
+    } };
+
+    // (\y -> (\z -> x) 42) 5
+    const lit_5 = try alloc.create(Expr);
+    lit_5.* = .{ .Lit = .{ .val = .{ .Int = 5 }, .span = testSpan() } };
+    const app_a = try alloc.create(Expr);
+    app_a.* = .{ .App = .{
+        .fn_expr = inner_a,
+        .arg = lit_5,
+        .span = testSpan(),
+    } };
+
+    // f = \x -> (\y -> (\z -> x) 42) 5
+    const f_lambda = try alloc.create(Expr);
+    f_lambda.* = .{ .Lam = .{
+        .binder = x_id,
+        .body = app_a,
+        .span = testSpan(),
+    } };
+
+    const f_bind = Bind{ .NonRec = .{
+        .binder = testId("f", 10),
+        .rhs = f_lambda,
+    } };
+
+    const program: core.CoreProgram = .{
+        .data_decls = &.{},
+        .binds = &.{f_bind},
+    };
+
+    const lifted = try lambdaLift(alloc, program, null, 0);
+
+    // 3 bindings: lifted_B (\z), lifted_A (\y, rewritten), f (rewritten).
+    try testing.expectEqual(@as(usize, 3), lifted.program.binds.len);
+
+    // No binding should contain un-rewritten expression lambdas.
+    // This is the key assertion: without the Phase 4 fix for lifted binding
+    // bodies, lifted_A would still contain the raw \z -> x pointer.
+    for (lifted.program.binds) |bind| {
+        switch (bind) {
+            .NonRec => |pair| {
+                try testing.expect(!containsExprLambdaInRhs(pair.rhs));
+            },
+            .Rec => |pairs| {
+                for (pairs) |pair| {
+                    try testing.expect(!containsExprLambdaInRhs(pair.rhs));
+                }
+            },
         }
     }
 }
