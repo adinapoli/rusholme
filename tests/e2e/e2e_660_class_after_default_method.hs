@@ -11,7 +11,12 @@ class Class2 a where
 
 data Val = Val Int
 
+instance Class1 Val where
+  method1 (Val n) = n + 1
+
 instance Class2 Val where
   method2 (Val n) = n + 1
 
-main = print (method2 (Val 41))
+main = do
+  print (method2 (Val 41))
+  print (doubled (Val 41))
