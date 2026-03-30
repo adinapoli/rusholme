@@ -122,6 +122,8 @@ pub const LambdaLifter = struct {
     /// Counter for generating unique lambda IDs.
     lambda_counter: u64 = 0,
     /// Counter for generating unique IDs for lifted function names.
+    /// Callers may seed this to a non-zero value to avoid symbol name
+    /// collisions when lifting multiple modules in the same link unit.
     lifted_id_counter: u64 = 0,
     /// Map from lambda ID to LambdaInfo.
     lambdas: std.AutoHashMapUnmanaged(u64, LambdaInfo),
@@ -591,6 +593,17 @@ pub const LambdaLifter = struct {
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
+/// Result of a lambda-lift pass, including the transformed program and
+/// the next available lifted-function name counter.  Callers that lift
+/// multiple modules in the same link unit should thread `next_lifted_id`
+/// into the next call as `lifted_id_start` to prevent duplicate LLVM
+/// symbol names (e.g. two modules each generating `lifted_0`).
+pub const LiftResult = struct {
+    program: core.CoreProgram,
+    /// The counter value to pass as `lifted_id_start` for the next module.
+    next_lifted_id: u64,
+};
+
 /// Lambda-lift a Core program.
 ///
 /// Returns a new program with all nested lambdas lifted to top-level
@@ -601,9 +614,16 @@ pub const LambdaLifter = struct {
 /// globally in-scope when computing free variables.  Without this,
 /// references to imported functions inside nested lambdas would be
 /// mis-classified as free variables and incorrectly captured.
-pub fn lambdaLift(alloc: std.mem.Allocator, program: core.CoreProgram, external_scope: ?[]const u64) !core.CoreProgram {
+///
+/// `lifted_id_start` seeds the lifted-function name counter.  Pass 0 for
+/// the first module; pass the previous call's `next_lifted_id` for every
+/// subsequent module compiled in the same link unit.  This ensures that
+/// all lifted functions across all modules in a program have distinct
+/// LLVM symbol names.
+pub fn lambdaLift(alloc: std.mem.Allocator, program: core.CoreProgram, external_scope: ?[]const u64, lifted_id_start: u64) !LiftResult {
     var lifter = LambdaLifter.init(alloc);
     defer lifter.deinit();
+    lifter.lifted_id_counter = lifted_id_start;
 
     // Phase 1: Build top-level scope (program binders + externals).
     // Include externally-visible names (Prelude, imports) so that the
@@ -747,9 +767,12 @@ pub fn lambdaLift(alloc: std.mem.Allocator, program: core.CoreProgram, external_
         idx += 1;
     }
 
-    return core.CoreProgram{
-        .data_decls = program.data_decls,
-        .binds = all_binds,
+    return LiftResult{
+        .program = core.CoreProgram{
+            .data_decls = program.data_decls,
+            .binds = all_binds,
+        },
+        .next_lifted_id = lifter.lifted_id_counter,
     };
 }
 
@@ -881,10 +904,10 @@ test "lambdaLift: identity function with no nested lambda" {
         .binds = &.{f_bind},
     };
 
-    const lifted = try lambdaLift(alloc, program, null);
+    const lifted = try lambdaLift(alloc, program, null, 0);
 
     // No nested lambda → exactly 1 binding, unchanged.
-    try testing.expectEqual(@as(usize, 1), lifted.binds.len);
+    try testing.expectEqual(@as(usize, 1), lifted.program.binds.len);
 }
 
 test "lambdaLift: nested lambda is lifted" {
@@ -937,14 +960,14 @@ test "lambdaLift: nested lambda is lifted" {
         .binds = &.{f_bind},
     };
 
-    const lifted = try lambdaLift(alloc, program, null);
+    const lifted = try lambdaLift(alloc, program, null, 0);
 
     // Should have 2 bindings: the lifted inner lambda + the rewritten f.
-    try testing.expectEqual(@as(usize, 2), lifted.binds.len);
+    try testing.expectEqual(@as(usize, 2), lifted.program.binds.len);
 
     // The original binding (f) should have no expression-position lambdas.
     // It appears second (lifted bindings come first).
-    const f_binding = lifted.binds[1];
+    const f_binding = lifted.program.binds[1];
     switch (f_binding) {
         .NonRec => |pair| {
             try testing.expect(!containsExprLambdaInRhs(pair.rhs));
@@ -1061,10 +1084,10 @@ test "lambdaLift: multi-param leading chain not lifted" {
         .binds = &.{f_bind},
     };
 
-    const lifted = try lambdaLift(alloc, program, null);
+    const lifted = try lambdaLift(alloc, program, null, 0);
 
     // No expression lambdas → exactly 1 binding.
-    try testing.expectEqual(@as(usize, 1), lifted.binds.len);
+    try testing.expectEqual(@as(usize, 1), lifted.program.binds.len);
 }
 
 test "lambdaLift: anonymous lambda in app position (#501)" {
@@ -1109,13 +1132,13 @@ test "lambdaLift: anonymous lambda in app position (#501)" {
         .binds = &.{it_bind},
     };
 
-    const lifted = try lambdaLift(alloc, program, null);
+    const lifted = try lambdaLift(alloc, program, null, 0);
 
     // Should have 2 bindings: the lifted lambda + the rewritten `it`.
-    try testing.expectEqual(@as(usize, 2), lifted.binds.len);
+    try testing.expectEqual(@as(usize, 2), lifted.program.binds.len);
 
     // The original binding (it) should have no expression-position lambdas.
-    const it_binding = lifted.binds[1];
+    const it_binding = lifted.program.binds[1];
     switch (it_binding) {
         .NonRec => |pair| {
             try testing.expect(!containsExprLambdaInRhs(pair.rhs));
@@ -1222,10 +1245,10 @@ test "lambdaLift: two-arg expression lambda does not propagate own param as free
         .binds = &.{g_bind},
     };
 
-    const lifted = try lambdaLift(alloc, program, null);
+    const lifted = try lambdaLift(alloc, program, null, 0);
 
     // Should have 3 bindings: lifted \y, lifted \x, rewritten g.
-    try testing.expectEqual(@as(usize, 3), lifted.binds.len);
+    try testing.expectEqual(@as(usize, 3), lifted.program.binds.len);
 
     // Also verify via direct lifter inspection.
     var lifter = LambdaLifter.init(alloc);

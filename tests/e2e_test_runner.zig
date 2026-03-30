@@ -319,3 +319,7 @@ test "e2e: e2e_show_polymorphic" {
 test "e2e: e2e_eq_bool (#531)" {
     try testE2e(std.testing.allocator, "e2e_eq_bool");
 }
+
+test "e2e: e2e_660_class_after_default_method (#660)" {
+    try testE2e(std.testing.allocator, "e2e_660_class_after_default_method");
+}

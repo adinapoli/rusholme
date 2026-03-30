@@ -30,6 +30,12 @@ pub const DesugarCtx = struct {
     /// when translating `DictEvidence.instance` to a Core variable reference.
     dict_names: DictNameMap = .empty,
 
+    /// Maps `(class_unique, method_unique)` → default method `Name`.
+    /// Populated by `desugarClassDecl` (section 3), queried by
+    /// `desugarInstanceDecl` when a method has no explicit binding and
+    /// the class provides a default implementation.
+    default_method_names: std.AutoHashMapUnmanaged(DefaultMethodKey, Name) = .{},
+
     /// Evidence map built from solved constraints. Keyed by
     /// `(var_unique, class_name_unique)` → list of `DictEvidence` pointers.
     /// Multiple constraints for the same variable can arise from multiple
@@ -57,6 +63,11 @@ pub const DesugarCtx = struct {
         class_unique: u64,
         /// Unique ID of the Rigid type variable.  Zero for non-Rigid or unknown.
         tyvar_unique: u64,
+    };
+
+    pub const DefaultMethodKey = struct {
+        class_unique: u64,
+        method_unique: u64,
     };
 
     pub const DictNameKey = struct {
@@ -717,6 +728,13 @@ fn desugarClassDecl(
             .unique = ctx.u_supply.fresh(),
         };
 
+        // Register the default method name so that desugarInstanceDecl can
+        // reference the same unique when a method is not explicitly provided.
+        try ctx.default_method_names.put(alloc, .{
+            .class_unique = cd.name.unique.value,
+            .method_unique = method.name.unique.value,
+        }, default_name);
+
         // Compile the default method body using the pattern match compiler.
         // The default body is a slice of RMatch equations (same as FunBind).
         const method_htype = class_info.methods[0].ty; // Placeholder — use method's own type
@@ -732,7 +750,7 @@ fn desugarClassDecl(
             method_core_ty = try method_htype.toCore(alloc);
         }
 
-        const body_expr = try desugarMatch(ctx, default_impl, method_core_ty);
+        const raw_body = try desugarMatch(ctx, default_impl, method_core_ty);
 
         // Wrap with a dictionary lambda: \dict -> body
         const dict_param_name = Name{
@@ -747,6 +765,17 @@ fn desugarClassDecl(
             .ty = dict_param_ty,
             .span = cd.span,
         };
+
+        // Thread the dictionary parameter through class method calls in the body.
+        // E.g. `doubled x = method1 x + method1 x` becomes
+        //       `doubled = \dict -> \x -> (method1 dict) x + (method1 dict) x`
+        // This is necessary because default bodies aren't type-checked,
+        // so the evidence resolver has no constraint entries for them.
+        var method_uniques = try alloc.alloc(u64, class_info.methods.len);
+        for (class_info.methods, 0..) |m, mi| {
+            method_uniques[mi] = m.name.unique.value;
+        }
+        const body_expr = try applyDictToClassMethods(alloc, raw_body, method_uniques, dict_param_id);
 
         const lam_default = try alloc.create(ast_mod.Expr);
         lam_default.* = ast_mod.Expr{
@@ -883,39 +912,134 @@ fn desugarInstanceDecl(
                 method_exprs[i] = try desugarMatch(ctx, binding.equations, method_core_ty);
             }
         } else if (method.has_default) {
-            // Apply the compiled default method to the instance dictionary.
-            // E.g., for `(/=)` with no instance binding:
-            //   default$Eq$/= dict$Eq$Int
-            // The default method was compiled in desugarClassDecl (section 3).
-            const default_fn = try alloc.create(ast_mod.Expr);
-            default_fn.* = ast_mod.Expr{
-                .Var = ast_mod.Id{
-                    .name = Name{
-                        .base = try std.fmt.allocPrint(alloc, "default${s}${s}", .{ id_decl.class_name.base, method.name.base }),
-                        .unique = ctx.u_supply.fresh(),
-                    },
-                    .ty = try method.ty.toCore(alloc),
-                    .span = id_decl.span,
-                },
+            // Use the compiled default method for this instance.
+            // The default method is: default$Class$method = \dict -> \x -> body
+            // We need to create an eta-expanded wrapper binding so the
+            // dictionary field holds a direct function reference (not a
+            // partial application thunk that the LLVM backend can't call
+            // through):
+            //
+            //   _inst$Class$method$Type = \x -> default$Class$method dict$Class$Type x
+            //
+            // Then the dictionary constructor uses _inst$... as the field.
+            //
+            // Look up the name registered during class desugaring so that
+            // the reference matches the binding's unique (issue #660).
+            const default_method_name = ctx.default_method_names.get(.{
+                .class_unique = id_decl.class_name.unique.value,
+                .method_unique = method.name.unique.value,
+            }) orelse {
+                // Defensive fallback — should not happen if desugarClassDecl ran first.
+                return error.OutOfMemory;
             };
-            // Apply the default function to the instance dictionary.
-            const dict_ref = try alloc.create(ast_mod.Expr);
-            dict_ref.* = ast_mod.Expr{
-                .Var = ast_mod.Id{
+
+            // Count the method arity (excluding the dict param which we supply).
+            const method_arity = countFunArity(method.ty);
+
+            // Build: _inst$Class$method$Type = \x0 -> ... -> default$... dict$... x0 ...
+            var wrapper_body: *const ast_mod.Expr = blk_fn: {
+                // Start with: default$Class$method
+                var expr: *const ast_mod.Expr = blk_def: {
+                    const e = try alloc.create(ast_mod.Expr);
+                    e.* = .{ .Var = .{
+                        .name = default_method_name,
+                        .ty = try method.ty.toCore(alloc),
+                        .span = id_decl.span,
+                    } };
+                    break :blk_def e;
+                };
+                // Apply the instance dictionary: default$... dict$Class$Type
+                const dict_ref = try alloc.create(ast_mod.Expr);
+                dict_ref.* = .{ .Var = .{
                     .name = dict_name,
                     .ty = ast_mod.CoreType{ .TyCon = .{ .name = dict_con_name, .args = &.{} } },
                     .span = id_decl.span,
-                },
-            };
-            const app = try alloc.create(ast_mod.Expr);
-            app.* = ast_mod.Expr{
-                .App = .{
-                    .fn_expr = default_fn,
+                } };
+                const app_dict = try alloc.create(ast_mod.Expr);
+                app_dict.* = .{ .App = .{
+                    .fn_expr = expr,
                     .arg = dict_ref,
                     .span = id_decl.span,
-                },
+                } };
+                expr = app_dict;
+                break :blk_fn expr;
             };
-            method_exprs[i] = app;
+
+            // Create eta binders and apply them.
+            var eta_binders = try alloc.alloc(ast_mod.Id, method_arity);
+            {
+                var remaining_ty = method.ty;
+                for (0..method_arity) |ei| {
+                    const chased = remaining_ty.chase();
+                    const arg_core_ty = switch (chased) {
+                        .Fun => |f| try f.arg.toCore(alloc),
+                        else => ast_mod.CoreType{ .TyCon = .{ .name = Known.Type.Unit, .args = &.{} } },
+                    };
+                    eta_binders[ei] = ast_mod.Id{
+                        .name = Name{
+                            .base = try std.fmt.allocPrint(alloc, "eta{d}", .{ei}),
+                            .unique = ctx.u_supply.fresh(),
+                        },
+                        .ty = arg_core_ty,
+                        .span = id_decl.span,
+                    };
+                    // Apply eta binder: expr eta_i
+                    const arg_ref = try alloc.create(ast_mod.Expr);
+                    arg_ref.* = .{ .Var = eta_binders[ei] };
+                    const app = try alloc.create(ast_mod.Expr);
+                    app.* = .{ .App = .{
+                        .fn_expr = wrapper_body,
+                        .arg = arg_ref,
+                        .span = id_decl.span,
+                    } };
+                    wrapper_body = app;
+                    remaining_ty = switch (chased) {
+                        .Fun => |f| f.res.*,
+                        else => remaining_ty,
+                    };
+                }
+            }
+
+            // Wrap with lambdas: \eta0 -> \eta1 -> ... -> body
+            {
+                var k = method_arity;
+                while (k > 0) {
+                    k -= 1;
+                    const lam = try alloc.create(ast_mod.Expr);
+                    lam.* = .{ .Lam = .{
+                        .binder = eta_binders[k],
+                        .body = wrapper_body,
+                        .span = id_decl.span,
+                    } };
+                    wrapper_body = lam;
+                }
+            }
+
+            // Create the wrapper binding name.
+            const wrapper_name = Name{
+                .base = try std.fmt.allocPrint(alloc, "_inst${s}${s}${s}", .{
+                    id_decl.class_name.base,
+                    method.name.base,
+                    head_name,
+                }),
+                .unique = ctx.u_supply.fresh(),
+            };
+            const wrapper_id = ast_mod.Id{
+                .name = wrapper_name,
+                .ty = try method.ty.toCore(alloc),
+                .span = id_decl.span,
+            };
+
+            // Emit the wrapper as a top-level binding.
+            try binds.append(alloc, .{ .NonRec = .{
+                .binder = wrapper_id,
+                .rhs = wrapper_body,
+            } });
+
+            // Use the wrapper in the dictionary constructor.
+            const wrapper_ref = try alloc.create(ast_mod.Expr);
+            wrapper_ref.* = .{ .Var = wrapper_id };
+            method_exprs[i] = wrapper_ref;
         } else {
             // Missing method with no default — emit diagnostic.
             const msg = try std.fmt.allocPrint(
@@ -1279,6 +1403,117 @@ fn findEvidenceForVar(
         }
     }
     return try result.toOwnedSlice(ctx.alloc);
+}
+
+// ── Default method dict threading ─────────────────────────────────────
+
+/// Walk a Core expression and wrap every reference to a class method
+/// variable with a dictionary application: `method` → `method dict`.
+///
+/// This is needed because default method bodies (e.g. `doubled x = method1 x + method1 x`)
+/// reference class method selectors that expect a dictionary as their first argument,
+/// but the typechecker does not type-check default method bodies and therefore
+/// produces no evidence entries. This post-processing step inserts the dictionary
+/// argument explicitly.
+fn applyDictToClassMethods(
+    alloc: std.mem.Allocator,
+    expr: *const ast_mod.Expr,
+    method_uniques: []const u64,
+    dict_param: ast_mod.Id,
+) std.mem.Allocator.Error!*const ast_mod.Expr {
+    switch (expr.*) {
+        .Var => |id| {
+            for (method_uniques) |mu| {
+                if (id.name.unique.value == mu) {
+                    // Wrap: method → App(method, dict_param)
+                    const dict_ref = try alloc.create(ast_mod.Expr);
+                    dict_ref.* = .{ .Var = dict_param };
+                    const app = try alloc.create(ast_mod.Expr);
+                    app.* = .{ .App = .{
+                        .fn_expr = expr,
+                        .arg = dict_ref,
+                        .span = id.span,
+                    } };
+                    return app;
+                }
+            }
+            return expr;
+        },
+        .App => |a| {
+            const new_fn = try applyDictToClassMethods(alloc, a.fn_expr, method_uniques, dict_param);
+            const new_arg = try applyDictToClassMethods(alloc, a.arg, method_uniques, dict_param);
+            if (new_fn == a.fn_expr and new_arg == a.arg) return expr;
+            const result = try alloc.create(ast_mod.Expr);
+            result.* = .{ .App = .{
+                .fn_expr = new_fn,
+                .arg = new_arg,
+                .span = a.span,
+            } };
+            return result;
+        },
+        .Lam => |l| {
+            // Don't descend into lambdas whose binder shadows a class method.
+            for (method_uniques) |mu| {
+                if (l.binder.name.unique.value == mu) return expr;
+            }
+            const new_body = try applyDictToClassMethods(alloc, l.body, method_uniques, dict_param);
+            if (new_body == l.body) return expr;
+            const result = try alloc.create(ast_mod.Expr);
+            result.* = .{ .Lam = .{
+                .binder = l.binder,
+                .body = new_body,
+                .span = l.span,
+            } };
+            return result;
+        },
+        .Let => |lt| {
+            const new_bind = switch (lt.bind) {
+                .NonRec => |nr| blk: {
+                    const new_rhs = try applyDictToClassMethods(alloc, nr.rhs, method_uniques, dict_param);
+                    break :blk ast_mod.Bind{ .NonRec = .{ .binder = nr.binder, .rhs = new_rhs } };
+                },
+                .Rec => |pairs| blk: {
+                    var new_pairs = try alloc.alloc(ast_mod.BindPair, pairs.len);
+                    for (pairs, 0..) |p, i| {
+                        new_pairs[i] = .{
+                            .binder = p.binder,
+                            .rhs = try applyDictToClassMethods(alloc, p.rhs, method_uniques, dict_param),
+                        };
+                    }
+                    break :blk ast_mod.Bind{ .Rec = new_pairs };
+                },
+            };
+            const new_body = try applyDictToClassMethods(alloc, lt.body, method_uniques, dict_param);
+            const result = try alloc.create(ast_mod.Expr);
+            result.* = .{ .Let = .{
+                .bind = new_bind,
+                .body = new_body,
+                .span = lt.span,
+            } };
+            return result;
+        },
+        .Case => |c| {
+            const new_scrut = try applyDictToClassMethods(alloc, c.scrutinee, method_uniques, dict_param);
+            var new_alts = try alloc.alloc(ast_mod.Alt, c.alts.len);
+            for (c.alts, 0..) |alt, i| {
+                new_alts[i] = .{
+                    .con = alt.con,
+                    .binders = alt.binders,
+                    .body = try applyDictToClassMethods(alloc, alt.body, method_uniques, dict_param),
+                };
+            }
+            const result = try alloc.create(ast_mod.Expr);
+            result.* = .{ .Case = .{
+                .scrutinee = new_scrut,
+                .binder = c.binder,
+                .ty = c.ty,
+                .alts = new_alts,
+                .span = c.span,
+            } };
+            return result;
+        },
+        .Lit, .Type, .Coercion => return expr,
+    }
 }
 
 // ── Foreign import prim helpers ────────────────────────────────────────

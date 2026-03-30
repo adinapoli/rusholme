@@ -585,7 +585,8 @@ fn cmdGrin(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
 
     // ── Lambda lift ────────────────────────────────────────────────────
     const ext_scope_1 = try collectExternalScope(arena_alloc, &module_types);
-    const core_lifted = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog, ext_scope_1);
+    const lift_result_1 = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog, ext_scope_1, 0);
+    const core_lifted = lift_result_1.program;
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
@@ -696,7 +697,8 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
 
     // ── Lambda lift ────────────────────────────────────────────────────
     const ext_scope_2 = try collectExternalScope(arena_alloc, &module_types);
-    const core_lifted = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog, ext_scope_2);
+    const lift_result_2 = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog, ext_scope_2, 0);
+    const core_lifted = lift_result_2.program;
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
@@ -925,10 +927,14 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     defer cross_module_con_map.deinit(arena_alloc);
 
     var per_module_grin = std.ArrayListUnmanaged(rusholme.grin.ast.Program){};
+    // Thread the lifted-function name counter across modules so that each
+    // module's lifted functions get globally unique LLVM symbol names.
+    var next_lift_id: u64 = 0;
     for (module_order) |mod_name| {
         const core_prog = session.programs.get(mod_name) orelse continue;
-        const core_lifted = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog, cross_module_scope);
-        const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted, null, &cross_module_con_map);
+        const lift_result = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog, cross_module_scope, next_lift_id);
+        next_lift_id = lift_result.next_lifted_id;
+        const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, lift_result.program, null, &cross_module_con_map);
         try per_module_grin.append(arena_alloc, grin_prog);
 
         // After translating this module, accumulate its constructor field

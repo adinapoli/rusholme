@@ -2181,3 +2181,135 @@ test "Scope.collectNames returns all bound names across frames" {
 
     try testing.expect(names.items.len == 3);
 }
+
+// ── Tests for issue #660 ───────────────────────────────────────────────
+//
+// Regression guard: two class declarations where the first has a default
+// method implementation must not corrupt the name resolution of the second
+// class's methods.  See: https://github.com/adinapoli/rusholme/issues/660
+
+test "rename #660: second class method resolves correctly after first class with default method" {
+    // Regression test for issue #660:
+    //
+    //   class MyEq a where
+    //     myEq  :: a -> a -> Bool
+    //     myNeq :: a -> a -> Bool
+    //     myNeq x y = myEq x y      -- default method
+    //
+    //   class MyShow a where
+    //     myShow :: a -> String      -- this must NOT become "unbound"
+    //
+    // The default-method body `myNeq x y = myEq x y` calls renameMatch,
+    // which pushes/pops a scope frame.  If that push/pop leaves the scope
+    // in an inconsistent state, the second class's method name `myShow`
+    // may fail to resolve in the typechecker (E002 "unbound variable").
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var supply = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var env = try RenameEnv.init(alloc, &supply, &diags);
+    defer env.deinit();
+
+    // Build the default-method body: `myEq x y`
+    //
+    //   App(App(Var("myEq"), Var("x")), Var("y"))
+    const var_my_eq = ast.Expr{ .Var = testQName("myEq") };
+    const var_x_body = ast.Expr{ .Var = testQName("x") };
+    const var_y_body = ast.Expr{ .Var = testQName("y") };
+    const app_inner = ast.Expr{ .App = .{ .fn_expr = &var_my_eq, .arg_expr = &var_x_body } };
+    const app_outer = ast.Expr{ .App = .{ .fn_expr = &app_inner, .arg_expr = &var_y_body } };
+
+    // Build the single-equation default: `myNeq x y = myEq x y`
+    const pat_x = testPatternVar("x");
+    const pat_y = testPatternVar("y");
+    const default_match = ast.Match{
+        .patterns     = &.{ pat_x, pat_y },
+        .rhs          = .{ .UnGuarded = app_outer },
+        .where_clause = null,
+        .span         = testSpan(),
+    };
+
+    // Build a simple Bool type for use in method signatures.
+    const bool_ty = ast.Type{ .Con = .{ .name = "Bool", .span = testSpan() } };
+    const string_ty = ast.Type{ .Con = .{ .name = "String", .span = testSpan() } };
+
+    // Build the type `a -> a -> Bool` for myEq / myNeq.
+    const tvar_a = ast.Type{ .Var = "a" };
+    const arr_a_a_bool_inner: [3]*const ast.Type = .{ &tvar_a, &tvar_a, &bool_ty };
+    const arr_a_a_bool = ast.Type{ .Fun = &arr_a_a_bool_inner };
+
+    // Build the type `a -> String` for myShow.
+    const arr_a_string: [2]*const ast.Type = .{ &tvar_a, &string_ty };
+    const a_to_string = ast.Type{ .Fun = &arr_a_string };
+
+    // class MyEq a where { myEq :: a -> a -> Bool; myNeq :: a -> a -> Bool; myNeq x y = myEq x y }
+    const methods_eq = [_]ast.ClassMethod{
+        .{
+            .name                   = "myEq",
+            .type                   = arr_a_a_bool,
+            .default_implementation = null,
+        },
+        .{
+            .name                   = "myNeq",
+            .type                   = arr_a_a_bool,
+            .default_implementation = &.{default_match},
+        },
+    };
+    const class_eq = ast.Decl{ .Class = .{
+        .context    = null,
+        .class_name = "MyEq",
+        .tyvars     = &.{"a"},
+        .fundeps    = &.{},
+        .methods    = &methods_eq,
+        .span       = testSpan(),
+    } };
+
+    // class MyShow a where { myShow :: a -> String }
+    const methods_show = [_]ast.ClassMethod{
+        .{
+            .name                   = "myShow",
+            .type                   = a_to_string,
+            .default_implementation = null,
+        },
+    };
+    const class_show = ast.Decl{ .Class = .{
+        .context    = null,
+        .class_name = "MyShow",
+        .tyvars     = &.{"a"},
+        .fundeps    = &.{},
+        .methods    = &methods_show,
+        .span       = testSpan(),
+    } };
+
+    const module = makeModule(&.{ class_eq, class_show });
+    const rm = try rename(module, &env);
+
+    // No rename errors.
+    try testing.expect(!diags.hasErrors());
+
+    // The renamed module must have exactly two declarations.
+    try testing.expectEqual(@as(usize, 2), rm.declarations.len);
+
+    // The second declaration must be a ClassDecl for MyShow.
+    const show_decl = rm.declarations[1].ClassDecl;
+    try testing.expectEqualStrings("MyShow", show_decl.name.base);
+    try testing.expectEqual(@as(usize, 1), show_decl.methods.len);
+
+    // The myShow method must have been assigned a non-zero unique (i.e. it
+    // was registered in Pass 1 and correctly looked up in Pass 2).
+    const my_show_method = show_decl.methods[0];
+    try testing.expectEqualStrings("myShow", my_show_method.name.base);
+    try testing.expect(my_show_method.name.unique.value != 0);
+
+    // The myNeq default method must also survive the round-trip intact.
+    const eq_decl = rm.declarations[0].ClassDecl;
+    try testing.expectEqualStrings("MyEq", eq_decl.name.base);
+    const my_neq_method = eq_decl.methods[1];
+    try testing.expectEqualStrings("myNeq", my_neq_method.name.base);
+    try testing.expect(my_neq_method.default_impl != null);
+    try testing.expectEqual(@as(usize, 1), my_neq_method.default_impl.?.len);
+}
