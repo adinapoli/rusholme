@@ -1,6 +1,8 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 module Main where
 
+foreign import prim "putStrLn" putStrLn :: String -> IO ()
+
 ($) :: (a -> b) -> a -> b
 ($) f a = f a
 infixr 0 $
