@@ -504,13 +504,15 @@ fn collectHTypeFreeMetas(
 
 // ── Built-in environment ───────────────────────────────────────────────
 
-/// Populate a `TyEnv` with the Prelude built-ins needed for M1.
+/// Populate a `TyEnv` with the built-ins needed for M1.
+///
+/// When `no_implicit_prelude` is true (module carries
+/// {-# LANGUAGE NoImplicitPrelude #-}), only wired-in types and constructors
+/// are added; Prelude function type signatures are suppressed.
 ///
 /// `supply` is the typechecker's `UniqueSupply` — used to mint fresh
 /// `Name` values for the rigid type variables in polymorphic schemes.
-/// After this call the env contains monomorphic and polymorphic bindings
-/// for the standard Prelude names used by M1 programs.
-pub fn initBuiltins(env: *TyEnv, alloc: std.mem.Allocator, supply: *UniqueSupply) std.mem.Allocator.Error!void {
+pub fn initBuiltins(env: *TyEnv, alloc: std.mem.Allocator, supply: *UniqueSupply, no_implicit_prelude: bool) std.mem.Allocator.Error!void {
     _ = supply; // reserved for future use if we need to mint fresh IDs for other built-ins
 
     // ── Type constructor helpers ───────────────────────────────────────
@@ -525,18 +527,7 @@ pub fn initBuiltins(env: *TyEnv, alloc: std.mem.Allocator, supply: *UniqueSupply
     // String = [Char].  Represented as `List Char`.
     const string_ty = try applyTy(Known.Type.List, &.{char_ty}, alloc);
 
-    // IO () — the type of main and putStrLn's return.
-    const io_unit = try applyTy(Known.Type.IO, &.{unit_ty}, alloc);
-
-    // ── Monomorphic bindings ───────────────────────────────────────────
-
-    // putStrLn : String -> IO ()
-    const putStrLn_ty = try funTy(string_ty, io_unit, alloc);
-    try env.bindMono(Known.Fn.putStrLn, putStrLn_ty);
-
-    // putStr : String -> IO ()
-    const putStr_ty = try funTy(string_ty, io_unit, alloc);
-    try env.bindMono(Known.Fn.putStr, putStr_ty);
+    // ── Wired-in monomorphic bindings (always present) ─────────────────
 
     // Primitive types
     try env.bindMono(Known.Type.Char, char_ty);
@@ -548,13 +539,10 @@ pub fn initBuiltins(env: *TyEnv, alloc: std.mem.Allocator, supply: *UniqueSupply
     try env.bindMono(Known.Con.True, bool_ty);
     try env.bindMono(Known.Con.False, bool_ty);
 
-    // otherwise : Bool  (always-true guard sentinel, identical to True)
-    try env.bindMono(Known.Fn.otherwise, bool_ty);
-
     // Unit constructor
     try env.bindMono(Known.Con.Unit, unit_ty);
 
-    // ── Polymorphic bindings ───────────────────────────────────────────
+    // ── Wired-in polymorphic bindings (always present) ─────────────────
     // Each polymorphic binding is a TyScheme{ .binders = &[ids], .body }.
 
     // (:) : forall a. a -> [a] -> [a]
@@ -588,6 +576,24 @@ pub fn initBuiltins(env: *TyEnv, alloc: std.mem.Allocator, supply: *UniqueSupply
         const tuple_ty = try funTy(a_ty, try funTy(b_ty, pair_ty, alloc), alloc);
         try env.bind(Known.Con.Tuple2, .{ .binders = try dupeIds(alloc, &.{ a_id, b_id }), .constraints = &.{}, .body = tuple_ty });
     }
+
+    if (no_implicit_prelude) return;
+
+    // ── Prelude-only bindings (suppressed by NoImplicitPrelude) ────────
+
+    // IO () — the type of main and putStrLn's return.
+    const io_unit = try applyTy(Known.Type.IO, &.{unit_ty}, alloc);
+
+    // putStrLn : String -> IO ()
+    const putStrLn_ty = try funTy(string_ty, io_unit, alloc);
+    try env.bindMono(Known.Fn.putStrLn, putStrLn_ty);
+
+    // putStr : String -> IO ()
+    const putStr_ty = try funTy(string_ty, io_unit, alloc);
+    try env.bindMono(Known.Fn.putStr, putStr_ty);
+
+    // otherwise : Bool  (always-true guard sentinel, identical to True)
+    try env.bindMono(Known.Fn.otherwise, bool_ty);
 
     // error : forall a. String -> a
     {
@@ -865,7 +871,7 @@ test "initBuiltins: putStrLn is in scope" {
     var u_supply = UniqueSupply{}; // Starts at 1000
 
     // Since initBuiltins now uses stable IDs (0-999), it doesn't move the supply.
-    try initBuiltins(&env, alloc, &u_supply);
+    try initBuiltins(&env, alloc, &u_supply, false);
 
     try testing.expect(u_supply.next == 1000);
 
@@ -883,7 +889,7 @@ test "initBuiltins: True and False are bound" {
     var env = try TyEnv.init(alloc);
     defer env.deinit();
     var u_supply = UniqueSupply{};
-    try initBuiltins(&env, alloc, &u_supply);
+    try initBuiltins(&env, alloc, &u_supply, false);
 
     var mv_supply = MetaVarSupply{};
     const true_ty = try env.lookup(Known.Con.True.unique, alloc, &mv_supply);
@@ -904,7 +910,7 @@ test "initBuiltins: bindings are polymorphic where expected" {
     var env = try TyEnv.init(alloc);
     defer env.deinit();
     var u_supply = UniqueSupply{};
-    try initBuiltins(&env, alloc, &u_supply);
+    try initBuiltins(&env, alloc, &u_supply, false);
 
     // We'll just verify that some bindings in the map are polymorphic.
     var it = env.current.bindings.iterator();
@@ -926,7 +932,7 @@ test "initBuiltins: at least one binder exists" {
     var env = try TyEnv.init(alloc);
     defer env.deinit();
     var u_supply = UniqueSupply{};
-    try initBuiltins(&env, alloc, &u_supply);
+    try initBuiltins(&env, alloc, &u_supply, false);
 
     try testing.expect(env.current.bindings.count() > 0);
 }

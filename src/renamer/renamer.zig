@@ -181,6 +181,7 @@ pub const RenameEnv = struct {
         alloc: std.mem.Allocator,
         supply: *UniqueSupply,
         diags: *DiagnosticCollector,
+        no_implicit_prelude: bool,
     ) !RenameEnv {
         var env = RenameEnv{
             .alloc = alloc,
@@ -188,7 +189,8 @@ pub const RenameEnv = struct {
             .scope = try Scope.init(alloc),
             .diags = diags,
         };
-        try env.populateBuiltins();
+        try env.populateWiredIn();
+        if (!no_implicit_prelude) try env.populatePreludeFns();
         return env;
     }
 
@@ -220,40 +222,16 @@ pub const RenameEnv = struct {
         return self.supply.freshName(src_name);
     }
 
-    /// Pre-populate the global scope frame with M1 built-in names.
+    /// Populate the scope with names that are always in scope regardless of
+    /// language extensions.  This includes primitive types, wired-in data
+    /// constructors, type classes, and numeric class methods needed for
+    /// desugaring (e.g. `fromInteger` for integer literals).
     ///
     /// Known shortcoming: names are minted here with fresh uniques each time
     /// `RenameEnv.init` is called, so the same built-in gets a different
     /// unique across compilation units.  A stable built-in table (keyed by
     /// a known initial unique range) is tracked in follow-up issue #166.
-    fn populateBuiltins(self: *RenameEnv) !void {
-        // Prelude functions
-        try self.scope.bind("putStrLn", Known.Fn.putStrLn);
-        try self.scope.bind("putStr", Known.Fn.putStr);
-        try self.scope.bind("print", Known.Fn.print);
-        try self.scope.bind("getLine", Known.Fn.getLine);
-        try self.scope.bind("return", Known.Fn.@"return");
-        try self.scope.bind("error", Known.Fn.@"error");
-        try self.scope.bind("undefined", Known.Fn.undefined);
-        try self.scope.bind("negate", Known.Fn.negate);
-        try self.scope.bind("abs", Known.Fn.abs);
-        try self.scope.bind("signum", Known.Fn.signum);
-        try self.scope.bind("fromInteger", Known.Fn.fromInteger);
-        try self.scope.bind("head", Known.Fn.head);
-        try self.scope.bind("tail", Known.Fn.tail);
-        try self.scope.bind("null", Known.Fn.null_);
-        try self.scope.bind("length", Known.Fn.length);
-        try self.scope.bind("map", Known.Fn.map);
-        try self.scope.bind("filter", Known.Fn.filter);
-        try self.scope.bind("foldl", Known.Fn.foldl);
-        try self.scope.bind("foldr", Known.Fn.foldr);
-        try self.scope.bind("concat", Known.Fn.concat);
-        try self.scope.bind("zip", Known.Fn.zip);
-        try self.scope.bind("unzip", Known.Fn.unzip);
-        try self.scope.bind("show", Known.Fn.show);
-        try self.scope.bind("read", Known.Fn.read);
-        try self.scope.bind("otherwise", Known.Fn.otherwise);
-
+    fn populateWiredIn(self: *RenameEnv) !void {
         // Primitive types
         try self.scope.bind("Int", Known.Type.Int);
         try self.scope.bind("Integer", Known.Type.Integer);
@@ -297,6 +275,39 @@ pub const RenameEnv = struct {
         try self.scope.bind("Monad", Known.Class.Monad);
         try self.scope.bind("Functor", Known.Class.Functor);
         try self.scope.bind("Applicative", Known.Class.Applicative);
+
+        // Numeric class methods needed for desugaring (e.g. integer literals
+        // desugar to `fromInteger`, negation to `negate`).
+        try self.scope.bind("fromInteger", Known.Fn.fromInteger);
+        try self.scope.bind("negate", Known.Fn.negate);
+        try self.scope.bind("abs", Known.Fn.abs);
+        try self.scope.bind("signum", Known.Fn.signum);
+    }
+
+    /// Populate the scope with Prelude functions that are suppressed when
+    /// the module carries {-# LANGUAGE NoImplicitPrelude #-}.
+    fn populatePreludeFns(self: *RenameEnv) !void {
+        try self.scope.bind("putStrLn", Known.Fn.putStrLn);
+        try self.scope.bind("putStr", Known.Fn.putStr);
+        try self.scope.bind("print", Known.Fn.print);
+        try self.scope.bind("getLine", Known.Fn.getLine);
+        try self.scope.bind("return", Known.Fn.@"return");
+        try self.scope.bind("error", Known.Fn.@"error");
+        try self.scope.bind("undefined", Known.Fn.undefined);
+        try self.scope.bind("head", Known.Fn.head);
+        try self.scope.bind("tail", Known.Fn.tail);
+        try self.scope.bind("null", Known.Fn.null_);
+        try self.scope.bind("length", Known.Fn.length);
+        try self.scope.bind("map", Known.Fn.map);
+        try self.scope.bind("filter", Known.Fn.filter);
+        try self.scope.bind("foldl", Known.Fn.foldl);
+        try self.scope.bind("foldr", Known.Fn.foldr);
+        try self.scope.bind("concat", Known.Fn.concat);
+        try self.scope.bind("zip", Known.Fn.zip);
+        try self.scope.bind("unzip", Known.Fn.unzip);
+        try self.scope.bind("show", Known.Fn.show);
+        try self.scope.bind("read", Known.Fn.read);
+        try self.scope.bind("otherwise", Known.Fn.otherwise);
     }
 };
 
@@ -1683,7 +1694,7 @@ test "rename: simple function binding gets a unique Name" {
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
 
-    var env = try RenameEnv.init(alloc, &supply, &diags);
+    var env = try RenameEnv.init(alloc, &supply, &diags, false);
     defer env.deinit();
 
     // `main = putStrLn "hello"`
@@ -1711,7 +1722,7 @@ test "rename: unbound variable emits diagnostic" {
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
 
-    var env = try RenameEnv.init(alloc, &supply, &diags);
+    var env = try RenameEnv.init(alloc, &supply, &diags, false);
     defer env.deinit();
 
     // `f = notInScope`
@@ -1737,7 +1748,7 @@ test "rename: lambda parameters are in scope in body" {
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
 
-    var env = try RenameEnv.init(alloc, &supply, &diags);
+    var env = try RenameEnv.init(alloc, &supply, &diags, false);
     defer env.deinit();
 
     // `f = \x -> x`
@@ -1763,7 +1774,7 @@ test "rename: lambda parameter does not leak out of body" {
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
 
-    var env = try RenameEnv.init(alloc, &supply, &diags);
+    var env = try RenameEnv.init(alloc, &supply, &diags, false);
     defer env.deinit();
 
     // `f = \x -> x`
@@ -1798,7 +1809,7 @@ test "rename: duplicate top-level binding emits diagnostic" {
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
 
-    var env = try RenameEnv.init(alloc, &supply, &diags);
+    var env = try RenameEnv.init(alloc, &supply, &diags, false);
     defer env.deinit();
 
     const lit = ast.Expr{ .Lit = .{ .Int = .{ .value = 1, .span = testSpan() } } };
@@ -1823,7 +1834,7 @@ test "rename: function equation patterns introduce binders" {
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
 
-    var env = try RenameEnv.init(alloc, &supply, &diags);
+    var env = try RenameEnv.init(alloc, &supply, &diags, false);
     defer env.deinit();
 
     // `f x = x`
@@ -1851,7 +1862,7 @@ test "rename: mutual recursion — both names visible" {
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
 
-    var env = try RenameEnv.init(alloc, &supply, &diags);
+    var env = try RenameEnv.init(alloc, &supply, &diags, false);
     defer env.deinit();
 
     // `even n = odd n`
@@ -1889,7 +1900,7 @@ test "rename: let-binding is in scope in body" {
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
 
-    var env = try RenameEnv.init(alloc, &supply, &diags);
+    var env = try RenameEnv.init(alloc, &supply, &diags, false);
     defer env.deinit();
 
     // `f = let y = 1 in y`
@@ -1921,7 +1932,7 @@ test "rename: built-in putStrLn resolves without error" {
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
 
-    var env = try RenameEnv.init(alloc, &supply, &diags);
+    var env = try RenameEnv.init(alloc, &supply, &diags, false);
     defer env.deinit();
 
     const rhs = ast.Expr{ .Var = testQName("putStrLn") };
@@ -1943,7 +1954,7 @@ test "rename: two distinct functions get distinct Names" {
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
 
-    var env = try RenameEnv.init(alloc, &supply, &diags);
+    var env = try RenameEnv.init(alloc, &supply, &diags, false);
     defer env.deinit();
 
     const lit1 = ast.Expr{ .Lit = .{ .Int = .{ .value = 1, .span = testSpan() } } };
@@ -1980,7 +1991,7 @@ test "rename: user-defined function may shadow a Prelude built-in" {
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
 
-    var env = try RenameEnv.init(alloc, &supply, &diags);
+    var env = try RenameEnv.init(alloc, &supply, &diags, false);
     defer env.deinit();
 
     // `head x = x`  (shadows the Prelude `head`)
@@ -2027,7 +2038,7 @@ test "rename #316: duplicate field name across constructors emits error" {
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
 
-    var env = try RenameEnv.init(alloc, &supply, &diags);
+    var env = try RenameEnv.init(alloc, &supply, &diags, false);
     defer env.deinit();
 
     const string_ty = testTypeCon("String");
@@ -2085,7 +2096,7 @@ test "rename #316: unique field names across constructors does not error" {
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
 
-    var env = try RenameEnv.init(alloc, &supply, &diags);
+    var env = try RenameEnv.init(alloc, &supply, &diags, false);
     defer env.deinit();
 
     const int_ty = testTypeCon("Int");
@@ -2135,7 +2146,7 @@ test "rename #316: repeated field within the same constructor emits error" {
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
 
-    var env = try RenameEnv.init(alloc, &supply, &diags);
+    var env = try RenameEnv.init(alloc, &supply, &diags, false);
     defer env.deinit();
 
     const int_ty = testTypeCon("Int");
@@ -2211,7 +2222,7 @@ test "rename #660: second class method resolves correctly after first class with
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
 
-    var env = try RenameEnv.init(alloc, &supply, &diags);
+    var env = try RenameEnv.init(alloc, &supply, &diags, false);
     defer env.deinit();
 
     // Build the default-method body: `myEq x y`

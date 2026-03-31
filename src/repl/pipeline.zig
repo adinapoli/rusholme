@@ -612,10 +612,10 @@ test "pipeline: compile simple literal expression" {
     var u_supply = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    var rename_env = try RenameEnv.init(alloc, &u_supply, &diags);
+    var rename_env = try RenameEnv.init(alloc, &u_supply, &diags, false);
     defer rename_env.deinit();
     var ty_env = try env_mod.TyEnv.init(alloc);
-    try env_mod.initBuiltins(&ty_env, alloc, &u_supply);
+    try env_mod.initBuiltins(&ty_env, alloc, &u_supply, false);
     var mv_supply = htype_mod.MetaVarSupply{};
 
     const result = try pipeline.compileInput(
@@ -648,10 +648,10 @@ test "pipeline: compile data declaration" {
     var u_supply = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    var rename_env = try RenameEnv.init(alloc, &u_supply, &diags);
+    var rename_env = try RenameEnv.init(alloc, &u_supply, &diags, false);
     defer rename_env.deinit();
     var ty_env = try env_mod.TyEnv.init(alloc);
-    try env_mod.initBuiltins(&ty_env, alloc, &u_supply);
+    try env_mod.initBuiltins(&ty_env, alloc, &u_supply, false);
     var mv_supply = htype_mod.MetaVarSupply{};
 
     const result = try pipeline.compileInput(
@@ -684,10 +684,10 @@ test "pipeline: compile function declaration" {
     var u_supply = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    var rename_env = try RenameEnv.init(alloc, &u_supply, &diags);
+    var rename_env = try RenameEnv.init(alloc, &u_supply, &diags, false);
     defer rename_env.deinit();
     var ty_env = try env_mod.TyEnv.init(alloc);
-    try env_mod.initBuiltins(&ty_env, alloc, &u_supply);
+    try env_mod.initBuiltins(&ty_env, alloc, &u_supply, false);
     var mv_supply = htype_mod.MetaVarSupply{};
 
     // Use a simple function that doesn't require typeclasses
@@ -806,10 +806,10 @@ test "pipeline: handle let prefix in declarations" {
     var u_supply = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    var rename_env = try RenameEnv.init(alloc, &u_supply, &diags);
+    var rename_env = try RenameEnv.init(alloc, &u_supply, &diags, false);
     defer rename_env.deinit();
     var ty_env = try env_mod.TyEnv.init(alloc);
-    try env_mod.initBuiltins(&ty_env, alloc, &u_supply);
+    try env_mod.initBuiltins(&ty_env, alloc, &u_supply, false);
     var mv_supply = htype_mod.MetaVarSupply{};
 
     // The "let " prefix should be stripped for module-level declarations

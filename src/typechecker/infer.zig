@@ -2580,7 +2580,7 @@ test "infer: integer literal has type Int" {
     var us = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    try env_mod.initBuiltins(&env, alloc, &us);
+    try env_mod.initBuiltins(&env, alloc, &us, false);
 
     var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
 
@@ -2602,7 +2602,7 @@ test "infer: character literal has type Char" {
     var us = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    try env_mod.initBuiltins(&env, alloc, &us);
+    try env_mod.initBuiltins(&env, alloc, &us, false);
 
     var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
 
@@ -2624,7 +2624,7 @@ test "infer: string literal has type [Char]" {
     var us = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    try env_mod.initBuiltins(&env, alloc, &us);
+    try env_mod.initBuiltins(&env, alloc, &us, false);
 
     var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
 
@@ -2648,7 +2648,7 @@ test "infer: float literal has type Double" {
     var us = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    try env_mod.initBuiltins(&env, alloc, &us);
+    try env_mod.initBuiltins(&env, alloc, &us, false);
 
     var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
 
@@ -2862,7 +2862,7 @@ test "infer: let id = \\x -> x in (id 1, id True) — let-polymorphism" {
     var us = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    try env_mod.initBuiltins(&env, alloc, &us);
+    try env_mod.initBuiltins(&env, alloc, &us, false);
 
     var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
 
@@ -2978,7 +2978,7 @@ test "infer: genuine let-polymorphism still works in nested scopes" {
     var us = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    try env_mod.initBuiltins(&env, alloc, &us);
+    try env_mod.initBuiltins(&env, alloc, &us, false);
 
     var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
 
@@ -3102,7 +3102,7 @@ test "infer: if True then 1 else 2 has type Int" {
     var us = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    try env_mod.initBuiltins(&env, alloc, &us);
+    try env_mod.initBuiltins(&env, alloc, &us, false);
 
     var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
 
@@ -3701,7 +3701,7 @@ test "infer: if branches of different types emits error" {
     var us = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    try env_mod.initBuiltins(&env, alloc, &us);
+    try env_mod.initBuiltins(&env, alloc, &us, false);
 
     var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
 
@@ -3788,7 +3788,7 @@ test "infer: (1, True) has type (Int, Bool)" {
     var us = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    try env_mod.initBuiltins(&env, alloc, &us);
+    try env_mod.initBuiltins(&env, alloc, &us, false);
 
     var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
 
@@ -3821,7 +3821,7 @@ test "inferModule: main = putStrLn \"Hello\"" {
     var us = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    try env_mod.initBuiltins(&env, alloc, &us);
+    try env_mod.initBuiltins(&env, alloc, &us, false);
 
     var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
 
@@ -3921,7 +3921,7 @@ test "inferModule: signature matches inferred type" {
     var us = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    try env_mod.initBuiltins(&env, alloc, &us);
+    try env_mod.initBuiltins(&env, alloc, &us, false);
 
     var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
 
@@ -3994,7 +3994,7 @@ test "inferModule: signature mismatch produces error" {
     var us = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    try env_mod.initBuiltins(&env, alloc, &us);
+    try env_mod.initBuiltins(&env, alloc, &us, false);
 
     var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
 
@@ -4044,7 +4044,7 @@ test "inferModule: type variables in signature are scoped correctly" {
     var us = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    try env_mod.initBuiltins(&env, alloc, &us);
+    try env_mod.initBuiltins(&env, alloc, &us, false);
 
     var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
 
@@ -4146,7 +4146,7 @@ test "inferModule: #304 bad x y = x with sig a -> b -> b produces RigidMismatch"
     var us = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    try env_mod.initBuiltins(&env, alloc, &us);
+    try env_mod.initBuiltins(&env, alloc, &us, false);
 
     var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
 
@@ -4204,7 +4204,7 @@ test "inferModule: #304 good x y = y with sig a -> b -> b succeeds" {
     var us = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    try env_mod.initBuiltins(&env, alloc, &us);
+    try env_mod.initBuiltins(&env, alloc, &us, false);
 
     var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
 
@@ -4556,7 +4556,7 @@ test "inferModule with type application in signature" {
     var us = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    try env_mod.initBuiltins(&env, alloc, &us);
+    try env_mod.initBuiltins(&env, alloc, &us, false);
 
     // Bind Just constructor as Int -> Int for testing (simplified)
     const just_name = testName("Just", 9301);
@@ -4635,7 +4635,7 @@ test "infer: let-binding with type signature uses signature" {
     var us = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    try env_mod.initBuiltins(&env, alloc, &us);
+    try env_mod.initBuiltins(&env, alloc, &us, false);
 
     var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
 
@@ -4713,7 +4713,7 @@ test "infer: let-binding with polymorphic signature works" {
     var us = UniqueSupply{};
     var diags = DiagnosticCollector.init();
     defer diags.deinit(alloc);
-    try env_mod.initBuiltins(&env, alloc, &us);
+    try env_mod.initBuiltins(&env, alloc, &us, false);
 
     var ctx = makeCtx(&arena, &env, &mv, &us, &diags);
 

@@ -179,7 +179,7 @@ pub const Session = struct {
         var init_diags = DiagnosticCollector.init();
         defer init_diags.deinit(allocator);
 
-        var rename_env = RenameEnv.init(allocator, &u_supply, &init_diags) catch {
+        var rename_env = RenameEnv.init(allocator, &u_supply, &init_diags, false) catch {
             return SessionError.InitFailed;
         };
         errdefer rename_env.deinit();
@@ -189,7 +189,7 @@ pub const Session = struct {
         };
         errdefer ty_env.deinit();
 
-        env_mod.initBuiltins(&ty_env, allocator, &u_supply) catch {
+        env_mod.initBuiltins(&ty_env, allocator, &u_supply, false) catch {
             return SessionError.OutOfMemory;
         };
 
