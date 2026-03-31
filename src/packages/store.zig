@@ -90,6 +90,25 @@ pub fn defaultPath(alloc: std.mem.Allocator) []const u8 {
     }) catch unreachable; // Only path allocation could fail; let it bubble up
 }
 
+/// Compute the package key from name, version, and descriptor content.
+///
+/// Format: {sha256_hex}-{name}-{version}
+///
+/// Caller owns the returned string (allocated with alloc).
+fn computeKey(alloc: std.mem.Allocator, name: []const u8, version: []const u8, descriptor_content: []const u8) Error![]const u8 {
+    var hasher = std.crypto.hash.sha256.Sha256.init(.{});
+    hasher.update(descriptor_content);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+
+    var hash_hex: [64]u8 = undefined;
+    for (digest, 0..) |byte, i| {
+        _ = std.fmt.formatIntHex(&hash_hex[2 * i .. 2 * i + 2], byte, .lower, .{ .width = 2 });
+    }
+
+    return std.fmt.allocPrint(alloc, "{s}-{s}-{s}", .{ &hash_hex, name, version });
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 test "defaultPath generates correct format" {
@@ -107,4 +126,30 @@ test "defaultPath generates correct format" {
         std.mem.indexOf(u8, path, arch_tag) != null or
         std.mem.indexOf(u8, path, os_tag) != null;
     try std.testing.expect(has_arch_or_os);
+}
+
+test "computeKey generates SHA256-based key" {
+    const desc_content = "name = \"test\"\nversion = \"1.0.0\"\n";
+    const key = try computeKey(std.testing.allocator, "test", "1.0.0", desc_content);
+    defer std.testing.allocator.free(key);
+
+    // Key format: {64-char hash}-{name}-{version}
+    try std.testing.expect(key.len >= 74); // 64 + 2 dashes +最少
+    const first_dash = std.mem.indexOfScalar(u8, key, '-') orelse return error.TestExpectFailed;
+    const second_dash = std.mem.indexOfScalarPos(u8, key, first_dash + 1, '-') orelse return error.TestExpectFailed;
+
+    try std.testing.expectEqual(@as(usize, 64), first_dash);
+    try std.testing.expectEqualStrings("test", key[first_dash + 1 .. second_dash]);
+    try std.testing.expectEqualStrings("1.0.0", key[second_dash + 1 ..]);
+
+    // Same descriptor content = same hash
+    const key2 = try computeKey(std.testing.allocator, "test", "1.0.0", desc_content);
+    defer std.testing.allocator.free(key2);
+    try std.testing.expectEqualStrings(key, key2);
+
+    // Different descriptor = different hash
+    const desc_content2 = "version = \"1.0.0\"\nname = \"test\"\n";
+    const key3 = try computeKey(std.testing.allocator, "test", "1.0.0", desc_content2);
+    defer std.testing.allocator.free(key3);
+    try std.testing.expect(!std.mem.eql(u8, key, key3));
 }
