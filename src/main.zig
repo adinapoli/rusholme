@@ -350,7 +350,8 @@ fn cmdCheck(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
 
     // ── Rename ─────────────────────────────────────────────────────────
     var u_supply = rusholme.naming.unique.UniqueSupply{};
-    var rename_env = try renamer_mod.RenameEnv.init(arena_alloc, &u_supply, &diags);
+    const no_implicit_prelude = module.language_extensions.contains(.NoImplicitPrelude);
+    var rename_env = try renamer_mod.RenameEnv.init(arena_alloc, &u_supply, &diags, no_implicit_prelude);
     defer rename_env.deinit();
 
     // ── Load Prelude before user rename ───────────────────────────────
@@ -359,12 +360,12 @@ fn cmdCheck(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     // during renaming.
     var mv_supply = htype_mod.MetaVarSupply{};
     var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
-    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
+    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply, no_implicit_prelude);
 
     // Respect the NoImplicitPrelude language extension: only load Prelude
     // when the user has NOT enabled NoImplicitPrelude.
     var prelude_result: ?PreludeResult = null;
-    if (!module.language_extensions.contains(.NoImplicitPrelude)) {
+    if (!no_implicit_prelude) {
         // Load the Prelude so its functions/operators are available for renaming.
         // Non-fatal: on failure the check continues with built-in names only.
         var pipeline_check = rusholme.repl.pipeline.Pipeline.init(arena_alloc, io);
@@ -455,18 +456,19 @@ fn cmdCore(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     }
 
     var u_supply = rusholme.naming.unique.UniqueSupply{};
-    var rename_env = try renamer_mod.RenameEnv.init(arena_alloc, &u_supply, &diags);
+    const no_implicit_prelude = module.language_extensions.contains(.NoImplicitPrelude);
+    var rename_env = try renamer_mod.RenameEnv.init(arena_alloc, &u_supply, &diags, no_implicit_prelude);
     defer rename_env.deinit();
 
     // ── Load Prelude before user rename ───────────────────────────────
     var mv_supply = htype_mod.MetaVarSupply{};
     var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
-    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
+    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply, no_implicit_prelude);
 
     // Respect the NoImplicitPrelude language extension: only load Prelude
     // when the user has NOT enabled NoImplicitPrelude.
     var prelude_result: ?PreludeResult = null;
-    if (!module.language_extensions.contains(.NoImplicitPrelude)) {
+    if (!no_implicit_prelude) {
         var pipeline_core = rusholme.repl.pipeline.Pipeline.init(arena_alloc, io);
         prelude_result = loadPrelude(arena_alloc, io, &pipeline_core, &u_supply, &rename_env, &ty_env, &mv_supply, &diags) catch null;
     }
@@ -555,18 +557,19 @@ fn cmdGrin(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
 
     // ── Rename ─────────────────────────────────────────────────────────
     var u_supply = rusholme.naming.unique.UniqueSupply{};
-    var rename_env = try renamer_mod.RenameEnv.init(arena_alloc, &u_supply, &diags);
+    const no_implicit_prelude = module.language_extensions.contains(.NoImplicitPrelude);
+    var rename_env = try renamer_mod.RenameEnv.init(arena_alloc, &u_supply, &diags, no_implicit_prelude);
     defer rename_env.deinit();
 
     // ── Load Prelude before user rename ───────────────────────────────
     var mv_supply = htype_mod.MetaVarSupply{};
     var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
-    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
+    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply, no_implicit_prelude);
 
     // Respect the NoImplicitPrelude language extension: only load Prelude
     // when the user has NOT enabled NoImplicitPrelude.
     var prelude_result: ?PreludeResult = null;
-    if (!module.language_extensions.contains(.NoImplicitPrelude)) {
+    if (!no_implicit_prelude) {
         var pipeline_grin = rusholme.repl.pipeline.Pipeline.init(arena_alloc, io);
         prelude_result = loadPrelude(arena_alloc, io, &pipeline_grin, &u_supply, &rename_env, &ty_env, &mv_supply, &diags) catch null;
     }
@@ -672,18 +675,19 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
 
     // ── Rename ─────────────────────────────────────────────────────────
     var u_supply = rusholme.naming.unique.UniqueSupply{};
-    var rename_env = try renamer_mod.RenameEnv.init(arena_alloc, &u_supply, &diags);
+    const no_implicit_prelude = module.language_extensions.contains(.NoImplicitPrelude);
+    var rename_env = try renamer_mod.RenameEnv.init(arena_alloc, &u_supply, &diags, no_implicit_prelude);
     defer rename_env.deinit();
 
     // ── Load Prelude before user rename ───────────────────────────────
     var mv_supply = htype_mod.MetaVarSupply{};
     var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
-    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply);
+    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply, no_implicit_prelude);
 
     // Respect the NoImplicitPrelude language extension: only load Prelude
     // when the user has NOT enabled NoImplicitPrelude.
     var prelude_result: ?PreludeResult = null;
-    if (!module.language_extensions.contains(.NoImplicitPrelude)) {
+    if (!no_implicit_prelude) {
         var pipeline_ll = rusholme.repl.pipeline.Pipeline.init(arena_alloc, io);
         prelude_result = loadPrelude(arena_alloc, io, &pipeline_ll, &u_supply, &rename_env, &ty_env, &mv_supply, &diags) catch null;
     }
@@ -890,7 +894,7 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
         } else |err| {
             // Prelude not found is non-fatal in development; warn and continue
             // without implicit Prelude compilation. User modules will still
-            // get built-in names from populateBuiltins/initBuiltins.
+            // get wired-in names from populateWiredIn/initBuiltins.
             var stderr_buf: [4096]u8 = undefined;
             var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
             const stderr = &stderr_fw.interface;

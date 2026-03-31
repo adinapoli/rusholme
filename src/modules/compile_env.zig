@@ -429,7 +429,8 @@ pub const CompileEnv = struct {
             try injectImplicitPrelude(self.alloc, parsed);
 
         // ── Rename ───────────────────────────────────────────────────────
-        var rename_env = try renamer_mod.RenameEnv.init(self.alloc, &self.u_supply, &self.diags);
+        const no_implicit_prelude = parsed.language_extensions.contains(.NoImplicitPrelude);
+        var rename_env = try renamer_mod.RenameEnv.init(self.alloc, &self.u_supply, &self.diags, no_implicit_prelude);
         defer rename_env.deinit();
         // Seed with names from imported modules only (not all compiled modules).
         try self.seedRenamerFromImports(&rename_env, module.imports);
@@ -438,7 +439,7 @@ pub const CompileEnv = struct {
 
         // ── Typecheck ────────────────────────────────────────────────────
         var ty_env = try env_mod.TyEnv.init(self.alloc);
-        try env_mod.initBuiltins(&ty_env, self.alloc, &self.u_supply);
+        try env_mod.initBuiltins(&ty_env, self.alloc, &self.u_supply, no_implicit_prelude);
         // Seed with types from imported modules only.
         try self.seedTyEnvFromImports(&ty_env, module.imports);
 
@@ -1416,6 +1417,57 @@ test "compileSingle: module with NoImplicitPrelude compiles without Prelude inje
     // The compilation may or may not succeed (depends on parser's pragma
     // handling), but it must not crash.
     _ = try env.compileSingle("WithNoPrelude", source, 1, null);
+}
+
+// ── NoImplicitPrelude suppression tests ───────────────────────────────────
+
+test "compileSingle: NoImplicitPrelude suppresses Prelude function injection" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = CompileEnv.init(alloc);
+    defer env.deinit();
+
+    // putStrLn should NOT be in scope when NoImplicitPrelude is active.
+    const source =
+        \\{-# LANGUAGE NoImplicitPrelude #-}
+        \\module NoPreludeFns where
+        \\
+        \\main :: IO ()
+        \\main = putStrLn "hello"
+        \\
+    ;
+
+    _ = try env.compileSingle("NoPreludeFns", source, 1, null);
+    // With NoImplicitPrelude, putStrLn is not in scope → renamer must emit an error.
+    try testing.expect(env.diags.hasErrors());
+}
+
+test "compileSingle: NoImplicitPrelude still allows wired-in types and constructors" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = CompileEnv.init(alloc);
+    defer env.deinit();
+
+    // Int, Bool, and True/False are wired-in and must remain available even
+    // when the module opts out of the implicit Prelude.
+    const source =
+        \\{-# LANGUAGE NoImplicitPrelude #-}
+        \\module WiredIn where
+        \\
+        \\answer :: Int
+        \\answer = 42
+        \\
+        \\flag :: Bool
+        \\flag = True
+        \\
+    ;
+
+    _ = try env.compileSingle("WiredIn", source, 1, null);
+    try testing.expect(!env.diags.hasErrors());
 }
 
 // ── .rhi cache integration tests ─────────────────────────────────────────
