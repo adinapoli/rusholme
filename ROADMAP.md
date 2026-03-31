@@ -361,7 +361,7 @@
 | [#343](https://github.com/adinapoli/rusholme/issues/343) | Implement heap operation PrimOps (MutVar) | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
 | [#344](https://github.com/adinapoli/rusholme/issues/344) | Implement FFI bridge (ccall PrimOp) | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
 | [#387](https://github.com/adinapoli/rusholme/issues/387) | Implement proper write() for runtime IO primitives | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
-| [#542](https://github.com/adinapoli/rusholme/issues/542) | Add missing RTS implementations for neg_Int, abs_Int, quot_Int, rem_Int | [#330](https://github.com/adinapoli/rusholme/issues/330) | :white_circle: |
+| [#542](https://github.com/adinapoli/rusholme/issues/542) | Add missing RTS implementations for neg_Int, abs_Int, quot_Int, rem_Int | [#330](https://github.com/adinapoli/rusholme/issues/330) | :green_circle: |
 
 ### Epic [#280](https://github.com/adinapoli/rusholme/issues/280): Rusholme Run-Time System (RTS)
 
@@ -454,7 +454,7 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | [#528](https://github.com/adinapoli/rusholme/issues/528) | Write `lib/Prelude.hs` with basic types and functions (no type classes) | [#527](https://github.com/adinapoli/rusholme/issues/527) | :green_circle: |
 | [#529](https://github.com/adinapoli/rusholme/issues/529) | Bootstrap Prelude: compile `lib/Prelude.hs` and wire into implicit import | [#527](https://github.com/adinapoli/rusholme/issues/527), [#528](https://github.com/adinapoli/rusholme/issues/528) | :green_circle: |
 | [#530](https://github.com/adinapoli/rusholme/issues/530) | Implement dictionary-passing translation for type classes | — | :green_circle: |
-| [#531](https://github.com/adinapoli/rusholme/issues/531) | Add type class definitions and instances to `lib/Prelude.hs` | [#528](https://github.com/adinapoli/rusholme/issues/528), [#529](https://github.com/adinapoli/rusholme/issues/529), [#530](https://github.com/adinapoli/rusholme/issues/530) | :white_circle: |
+| [#531](https://github.com/adinapoli/rusholme/issues/531) | Add type class definitions and instances to `lib/Prelude.hs` | [#528](https://github.com/adinapoli/rusholme/issues/528), [#529](https://github.com/adinapoli/rusholme/issues/529), [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#555](https://github.com/adinapoli/rusholme/issues/555) | Implement default method compilation for type classes | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#556](https://github.com/adinapoli/rusholme/issues/556) | Insert dictionary arguments at type class method call sites | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#557](https://github.com/adinapoli/rusholme/issues/557) | Persist ClassEnv across REPL inputs in session state | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
@@ -464,23 +464,23 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | [#609](https://github.com/adinapoli/rusholme/issues/609) | Implement string-as-[Char] and Prelude loading for native JIT REPL | [#557](https://github.com/adinapoli/rusholme/issues/557), [#529](https://github.com/adinapoli/rusholme/issues/529) | :green_circle: |
 | [#612](https://github.com/adinapoli/rusholme/issues/612) | REPL: result display via Haskell's Show typeclass | [#607](https://github.com/adinapoli/rusholme/issues/607) | :green_circle: |
 | [#615](https://github.com/adinapoli/rusholme/issues/615) | GRIN evaluator: support dictionary-passing for typeclass dispatch | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
-| [#616](https://github.com/adinapoli/rusholme/issues/616) | Module interface cache (.rhi) does not store ClassEnv or DictNameMap | [#612](https://github.com/adinapoli/rusholme/issues/612) | :yellow_circle: |
+| [#616](https://github.com/adinapoli/rusholme/issues/616) | Module interface cache (.rhi) does not store ClassEnv or DictNameMap | [#612](https://github.com/adinapoli/rusholme/issues/612) | :green_circle: |
 | [#617](https://github.com/adinapoli/rusholme/issues/617) | Show Char and Show String instances lack escape sequence handling | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
 | [#618](https://github.com/adinapoli/rusholme/issues/618) | Native LLVM backend segfaults on dictionary-passing codegen | [#612](https://github.com/adinapoli/rusholme/issues/612) | :green_circle: |
 | [#621](https://github.com/adinapoli/rusholme/issues/621) | Unit and integer 0 are indistinguishable in JIT result formatting | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
-| [#623](https://github.com/adinapoli/rusholme/issues/623) | Where-clause bindings not in scope during renaming/typechecking | — | :white_circle: |
+| [#623](https://github.com/adinapoli/rusholme/issues/623) | Where-clause bindings not in scope during renaming/typechecking | — | :green_circle: |
 | [#624](https://github.com/adinapoli/rusholme/issues/624) | Runtime segfault in programs combining many different thunk types in long do-blocks | [#618](https://github.com/adinapoli/rusholme/issues/618) | :green_circle: |
 | [#631](https://github.com/adinapoli/rusholme/issues/631) | Regression in infinite list support: REPL crashes on `take 3 [1..]` after prior range expression | [#624](https://github.com/adinapoli/rusholme/issues/624) | :green_circle: |
 | [#636](https://github.com/adinapoli/rusholme/issues/636) | Refactor TagTable into persistent TagRegistry + transient TranslationContext | [#631](https://github.com/adinapoli/rusholme/issues/631) | :green_circle: |
 | [#558](https://github.com/adinapoli/rusholme/issues/558) | Implement recursive instance context constraint resolution | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#559](https://github.com/adinapoli/rusholme/issues/559) | Support class constraints in user-written type signatures | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#641](https://github.com/adinapoli/rusholme/issues/641) | Polymorphic Show instances fail in native AOT path for Maybe/Either | [#629](https://github.com/adinapoli/rusholme/issues/629) | :green_circle: |
-| [#644](https://github.com/adinapoli/rusholme/issues/644) | Desugarer discards annotated expression in TypeAnn — replaces with unit_0 | [#641](https://github.com/adinapoli/rusholme/issues/641) | :white_circle: |
-| [#645](https://github.com/adinapoli/rusholme/issues/645) | Single-file CLI commands do not propagate Prelude class env | [#641](https://github.com/adinapoli/rusholme/issues/641) | :white_circle: |
-| [#566](https://github.com/adinapoli/rusholme/issues/566) | Typechecker: support declaration-order-independent inference | — | :white_circle: |
-| [#567](https://github.com/adinapoli/rusholme/issues/567) | Parser: support parenthesised-pattern LHS in function bindings | — | :white_circle: |
+| [#644](https://github.com/adinapoli/rusholme/issues/644) | Desugarer discards annotated expression in TypeAnn — replaces with unit_0 | [#641](https://github.com/adinapoli/rusholme/issues/641) | :green_circle: |
+| [#645](https://github.com/adinapoli/rusholme/issues/645) | Single-file CLI commands do not propagate Prelude class env | [#641](https://github.com/adinapoli/rusholme/issues/641) | :green_circle: |
+| [#566](https://github.com/adinapoli/rusholme/issues/566) | Typechecker: support declaration-order-independent inference | — | :green_circle: |
+| [#567](https://github.com/adinapoli/rusholme/issues/567) | Parser: support parenthesised-pattern LHS in function bindings | — | :green_circle: |
 | [#591](https://github.com/adinapoli/rusholme/issues/591) | Wire Prelude into REPL session for WASM target | [#529](https://github.com/adinapoli/rusholme/issues/529) | :green_circle: |
-| [#592](https://github.com/adinapoli/rusholme/issues/592) | GRIN evaluator drops first IO action with eta-reduced bindings in do-blocks | [#591](https://github.com/adinapoli/rusholme/issues/591) | :white_circle: |
+| [#592](https://github.com/adinapoli/rusholme/issues/592) | GRIN evaluator drops first IO action with eta-reduced bindings in do-blocks | [#591](https://github.com/adinapoli/rusholme/issues/591) | :green_circle: |
 
 ### Epic [#14](https://github.com/adinapoli/rusholme/issues/14): Memory Management (Arena → Immix GC)
 
@@ -510,17 +510,19 @@ These existing issues must be resolved before any Phase 1 work begins:
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#531](https://github.com/adinapoli/rusholme/issues/531) | Add `Eq`/`Ord`/`Num` type classes to `lib/Prelude.hs` | [#530](https://github.com/adinapoli/rusholme/issues/530) | :white_circle: |
-| [#616](https://github.com/adinapoli/rusholme/issues/616) | Module interface cache (`.rhi`) does not store `ClassEnv` or `DictNameMap` | [#612](https://github.com/adinapoli/rusholme/issues/612) | :yellow_circle: |
+| [#531](https://github.com/adinapoli/rusholme/issues/531) | Add `Eq`/`Ord`/`Num` type classes to `lib/Prelude.hs` | [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
+| [#659](https://github.com/adinapoli/rusholme/issues/659) | Lambda lifter propagates outer lambda's parameter as free variable from inner lifted lambda | [#531](https://github.com/adinapoli/rusholme/issues/531) | :green_circle: |
+| [#660](https://github.com/adinapoli/rusholme/issues/660) | Default method in class declaration causes subsequent class method to be unbound in typechecker | [#531](https://github.com/adinapoli/rusholme/issues/531) | :green_circle: |
+| [#616](https://github.com/adinapoli/rusholme/issues/616) | Module interface cache (`.rhi`) does not store `ClassEnv` or `DictNameMap` | [#612](https://github.com/adinapoli/rusholme/issues/612) | :green_circle: |
 | [#615](https://github.com/adinapoli/rusholme/issues/615) | GRIN evaluator: support dictionary-passing for typeclass dispatch | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
-| [#566](https://github.com/adinapoli/rusholme/issues/566) | Typechecker: support declaration-order-independent inference | — | :white_circle: |
-| [#623](https://github.com/adinapoli/rusholme/issues/623) | Where-clause bindings not in scope during renaming/typechecking | — | :white_circle: |
+| [#566](https://github.com/adinapoli/rusholme/issues/566) | Typechecker: support declaration-order-independent inference | — | :green_circle: |
+| [#623](https://github.com/adinapoli/rusholme/issues/623) | Where-clause bindings not in scope during renaming/typechecking | — | :green_circle: |
 
 #### Phase 1 — Package infrastructure
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#649](https://github.com/adinapoli/rusholme/issues/649) | Implement `.rhc-pkg` package descriptor format and parser | — | :white_circle: |
+| [#649](https://github.com/adinapoli/rusholme/issues/649) | Implement `.rhc-pkg` package descriptor format and parser | — | :green_circle: |
 | [#650](https://github.com/adinapoli/rusholme/issues/650) | Implement package store layout at `~/.rhc/store/` | [#649](https://github.com/adinapoli/rusholme/issues/649) | :white_circle: |
 | [#651](https://github.com/adinapoli/rusholme/issues/651) | Implement `rhc-pkg` tool (list/describe/install/unregister/check) | [#650](https://github.com/adinapoli/rusholme/issues/650) | :white_circle: |
 | [#652](https://github.com/adinapoli/rusholme/issues/652) | Add `--package-db` flag to `rhc` compiler | [#650](https://github.com/adinapoli/rusholme/issues/650) | :white_circle: |
