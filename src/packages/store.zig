@@ -321,6 +321,23 @@ pub fn lookup(self: *const Store, name: []const u8, version: []const u8) Error!?
     return null;
 }
 
+/// Look up a package by its full key (hash-name-version).
+pub fn lookupByKey(self: *const Store, key: []const u8) Error!?Entry {
+    const conf_filename = try std.fmt.allocPrintZ(self.allocator, "{s}.conf", .{key});
+    defer self.allocator.free(conf_filename);
+
+    const conf_path = try std.fs.path.joinZ(self.allocator, &.{ self.conf_dir_path, conf_filename });
+    defer self.allocator.free(conf_path);
+
+    // Check if file exists
+    const file = std.fs.cwd().openFile(conf_path, .{}) catch |err| {
+        return if (err == error.FileNotFound) null else err;
+    };
+    file.close();
+
+    return try parseConfFile(self.allocator, conf_path);
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 test "defaultPath generates correct format" {
@@ -518,5 +535,41 @@ test "Store.lookup returns null for non-existent package" {
     defer store.deinit();
 
     const entry = try store.lookup("nonexistent", "1.0.0");
+    try std.testing.expect(entry == null);
+}
+
+test "Store.lookupByKey finds package by full key" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    var store = try Store.init(std.testing.allocator, tmp_dir.dir.path);
+    defer store.deinit();
+
+    const desc_content = "name = \"keytest\"\nversion = \"1.0.0\"\n";
+    const desc = try descriptor.parse(std.testing.allocator, desc_content);
+    defer desc.deinit(std.testing.allocator);
+
+    const key = try computeKey(std.testing.allocator, desc.name, desc.version, desc_content);
+    defer std.testing.allocator.free(key);
+
+    try store.register(key, desc_content, desc);
+
+    const entry = (try store.lookupByKey(key)) orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    defer entry.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings(key, entry.key);
+}
+
+test "Store.lookupByKey returns null for unknown key" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    var store = try Store.init(std.testing.allocator, tmp_dir.dir.path);
+    defer store.deinit();
+
+    const entry = try store.lookupByKey("unknown-key");
     try std.testing.expect(entry == null);
 }
