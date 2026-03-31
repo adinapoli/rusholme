@@ -56,3 +56,55 @@ pub const Error = error{
     /// A .conf file exists but is malformed.
     InvalidConf,
 };
+
+// ── Public functions ─────────────────────────────────────────────────────────
+
+/// Return the default store path: `~/.rhc/store/<arch>-<os>-<version>/`.
+///
+/// Path components:
+/// - `arch`: from `builtin.cpu.arch` (e.g., "x86_64")
+/// - `os`: from `builtin.os.tag` (e.g., "linux", "macos", "windows")
+/// - `version`: the compiler version (hardcoded as "0.1.0" for now)
+///
+/// The caller owns the returned string and must free it with `alloc.free`.
+pub fn defaultPath(alloc: std.mem.Allocator) []const u8 {
+    const VERSION = "0.1.0"; // TODO: Use @import("root").main.VERSION when accessible
+    const arch = switch (builtin.cpu.arch) {
+        .x86_64 => "x86_64",
+        .aarch64 => "aarch64",
+        .riscv64 => "riscv64",
+        else => @tagName(builtin.cpu.arch),
+    };
+    const os_tag = switch (builtin.os.tag) {
+        .linux => "linux",
+        .macos => "macos",
+        .windows => "windows",
+        .wasi => "wasi",
+        else => @tagName(builtin.os.tag),
+    };
+    return std.fmt.allocPrint(alloc, "{s}/.rhc/store/{s}-{s}-{s}/", .{
+        std.c.getenv("HOME") orelse ".",
+        arch,
+        os_tag,
+        VERSION,
+    }) catch unreachable; // Only path allocation could fail; let it bubble up
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+test "defaultPath generates correct format" {
+    const path = defaultPath(std.testing.allocator);
+    defer std.testing.allocator.free(path);
+
+    // Should contain .rhc/store/ and version
+    try std.testing.expect(std.mem.indexOf(u8, path, ".rhc/store/") != null);
+    try std.testing.expect(std.mem.indexOf(u8, path, "0.1.0") != null);
+
+    // Should contain valid arch/os
+    const arch_tag = @tagName(builtin.cpu.arch);
+    const os_tag = @tagName(builtin.os.tag);
+    const has_arch_or_os =
+        std.mem.indexOf(u8, path, arch_tag) != null or
+        std.mem.indexOf(u8, path, os_tag) != null;
+    try std.testing.expect(has_arch_or_os);
+}
