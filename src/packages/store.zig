@@ -55,7 +55,7 @@ pub const Error = error{
     DuplicatePackage,
     /// A .conf file exists but is malformed.
     InvalidConf,
-} || std.fs.File.OpenError || std.fs.Dir.OpenError;
+} || std.fs.File.OpenError || std.fs.Dir.OpenError || std.json.Error;
 
 // ── Public functions ─────────────────────────────────────────────────────────
 
@@ -239,6 +239,88 @@ pub fn register(
     try writer.writeAll("}\n");
 }
 
+/// Parse a .conf file and return an Entry.
+fn parseConfFile(alloc: std.mem.Allocator, path: []const u8) Error!Entry {
+    const content = try std.fs.cwd().readFileAlloc(alloc, path, 1024 * 64);
+    defer alloc.free(content);
+
+    const Parsed = struct {
+        key: []const u8,
+        name: []const u8,
+        version: []const u8,
+        hash: []const u8,
+        exposed_modules: []const []const u8,
+        depends: []const []const u8,
+        install_path: []const u8,
+    };
+
+    const parsed = try std.json.parseFromSlice(Parsed, alloc, content, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const p = parsed.value;
+
+    // Deep copy strings
+    const entry = Entry{
+        .key = try alloc.dupe(u8, p.key),
+        .name = try alloc.dupe(u8, p.name),
+        .version = try alloc.dupe(u8, p.version),
+        .hash = try alloc.dupe(u8, p.hash),
+        .install_path = try alloc.dupe(u8, p.install_path),
+        .exposed_modules = try alloc.alloc([]const u8, p.exposed_modules.len),
+        .depends = try alloc.alloc([]const u8, p.depends.len),
+    };
+
+    errdefer {
+        alloc.free(entry.key);
+        alloc.free(entry.name);
+        alloc.free(entry.version);
+        alloc.free(entry.hash);
+        alloc.free(entry.install_path);
+        for (entry.exposed_modules) |m| alloc.free(m);
+        alloc.free(entry.exposed_modules);
+        for (entry.depends) |d| alloc.free(d);
+        alloc.free(entry.depends);
+    }
+
+    for (p.exposed_modules, 0..) |m, i| {
+        entry.exposed_modules[i] = try alloc.dupe(u8, m);
+    }
+    for (p.depends, 0..) |d, i| {
+        entry.depends[i] = try alloc.dupe(u8, d);
+    }
+
+    return entry;
+}
+
+/// Look up a package by name and version.
+pub fn lookup(self: *const Store, name: []const u8, version: []const u8) Error!?Entry {
+    const expected_suffix = try std.fmt.allocPrint(self.allocator, "-{s}-{s}", .{ name, version });
+    defer self.allocator.free(expected_suffix);
+
+    // Scan package.conf.d/ for matching .conf files
+    var dir = std.fs.cwd().openDir(self.conf_dir_path, .{ .iterate = true }) catch |err| {
+        return if (err == error.FileNotFound) null else err;
+    };
+    defer dir.close();
+
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".conf")) continue;
+
+        // Check suffix match
+        if (std.mem.endsWith(u8, entry.name, expected_suffix ++ ".conf")) {
+            const conf_path = try std.fs.path.joinZ(self.allocator, &.{ self.conf_dir_path, entry.name });
+            defer self.allocator.free(conf_path);
+            return try parseConfFile(self.allocator, conf_path);
+        }
+    }
+
+    return null;
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 test "defaultPath generates correct format" {
@@ -392,4 +474,49 @@ test "Store.register returns DuplicatePackage for duplicate" {
     // Second registration should fail
     const result = store.register(key, desc_content, desc);
     try std.testing.expectError(Error.DuplicatePackage, result);
+}
+
+test "Store.lookup finds registered package" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    var store = try Store.init(std.testing.allocator, tmp_dir.dir.path);
+    defer store.deinit();
+
+    const desc_content =
+        \\name = "lookup-test"
+        \\version = "2.0.0"
+        \\exposed-modules = ["Lookup.Module"]
+        \\depends = []
+    ;
+    const desc = try descriptor.parse(std.testing.allocator, desc_content);
+    defer desc.deinit(std.testing.allocator);
+
+    const key = try computeKey(std.testing.allocator, desc.name, desc.version, desc_content);
+    defer std.testing.allocator.free(key);
+
+    try store.register(key, desc_content, desc);
+
+    // Lookup by name+version
+    const entry = (try store.lookup("lookup-test", "2.0.0")) orelse {
+        try std.testing.expect(false); // should not be null
+        return;
+    };
+    defer entry.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("lookup-test", entry.name);
+    try std.testing.expectEqualStrings("2.0.0", entry.version);
+    try std.testing.expectEqual(@as(usize, 1), entry.exposed_modules.len);
+    try std.testing.expectEqualStrings("Lookup.Module", entry.exposed_modules[0]);
+}
+
+test "Store.lookup returns null for non-existent package" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    var store = try Store.init(std.testing.allocator, tmp_dir.dir.path);
+    defer store.deinit();
+
+    const entry = try store.lookup("nonexistent", "1.0.0");
+    try std.testing.expect(entry == null);
 }
