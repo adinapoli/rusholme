@@ -67,6 +67,11 @@ pub const modules = struct {
     pub const compile_env = @import("modules/compile_env.zig");
 };
 
+// Package system
+pub const packages = struct {
+    pub const descriptor = @import("packages/descriptor.zig");
+};
+
 // Backend
 pub const backend = @import("backend.zig");
 
