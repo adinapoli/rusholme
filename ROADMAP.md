@@ -332,7 +332,7 @@
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#43](https://github.com/adinapoli/rusholme/issues/43) | Implement Core to GRIN translation | [#314](https://github.com/adinapoli/rusholme/issues/314), [#315](https://github.com/adinapoli/rusholme/issues/315), [#317](https://github.com/adinapoli/rusholme/issues/317) | :white_circle: |
+| [#43](https://github.com/adinapoli/rusholme/issues/43) | Implement Core to GRIN translation | [#314](https://github.com/adinapoli/rusholme/issues/314), [#315](https://github.com/adinapoli/rusholme/issues/315), [#317](https://github.com/adinapoli/rusholme/issues/317) | :green_circle: |
 | [#40](https://github.com/adinapoli/rusholme/issues/40) | Define GRIN IR types (Modern GRIN dialect) | [#69](https://github.com/adinapoli/rusholme/issues/69) | :green_circle: |
 | [#41](https://github.com/adinapoli/rusholme/issues/41) | Implement GRIN IR pretty-printer | [#40](https://github.com/adinapoli/rusholme/issues/40) | :green_circle: |
 | [#42](https://github.com/adinapoli/rusholme/issues/42) | Research: Core to GRIN translation strategy | [#34](https://github.com/adinapoli/rusholme/issues/34), [#40](https://github.com/adinapoli/rusholme/issues/40) | :green_circle: |
@@ -463,7 +463,7 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | [#607](https://github.com/adinapoli/rusholme/issues/607) | REPL: type class method calls fail at JIT execution time | [#578](https://github.com/adinapoli/rusholme/issues/578) | :green_circle: |
 | [#609](https://github.com/adinapoli/rusholme/issues/609) | Implement string-as-[Char] and Prelude loading for native JIT REPL | [#557](https://github.com/adinapoli/rusholme/issues/557), [#529](https://github.com/adinapoli/rusholme/issues/529) | :green_circle: |
 | [#612](https://github.com/adinapoli/rusholme/issues/612) | REPL: result display via Haskell's Show typeclass | [#607](https://github.com/adinapoli/rusholme/issues/607) | :green_circle: |
-| [#615](https://github.com/adinapoli/rusholme/issues/615) | GRIN evaluator: support dictionary-passing for typeclass dispatch | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
+| [#615](https://github.com/adinapoli/rusholme/issues/615) | GRIN evaluator: support dictionary-passing for typeclass dispatch | [#612](https://github.com/adinapoli/rusholme/issues/612) | :green_circle: |
 | [#616](https://github.com/adinapoli/rusholme/issues/616) | Module interface cache (.rhi) does not store ClassEnv or DictNameMap | [#612](https://github.com/adinapoli/rusholme/issues/612) | :green_circle: |
 | [#617](https://github.com/adinapoli/rusholme/issues/617) | Show Char and Show String instances lack escape sequence handling | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
 | [#618](https://github.com/adinapoli/rusholme/issues/618) | Native LLVM backend segfaults on dictionary-passing codegen | [#612](https://github.com/adinapoli/rusholme/issues/612) | :green_circle: |
@@ -514,7 +514,7 @@ These existing issues must be resolved before any Phase 1 work begins:
 | [#659](https://github.com/adinapoli/rusholme/issues/659) | Lambda lifter propagates outer lambda's parameter as free variable from inner lifted lambda | [#531](https://github.com/adinapoli/rusholme/issues/531) | :green_circle: |
 | [#660](https://github.com/adinapoli/rusholme/issues/660) | Default method in class declaration causes subsequent class method to be unbound in typechecker | [#531](https://github.com/adinapoli/rusholme/issues/531) | :green_circle: |
 | [#616](https://github.com/adinapoli/rusholme/issues/616) | Module interface cache (`.rhi`) does not store `ClassEnv` or `DictNameMap` | [#612](https://github.com/adinapoli/rusholme/issues/612) | :green_circle: |
-| [#615](https://github.com/adinapoli/rusholme/issues/615) | GRIN evaluator: support dictionary-passing for typeclass dispatch | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
+| [#615](https://github.com/adinapoli/rusholme/issues/615) | GRIN evaluator: support dictionary-passing for typeclass dispatch | [#612](https://github.com/adinapoli/rusholme/issues/612) | :green_circle: |
 | [#566](https://github.com/adinapoli/rusholme/issues/566) | Typechecker: support declaration-order-independent inference | — | :green_circle: |
 | [#623](https://github.com/adinapoli/rusholme/issues/623) | Where-clause bindings not in scope during renaming/typechecking | — | :green_circle: |
 
