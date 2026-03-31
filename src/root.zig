@@ -124,4 +124,5 @@ test {
     testing.refAllDecls(runtime);
     testing.refAllDecls(modules);
     testing.refAllDecls(repl);
+    testing.refAllDecls(packages);
 }
