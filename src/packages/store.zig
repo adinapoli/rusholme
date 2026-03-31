@@ -338,6 +338,36 @@ pub fn lookupByKey(self: *const Store, key: []const u8) Error!?Entry {
     return try parseConfFile(self.allocator, conf_path);
 }
 
+/// List all packages in the store.
+pub fn list(self: *const Store) Error![]const Entry {
+    var entries = std.ArrayList(Entry).init(self.allocator);
+    errdefer {
+        for (entries.items) |e| e.deinit(self.allocator);
+        entries.deinit();
+    }
+
+    var dir = std.fs.cwd().openDir(self.conf_dir_path, .{ .iterate = true }) catch |err| {
+        return if (err == error.FileNotFound) return entries.toOwnedSlice() else err;
+    };
+    defer dir.close();
+
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".conf")) continue;
+
+        const conf_path = try std.fs.path.joinZ(self.allocator, &.{ self.conf_dir_path, entry.name });
+        defer self.allocator.free(conf_path);
+
+        const parsed_entry = try parseConfFile(self.allocator, conf_path);
+        errdefer parsed_entry.deinit(self.allocator);
+
+        try entries.append(parsed_entry);
+    }
+
+    return entries.toOwnedSlice();
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 test "defaultPath generates correct format" {
@@ -572,4 +602,52 @@ test "Store.lookupByKey returns null for unknown key" {
 
     const entry = try store.lookupByKey("unknown-key");
     try std.testing.expect(entry == null);
+}
+
+test "Store.list returns all registered packages" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    var store = try Store.init(std.testing.allocator, tmp_dir.dir.path);
+    defer store.deinit();
+
+    // Register two packages
+    const desc1_content = "name = \"list-test-1\"\nversion = \"1.0.0\"\n";
+    const desc1 = try descriptor.parse(std.testing.allocator, desc1_content);
+    defer desc1.deinit(std.testing.allocator);
+    const key1 = try computeKey(std.testing.allocator, desc1.name, desc1.version, desc1_content);
+    defer std.testing.allocator.free(key1);
+    try store.register(key1, desc1_content, desc1);
+
+    const desc2_content = "name = \"list-test-2\"\nversion = \"2.0.0\"\n";
+    const desc2 = try descriptor.parse(std.testing.allocator, desc2_content);
+    defer desc2.deinit(std.testing.allocator);
+    const key2 = try computeKey(std.testing.allocator, desc2.name, desc2.version, desc2_content);
+    defer std.testing.allocator.free(key2);
+    try store.register(key2, desc2_content, desc2);
+
+    // List and verify
+    const entries = try store.list();
+    defer {
+        for (entries) |e| e.deinit(std.testing.allocator);
+        std.testing.allocator.free(entries);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), entries.len);
+
+    // Both packages should be in the list
+    const found1 = blk: {
+        for (entries) |e| {
+            if (std.mem.eql(u8, e.name, "list-test-1")) break :blk true;
+        }
+        break :blk false;
+    };
+    try std.testing.expect(found1);
+    const found2 = blk: {
+        for (entries) |e| {
+            if (std.mem.eql(u8, e.name, "list-test-2")) break :blk true;
+        }
+        break :blk false;
+    };
+    try std.testing.expect(found2);
 }
