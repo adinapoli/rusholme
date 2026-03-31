@@ -32,10 +32,6 @@
 //!   yet expanded; a downstream consumer must load Bar's interface separately.
 //!   Tracked in: https://github.com/adinapoli/rusholme/issues/368
 //!
-//! - Type-class instances are not yet included in `ModIface`.  Adding them
-//!   requires the full class/instance infrastructure (#60).
-//!   Tracked in: https://github.com/adinapoli/rusholme/issues/369
-//!
 //! ## References
 //!
 //! - Haskell 2010 Report §5.2 (Export Lists)
@@ -270,7 +266,7 @@ pub const SerialisedClassConstraint = struct {
 ///
 /// Note: `rigid_scope` is not serialised — it is only needed during Pass 2
 /// instance body inference, which does not run on cached modules.  When
-/// per-module Core caching (#436) allows skipping `compileSingle` entirely,
+/// per-module Core caching (#456) allows skipping `compileSingle` entirely,
 /// `rigid_scope` must be added here or reconstructed on demand.
 pub const SerialisedInstanceInfo = struct {
     class_name: SerialisedNameRef,

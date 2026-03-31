@@ -554,7 +554,7 @@ pub const SourceModule = struct {
     ///
     /// Leave `null` to disable caching for this module (e.g. in tests that
     /// supply source text without a backing file, or in `cmdBuild` until
-    /// per-module `.bc` backend caching is implemented — see #436).
+    /// per-module `.bc` backend caching is implemented — see #456).
     source_path: ?[]const u8 = null,
 };
 
@@ -687,7 +687,7 @@ pub fn compileProgram(
     //      On cache hit: register the cached iface + an empty CoreProgram
     //      and skip compilation.  The empty Core is acceptable for frontend
     //      caching; full backend reuse requires per-module .bc artifacts
-    //      (tracked in #436).
+    //      (tracked in #456).
     //   4. On cache miss: run `compileSingle`, then tag the iface with its
     //      fingerprint and write it to disk for future runs.
     for (topo.order) |mod_name| {
@@ -720,9 +720,9 @@ pub fn compileProgram(
         // has already been cached from a prior run).
         //
         // Core is NOT loaded from cache — per-module .bc caching is tracked
-        // in: https://github.com/adinapoli/rusholme/issues/436
+        // in: https://github.com/adinapoli/rusholme/issues/456
         //
-        // Until #436 is resolved every module is compiled from source on every
+        // Until #456 is resolved every module is compiled from source on every
         // build.  The pre-seeded ClassEnv/DictNames are overwritten by
         // compileSingle with identical data; the pre-seeding is harmless and
         // keeps the path exercised so that the serialisation round-trip is
@@ -1126,7 +1126,7 @@ fn deserialiseClassEnvFromIface(
         // NOTE: `rigid_scope` is omitted from the serialised form and
         // defaults to empty here.  This is safe while compileSingle always
         // runs (the fresh ClassEnv overwrites this one), but must be
-        // revisited when #436 allows skipping compilation on cache hit.
+        // revisited when #456 allows skipping compilation on cache hit.
         try class_env.addInstance(.{
             .class_name = .{ .base = ii.class_name.base, .unique = .{ .value = ii.class_name.unique } },
             .head = htype_head,
@@ -1459,7 +1459,7 @@ test "compileProgram: .rhi cache hit — second invocation loads cached interfac
     // The source and dep fingerprints are unchanged, so `compileProgram`
     // finds the `.rhi` written by the first run and pre-seeds ClassEnv and
     // DictNameMap from it.  The module is then compiled from source anyway
-    // (per-module .bc caching is deferred to #436), so the Core binds are
+    // (per-module .bc caching is deferred to #456), so the Core binds are
     // non-empty.  The fingerprint must be preserved across runs.
     {
         var r2 = try compileProgram(alloc, io, &.{.{
