@@ -55,7 +55,9 @@ pub const Error = error{
     DuplicatePackage,
     /// A .conf file exists but is malformed.
     InvalidConf,
-};
+} || std.fs.File.OpenError || std.fs.Dir.OpenError;
+
+// ── Public functions ─────────────────────────────────────────────────────────
 
 // ── Public functions ─────────────────────────────────────────────────────────
 
@@ -89,6 +91,42 @@ pub fn defaultPath(alloc: std.mem.Allocator) []const u8 {
         VERSION,
     }) catch unreachable; // Only path allocation could fail; let it bubble up
 }
+
+/// Initialize a package store.
+///
+/// If `root_path` is null, uses `defaultPath()`.
+/// Creates the root directory and `package.conf.d/` if missing.
+pub fn init(alloc: std.mem.Allocator, root_path: ?[]const u8) Error!Store {
+    const root = if (root_path) |p|
+        try alloc.dupe(u8, p)
+    else
+        defaultPath(alloc);
+
+    errdefer alloc.free(root);
+
+    // Create root directory
+    std.fs.cwd().makePath(root) catch |err| switch (err) {
+        error.PathAlreadyExists => {}, // OK if it exists
+        else => return err,
+    };
+
+    // Create package.conf.d directory
+    const conf_dir = try std.fs.path.joinZ(alloc, &.{ root, "package.conf.d" });
+    errdefer alloc.free(conf_dir);
+
+    std.fs.cwd().makePath(conf_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    return Store{
+        .allocator = alloc,
+        .root_path = root,
+        .conf_dir_path = conf_dir,
+    };
+}
+
+/// Compute the package key from name, version, and descriptor content.
 
 /// Compute the package key from name, version, and descriptor content.
 ///
@@ -134,7 +172,7 @@ test "computeKey generates SHA256-based key" {
     defer std.testing.allocator.free(key);
 
     // Key format: {64-char hash}-{name}-{version}
-    try std.testing.expect(key.len >= 74); // 64 + 2 dashes +最少
+    try std.testing.expect(key.len >= 74); // 64 + 2 dashes + at least 4 for name-version
     const first_dash = std.mem.indexOfScalar(u8, key, '-') orelse return error.TestExpectFailed;
     const second_dash = std.mem.indexOfScalarPos(u8, key, first_dash + 1, '-') orelse return error.TestExpectFailed;
 
@@ -152,4 +190,28 @@ test "computeKey generates SHA256-based key" {
     const key3 = try computeKey(std.testing.allocator, "test", "1.0.0", desc_content2);
     defer std.testing.allocator.free(key3);
     try std.testing.expect(!std.mem.eql(u8, key, key3));
+}
+
+test "Store.init creates directory structure" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const root_path = try std.fs.path.joinZ(std.testing.allocator, &.{
+        tmp_dir.dir.path, "test-store",
+    });
+    defer std.testing.allocator.free(root_path);
+
+    var store = try Store.init(std.testing.allocator, root_path);
+    defer store.deinit();
+
+    // Verify paths are stored
+    try std.testing.expectEqualStrings(root_path, store.root_path);
+
+    const expected_conf_dir = try std.fs.path.joinZ(std.testing.allocator, &.{ root_path, "package.conf.d" });
+    defer std.testing.allocator.free(expected_conf_dir);
+    try std.testing.expectEqualStrings(expected_conf_dir, store.conf_dir_path);
+
+    // Verify directories exist
+    try tmp_dir.dir.access("test-store", .{});
+    try tmp_dir.dir.access("test-store/package.conf.d", .{});
 }
