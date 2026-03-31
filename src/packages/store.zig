@@ -147,6 +147,20 @@ fn computeKey(alloc: std.mem.Allocator, name: []const u8, version: []const u8, d
     return std.fmt.allocPrint(alloc, "{s}-{s}-{s}", .{ &hash_hex, name, version });
 }
 
+/// Compute the full path to a .conf file for a given key.
+fn computeConfPath(store: *const Store, key: []const u8) []const u8 {
+    return std.fmt.allocPrint(store.allocator, "{s}/{s}.conf", .{
+        store.conf_dir_path, key,
+    }) catch unreachable;
+}
+
+/// Compute the full path to a package directory.
+fn computePkgPath(store: *const Store, name: []const u8, version: []const u8) []const u8 {
+    return std.fmt.allocPrint(store.allocator, "{s}/{s}-{s}", .{
+        store.root_path, name, version,
+    }) catch unreachable;
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 test "defaultPath generates correct format" {
@@ -214,4 +228,32 @@ test "Store.init creates directory structure" {
     // Verify directories exist
     try tmp_dir.dir.access("test-store", .{});
     try tmp_dir.dir.access("test-store/package.conf.d", .{});
+}
+
+test "computeConfPath returns correct .conf file path" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    var store = try Store.init(std.testing.allocator, tmp_dir.dir.path);
+    defer store.deinit();
+
+    const key = "abc123-test-1.0.0";
+    const conf_path = computeConfPath(&store, key);
+
+    defer store.allocator.free(conf_path);
+    try std.testing.expect(std.mem.indexOf(u8, conf_path, "package.conf.d") != null);
+    try std.testing.expect(std.mem.indexOf(u8, conf_path, key ++ ".conf") != null);
+}
+
+test "computePkgPath returns correct package directory path" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    var store = try Store.init(std.testing.allocator, tmp_dir.dir.path);
+    defer store.deinit();
+
+    const pkg_path = computePkgPath(&store, "test", "1.0.0");
+    defer store.allocator.free(pkg_path);
+
+    try std.testing.expect(std.mem.indexOf(u8, pkg_path, "test-1.0.0") != null);
 }
