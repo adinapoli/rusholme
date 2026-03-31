@@ -464,7 +464,7 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | [#609](https://github.com/adinapoli/rusholme/issues/609) | Implement string-as-[Char] and Prelude loading for native JIT REPL | [#557](https://github.com/adinapoli/rusholme/issues/557), [#529](https://github.com/adinapoli/rusholme/issues/529) | :green_circle: |
 | [#612](https://github.com/adinapoli/rusholme/issues/612) | REPL: result display via Haskell's Show typeclass | [#607](https://github.com/adinapoli/rusholme/issues/607) | :green_circle: |
 | [#615](https://github.com/adinapoli/rusholme/issues/615) | GRIN evaluator: support dictionary-passing for typeclass dispatch | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
-| [#616](https://github.com/adinapoli/rusholme/issues/616) | Module interface cache (.rhi) does not store ClassEnv or DictNameMap | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
+| [#616](https://github.com/adinapoli/rusholme/issues/616) | Module interface cache (.rhi) does not store ClassEnv or DictNameMap | [#612](https://github.com/adinapoli/rusholme/issues/612) | :yellow_circle: |
 | [#617](https://github.com/adinapoli/rusholme/issues/617) | Show Char and Show String instances lack escape sequence handling | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
 | [#618](https://github.com/adinapoli/rusholme/issues/618) | Native LLVM backend segfaults on dictionary-passing codegen | [#612](https://github.com/adinapoli/rusholme/issues/612) | :green_circle: |
 | [#621](https://github.com/adinapoli/rusholme/issues/621) | Unit and integer 0 are indistinguishable in JIT result formatting | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
@@ -511,7 +511,7 @@ These existing issues must be resolved before any Phase 1 work begins:
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#531](https://github.com/adinapoli/rusholme/issues/531) | Add `Eq`/`Ord`/`Num` type classes to `lib/Prelude.hs` | [#530](https://github.com/adinapoli/rusholme/issues/530) | :white_circle: |
-| [#616](https://github.com/adinapoli/rusholme/issues/616) | Module interface cache (`.rhi`) does not store `ClassEnv` or `DictNameMap` | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
+| [#616](https://github.com/adinapoli/rusholme/issues/616) | Module interface cache (`.rhi`) does not store `ClassEnv` or `DictNameMap` | [#612](https://github.com/adinapoli/rusholme/issues/612) | :yellow_circle: |
 | [#615](https://github.com/adinapoli/rusholme/issues/615) | GRIN evaluator: support dictionary-passing for typeclass dispatch | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
 | [#566](https://github.com/adinapoli/rusholme/issues/566) | Typechecker: support declaration-order-independent inference | — | :white_circle: |
 | [#623](https://github.com/adinapoli/rusholme/issues/623) | Where-clause bindings not in scope during renaming/typechecking | — | :white_circle: |
