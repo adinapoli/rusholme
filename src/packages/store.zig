@@ -237,8 +237,9 @@ pub const Error = error{
 /// Returns `error.HomeDirectoryUnset` if `HOME` is not in the environment.
 /// The caller owns the returned string and must free it with `alloc.free`.
 ///
-/// TODO #???:  derive version from build metadata instead of hardcoding "0.1.0"
+// tracked in: https://github.com/adinapoli/rusholme/issues/675
 pub fn defaultPath(alloc: std.mem.Allocator) Error![]const u8 {
+    // tracked in: https://github.com/adinapoli/rusholme/issues/676
     const VERSION = "0.1.0";
     const arch = switch (builtin.cpu.arch) {
         .x86_64 => "x86_64",
@@ -255,6 +256,7 @@ pub fn defaultPath(alloc: std.mem.Allocator) Error![]const u8 {
     };
     const home_ptr = std.c.getenv("HOME") orelse return error.HomeDirectoryUnset;
     const home: []const u8 = std.mem.span(home_ptr);
+    // tracked in: https://github.com/adinapoli/rusholme/issues/676
     return std.fmt.allocPrint(alloc, "{s}/.rhc/store/{s}-{s}-{s}/", .{
         home, arch, os_tag, VERSION,
     });
