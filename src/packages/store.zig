@@ -161,6 +161,84 @@ fn computePkgPath(store: *const Store, name: []const u8, version: []const u8) []
     }) catch unreachable;
 }
 
+/// Register a package in the store.
+///
+/// Creates:
+/// 1. .conf file in package.conf.d/
+/// 2. Empty package directory for artifacts
+///
+/// Returns DuplicatePackage if the package key already exists.
+pub fn register(
+    self: *Store,
+    pkg_key: []const u8,
+    descriptor_content: []const u8,
+    desc: descriptor.PackageDescriptor,
+) Error!void {
+    const conf_path = computeConfPath(self, pkg_key);
+    defer self.allocator.free(conf_path);
+
+    // Check if conf file already exists
+    if (std.fs.cwd().openFile(conf_path, .{}) catch |err| {
+        if (err == error.FileNotFound) {
+            // OK, continue to registration
+            return false;
+        } else {
+            return err;
+        }
+    }) |_| {
+        // File exists, must close it and return error
+        return Error.DuplicatePackage;
+    }
+
+    // Create package directory
+    const pkg_path = computePkgPath(self, desc.name, desc.version);
+    defer self.allocator.free(pkg_path);
+    std.fs.cwd().makePath(pkg_path) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    // Write .conf file
+    var conf_file = try std.fs.cwd().createFile(conf_path, .{});
+    defer conf_file.close();
+
+    const install_path = try std.fs.cwd().realpathAlloc(self.allocator, pkg_path);
+    defer self.allocator.free(install_path);
+
+    // Compute hash
+    var hasher = std.crypto.hash.sha256.Sha256.init(.{});
+    hasher.update(descriptor_content);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+
+    var hash_hex: [64]u8 = undefined;
+    for (digest, 0..) |byte, i| {
+        _ = std.fmt.formatIntHex(&hash_hex[2 * i .. 2 * i + 2], byte, .lower, .{ .width = 2 });
+    }
+
+    // Write JSON conf
+    const writer = conf_file.writer();
+    try writer.writeAll("{\n");
+    try writer.print("  \"key\": \"{s}\",\n", .{pkg_key});
+    try writer.print("  \"name\": \"{s}\",\n", .{desc.name});
+    try writer.print("  \"version\": \"{s}\",\n", .{desc.version});
+    try writer.print("  \"hash\": \"{s}\",\n", .{&hash_hex});
+    try writer.writeAll("  \"exposed_modules\": [");
+    for (desc.exposed_modules, 0..) |m, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writer.print("\"{s}\"", .{m});
+    }
+    try writer.writeAll("],\n");
+    try writer.writeAll("  \"depends\": [");
+    for (desc.depends, 0..) |d, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writer.print("\"{s}\"", .{d});
+    }
+    try writer.writeAll("],\n");
+    try writer.print("  \"install_path\": \"{s}\"\n", .{install_path});
+    try writer.writeAll("}\n");
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 test "defaultPath generates correct format" {
@@ -256,4 +334,62 @@ test "computePkgPath returns correct package directory path" {
     defer store.allocator.free(pkg_path);
 
     try std.testing.expect(std.mem.indexOf(u8, pkg_path, "test-1.0.0") != null);
+}
+
+test "Store.register creates conf file and package directory" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    var store = try Store.init(std.testing.allocator, tmp_dir.dir.path);
+    defer store.deinit();
+
+    const desc_content =
+        \\name = "test-pkg"
+        \\version = "1.0.0"
+        \\exposed-modules = ["Test.Module"]
+        \\depends = []
+    ;
+
+    const desc = try descriptor.parse(std.testing.allocator, desc_content);
+    defer desc.deinit(std.testing.allocator);
+
+    const key = try computeKey(std.testing.allocator, desc.name, desc.version, desc_content);
+    defer std.testing.allocator.free(key);
+
+    try store.register(key, desc_content, desc);
+
+    // Verify .conf file exists
+    const conf_path = computeConfPath(&store, key);
+    defer store.allocator.free(conf_path);
+    std.fs.cwd().access(conf_path, .{}) catch |err| {
+        try std.testing.expect(error.FileNotFound == err);
+    };
+
+    // Verify package directory exists
+    const pkg_path = computePkgPath(&store, desc.name, desc.version);
+    defer store.allocator.free(pkg_path);
+    std.fs.cwd().access(pkg_path, .{}) catch |err| {
+        try std.testing.expect(error.FileNotFound == err);
+    };
+}
+
+test "Store.register returns DuplicatePackage for duplicate" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    var store = try Store.init(std.testing.allocator, tmp_dir.dir.path);
+    defer store.deinit();
+
+    const desc_content = "name = \"test\"\nversion = \"1.0.0\"\n";
+    const desc = try descriptor.parse(std.testing.allocator, desc_content);
+    defer desc.deinit(std.testing.allocator);
+
+    const key = try computeKey(std.testing.allocator, desc.name, desc.version, desc_content);
+    defer std.testing.allocator.free(key);
+
+    try store.register(key, desc_content, desc);
+
+    // Second registration should fail
+    const result = store.register(key, desc_content, desc);
+    try std.testing.expectError(Error.DuplicatePackage, result);
 }
