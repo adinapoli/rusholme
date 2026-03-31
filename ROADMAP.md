@@ -407,7 +407,7 @@
 | [#573](https://github.com/adinapoli/rusholme/issues/573) | GRIN backend: polymorphic Prelude functions produce broken codegen | [#529](https://github.com/adinapoli/rusholme/issues/529) | :green_circle: |
 | [#569](https://github.com/adinapoli/rusholme/issues/569) | GRIN/LLVM backend: support dictionary-passing in codegen | [#556](https://github.com/adinapoli/rusholme/issues/556) | :green_circle: |
 | [#583](https://github.com/adinapoli/rusholme/issues/583) | Implement VarTagNode handling in LLVM backend for partial applications | — | :green_circle: |
-| [#589](https://github.com/adinapoli/rusholme/issues/589) | LLVM backend: ptr/i64 return type confusion causes segfaults | [#573](https://github.com/adinapoli/rusholme/issues/573) | :white_circle: |
+| [#589](https://github.com/adinapoli/rusholme/issues/589) | LLVM backend: ptr/i64 return type confusion causes segfaults | [#573](https://github.com/adinapoli/rusholme/issues/573) | :green_circle: |
 
 ### Epic [#515](https://github.com/adinapoli/rusholme/issues/515): Support Laziness (Call-by-Need Evaluation)
 
