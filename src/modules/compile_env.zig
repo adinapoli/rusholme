@@ -474,13 +474,18 @@ pub const CompileEnv = struct {
 
         // ── Build interface ───────────────────────────────────────────────
         const export_list = module.exports;
-        const iface = try mod_iface.buildModIface(
+        var iface = try mod_iface.buildModIface(
             self.alloc,
             module_name,
             export_list,
             core_prog,
             &module_types,
         );
+        // Extend the interface with class and dictionary name data so that
+        // downstream modules can reconstruct a ClassEnv and DictNameMap from
+        // a cached .rhi file (issue #616).
+        try serialiseClassEnvIntoIface(self.alloc, &iface, &module_types.class_env);
+        try serialiseDictNamesIntoIface(self.alloc, &iface, &desugar_result.dict_names);
 
         // ── Register ─────────────────────────────────────────────────────
         try self.register(module_name, iface, core_prog);
@@ -709,26 +714,37 @@ pub fn compileProgram(
         else
             null;
 
-        // Attempt cache lookup.
+        // Attempt cache lookup.  A valid `.rhi` hit pre-seeds ClassEnv and
+        // DictNameMap for this module so that downstream compilation can use
+        // them (e.g. a sibling module imported earlier in the same build that
+        // has already been cached from a prior run).
         //
-        // NOTE: The .rhi cache currently stores only ModIface (types and
-        // data constructors).  It does NOT store ClassEnv or DictNameMap.
-        // A cache hit registers an empty Core, which means:
-        //   - Class declarations from the cached module are invisible to
-        //     downstream modules (seedClassEnvFromImports finds nothing).
-        //   - Dictionary names are missing, so the desugarer can't resolve
-        //     evidence for imported instances.
-        //   - The merged Core is incomplete: function definitions from the
-        //     cached module are absent, causing linker errors.
+        // Core is NOT loaded from cache — per-module .bc caching is tracked
+        // in: https://github.com/adinapoli/rusholme/issues/436
         //
-        // Until per-module .bc caching is implemented (#436) and the .rhi
-        // format is extended to include class/instance information (#369),
-        // .rhi caching produces incorrect whole-program builds.  Disabled
-        // for now so that every module is always compiled from source.
-        const cache_hit = false;
+        // Until #436 is resolved every module is compiled from source on every
+        // build.  The pre-seeded ClassEnv/DictNames are overwritten by
+        // compileSingle with identical data; the pre-seeding is harmless and
+        // keeps the path exercised so that the serialisation round-trip is
+        // validated on every build.
+        const cached_iface: ?mod_iface.ModIface = if (rhi_p != null and expected_fp != null)
+            try mod_iface.tryLoadCachedIface(alloc, io, rhi_p.?, expected_fp.?)
+        else
+            null;
 
-        if (!cache_hit) {
-            // Cache miss: compile from source.
+        if (cached_iface) |ci| {
+            // Cache hit: pre-seed ClassEnv and DictNameMap from the cached
+            // interface.  compileSingle (below) will re-derive these from
+            // source and overwrite them, which is harmless.
+            const ce = try deserialiseClassEnvFromIface(alloc, ci);
+            const owned_name = try alloc.dupe(u8, mod_name);
+            try env.class_envs.put(alloc, owned_name, ce);
+            const dict_names = try deserialiseDictNamesFromIface(alloc, ci);
+            try env.dict_names_map.put(alloc, owned_name, dict_names);
+        }
+
+        // Always compile from source to produce the Core program.
+        {
             const parsed = env.parsed_modules.get(mod_name);
             const core_opt = try env.compileSingle(m.module_name, m.source, m.file_id, parsed);
 
@@ -941,6 +957,181 @@ fn conTypeToScheme(
         .constraints = &.{},
         .body = body,
     };
+}
+
+// ── ClassEnv / DictNameMap serialisation helpers ──────────────────────────
+
+/// Populate `iface.class_infos` and `iface.instance_infos` from `class_env`.
+///
+/// Converts all `ClassInfo` and `InstanceInfo` records to their serialisable
+/// forms using `HType.toCore` → `SerialisedCoreType.fromCoreType`.
+/// All allocations go into `alloc` (expected to be an arena).
+fn serialiseClassEnvIntoIface(
+    alloc: std.mem.Allocator,
+    iface: *mod_iface.ModIface,
+    class_env: *const ClassEnv,
+) std.mem.Allocator.Error!void {
+    var class_list: std.ArrayListUnmanaged(mod_iface.SerialisedClassInfo) = .{};
+    var inst_list: std.ArrayListUnmanaged(mod_iface.SerialisedInstanceInfo) = .{};
+
+    var class_it = class_env.classes.iterator();
+    while (class_it.next()) |entry| {
+        const ci = entry.value_ptr.*;
+
+        const s_supers = try alloc.alloc(mod_iface.SerialisedNameRef, ci.superclasses.len);
+        for (ci.superclasses, 0..) |sc, i| {
+            s_supers[i] = .{ .base = sc.base, .unique = sc.unique.value };
+        }
+
+        const s_methods = try alloc.alloc(mod_iface.SerialisedMethodInfo, ci.methods.len);
+        for (ci.methods, 0..) |m, i| {
+            const core_ty = try m.ty.toCore(alloc);
+            const s_ty = try mod_iface.SerialisedCoreType.fromCoreType(core_ty, alloc);
+            s_methods[i] = .{
+                .name = .{ .base = m.name.base, .unique = m.name.unique.value },
+                .ty = s_ty,
+                .has_default = m.has_default,
+            };
+        }
+
+        try class_list.append(alloc, .{
+            .name = .{ .base = ci.name.base, .unique = ci.name.unique.value },
+            .tyvar = ci.tyvar,
+            .superclasses = s_supers,
+            .methods = s_methods,
+            .dict_con_name = .{ .base = ci.dict_con_name.base, .unique = ci.dict_con_name.unique.value },
+        });
+
+        // Serialise instances for this class.
+        const class_unique = entry.key_ptr.*;
+        if (class_env.instances.get(class_unique)) |inst_arr| {
+            for (inst_arr.items) |inst| {
+                const core_head = try inst.head.toCore(alloc);
+                const s_head = try mod_iface.SerialisedCoreType.fromCoreType(core_head, alloc);
+
+                const s_context = try alloc.alloc(mod_iface.SerialisedClassConstraint, inst.context.len);
+                for (inst.context, 0..) |cc, j| {
+                    const core_cc_ty = try cc.ty.toCore(alloc);
+                    const s_cc_ty = try mod_iface.SerialisedCoreType.fromCoreType(core_cc_ty, alloc);
+                    s_context[j] = .{
+                        .class_name = .{ .base = cc.class_name.base, .unique = cc.class_name.unique.value },
+                        .ty = s_cc_ty,
+                    };
+                }
+
+                try inst_list.append(alloc, .{
+                    .class_name = .{ .base = inst.class_name.base, .unique = inst.class_name.unique.value },
+                    .head = s_head,
+                    .context = s_context,
+                });
+            }
+        }
+    }
+
+    iface.class_infos = try class_list.toOwnedSlice(alloc);
+    iface.instance_infos = try inst_list.toOwnedSlice(alloc);
+}
+
+/// Populate `iface.dict_entries` from `dict_names`.
+fn serialiseDictNamesIntoIface(
+    alloc: std.mem.Allocator,
+    iface: *mod_iface.ModIface,
+    dict_names: *const DictNameMap,
+) std.mem.Allocator.Error!void {
+    const entries = try alloc.alloc(mod_iface.SerialisedDictEntry, dict_names.count());
+    for (dict_names.keys(), dict_names.values(), 0..) |key, val, i| {
+        entries[i] = .{
+            .class_unique = key.class_unique,
+            .head_name = key.head_name,
+            .name_base = val.base,
+            .name_unique = val.unique.value,
+        };
+    }
+    iface.dict_entries = entries;
+}
+
+/// Reconstruct a `ClassEnv` from the serialised class/instance data in `iface`.
+///
+/// All allocations go into `alloc`.  The returned `ClassEnv` has `rigid_scope`
+/// set to empty for all instances — the scope is only needed during Pass 2
+/// instance body inference, which does not run on cached modules.
+fn deserialiseClassEnvFromIface(
+    alloc: std.mem.Allocator,
+    iface: mod_iface.ModIface,
+) std.mem.Allocator.Error!ClassEnv {
+    var class_env = ClassEnv.init(alloc);
+
+    for (iface.class_infos) |ci| {
+        const superclasses = try alloc.alloc(Name, ci.superclasses.len);
+        for (ci.superclasses, 0..) |sc, i| {
+            superclasses[i] = .{ .base = sc.base, .unique = .{ .value = sc.unique } };
+        }
+
+        const methods = try alloc.alloc(class_env_mod.MethodInfo, ci.methods.len);
+        for (ci.methods, 0..) |sm, i| {
+            const core_ty = try sm.ty.toCoreType(alloc);
+            const hty = try coreTypeToHType(alloc, core_ty);
+            methods[i] = .{
+                .name = .{ .base = sm.name.base, .unique = .{ .value = sm.name.unique } },
+                .ty = hty,
+                .has_default = sm.has_default,
+            };
+        }
+
+        try class_env.addClass(.{
+            .name = .{ .base = ci.name.base, .unique = .{ .value = ci.name.unique } },
+            .tyvar = ci.tyvar,
+            .superclasses = superclasses,
+            .methods = methods,
+            .dict_con_name = .{ .base = ci.dict_con_name.base, .unique = .{ .value = ci.dict_con_name.unique } },
+        });
+    }
+
+    for (iface.instance_infos) |ii| {
+        const core_head = try ii.head.toCoreType(alloc);
+        const htype_head = try coreTypeToHType(alloc, core_head);
+
+        const context = try alloc.alloc(class_env_mod.ClassConstraint, ii.context.len);
+        for (ii.context, 0..) |cc, i| {
+            const core_ty = try cc.ty.toCoreType(alloc);
+            const htype_ty = try alloc.create(htype_mod.HType);
+            htype_ty.* = try coreTypeToHType(alloc, core_ty);
+            context[i] = .{
+                .class_name = .{ .base = cc.class_name.base, .unique = .{ .value = cc.class_name.unique } },
+                .ty = htype_ty,
+                .span = .{ .start = span_mod.SourcePos.invalid(), .end = span_mod.SourcePos.invalid() },
+            };
+        }
+
+        try class_env.addInstance(.{
+            .class_name = .{ .base = ii.class_name.base, .unique = .{ .value = ii.class_name.unique } },
+            .head = htype_head,
+            .context = context,
+            .span = .{ .start = span_mod.SourcePos.invalid(), .end = span_mod.SourcePos.invalid() },
+        });
+    }
+
+    return class_env;
+}
+
+/// Reconstruct a `DictNameMap` from the serialised entries in `iface`.
+fn deserialiseDictNamesFromIface(
+    alloc: std.mem.Allocator,
+    iface: mod_iface.ModIface,
+) std.mem.Allocator.Error!DictNameMap {
+    var map: DictNameMap = .empty;
+    for (iface.dict_entries) |entry| {
+        const key = desugar_mod.DesugarCtx.DictNameKey{
+            .class_unique = entry.class_unique,
+            .head_name = entry.head_name,
+        };
+        const val = Name{
+            .base = entry.name_base,
+            .unique = .{ .value = entry.name_unique },
+        };
+        try map.put(alloc, key, val);
+    }
+    return map;
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -1234,14 +1425,13 @@ test "compileProgram: .rhi cache hit — second invocation loads cached interfac
         break :blk fp;
     };
 
-    // ── Second run ──────────────────────────────────────────────────────
+    // ── Second run: cache hit pre-seeds metadata, source still compiled ──
     //
-    // NOTE: .rhi caching is currently disabled (see the `const cache_hit
-    // = false` comment in Phase 3 of compileProgram).  When caching was
-    // active, this second run would hit the cache and produce zero Core
-    // binds.  With caching disabled, it recompiles and produces real binds.
-    // The fingerprint is still correct because fingerprinting is
-    // independent of whether the cache was actually read.
+    // The source and dep fingerprints are unchanged, so `compileProgram`
+    // finds the `.rhi` written by the first run and pre-seeds ClassEnv and
+    // DictNameMap from it.  The module is then compiled from source anyway
+    // (per-module .bc caching is deferred to #436), so the Core binds are
+    // non-empty.  The fingerprint must be preserved across runs.
     {
         var r2 = try compileProgram(alloc, io, &.{.{
             .module_name = "CacheHit",
@@ -1256,7 +1446,7 @@ test "compileProgram: .rhi cache hit — second invocation loads cached interfac
         const fp2 = r2.env.ifaces.get("CacheHit").?.fingerprint;
         try testing.expectEqual(fp1, fp2);
 
-        // With caching disabled, recompilation produces real Core binds.
+        // compileSingle always runs → Core binds are produced.
         try testing.expect(r2.result.core.binds.len > 0);
     }
 }

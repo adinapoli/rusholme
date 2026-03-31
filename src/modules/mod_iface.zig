@@ -222,6 +222,71 @@ pub const SerialisedScheme = struct {
     body: SerialisedCoreType,
 };
 
+// ── SerialisedNameRef / SerialisedClassInfo / SerialisedInstanceInfo ────
+
+/// A JSON-serialisable `Name` (base + unique).
+///
+/// Used wherever a `Name` value must survive a JSON round-trip, e.g.
+/// inside `SerialisedClassInfo` and `SerialisedInstanceInfo`.
+pub const SerialisedNameRef = struct {
+    base: []const u8,
+    unique: u64,
+};
+
+/// A JSON-serialisable method declaration (mirrors `class_env.MethodInfo`).
+pub const SerialisedMethodInfo = struct {
+    name: SerialisedNameRef,
+    ty: SerialisedCoreType,
+    has_default: bool,
+};
+
+/// A JSON-serialisable class declaration (mirrors `class_env.ClassInfo`).
+///
+/// Stored in `ModIface.class_infos` so that downstream modules can
+/// reconstruct a `ClassEnv` from a cached `.rhi` file.
+pub const SerialisedClassInfo = struct {
+    name: SerialisedNameRef,
+    tyvar: u64,
+    superclasses: []const SerialisedNameRef,
+    methods: []const SerialisedMethodInfo,
+    dict_con_name: SerialisedNameRef,
+};
+
+/// A JSON-serialisable class constraint used in instance context serialisation.
+///
+/// Distinguished from `SerialisedConstraint` (which is for scheme constraints
+/// keyed by type variable unique) by including the full type as a
+/// `SerialisedCoreType` rather than just a `tyvar_unique`.
+pub const SerialisedClassConstraint = struct {
+    class_name: SerialisedNameRef,
+    ty: SerialisedCoreType,
+};
+
+/// A JSON-serialisable instance declaration (mirrors `class_env.InstanceInfo`).
+///
+/// Stored in `ModIface.instance_infos` so that downstream modules can
+/// reconstruct the instance list in a cached `ClassEnv`.
+///
+/// Note: `rigid_scope` is not serialised — it is only needed during Pass 2
+/// instance body inference, which does not run on cached modules.
+pub const SerialisedInstanceInfo = struct {
+    class_name: SerialisedNameRef,
+    head: SerialisedCoreType,
+    context: []const SerialisedClassConstraint,
+};
+
+/// A JSON-serialisable entry in the dictionary name map.
+///
+/// Stores one `(class_unique, head_name) → Name` mapping from
+/// `DesugarCtx.DictNameMap` so that cached modules can supply dictionary
+/// evidence to downstream desugaring.
+pub const SerialisedDictEntry = struct {
+    class_unique: u64,
+    head_name: []const u8,
+    name_base: []const u8,
+    name_unique: u64,
+};
+
 // ── ExportedValue ────────────────────────────────────────────────────────
 
 /// A top-level value exported by a module: its source name, unique ID,
@@ -278,6 +343,16 @@ pub const ModIface = struct {
     values: []const ExportedValue,
     /// Exported data type declarations.
     data_decls: []const ExportedDataDecl,
+    /// Format version for the `.rhi` serialisation schema.
+    ///
+    /// Increment this whenever the schema changes in a backwards-incompatible
+    /// way so that old cached files are treated as misses rather than loaded
+    /// with missing or misinterpreted fields.
+    ///
+    /// Version history:
+    ///   0 — initial format (values, data_decls, fingerprint only)
+    ///   1 — added class_infos, instance_infos, dict_entries (#616)
+    format_version: u32 = 0,
     /// Recompilation fingerprint: `Wyhash(source_bytes ++ dep_fingerprints)`.
     ///
     /// Computed by `computeFingerprint` and stored in the `.rhi` file.
@@ -286,10 +361,20 @@ pub const ModIface = struct {
     /// Used by `compileProgram` to decide whether a cached `.rhi` is still
     /// valid (#371).
     fingerprint: u64 = 0,
+    /// Exported class declarations for downstream `ClassEnv` reconstruction.
+    ///
+    /// Populated by `compile_env.serialiseClassEnvIntoIface` after desugaring.
+    /// Tracked in: https://github.com/adinapoli/rusholme/issues/616
+    class_infos: []const SerialisedClassInfo = &.{},
+    /// Exported instance declarations for downstream `ClassEnv` reconstruction.
+    ///
+    /// Tracked in: https://github.com/adinapoli/rusholme/issues/616
+    instance_infos: []const SerialisedInstanceInfo = &.{},
+    /// Dictionary name entries for downstream desugaring evidence resolution.
+    ///
+    /// Tracked in: https://github.com/adinapoli/rusholme/issues/616
+    dict_entries: []const SerialisedDictEntry = &.{},
     // ── Not yet implemented ─────────────────────────────────────────────
-    //
-    // Exported type class instances are not yet included.
-    // Tracked in: https://github.com/adinapoli/rusholme/issues/369
     //
     // Re-export expansion (module Foo (module Bar)) is not yet performed.
     // Tracked in: https://github.com/adinapoli/rusholme/issues/368
@@ -528,11 +613,27 @@ fn isConExported(con_name: Name, type_name: Name, export_list: ?[]const ExportSp
 
 // ── Serialisation (.rhi write) ──────────────────────────────────────────
 
+/// The current `.rhi` schema version.
+///
+/// Increment whenever the `ModIface` JSON layout changes in a
+/// backwards-incompatible way.  `tryLoadCachedIface` rejects files whose
+/// stored `format_version` does not match this constant.
+///
+/// Version history:
+///   0 — initial format (values, data_decls, fingerprint only)
+///   1 — added class_infos, instance_infos, dict_entries (#616)
+pub const RHI_FORMAT_VERSION: u32 = 1;
+
 /// Serialise a `ModIface` to its JSON `.rhi` representation.
+///
+/// The `format_version` field is always overwritten with `RHI_FORMAT_VERSION`
+/// before serialisation so that the written file reflects the current schema.
 ///
 /// Returns a heap-allocated string (caller owns, must free with `alloc`).
 pub fn writeRhi(alloc: std.mem.Allocator, iface: ModIface) std.mem.Allocator.Error![]u8 {
-    return std.json.Stringify.valueAlloc(alloc, iface, .{ .whitespace = .indent_2 });
+    var versioned = iface;
+    versioned.format_version = RHI_FORMAT_VERSION;
+    return std.json.Stringify.valueAlloc(alloc, versioned, .{ .whitespace = .indent_2 });
 }
 
 // ── Deserialisation (.rhi read) ──────────────────────────────────────────
@@ -574,11 +675,84 @@ fn deepCopyModIface(alloc: std.mem.Allocator, src: ModIface) std.mem.Allocator.E
         data_decls[i] = try deepCopyExportedDataDecl(alloc, dd);
     }
 
+    const class_infos = try alloc.alloc(SerialisedClassInfo, src.class_infos.len);
+    for (src.class_infos, 0..) |ci, i| {
+        class_infos[i] = try deepCopySerialisedClassInfo(alloc, ci);
+    }
+
+    const instance_infos = try alloc.alloc(SerialisedInstanceInfo, src.instance_infos.len);
+    for (src.instance_infos, 0..) |ii, i| {
+        instance_infos[i] = try deepCopySerialisedInstanceInfo(alloc, ii);
+    }
+
+    const dict_entries = try alloc.alloc(SerialisedDictEntry, src.dict_entries.len);
+    for (src.dict_entries, 0..) |de, i| {
+        dict_entries[i] = try deepCopySerialisedDictEntry(alloc, de);
+    }
+
     return ModIface{
         .module_name = module_name,
         .values = values,
         .data_decls = data_decls,
+        .format_version = src.format_version,
         .fingerprint = src.fingerprint,
+        .class_infos = class_infos,
+        .instance_infos = instance_infos,
+        .dict_entries = dict_entries,
+    };
+}
+
+fn deepCopySerialisedNameRef(alloc: std.mem.Allocator, src: SerialisedNameRef) std.mem.Allocator.Error!SerialisedNameRef {
+    return .{ .base = try alloc.dupe(u8, src.base), .unique = src.unique };
+}
+
+fn deepCopySerialisedMethodInfo(alloc: std.mem.Allocator, src: SerialisedMethodInfo) std.mem.Allocator.Error!SerialisedMethodInfo {
+    return .{
+        .name = try deepCopySerialisedNameRef(alloc, src.name),
+        .ty = try deepCopySerialisedCoreType(alloc, src.ty),
+        .has_default = src.has_default,
+    };
+}
+
+fn deepCopySerialisedClassInfo(alloc: std.mem.Allocator, src: SerialisedClassInfo) std.mem.Allocator.Error!SerialisedClassInfo {
+    const supers = try alloc.alloc(SerialisedNameRef, src.superclasses.len);
+    for (src.superclasses, 0..) |sc, i| supers[i] = try deepCopySerialisedNameRef(alloc, sc);
+
+    const methods = try alloc.alloc(SerialisedMethodInfo, src.methods.len);
+    for (src.methods, 0..) |m, i| methods[i] = try deepCopySerialisedMethodInfo(alloc, m);
+
+    return .{
+        .name = try deepCopySerialisedNameRef(alloc, src.name),
+        .tyvar = src.tyvar,
+        .superclasses = supers,
+        .methods = methods,
+        .dict_con_name = try deepCopySerialisedNameRef(alloc, src.dict_con_name),
+    };
+}
+
+fn deepCopySerialisedClassConstraint(alloc: std.mem.Allocator, src: SerialisedClassConstraint) std.mem.Allocator.Error!SerialisedClassConstraint {
+    return .{
+        .class_name = try deepCopySerialisedNameRef(alloc, src.class_name),
+        .ty = try deepCopySerialisedCoreType(alloc, src.ty),
+    };
+}
+
+fn deepCopySerialisedInstanceInfo(alloc: std.mem.Allocator, src: SerialisedInstanceInfo) std.mem.Allocator.Error!SerialisedInstanceInfo {
+    const ctx = try alloc.alloc(SerialisedClassConstraint, src.context.len);
+    for (src.context, 0..) |cc, i| ctx[i] = try deepCopySerialisedClassConstraint(alloc, cc);
+    return .{
+        .class_name = try deepCopySerialisedNameRef(alloc, src.class_name),
+        .head = try deepCopySerialisedCoreType(alloc, src.head),
+        .context = ctx,
+    };
+}
+
+fn deepCopySerialisedDictEntry(alloc: std.mem.Allocator, src: SerialisedDictEntry) std.mem.Allocator.Error!SerialisedDictEntry {
+    return .{
+        .class_unique = src.class_unique,
+        .head_name = try alloc.dupe(u8, src.head_name),
+        .name_base = try alloc.dupe(u8, src.name_base),
+        .name_unique = src.name_unique,
     };
 }
 
@@ -735,6 +909,9 @@ pub fn tryLoadCachedIface(
         error.OutOfMemory => return error.OutOfMemory,
         else => return null,
     };
+
+    // Format version mismatch → stale cache (schema has changed).
+    if (iface.format_version != RHI_FORMAT_VERSION) return null;
 
     // Fingerprint mismatch → stale cache.
     if (iface.fingerprint != expected_fp) return null;
