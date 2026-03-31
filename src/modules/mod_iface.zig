@@ -246,6 +246,7 @@ pub const SerialisedMethodInfo = struct {
 /// reconstruct a `ClassEnv` from a cached `.rhi` file.
 pub const SerialisedClassInfo = struct {
     name: SerialisedNameRef,
+    /// Unique ID of the class's type variable (mirrors `ClassInfo.tyvar`).
     tyvar: u64,
     superclasses: []const SerialisedNameRef,
     methods: []const SerialisedMethodInfo,
@@ -268,7 +269,9 @@ pub const SerialisedClassConstraint = struct {
 /// reconstruct the instance list in a cached `ClassEnv`.
 ///
 /// Note: `rigid_scope` is not serialised — it is only needed during Pass 2
-/// instance body inference, which does not run on cached modules.
+/// instance body inference, which does not run on cached modules.  When
+/// per-module Core caching (#436) allows skipping `compileSingle` entirely,
+/// `rigid_scope` must be added here or reconstructed on demand.
 pub const SerialisedInstanceInfo = struct {
     class_name: SerialisedNameRef,
     head: SerialisedCoreType,
@@ -352,6 +355,10 @@ pub const ModIface = struct {
     /// Version history:
     ///   0 — initial format (values, data_decls, fingerprint only)
     ///   1 — added class_infos, instance_infos, dict_entries (#616)
+    ///
+    /// The default is `0` (not `rhi_format_version`) so that in-memory ifaces
+    /// constructed during compilation are distinguishable from cache-loaded
+    /// ones.  `writeRhi` stamps `rhi_format_version` before writing to disk.
     format_version: u32 = 0,
     /// Recompilation fingerprint: `Wyhash(source_bytes ++ dep_fingerprints)`.
     ///
@@ -622,17 +629,17 @@ fn isConExported(con_name: Name, type_name: Name, export_list: ?[]const ExportSp
 /// Version history:
 ///   0 — initial format (values, data_decls, fingerprint only)
 ///   1 — added class_infos, instance_infos, dict_entries (#616)
-pub const RHI_FORMAT_VERSION: u32 = 1;
+pub const rhi_format_version: u32 = 1;
 
 /// Serialise a `ModIface` to its JSON `.rhi` representation.
 ///
-/// The `format_version` field is always overwritten with `RHI_FORMAT_VERSION`
+/// The `format_version` field is always overwritten with `rhi_format_version`
 /// before serialisation so that the written file reflects the current schema.
 ///
 /// Returns a heap-allocated string (caller owns, must free with `alloc`).
 pub fn writeRhi(alloc: std.mem.Allocator, iface: ModIface) std.mem.Allocator.Error![]u8 {
     var versioned = iface;
-    versioned.format_version = RHI_FORMAT_VERSION;
+    versioned.format_version = rhi_format_version;
     return std.json.Stringify.valueAlloc(alloc, versioned, .{ .whitespace = .indent_2 });
 }
 
@@ -911,7 +918,7 @@ pub fn tryLoadCachedIface(
     };
 
     // Format version mismatch → stale cache (schema has changed).
-    if (iface.format_version != RHI_FORMAT_VERSION) return null;
+    if (iface.format_version != rhi_format_version) return null;
 
     // Fingerprint mismatch → stale cache.
     if (iface.fingerprint != expected_fp) return null;

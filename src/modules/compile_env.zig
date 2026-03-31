@@ -732,6 +732,10 @@ pub fn compileProgram(
         else
             null;
 
+        // Pre-seed counts for the debug assertion below.
+        var pre_class_count: ?usize = null;
+        var pre_dict_count: ?usize = null;
+
         if (cached_iface) |ci| {
             // Cache hit: pre-seed ClassEnv and DictNameMap from the cached
             // interface.  compileSingle (below) will re-derive these from
@@ -741,6 +745,8 @@ pub fn compileProgram(
             try env.class_envs.put(alloc, owned_name, ce);
             const dict_names = try deserialiseDictNamesFromIface(alloc, ci);
             try env.dict_names_map.put(alloc, owned_name, dict_names);
+            pre_class_count = ce.classes.count();
+            pre_dict_count = dict_names.count();
         }
 
         // Always compile from source to produce the Core program.
@@ -759,6 +765,20 @@ pub fn compileProgram(
                             // Write failure is non-fatal: next invocation will be a miss.
                             mod_iface.writeRhiToDisk(alloc, io, rp, iface) catch {};
                         }
+                    }
+                }
+
+                // Validate that the cached metadata matches what compileSingle
+                // produced.  A mismatch means the serialisation round-trip is
+                // lossy — catch it early in debug builds.
+                if (pre_class_count) |cached_n| {
+                    if (env.class_envs.get(mod_name)) |fresh_ce| {
+                        std.debug.assert(cached_n == fresh_ce.classes.count());
+                    }
+                }
+                if (pre_dict_count) |cached_n| {
+                    if (env.dict_names_map.get(mod_name)) |fresh_dn| {
+                        std.debug.assert(cached_n == fresh_dn.count());
                     }
                 }
             }
@@ -1103,6 +1123,10 @@ fn deserialiseClassEnvFromIface(
             };
         }
 
+        // NOTE: `rigid_scope` is omitted from the serialised form and
+        // defaults to empty here.  This is safe while compileSingle always
+        // runs (the fresh ClassEnv overwrites this one), but must be
+        // revisited when #436 allows skipping compilation on cache hit.
         try class_env.addInstance(.{
             .class_name = .{ .base = ii.class_name.base, .unique = .{ .value = ii.class_name.unique } },
             .head = htype_head,
@@ -1115,6 +1139,11 @@ fn deserialiseClassEnvFromIface(
 }
 
 /// Reconstruct a `DictNameMap` from the serialised entries in `iface`.
+///
+/// String slices (`head_name`, `name_base`) point into the deep-copied
+/// `ModIface` arena memory.  This is safe as long as the `ModIface` and
+/// the returned `DictNameMap` share the same arena (which they do in the
+/// current `compileProgram` flow).
 fn deserialiseDictNamesFromIface(
     alloc: std.mem.Allocator,
     iface: mod_iface.ModIface,
