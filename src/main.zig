@@ -894,7 +894,7 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
         } else |err| {
             // Prelude not found is non-fatal in development; warn and continue
             // without implicit Prelude compilation. User modules will still
-            // get built-in names from populateBuiltins/initBuiltins.
+            // get wired-in names from populateWiredIn/initBuiltins.
             var stderr_buf: [4096]u8 = undefined;
             var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
             const stderr = &stderr_fw.interface;

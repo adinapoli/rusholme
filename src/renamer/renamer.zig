@@ -276,12 +276,12 @@ pub const RenameEnv = struct {
         try self.scope.bind("Functor", Known.Class.Functor);
         try self.scope.bind("Applicative", Known.Class.Applicative);
 
-        // Numeric class methods needed for desugaring (e.g. integer literals
-        // desugar to `fromInteger`, negation to `negate`).
+        // `fromInteger` and `negate` are needed for desugaring: integer
+        // literals desugar to `fromInteger n`, and negation (`-x`) desugars
+        // to `negate x`.  All other Num methods (abs, signum, …) are plain
+        // Prelude functions suppressed by NoImplicitPrelude.
         try self.scope.bind("fromInteger", Known.Fn.fromInteger);
         try self.scope.bind("negate", Known.Fn.negate);
-        try self.scope.bind("abs", Known.Fn.abs);
-        try self.scope.bind("signum", Known.Fn.signum);
     }
 
     /// Populate the scope with Prelude functions that are suppressed when
@@ -305,6 +305,8 @@ pub const RenameEnv = struct {
         try self.scope.bind("concat", Known.Fn.concat);
         try self.scope.bind("zip", Known.Fn.zip);
         try self.scope.bind("unzip", Known.Fn.unzip);
+        try self.scope.bind("abs", Known.Fn.abs);
+        try self.scope.bind("signum", Known.Fn.signum);
         try self.scope.bind("show", Known.Fn.show);
         try self.scope.bind("read", Known.Fn.read);
         try self.scope.bind("otherwise", Known.Fn.otherwise);
