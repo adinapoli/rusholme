@@ -526,7 +526,8 @@ These existing issues must be resolved before any Phase 1 work begins:
 | [#649](https://github.com/adinapoli/rusholme/issues/649) | Implement `.rhc-pkg` package descriptor format and parser | — | :green_circle: |
 | [#650](https://github.com/adinapoli/rusholme/issues/650) | Implement package store layout at `~/.rhc/store/` | [#649](https://github.com/adinapoli/rusholme/issues/649) | :green_circle: |
 | [#675](https://github.com/adinapoli/rusholme/issues/675) | Package store: replace hardcoded VERSION constant with build-time version | [#650](https://github.com/adinapoli/rusholme/issues/650) | :green_circle: |
-| [#651](https://github.com/adinapoli/rusholme/issues/651) | Implement `rhc-pkg` tool (list/describe/install/unregister/check) | [#650](https://github.com/adinapoli/rusholme/issues/650) | :white_circle: |
+| [#676](https://github.com/adinapoli/rusholme/issues/676) | Package store: use platform-independent path separators | [#650](https://github.com/adinapoli/rusholme/issues/650) | :green_circle: |
+| [#651](https://github.com/adinapoli/rusholme/issues/651) | Implement `rhc-pkg` tool (list/describe/install/unregister/check) | [#650](https://github.com/adinapoli/rusholme/issues/650) | :green_circle: |
 | [#652](https://github.com/adinapoli/rusholme/issues/652) | Add `--package-db` flag to `rhc` compiler | [#650](https://github.com/adinapoli/rusholme/issues/650) | :green_circle: |
 
 #### Phase 2 — Boot packages as real packages
