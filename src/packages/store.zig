@@ -183,6 +183,39 @@ pub const Store = struct {
 
         return entries.toOwnedSlice(self.allocator);
     }
+
+    /// Remove a package's registry entry from `package.conf.d/`.
+    ///
+    /// Deletes the `.conf` file for the package named `name` at version
+    /// `version`. Does NOT delete the compiled artifact directory — artifacts
+    /// survive unregistration and must be cleaned up separately.
+    ///
+    /// Returns `error.PackageNotFound` if no matching entry exists.
+    pub fn unregister(
+        self: *Store,
+        io: std.Io,
+        name: []const u8,
+        version: []const u8,
+    ) Error!void {
+        const entries = try self.list(io);
+        defer {
+            for (entries) |e| e.deinit(self.allocator);
+            self.allocator.free(entries);
+        }
+
+        for (entries) |entry| {
+            if (std.mem.eql(u8, entry.name, name) and
+                std.mem.eql(u8, entry.version, version))
+            {
+                const conf_path = try computeConfPath(self, entry.key);
+                defer self.allocator.free(conf_path);
+                try std.Io.Dir.deleteFile(.cwd(), io, conf_path);
+                return;
+            }
+        }
+
+        return error.PackageNotFound;
+    }
 };
 
 /// An entry in the package store, parsed from a .conf file.
@@ -216,6 +249,8 @@ pub const Error = error{
     InvalidConf,
     /// The HOME environment variable is not set (required for defaultPath).
     HomeDirectoryUnset,
+    /// The requested package was not found in the store.
+    PackageNotFound,
 } || std.Io.File.OpenError
   || std.Io.Dir.OpenError
   || std.Io.Dir.CreateDirPathError
@@ -742,4 +777,52 @@ test "Store.list returns empty slice for empty store" {
     defer std.testing.allocator.free(entries);
 
     try std.testing.expectEqual(@as(usize, 0), entries.len);
+}
+
+test "Store.unregister removes conf file" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const tmp_abs = try tmpDirPath(std.testing.allocator, &tmp_dir);
+    defer std.testing.allocator.free(tmp_abs);
+
+    var s = try init(std.testing.allocator, std.testing.io, tmp_abs);
+    defer s.deinit();
+
+    const content = "name = \"pkg-a\"\nversion = \"1.0.0\"\n";
+    const desc = try descriptor.parse(std.testing.allocator, content);
+    defer desc.deinit(std.testing.allocator);
+    const key = try computeKey(std.testing.allocator, desc.name, desc.version, content);
+    defer std.testing.allocator.free(key);
+    try s.register(std.testing.io, key, content, desc);
+
+    const before = try s.list(std.testing.io);
+    try std.testing.expectEqual(@as(usize, 1), before.len);
+    for (before) |e| e.deinit(std.testing.allocator);
+    std.testing.allocator.free(before);
+
+    try s.unregister(std.testing.io, "pkg-a", "1.0.0");
+
+    const after = try s.list(std.testing.io);
+    defer {
+        for (after) |e| e.deinit(std.testing.allocator);
+        std.testing.allocator.free(after);
+    }
+    try std.testing.expectEqual(@as(usize, 0), after.len);
+}
+
+test "Store.unregister returns PackageNotFound for unknown package" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const tmp_abs = try tmpDirPath(std.testing.allocator, &tmp_dir);
+    defer std.testing.allocator.free(tmp_abs);
+
+    var s = try init(std.testing.allocator, std.testing.io, tmp_abs);
+    defer s.deinit();
+
+    try std.testing.expectError(
+        error.PackageNotFound,
+        s.unregister(std.testing.io, "ghost", "0.0.1"),
+    );
 }
