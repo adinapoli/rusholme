@@ -809,7 +809,19 @@ pub const GrinTranslator = struct {
                                 _ = llvm.buildRet(self.builder, as_i64);
                             }
                         } else {
-                            _ = llvm.buildRet(self.builder, val);
+                            // Non-pointer body value (raw i64 from a literal
+                            // return or arithmetic).  Tag the integer so that
+                            // `formatJitResult` can distinguish integer 0 from
+                            // the Unit heap-node pointer.
+                            // See: https://github.com/adinapoli/rusholme/issues/621
+                            const val_kind_inner = c.LLVMGetTypeKind(c.LLVMTypeOf(val));
+                            if (val_kind_inner == c.LLVMIntegerTypeKind) {
+                                const tagged = tagInt(self.builder, val);
+                                const as_i64 = c.LLVMBuildPtrToInt(self.builder, tagged, llvm.i64Type(), "tagged_i64");
+                                _ = llvm.buildRet(self.builder, as_i64);
+                            } else {
+                                _ = llvm.buildRet(self.builder, val);
+                            }
                         }
                     } else {
                         // Non-REPL function: ensure return value matches function signature.
@@ -2698,7 +2710,16 @@ pub const GrinTranslator = struct {
                             _ = llvm.buildRet(self.builder, converted);
                             return;
                         }
-                        _ = llvm.buildRet(self.builder, llvm_val);
+                        // Tag the integer so that `formatJitResult` can
+                        // distinguish integer 0 from Unit (a heap pointer
+                        // with tag rts_node.Tag.Unit).  Without this, both
+                        // `0` and `()` produce a raw 0 at the i64 boundary,
+                        // causing `0` to be suppressed in the REPL output.
+                        // tagInt encodes the value as `(val << 1) | 1`.
+                        // See: https://github.com/adinapoli/rusholme/issues/621
+                        const tagged = tagInt(self.builder, llvm_val);
+                        const as_i64 = c.LLVMBuildPtrToInt(self.builder, tagged, llvm.i64Type(), "tagged_i64");
+                        _ = llvm.buildRet(self.builder, as_i64);
                         return;
                     }
                 } else if (!is_native_main) {
