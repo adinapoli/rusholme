@@ -60,3 +60,4 @@ current-plan.md
 *.wasm
 test
 current-issue.md
+.worktrees/
