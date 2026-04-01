@@ -2,6 +2,9 @@
 //!
 //! Each public function accepts a `*store.Store` so callers (including tests)
 //! can supply their own store instead of relying on the default path.
+//! Each function that produces output accepts an `out: *std.Io.Writer` so
+//! callers can redirect or discard output (tests pass `Allocating` writers;
+//! the `cmdPkg` dispatcher passes a stdout-backed `File.Writer`).
 //!
 //! ## Subcommands
 //!
@@ -27,17 +30,15 @@ pub const CheckError = error{CheckFailed};
 
 // ── cmdPkgList ────────────────────────────────────────────────────────────────
 
-/// Print one `<name>-<version>` line per installed package to stdout.
-pub fn cmdPkgList(alloc: std.mem.Allocator, io: Io, s: *store.Store) !void {
+/// Print one `<name>-<version>` line per installed package.
+/// Output is written to `out`; callers are responsible for choosing the
+/// destination (stdout in production, an `Allocating` writer in tests).
+pub fn cmdPkgList(alloc: std.mem.Allocator, io: Io, s: *store.Store, out: *std.Io.Writer) !void {
     const entries = try s.list(io);
     defer {
         for (entries) |e| e.deinit(alloc);
         alloc.free(entries);
     }
-
-    var buf: [4096]u8 = undefined;
-    var fw: File.Writer = .init(.stdout(), io, &buf);
-    const out = &fw.interface;
 
     for (entries) |entry| {
         try out.print("{s}-{s}\n", .{ entry.name, entry.version });
@@ -60,16 +61,12 @@ pub fn cmdPkgList(alloc: std.mem.Allocator, io: Io, s: *store.Store) !void {
 /// exposed-modules: <mod1> <mod2> ...
 /// depends: <dep1> <dep2> ...
 /// ```
-pub fn cmdPkgDescribe(alloc: std.mem.Allocator, io: Io, s: *store.Store, name: []const u8) !void {
+pub fn cmdPkgDescribe(alloc: std.mem.Allocator, io: Io, s: *store.Store, name: []const u8, out: *std.Io.Writer) !void {
     const entries = try s.list(io);
     defer {
         for (entries) |e| e.deinit(alloc);
         alloc.free(entries);
     }
-
-    var buf: [4096]u8 = undefined;
-    var fw: File.Writer = .init(.stdout(), io, &buf);
-    const out = &fw.interface;
 
     var first = true;
     for (entries) |entry| {
@@ -97,9 +94,9 @@ pub fn cmdPkgDescribe(alloc: std.mem.Allocator, io: Io, s: *store.Store, name: [
 // ── cmdPkgInstall ─────────────────────────────────────────────────────────────
 
 /// Install a package from a `.rhc-pkg` descriptor file at `pkg_path`.
-/// Prints `<name>-<version> installed` on success.
+/// Prints `<name>-<version> installed` to `out` on success.
 /// Returns `store.Error.DuplicatePackage` if the package is already registered.
-pub fn cmdPkgInstall(alloc: std.mem.Allocator, io: Io, s: *store.Store, pkg_path: []const u8) !void {
+pub fn cmdPkgInstall(alloc: std.mem.Allocator, io: Io, s: *store.Store, pkg_path: []const u8, out: *std.Io.Writer) !void {
     const content = try std.Io.Dir.readFileAlloc(.cwd(), io, pkg_path, alloc, .limited(1024 * 64));
     defer alloc.free(content);
 
@@ -111,9 +108,6 @@ pub fn cmdPkgInstall(alloc: std.mem.Allocator, io: Io, s: *store.Store, pkg_path
 
     try s.register(io, key, content, desc);
 
-    var buf: [256]u8 = undefined;
-    var fw: File.Writer = .init(.stdout(), io, &buf);
-    const out = &fw.interface;
     try out.print("{s}-{s} installed\n", .{ desc.name, desc.version });
     try out.flush();
 }
@@ -124,9 +118,9 @@ pub fn cmdPkgInstall(alloc: std.mem.Allocator, io: Io, s: *store.Store, pkg_path
 ///
 /// The argument must match `<name>-<version>` for some registered package
 /// (i.e. `entry.name ++ "-" ++ entry.version == name_version`).
-/// Prints `<name_version> unregistered` on success.
+/// Prints `<name_version> unregistered` to `out` on success.
 /// Returns `store.Error.PackageNotFound` if no matching package exists.
-pub fn cmdPkgUnregister(alloc: std.mem.Allocator, io: Io, s: *store.Store, name_version: []const u8) !void {
+pub fn cmdPkgUnregister(alloc: std.mem.Allocator, io: Io, s: *store.Store, name_version: []const u8, out: *std.Io.Writer) !void {
     const entries = try s.list(io);
     defer {
         for (entries) |e| e.deinit(alloc);
@@ -140,9 +134,6 @@ pub fn cmdPkgUnregister(alloc: std.mem.Allocator, io: Io, s: *store.Store, name_
         if (std.mem.eql(u8, full, name_version)) {
             try s.unregister(io, entry.key);
 
-            var buf: [256]u8 = undefined;
-            var fw: File.Writer = .init(.stdout(), io, &buf);
-            const out = &fw.interface;
             try out.print("{s} unregistered\n", .{name_version});
             try out.flush();
             return;
@@ -160,21 +151,17 @@ pub fn cmdPkgUnregister(alloc: std.mem.Allocator, io: Io, s: *store.Store, name_
 /// Module name to path conversion: dots become slashes.
 /// Example: `"Data.Maybe"` → `"Data/Maybe.rhi"`.
 ///
-/// Prints one line per package:
+/// Prints one line per package to `out`:
 ///   `  <name>-<version>: OK`
 ///   `  <name>-<version>: MISSING <Module/Path>.rhi`
 ///
 /// Returns `CheckError.CheckFailed` if any `.rhi` file is absent.
-pub fn cmdPkgCheck(alloc: std.mem.Allocator, io: Io, s: *store.Store) !void {
+pub fn cmdPkgCheck(alloc: std.mem.Allocator, io: Io, s: *store.Store, out: *std.Io.Writer) !void {
     const entries = try s.list(io);
     defer {
         for (entries) |e| e.deinit(alloc);
         alloc.free(entries);
     }
-
-    var buf: [4096]u8 = undefined;
-    var fw: File.Writer = .init(.stdout(), io, &buf);
-    const out = &fw.interface;
 
     var any_missing = false;
 
@@ -241,8 +228,13 @@ pub fn cmdPkg(alloc: std.mem.Allocator, io: Io, args: []const []const u8) !void 
     };
     defer s.deinit();
 
+    // All subcommands that produce output share this single stdout writer.
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_fw: File.Writer = .init(.stdout(), io, &stdout_buf);
+    const out = &stdout_fw.interface;
+
     if (std.mem.eql(u8, subcommand, "list")) {
-        try cmdPkgList(alloc, io, &s);
+        try cmdPkgList(alloc, io, &s, out);
         return;
     }
 
@@ -252,7 +244,7 @@ pub fn cmdPkg(alloc: std.mem.Allocator, io: Io, args: []const []const u8) !void 
             try writePkgStderr(io, "Usage: rhc pkg describe <name>\n");
             std.process.exit(1);
         }
-        try cmdPkgDescribe(alloc, io, &s, sub_args[0]);
+        try cmdPkgDescribe(alloc, io, &s, sub_args[0], out);
         return;
     }
 
@@ -262,7 +254,7 @@ pub fn cmdPkg(alloc: std.mem.Allocator, io: Io, args: []const []const u8) !void 
             try writePkgStderr(io, "Usage: rhc pkg install <path-to-.rhc-pkg>\n");
             std.process.exit(1);
         }
-        cmdPkgInstall(alloc, io, &s, sub_args[0]) catch |err| {
+        cmdPkgInstall(alloc, io, &s, sub_args[0], out) catch |err| {
             var ebuf: [512]u8 = undefined;
             var efw: File.Writer = .init(.stderr(), io, &ebuf);
             const e = &efw.interface;
@@ -282,7 +274,7 @@ pub fn cmdPkg(alloc: std.mem.Allocator, io: Io, args: []const []const u8) !void 
             try writePkgStderr(io, "Usage: rhc pkg unregister <name>-<version>\n");
             std.process.exit(1);
         }
-        cmdPkgUnregister(alloc, io, &s, sub_args[0]) catch |err| {
+        cmdPkgUnregister(alloc, io, &s, sub_args[0], out) catch |err| {
             var ebuf: [512]u8 = undefined;
             var efw: File.Writer = .init(.stderr(), io, &ebuf);
             const e = &efw.interface;
@@ -297,7 +289,7 @@ pub fn cmdPkg(alloc: std.mem.Allocator, io: Io, args: []const []const u8) !void 
     }
 
     if (std.mem.eql(u8, subcommand, "check")) {
-        cmdPkgCheck(alloc, io, &s) catch |err| {
+        cmdPkgCheck(alloc, io, &s, out) catch |err| {
             switch (err) {
                 error.CheckFailed => std.process.exit(1),
                 else => return err,
@@ -370,6 +362,12 @@ fn registerTestPkg(
     try s.register(std.testing.io, key, content, desc);
 }
 
+/// Create a heap-backed writer whose output is discarded on `deinit`.
+/// Use this in tests to call command functions without writing to stdout.
+fn makeDiscardWriter() std.Io.Writer.Allocating {
+    return .init(std.testing.allocator);
+}
+
 test "cmdPkgList: lists installed packages without error" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -380,7 +378,9 @@ test "cmdPkgList: lists installed packages without error" {
     try registerTestPkg(std.testing.allocator, &s, "alpha", "1.0.0");
     try registerTestPkg(std.testing.allocator, &s, "beta", "2.3.0");
 
-    try cmdPkgList(std.testing.allocator, std.testing.io, &s);
+    var discard = makeDiscardWriter();
+    defer discard.deinit();
+    try cmdPkgList(std.testing.allocator, std.testing.io, &s, &discard.writer);
 
     // Verify both packages remain registered (listing is non-destructive).
     const entries = try s.list(std.testing.io);
@@ -398,7 +398,9 @@ test "cmdPkgList: succeeds on empty store" {
     var s = try makeTestStore(std.testing.allocator, &tmp);
     defer s.deinit();
 
-    try cmdPkgList(std.testing.allocator, std.testing.io, &s);
+    var discard = makeDiscardWriter();
+    defer discard.deinit();
+    try cmdPkgList(std.testing.allocator, std.testing.io, &s, &discard.writer);
 }
 
 test "cmdPkgDescribe: known package runs without error" {
@@ -409,7 +411,10 @@ test "cmdPkgDescribe: known package runs without error" {
     defer s.deinit();
 
     try registerTestPkg(std.testing.allocator, &s, "mypkg", "1.0.0");
-    try cmdPkgDescribe(std.testing.allocator, std.testing.io, &s, "mypkg");
+
+    var discard = makeDiscardWriter();
+    defer discard.deinit();
+    try cmdPkgDescribe(std.testing.allocator, std.testing.io, &s, "mypkg", &discard.writer);
 }
 
 test "cmdPkgDescribe: unknown name is silent" {
@@ -419,7 +424,9 @@ test "cmdPkgDescribe: unknown name is silent" {
     var s = try makeTestStore(std.testing.allocator, &tmp);
     defer s.deinit();
 
-    try cmdPkgDescribe(std.testing.allocator, std.testing.io, &s, "ghost");
+    var discard = makeDiscardWriter();
+    defer discard.deinit();
+    try cmdPkgDescribe(std.testing.allocator, std.testing.io, &s, "ghost", &discard.writer);
 }
 
 test "cmdPkgInstall: registers package from descriptor file" {
@@ -440,7 +447,9 @@ test "cmdPkgInstall: registers package from descriptor file" {
     defer file.close(std.testing.io);
     try file.writeStreamingAll(std.testing.io, desc_content);
 
-    try cmdPkgInstall(std.testing.allocator, std.testing.io, &s, pkg_file_path);
+    var discard = makeDiscardWriter();
+    defer discard.deinit();
+    try cmdPkgInstall(std.testing.allocator, std.testing.io, &s, pkg_file_path, &discard.writer);
 
     const entry = try s.lookup(std.testing.io, "install-test", "0.5.0");
     try std.testing.expect(entry != null);
@@ -455,7 +464,10 @@ test "cmdPkgUnregister: removes the package" {
     defer s.deinit();
 
     try registerTestPkg(std.testing.allocator, &s, "mypkg", "1.0.0");
-    try cmdPkgUnregister(std.testing.allocator, std.testing.io, &s, "mypkg-1.0.0");
+
+    var discard = makeDiscardWriter();
+    defer discard.deinit();
+    try cmdPkgUnregister(std.testing.allocator, std.testing.io, &s, "mypkg-1.0.0", &discard.writer);
 
     const entries = try s.list(std.testing.io);
     defer {
@@ -472,9 +484,11 @@ test "cmdPkgUnregister: returns PackageNotFound for unknown name_version" {
     var s = try makeTestStore(std.testing.allocator, &tmp);
     defer s.deinit();
 
+    var discard = makeDiscardWriter();
+    defer discard.deinit();
     try std.testing.expectError(
         error.PackageNotFound,
-        cmdPkgUnregister(std.testing.allocator, std.testing.io, &s, "ghost-9.9.9"),
+        cmdPkgUnregister(std.testing.allocator, std.testing.io, &s, "ghost-9.9.9", &discard.writer),
     );
 }
 
@@ -485,7 +499,9 @@ test "cmdPkgCheck: empty store passes" {
     var s = try makeTestStore(std.testing.allocator, &tmp);
     defer s.deinit();
 
-    try cmdPkgCheck(std.testing.allocator, std.testing.io, &s);
+    var discard = makeDiscardWriter();
+    defer discard.deinit();
+    try cmdPkgCheck(std.testing.allocator, std.testing.io, &s, &discard.writer);
 }
 
 test "cmdPkgCheck: package with no exposed modules passes" {
@@ -496,7 +512,10 @@ test "cmdPkgCheck: package with no exposed modules passes" {
     defer s.deinit();
 
     try registerTestPkg(std.testing.allocator, &s, "noop", "1.0.0");
-    try cmdPkgCheck(std.testing.allocator, std.testing.io, &s);
+
+    var discard = makeDiscardWriter();
+    defer discard.deinit();
+    try cmdPkgCheck(std.testing.allocator, std.testing.io, &s, &discard.writer);
 }
 
 test "cmdPkgCheck: returns CheckFailed when rhi is missing" {
@@ -514,9 +533,11 @@ test "cmdPkgCheck: returns CheckFailed when rhi is missing" {
     try s.register(std.testing.io, key, content, desc);
 
     // The .rhi file does NOT exist — check must return CheckFailed.
+    var discard = makeDiscardWriter();
+    defer discard.deinit();
     try std.testing.expectError(
         CheckError.CheckFailed,
-        cmdPkgCheck(std.testing.allocator, std.testing.io, &s),
+        cmdPkgCheck(std.testing.allocator, std.testing.io, &s, &discard.writer),
     );
 }
 
@@ -548,5 +569,7 @@ test "cmdPkgCheck: succeeds when rhi exists" {
     const rhi_file = try std.Io.Dir.createFile(.cwd(), std.testing.io, rhi_path, .{});
     rhi_file.close(std.testing.io);
 
-    try cmdPkgCheck(std.testing.allocator, std.testing.io, &s);
+    var discard = makeDiscardWriter();
+    defer discard.deinit();
+    try cmdPkgCheck(std.testing.allocator, std.testing.io, &s, &discard.writer);
 }

@@ -4,6 +4,9 @@
 //! tmpDir-backed package store. They use the `rusholme` module import path
 //! and are registered as a separate test suite in build.zig.
 //!
+//! Output is discarded via `std.Io.Writer.Allocating` to avoid writing to the
+//! test runner's binary protocol pipe (which would corrupt `--listen=-` mode).
+//!
 //! Issue: #651
 
 const std = @import("std");
@@ -16,6 +19,10 @@ fn makeTestStore(alloc: std.mem.Allocator, tmp: *std.testing.TmpDir) !store_mod.
     const path = try std.Io.Dir.realPathFileAlloc(tmp.dir, std.testing.io, ".", alloc);
     defer alloc.free(path);
     return store_mod.init(alloc, std.testing.io, path);
+}
+
+fn makeDiscardWriter() std.Io.Writer.Allocating {
+    return .init(std.testing.allocator);
 }
 
 fn registerPkg(
@@ -42,7 +49,9 @@ test "rhc pkg list: empty store produces no output" {
     defer tmp.cleanup();
     var s = try makeTestStore(std.testing.allocator, &tmp);
     defer s.deinit();
-    try pkg_cmd.cmdPkgList(std.testing.allocator, std.testing.io, &s);
+    var discard = makeDiscardWriter();
+    defer discard.deinit();
+    try pkg_cmd.cmdPkgList(std.testing.allocator, std.testing.io, &s, &discard.writer);
 }
 
 test "rhc pkg list: lists all registered packages" {
@@ -52,7 +61,9 @@ test "rhc pkg list: lists all registered packages" {
     defer s.deinit();
     try registerPkg(std.testing.allocator, &s, "pkg-x", "1.0.0");
     try registerPkg(std.testing.allocator, &s, "pkg-y", "2.0.0");
-    try pkg_cmd.cmdPkgList(std.testing.allocator, std.testing.io, &s);
+    var discard = makeDiscardWriter();
+    defer discard.deinit();
+    try pkg_cmd.cmdPkgList(std.testing.allocator, std.testing.io, &s, &discard.writer);
     const entries = try s.list(std.testing.io);
     defer {
         for (entries) |e| e.deinit(std.testing.allocator);
@@ -67,7 +78,9 @@ test "rhc pkg describe: known package runs without error" {
     var s = try makeTestStore(std.testing.allocator, &tmp);
     defer s.deinit();
     try registerPkg(std.testing.allocator, &s, "described", "3.0.0");
-    try pkg_cmd.cmdPkgDescribe(std.testing.allocator, std.testing.io, &s, "described");
+    var discard = makeDiscardWriter();
+    defer discard.deinit();
+    try pkg_cmd.cmdPkgDescribe(std.testing.allocator, std.testing.io, &s, "described", &discard.writer);
 }
 
 test "rhc pkg describe: unknown name is silent" {
@@ -75,7 +88,9 @@ test "rhc pkg describe: unknown name is silent" {
     defer tmp.cleanup();
     var s = try makeTestStore(std.testing.allocator, &tmp);
     defer s.deinit();
-    try pkg_cmd.cmdPkgDescribe(std.testing.allocator, std.testing.io, &s, "nobody");
+    var discard = makeDiscardWriter();
+    defer discard.deinit();
+    try pkg_cmd.cmdPkgDescribe(std.testing.allocator, std.testing.io, &s, "nobody", &discard.writer);
 }
 
 test "rhc pkg unregister: removes registered package" {
@@ -84,7 +99,9 @@ test "rhc pkg unregister: removes registered package" {
     var s = try makeTestStore(std.testing.allocator, &tmp);
     defer s.deinit();
     try registerPkg(std.testing.allocator, &s, "remove-me", "1.0.0");
-    try pkg_cmd.cmdPkgUnregister(std.testing.allocator, std.testing.io, &s, "remove-me-1.0.0");
+    var discard = makeDiscardWriter();
+    defer discard.deinit();
+    try pkg_cmd.cmdPkgUnregister(std.testing.allocator, std.testing.io, &s, "remove-me-1.0.0", &discard.writer);
     const entries = try s.list(std.testing.io);
     defer {
         for (entries) |e| e.deinit(std.testing.allocator);
@@ -98,9 +115,11 @@ test "rhc pkg unregister: returns PackageNotFound for unknown pkg" {
     defer tmp.cleanup();
     var s = try makeTestStore(std.testing.allocator, &tmp);
     defer s.deinit();
+    var discard = makeDiscardWriter();
+    defer discard.deinit();
     try std.testing.expectError(
         error.PackageNotFound,
-        pkg_cmd.cmdPkgUnregister(std.testing.allocator, std.testing.io, &s, "nobody-0.0.0"),
+        pkg_cmd.cmdPkgUnregister(std.testing.allocator, std.testing.io, &s, "nobody-0.0.0", &discard.writer),
     );
 }
 
@@ -109,7 +128,9 @@ test "rhc pkg check: empty store passes" {
     defer tmp.cleanup();
     var s = try makeTestStore(std.testing.allocator, &tmp);
     defer s.deinit();
-    try pkg_cmd.cmdPkgCheck(std.testing.allocator, std.testing.io, &s);
+    var discard = makeDiscardWriter();
+    defer discard.deinit();
+    try pkg_cmd.cmdPkgCheck(std.testing.allocator, std.testing.io, &s, &discard.writer);
 }
 
 test "rhc pkg check: fails when rhi is missing" {
@@ -125,8 +146,10 @@ test "rhc pkg check: fails when rhi is missing" {
     defer std.testing.allocator.free(key);
     try s.register(std.testing.io, key, content, desc);
 
+    var discard = makeDiscardWriter();
+    defer discard.deinit();
     try std.testing.expectError(
         error.CheckFailed,
-        pkg_cmd.cmdPkgCheck(std.testing.allocator, std.testing.io, &s),
+        pkg_cmd.cmdPkgCheck(std.testing.allocator, std.testing.io, &s, &discard.writer),
     );
 }
