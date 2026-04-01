@@ -816,8 +816,12 @@ pub const GrinTranslator = struct {
                             // See: https://github.com/adinapoli/rusholme/issues/621
                             const val_kind_inner = c.LLVMGetTypeKind(c.LLVMTypeOf(val));
                             if (val_kind_inner == c.LLVMIntegerTypeKind) {
-                                const tagged = tagInt(self.builder, val);
-                                const as_i64 = c.LLVMBuildPtrToInt(self.builder, tagged, llvm.i64Type(), "tagged_i64");
+                                const val_width_inner = c.LLVMGetIntTypeWidth(c.LLVMTypeOf(val));
+                                const val_to_tag = if (val_width_inner == 32) blk: {
+                                    break :blk c.LLVMBuildZExt(self.builder, val, llvm.i64Type(), "i32_to_i64_body");
+                                } else val;
+                                const tagged = tagInt(self.builder, val_to_tag);
+                                const as_i64 = c.LLVMBuildPtrToInt(self.builder, tagged, llvm.i64Type(), "tagged_i64_body");
                                 _ = llvm.buildRet(self.builder, as_i64);
                             } else {
                                 _ = llvm.buildRet(self.builder, val);
@@ -2706,8 +2710,10 @@ pub const GrinTranslator = struct {
                     } else if (is_int) {
                         const val_width = c.LLVMGetIntTypeWidth(val_ty);
                         if (val_width == 32) {
-                            const converted = c.LLVMBuildZExt(self.builder, llvm_val, llvm.i64Type(), "i32_to_i64");
-                            _ = llvm.buildRet(self.builder, converted);
+                            const widened = c.LLVMBuildZExt(self.builder, llvm_val, llvm.i64Type(), "i32_to_i64");
+                            const tagged = tagInt(self.builder, widened);
+                            const as_i64 = c.LLVMBuildPtrToInt(self.builder, tagged, llvm.i64Type(), "tagged_i64");
+                            _ = llvm.buildRet(self.builder, as_i64);
                             return;
                         }
                         // Tag the integer so that `formatJitResult` can
