@@ -14,7 +14,7 @@ module Prelude
     , intToChar, charToInt
     , max
     , Eq(..)
-    , Show(..), show, showString, showListWith, showListTail
+    , Show(..), show, showString, showLitChar, showListWith, showListTail
     , intToDigit
     , enumFrom, enumFromTo, enumFromThen, enumFromThenTo
     ) where
@@ -317,11 +317,48 @@ showListWith :: Show a => [a] -> String
 showListWith []     = "[]"
 showListWith (x:xs) = '[' : show x ++ showListTail xs
 
+-- showLitChar renders a single character as its escaped representation
+-- (without surrounding quotes). Used by Show Char and showLitString.
+--
+-- Escape sequences handled: \\ \' \" \n \r \t \0 \a \b \f \v \DEL
+-- Characters outside these cases are rendered literally; non-printable
+-- characters with code > 127 fall through to literal rendering until a
+-- proper unicode escape routine is added (tracked in:
+-- https://github.com/adinapoli/rusholme/issues/617).
+showLitChar :: Char -> String -> String
+showLitChar c rest =
+    let n = charToInt c
+    in case primEqInt n 92 of          -- '\\'
+        True  -> '\\' : '\\' : rest
+        False -> case primEqInt n 39 of  -- '\''
+            True  -> '\\' : '\'' : rest
+            False -> case primEqInt n 34 of  -- '"'
+                True  -> '\\' : '"' : rest
+                False -> case primEqInt n 10 of  -- '\n'
+                    True  -> '\\' : 'n' : rest
+                    False -> case primEqInt n 13 of  -- '\r'
+                        True  -> '\\' : 'r' : rest
+                        False -> case primEqInt n 9 of  -- '\t'
+                            True  -> '\\' : 't' : rest
+                            False -> case primEqInt n 0 of  -- '\0'
+                                True  -> '\\' : '0' : rest
+                                False -> case primEqInt n 7 of  -- '\a'
+                                    True  -> '\\' : 'a' : rest
+                                    False -> case primEqInt n 8 of  -- '\b'
+                                        True  -> '\\' : 'b' : rest
+                                        False -> case primEqInt n 12 of  -- '\f'
+                                            True  -> '\\' : 'f' : rest
+                                            False -> case primEqInt n 11 of  -- '\v'
+                                                True  -> '\\' : 'v' : rest
+                                                False -> case primEqInt n 127 of  -- '\DEL'
+                                                    True  -> '\\' : 'D' : 'E' : 'L' : rest
+                                                    False -> c : rest
+
 -- Monomorphic string display (avoids dictionary-passing, see #618).
 -- showLitString must precede showString (callee before caller, #566).
 showLitString :: String -> String
 showLitString []     = "\""
-showLitString (x:xs) = x : showLitString xs
+showLitString (x:xs) = showLitChar x (showLitString xs)
 
 showString :: String -> String
 showString s = '"' : showLitString s
@@ -345,7 +382,7 @@ instance Show Ordering where
       GT -> "GT"
 
 instance Show Char where
-  show c = '\'' : c : '\'' : []
+  show c = '\'' : showLitChar c "'"
 
 instance Show a => Show [a] where
   show xs = showListWith xs

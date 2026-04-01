@@ -1,0 +1,13 @@
+'a'
+'\\'
+'\''
+'\n'
+'\t'
+'\r'
+'\"'
+'\0'
+"hello\nworld"
+"a\tb"
+"back\\slash"
+"say \"hi\""
+"abc"
