@@ -327,6 +327,8 @@
 | [#378](https://github.com/adinapoli/rusholme/issues/378) | Tier 3: Optimal decision trees with exhaustiveness/redundancy checking | [#377](https://github.com/adinapoli/rusholme/issues/377) | :white_circle: |
 | [#297](https://github.com/adinapoli/rusholme/issues/297) | Compare Core IR emitted by GHC vs Rusholme | [#38](https://github.com/adinapoli/rusholme/issues/38) | :white_circle: |
 | [#309](https://github.com/adinapoli/rusholme/issues/309) | Implement list comprehension (ListComp) support | [#38](https://github.com/adinapoli/rusholme/issues/38) | :white_circle: |
+| [#679](https://github.com/adinapoli/rusholme/issues/679) | Implement `deriving` mechanism for stock classes (`Eq`, `Ord`, `Show`, `Bounded`, `Enum`) and newtype strategy | [#33](https://github.com/adinapoli/rusholme/issues/33), [#530](https://github.com/adinapoli/rusholme/issues/530) | :white_circle: |
+| [#680](https://github.com/adinapoli/rusholme/issues/680) | Implement `deriving Generic` / `Generic1` and `GHC.Generics` compatibility module | [#679](https://github.com/adinapoli/rusholme/issues/679), [#655](https://github.com/adinapoli/rusholme/issues/655) | :white_circle: |
 
 ### Epic [#6](https://github.com/adinapoli/rusholme/issues/6): GRIN IR and Core→GRIN Translation
 
