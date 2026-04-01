@@ -11,6 +11,7 @@
 const std = @import("std");
 const descriptor = @import("descriptor.zig");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -261,15 +262,14 @@ pub const Error = error{
 /// Path components:
 /// - `arch`: from `builtin.cpu.arch` (e.g., "x86_64")
 /// - `os`: from `builtin.os.tag` (e.g., "linux", "macos", "windows")
-/// - `version`: the compiler version (hardcoded as "0.1.0" for now)
+/// - `version`: the compiler version injected by the build system via `build_options`
 ///
 /// Returns `error.HomeDirectoryUnset` if `HOME` is not in the environment.
 /// The caller owns the returned string and must free it with `alloc.free`.
 ///
-// tracked in: https://github.com/adinapoli/rusholme/issues/675
 pub fn defaultPath(alloc: std.mem.Allocator) Error![]const u8 {
     // tracked in: https://github.com/adinapoli/rusholme/issues/676
-    const VERSION = "0.1.0";
+    const VERSION = build_options.version;
     const arch = switch (builtin.cpu.arch) {
         .x86_64 => "x86_64",
         .aarch64 => "aarch64",
