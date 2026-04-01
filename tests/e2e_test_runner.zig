@@ -13,7 +13,11 @@
 //! skip:       <reason>  — skip this test entirely (unsupported feature)
 //! xfail:      <reason>  — expected to fail; CI passes silently, notes if it passes
 //! exit_code:  N         — expected process exit code (default 0)
-//! stderr:     <text>    — expected binary stderr output (single-line; use .stderr sidecar for multi-line)
+//! stderr:     <text>    — expected binary stderr output (single-line, whitespace-trimmed).
+//!                         CAUTION: captured stderr typically ends with '\n', so a binary that
+//!                         writes `hPutStrLn stderr "msg"` produces `"msg\n"` which will NOT
+//!                         match `stderr: msg` (no newline). Use a `.stderr` sidecar file for
+//!                         exact byte-for-byte matching.
 //! ```
 //!
 //! ## Adding a new test
@@ -85,7 +89,10 @@ fn readProperties(
             }
             if (std.mem.startsWith(u8, trimmed, "stderr:")) {
                 const val = std.mem.trim(u8, trimmed["stderr:".len..], " \t");
-                if (props.expected_stderr) |old| allocator.free(old);
+                if (props.expected_stderr) |old| {
+                    allocator.free(old);
+                    props.expected_stderr = null; // prevent double-free if dupe fails
+                }
                 props.expected_stderr = try allocator.dupe(u8, val);
             }
         }
@@ -412,4 +419,8 @@ test "e2e: e2e_024_stderr_empty (#460)" {
 
 test "e2e: e2e_025_stderr_inline (#460)" {
     try testE2e(std.testing.allocator, "e2e_025_stderr_inline");
+}
+
+test "e2e: e2e_026_stderr_mismatch (#460)" {
+    try testE2e(std.testing.allocator, "e2e_026_stderr_mismatch");
 }
