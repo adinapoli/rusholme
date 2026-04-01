@@ -21,7 +21,8 @@ main = do
     putStrLn (show '\n')
     putStrLn (show '\t')
     putStrLn (show '\r')
-    -- Double quote inside a character literal (escaped in Show output)
+    -- Double quote inside a character literal: showLitChar renders it
+    -- literally ('"' is printable), so Show Char produces '"'
     putStrLn (show '"')
     -- Null character
     putStrLn (show '\0')

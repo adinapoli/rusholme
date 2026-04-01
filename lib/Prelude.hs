@@ -320,11 +320,13 @@ showListWith (x:xs) = '[' : show x ++ showListTail xs
 -- showLitChar renders a single character as its escaped representation
 -- (without surrounding quotes). Used by Show Char and showLitString.
 --
--- Escape sequences handled: \\ \' \" \n \r \t \0 \a \b \f \v \DEL
--- Characters outside these cases are rendered literally; non-printable
--- characters with code > 127 fall through to literal rendering until a
--- proper unicode escape routine is added (tracked in:
--- https://github.com/adinapoli/rusholme/issues/617).
+-- Escape sequences handled: \\ \' \n \r \t \0 \a \b \f \v \DEL
+-- Note: '"' is NOT escaped here — it is a printable character and is
+-- rendered literally. showLitString handles '"' separately because
+-- strings are double-quote-delimited.
+-- Non-printable characters with codepoint > 127 fall through to
+-- literal rendering; proper unicode escape handling is tracked in:
+-- https://github.com/adinapoli/rusholme/issues/682
 showLitChar :: Char -> String -> String
 showLitChar c rest =
     let n = charToInt c
@@ -332,33 +334,36 @@ showLitChar c rest =
         True  -> '\\' : '\\' : rest
         False -> case primEqInt n 39 of  -- '\''
             True  -> '\\' : '\'' : rest
-            False -> case primEqInt n 34 of  -- '"'
-                True  -> '\\' : '"' : rest
-                False -> case primEqInt n 10 of  -- '\n'
-                    True  -> '\\' : 'n' : rest
-                    False -> case primEqInt n 13 of  -- '\r'
-                        True  -> '\\' : 'r' : rest
-                        False -> case primEqInt n 9 of  -- '\t'
-                            True  -> '\\' : 't' : rest
-                            False -> case primEqInt n 0 of  -- '\0'
-                                True  -> '\\' : '0' : rest
-                                False -> case primEqInt n 7 of  -- '\a'
-                                    True  -> '\\' : 'a' : rest
-                                    False -> case primEqInt n 8 of  -- '\b'
-                                        True  -> '\\' : 'b' : rest
-                                        False -> case primEqInt n 12 of  -- '\f'
-                                            True  -> '\\' : 'f' : rest
-                                            False -> case primEqInt n 11 of  -- '\v'
-                                                True  -> '\\' : 'v' : rest
-                                                False -> case primEqInt n 127 of  -- '\DEL'
-                                                    True  -> '\\' : 'D' : 'E' : 'L' : rest
-                                                    False -> c : rest
+            False -> case primEqInt n 10 of  -- '\n'
+                True  -> '\\' : 'n' : rest
+                False -> case primEqInt n 13 of  -- '\r'
+                    True  -> '\\' : 'r' : rest
+                    False -> case primEqInt n 9 of  -- '\t'
+                        True  -> '\\' : 't' : rest
+                        False -> case primEqInt n 0 of  -- '\0'
+                            True  -> '\\' : '0' : rest
+                            False -> case primEqInt n 7 of  -- '\a'
+                                True  -> '\\' : 'a' : rest
+                                False -> case primEqInt n 8 of  -- '\b'
+                                    True  -> '\\' : 'b' : rest
+                                    False -> case primEqInt n 12 of  -- '\f'
+                                        True  -> '\\' : 'f' : rest
+                                        False -> case primEqInt n 11 of  -- '\v'
+                                            True  -> '\\' : 'v' : rest
+                                            False -> case primEqInt n 127 of  -- '\DEL'
+                                                True  -> '\\' : 'D' : 'E' : 'L' : rest
+                                                False -> c : rest
 
 -- Monomorphic string display (avoids dictionary-passing, see #618).
 -- showLitString must precede showString (callee before caller, #566).
+--
+-- '"' is handled explicitly before delegating to showLitChar because
+-- showLitChar renders '"' literally (it is printable), but inside a
+-- double-quoted string literal it must be escaped.
 showLitString :: String -> String
-showLitString []     = "\""
-showLitString (x:xs) = showLitChar x (showLitString xs)
+showLitString []         = "\""
+showLitString ('"' : xs) = '\\' : '"' : showLitString xs
+showLitString (x   : xs) = showLitChar x (showLitString xs)
 
 showString :: String -> String
 showString s = '"' : showLitString s
