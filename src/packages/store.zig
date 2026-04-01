@@ -183,6 +183,33 @@ pub const Store = struct {
 
         return entries.toOwnedSlice(self.allocator);
     }
+
+    /// Remove a package's registry entry from `package.conf.d/`.
+    ///
+    /// Deletes the `.conf` file identified by `key` (the string returned by
+    /// `computeKey`). Does NOT delete the compiled artifact directory —
+    /// artifacts survive unregistration and must be cleaned up separately.
+    ///
+    /// Returns `error.PackageNotFound` if no `.conf` file for `key` exists.
+    pub fn unregister(
+        self: *Store,
+        io: std.Io,
+        key: []const u8,
+    ) Error!void {
+        const conf_path = try computeConfPath(self, key);
+        defer self.allocator.free(conf_path);
+
+        const exists = blk: {
+            std.Io.Dir.access(.cwd(), io, conf_path, .{}) catch |err| {
+                if (err == error.FileNotFound) break :blk false;
+                return err;
+            };
+            break :blk true;
+        };
+        if (!exists) return error.PackageNotFound;
+
+        try std.Io.Dir.deleteFile(.cwd(), io, conf_path);
+    }
 };
 
 /// An entry in the package store, parsed from a .conf file.
@@ -216,6 +243,8 @@ pub const Error = error{
     InvalidConf,
     /// The HOME environment variable is not set (required for defaultPath).
     HomeDirectoryUnset,
+    /// The requested package was not found in the store.
+    PackageNotFound,
 } || std.Io.File.OpenError
   || std.Io.Dir.OpenError
   || std.Io.Dir.CreateDirPathError
@@ -294,7 +323,7 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io, root_path: ?[]const u8) Error!
 /// Format: {sha256_hex}-{name}-{version}
 ///
 /// Caller owns the returned string (allocated with alloc).
-fn computeKey(alloc: std.mem.Allocator, name: []const u8, version: []const u8, descriptor_content: []const u8) std.mem.Allocator.Error![]const u8 {
+pub fn computeKey(alloc: std.mem.Allocator, name: []const u8, version: []const u8, descriptor_content: []const u8) std.mem.Allocator.Error![]const u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(descriptor_content);
     var digest: [32]u8 = undefined;
@@ -742,4 +771,52 @@ test "Store.list returns empty slice for empty store" {
     defer std.testing.allocator.free(entries);
 
     try std.testing.expectEqual(@as(usize, 0), entries.len);
+}
+
+test "Store.unregister removes conf file" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const tmp_abs = try tmpDirPath(std.testing.allocator, &tmp_dir);
+    defer std.testing.allocator.free(tmp_abs);
+
+    var s = try init(std.testing.allocator, std.testing.io, tmp_abs);
+    defer s.deinit();
+
+    const content = "name = \"pkg-a\"\nversion = \"1.0.0\"\n";
+    const desc = try descriptor.parse(std.testing.allocator, content);
+    defer desc.deinit(std.testing.allocator);
+    const key = try computeKey(std.testing.allocator, desc.name, desc.version, content);
+    defer std.testing.allocator.free(key);
+    try s.register(std.testing.io, key, content, desc);
+
+    const before = try s.list(std.testing.io);
+    try std.testing.expectEqual(@as(usize, 1), before.len);
+    for (before) |e| e.deinit(std.testing.allocator);
+    std.testing.allocator.free(before);
+
+    try s.unregister(std.testing.io, key);
+
+    const after = try s.list(std.testing.io);
+    defer {
+        for (after) |e| e.deinit(std.testing.allocator);
+        std.testing.allocator.free(after);
+    }
+    try std.testing.expectEqual(@as(usize, 0), after.len);
+}
+
+test "Store.unregister returns PackageNotFound for unknown package" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const tmp_abs = try tmpDirPath(std.testing.allocator, &tmp_dir);
+    defer std.testing.allocator.free(tmp_abs);
+
+    var s = try init(std.testing.allocator, std.testing.io, tmp_abs);
+    defer s.deinit();
+
+    try std.testing.expectError(
+        error.PackageNotFound,
+        s.unregister(std.testing.io, "nonexistent-key"),
+    );
 }

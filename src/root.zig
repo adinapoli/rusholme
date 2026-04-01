@@ -71,6 +71,7 @@ pub const modules = struct {
 pub const packages = struct {
     pub const descriptor = @import("packages/descriptor.zig");
     pub const store = @import("packages/store.zig");
+    pub const pkg_cmd = @import("packages/pkg_cmd.zig");
 };
 
 // Backend

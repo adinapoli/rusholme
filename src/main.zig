@@ -10,6 +10,7 @@
 //!                          Full pipeline; compile to native executable
 //!                          Backends: native (default), jit, wasm, c
 //!   rhc repl               Interactive REPL (read-eval-print loop)
+//!   rhc pkg <subcommand>   Package management (list, describe, install, …)
 //!   rhc --help             Show this help message
 //!   rhc --version          Show version information
 
@@ -229,6 +230,12 @@ pub fn main(init: std.process.Init) !void {
         // Derive output name from the first file when -o is not given.
         const out = output_name orelse std.fs.path.stem(std.fs.path.basename(file_paths.items[0]));
         try cmdBuild(allocator, io, file_paths.items, out, backend_kind, is_repl);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "pkg")) {
+        const cmd_args = user_args[1..];
+        try rusholme.packages.pkg_cmd.cmdPkg(allocator, io, cmd_args);
         return;
     }
 
@@ -1654,6 +1661,8 @@ fn printUsage(io: Io) !void {
         \\                         Backends: native (default), jit, wasm, c
         \\  rhc repl [--server]   Interactive REPL (read-eval-print loop)
         \\                         Use --server for JSON-RPC protocol mode
+        \\  rhc pkg <subcommand>  Package management (list, describe, install, …)
+        \\                         Run 'rhc pkg' for subcommand help
         \\  rhc --help             Show this help message
         \\  rhc --version          Show version information
         \\
