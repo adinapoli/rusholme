@@ -1,6 +1,6 @@
 //! Package store for Rusholme package management.
 //!
-//! The store lives at `~/.rhc/store/<arch>-<os>-<version>/` with
+//! The store lives at `~/.rhc/store/<arch>-<os>-<version>` with
 //! `package.conf.d/` containing JSON entries for each installed package.
 //!
 //! ## Reference
@@ -258,7 +258,7 @@ pub const Error = error{
 
 // ── Public functions ─────────────────────────────────────────────────────────
 
-/// Return the default store path: `~/.rhc/store/<arch>-<os>-<version>/`.
+/// Return the default store path: `~/.rhc/store/<arch>-<os>-<version>`.
 ///
 /// Path components:
 /// - `arch`: from `builtin.cpu.arch` (e.g., "x86_64")
@@ -270,7 +270,6 @@ pub const Error = error{
 ///
 // tracked in: https://github.com/adinapoli/rusholme/issues/675
 pub fn defaultPath(alloc: std.mem.Allocator) Error![]const u8 {
-    // tracked in: https://github.com/adinapoli/rusholme/issues/676
     const VERSION = "0.1.0";
     const arch = switch (builtin.cpu.arch) {
         .x86_64 => "x86_64",
@@ -288,7 +287,6 @@ pub fn defaultPath(alloc: std.mem.Allocator) Error![]const u8 {
     // On POSIX we rely on HOME; on Windows APPDATA or USERPROFILE would be
     // needed instead.  Windows support is deferred — the Nix-based build
     // currently only targets Linux and macOS.
-    // tracked in: https://github.com/adinapoli/rusholme/issues/676
     if (builtin.os.tag == .windows) {
         @compileError("defaultPath: Windows home-directory lookup is not yet implemented (see #676)");
     }
