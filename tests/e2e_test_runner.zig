@@ -2,8 +2,10 @@
 //!
 //! For each `.hs` file in tests/e2e/:
 //!   1. Compile with `rhc build <file> -o <tmp/binary>`.
-//!   2. Run the binary, capturing stdout.
+//!   2. Run the binary, capturing stdout and stderr.
 //!   3. Compare captured stdout against the `.stdout` sidecar file.
+//!   4. If a `.stderr` sidecar or inline `stderr:` directive is present,
+//!      compare captured stderr against the expected value.
 //!
 //! ## Properties sidecar format (one directive per line)
 //!
@@ -11,13 +13,15 @@
 //! skip:       <reason>  — skip this test entirely (unsupported feature)
 //! xfail:      <reason>  — expected to fail; CI passes silently, notes if it passes
 //! exit_code:  N         — expected process exit code (default 0)
+//! stderr:     <text>    — expected binary stderr output (single-line; use .stderr sidecar for multi-line)
 //! ```
 //!
 //! ## Adding a new test
 //!
 //! 1. Create `tests/e2e/<name>.hs` and `tests/e2e/<name>.stdout`.
 //! 2. Optionally create `tests/e2e/<name>.properties` with directives.
-//! 3. Add a test declaration at the bottom of this file.
+//! 3. Optionally create `tests/e2e/<name>.stderr` with expected stderr output.
+//! 4. Add a test declaration at the bottom of this file.
 //!
 //! ## rhc binary path
 //!
@@ -39,6 +43,14 @@ const Properties = struct {
     xfail: bool = false,
     /// Expected exit code of the compiled binary (default 0).
     exit_code: u8 = 0,
+    /// If non-null, the binary's stderr is compared against this string.
+    /// Populated from the `stderr:` directive in `.properties` or the
+    /// `.stderr` sidecar file (sidecar takes precedence).
+    expected_stderr: ?[]const u8 = null,
+
+    pub fn deinit(self: Properties, alloc: std.mem.Allocator) void {
+        if (self.expected_stderr) |s| alloc.free(s);
+    }
 };
 
 fn readProperties(
@@ -47,44 +59,76 @@ fn readProperties(
 ) !Properties {
     const io = std.testing.io;
     const props_path = e2e_dir ++ "/" ++ basename ++ ".properties";
-
-    const file = Dir.openFile(.cwd(), io, props_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return .{},
-        else => return err,
-    };
-    defer file.close(io);
-
-    var read_buf: [1024]u8 = undefined;
-    var rdr = file.reader(io, &read_buf);
-    const content = try rdr.interface.allocRemaining(allocator, .limited(1024));
-    defer allocator.free(content);
+    const stderr_sidecar_path = e2e_dir ++ "/" ++ basename ++ ".stderr";
 
     var props = Properties{};
-    var iter = std.mem.splitScalar(u8, content, '\n');
-    while (iter.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (trimmed.len == 0 or trimmed[0] == '#') continue;
-        if (std.mem.startsWith(u8, trimmed, "skip:")) props.skip = true;
-        if (std.mem.startsWith(u8, trimmed, "xfail:")) props.xfail = true;
-        if (std.mem.startsWith(u8, trimmed, "exit_code:")) {
-            const val = std.mem.trim(u8, trimmed["exit_code:".len..], " \t");
-            props.exit_code = std.fmt.parseInt(u8, val, 10) catch 0;
+    errdefer props.deinit(allocator);
+
+    // ── Parse .properties directives (optional file) ──────────────────────────
+    if (Dir.openFile(.cwd(), io, props_path, .{})) |file| {
+        defer file.close(io);
+
+        var read_buf: [1024]u8 = undefined;
+        var rdr = file.reader(io, &read_buf);
+        const content = try rdr.interface.allocRemaining(allocator, .limited(1024));
+        defer allocator.free(content);
+
+        var iter = std.mem.splitScalar(u8, content, '\n');
+        while (iter.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (trimmed.len == 0 or trimmed[0] == '#') continue;
+            if (std.mem.startsWith(u8, trimmed, "skip:")) props.skip = true;
+            if (std.mem.startsWith(u8, trimmed, "xfail:")) props.xfail = true;
+            if (std.mem.startsWith(u8, trimmed, "exit_code:")) {
+                const val = std.mem.trim(u8, trimmed["exit_code:".len..], " \t");
+                props.exit_code = std.fmt.parseInt(u8, val, 10) catch 0;
+            }
+            if (std.mem.startsWith(u8, trimmed, "stderr:")) {
+                const val = std.mem.trim(u8, trimmed["stderr:".len..], " \t");
+                if (props.expected_stderr) |old| allocator.free(old);
+                props.expected_stderr = try allocator.dupe(u8, val);
+            }
         }
+    } else |err| {
+        if (err != error.FileNotFound) return err;
     }
+
+    // ── .stderr sidecar overrides inline directive ─────────────────────────────
+    if (Dir.cwd().readFileAlloc(io, stderr_sidecar_path, allocator, .unlimited)) |content| {
+        if (props.expected_stderr) |old| allocator.free(old);
+        props.expected_stderr = content;
+    } else |err| {
+        if (err != error.FileNotFound) return err;
+    }
+
     return props;
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Print each line of `text` prefixed by `  | ` for visual separation from
+/// the test runner's own diagnostic output.
+fn printIndented(text: []const u8) void {
+    var iter = std.mem.splitScalar(u8, text, '\n');
+    while (iter.next()) |line| {
+        // Skip the final empty segment produced by a trailing newline.
+        if (iter.index == null and line.len == 0) break;
+        std.debug.print("  | {s}\n", .{line});
+    }
 }
 
 // ── Core test logic ───────────────────────────────────────────────────────────
 
-/// Compile the Haskell source, run the binary, and compare stdout.
-/// Returns true on success, false on any testable failure (wrong output,
-/// non-zero exit, compile error). Infrastructure errors (spawn failure,
-/// OOM) are propagated as errors.
+/// Compile the Haskell source, run the binary, and compare stdout (and
+/// optionally stderr). Returns true on success, false on any testable
+/// failure (wrong output, wrong exit code, compile error). Infrastructure
+/// errors (spawn failure, OOM) are propagated as errors.
 fn runTest(
     allocator: std.mem.Allocator,
     comptime hs_path: []const u8,
     comptime stdout_ref_path: []const u8,
     expected_exit: u8,
+    expected_stderr: ?[]const u8,
 ) !bool {
     const io = std.testing.io;
     const rhc_path = e2e_options.rhc_path;
@@ -111,10 +155,8 @@ fn runTest(
 
     switch (compile_result.term) {
         .exited => |code| if (code != 0) {
-            std.debug.print(
-                "  [e2e] compile failed (exit {d}):\n{s}\n",
-                .{ code, compile_result.stderr },
-            );
+            std.debug.print("  [e2e] compile failed (exit {d}):\n", .{code});
+            printIndented(compile_result.stderr);
             return false;
         },
         else => {
@@ -123,7 +165,7 @@ fn runTest(
         },
     }
 
-    // ── Step 2: Run binary, capture stdout ────────────────────────────────────
+    // ── Step 2: Run binary, capture stdout and stderr ─────────────────────────
     const run_argv = [_][]const u8{binary_path};
     const run_result = try process.run(allocator, io, .{
         .argv = &run_argv,
@@ -144,7 +186,7 @@ fn runTest(
     const expected_stdout = try cwd.readFileAlloc(io, stdout_ref_path, allocator, .unlimited);
     defer allocator.free(expected_stdout);
 
-    // ── Step 4: Assert ────────────────────────────────────────────────────────
+    // ── Step 4: Assert stdout ─────────────────────────────────────────────────
     if (!std.mem.eql(u8, run_result.stdout, expected_stdout)) {
         std.debug.print(
             "  [e2e] stdout mismatch:\n  expected: {s}  actual:   {s}\n",
@@ -153,12 +195,25 @@ fn runTest(
         return false;
     }
 
+    // ── Step 5: Assert exit code ──────────────────────────────────────────────
     if (actual_exit != expected_exit) {
         std.debug.print(
             "  [e2e] exit code mismatch: expected {d}, got {d}\n",
             .{ expected_exit, actual_exit },
         );
         return false;
+    }
+
+    // ── Step 6: Assert stderr (when expected_stderr is set) ───────────────────
+    if (expected_stderr) |exp| {
+        if (!std.mem.eql(u8, run_result.stderr, exp)) {
+            std.debug.print("  [e2e] stderr mismatch:\n", .{});
+            std.debug.print("  expected:\n", .{});
+            printIndented(exp);
+            std.debug.print("  actual:\n", .{});
+            printIndented(run_result.stderr);
+            return false;
+        }
     }
 
     return true;
@@ -168,12 +223,19 @@ fn runTest(
 
 fn testE2e(allocator: std.mem.Allocator, comptime basename: []const u8) !void {
     const props = try readProperties(allocator, basename);
+    defer props.deinit(allocator);
     if (props.skip) return;
 
     const hs_path = e2e_dir ++ "/" ++ basename ++ ".hs";
     const stdout_ref_path = e2e_dir ++ "/" ++ basename ++ ".stdout";
 
-    const passed = try runTest(allocator, hs_path, stdout_ref_path, props.exit_code);
+    const passed = try runTest(
+        allocator,
+        hs_path,
+        stdout_ref_path,
+        props.exit_code,
+        props.expected_stderr,
+    );
 
     if (props.xfail) {
         if (passed) {
@@ -342,4 +404,12 @@ test "e2e: e2e_022_declaration_order (#566)" {
 
 test "e2e: e2e_023_mutual_recursion (#566)" {
     try testE2e(std.testing.allocator, "e2e_023_mutual_recursion");
+}
+
+test "e2e: e2e_024_stderr_empty (#460)" {
+    try testE2e(std.testing.allocator, "e2e_024_stderr_empty");
+}
+
+test "e2e: e2e_025_stderr_inline (#460)" {
+    try testE2e(std.testing.allocator, "e2e_025_stderr_inline");
 }
