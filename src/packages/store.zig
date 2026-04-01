@@ -329,7 +329,7 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io, root_path: ?[]const u8) Error!
 /// Format: {sha256_hex}-{name}-{version}
 ///
 /// Caller owns the returned string (allocated with alloc).
-fn computeKey(alloc: std.mem.Allocator, name: []const u8, version: []const u8, descriptor_content: []const u8) std.mem.Allocator.Error![]const u8 {
+pub fn computeKey(alloc: std.mem.Allocator, name: []const u8, version: []const u8, descriptor_content: []const u8) std.mem.Allocator.Error![]const u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(descriptor_content);
     var digest: [32]u8 = undefined;
