@@ -70,6 +70,7 @@ pub const modules = struct {
 // Package system
 pub const packages = struct {
     pub const descriptor = @import("packages/descriptor.zig");
+    pub const store = @import("packages/store.zig");
 };
 
 // Backend
@@ -123,4 +124,5 @@ test {
     testing.refAllDecls(runtime);
     testing.refAllDecls(modules);
     testing.refAllDecls(repl);
+    testing.refAllDecls(packages);
 }
