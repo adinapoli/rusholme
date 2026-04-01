@@ -44,8 +44,8 @@
 //! - Recompilation avoidance (`.rhi` fingerprinting) is not yet implemented.
 //!   Tracked in: https://github.com/adinapoli/rusholme/issues/371
 //!
-//! - Package-level search paths are not yet supported.
-//!   Tracked in: https://github.com/adinapoli/rusholme/issues/368
+//! - Package-level search paths via `--package-db` are implemented.
+//!   Tracked in: https://github.com/adinapoli/rusholme/issues/652
 
 const std = @import("std");
 
@@ -133,9 +133,20 @@ pub const CompileEnv = struct {
     /// for imported type class instances.
     dict_names_map: std.StringHashMapUnmanaged(DictNameMap),
 
+    /// Package-database search paths for pre-built `.rhi` interfaces.
+    ///
+    /// When resolving an import whose source is not in the current build,
+    /// `compileProgram` searches each path (in order) for a `.rhi` file
+    /// matching the module name.  The paths are caller-owned and must
+    /// outlive the `CompileEnv`.
+    ///
+    /// Empty by default; populated via `--package-db` flags on the CLI.
+    /// Tracked in: https://github.com/adinapoli/rusholme/issues/652
+    package_dbs: []const []const u8,
+
     // ── Lifecycle ─────────────────────────────────────────────────────────
 
-    /// Create an empty compilation session.
+    /// Create an empty compilation session with no package-database paths.
     pub fn init(alloc: std.mem.Allocator) CompileEnv {
         return .{
             .alloc = alloc,
@@ -147,6 +158,7 @@ pub const CompileEnv = struct {
             .diags = DiagnosticCollector.init(),
             .class_envs = .{},
             .dict_names_map = .{},
+            .package_dbs = &.{},
         };
     }
 
@@ -588,15 +600,23 @@ pub const CompileResult = struct {
 /// 3. Topologically sorts the graph (import cycles → error).
 /// 4. Compiles each module in dependency-first order via `CompileEnv.compileSingle`,
 ///    passing the pre-parsed AST to avoid redundant lexing/parsing.
+///    Modules not present in `modules` are resolved by searching `package_dbs`
+///    for a pre-built `.rhi` interface (in order; first match wins).
 /// 5. Merges all `CoreProgram`s into a single whole-program Core.
+///
+/// `package_dbs` is a list of directory paths searched (in order) when an
+/// imported module is not among the provided source files.  Pass `&.{}` to
+/// disable package-database lookup.
 ///
 /// `alloc` should be an arena that outlives the returned result.
 pub fn compileProgram(
     alloc: std.mem.Allocator,
     io: std.Io,
     modules: []const SourceModule,
+    package_dbs: []const []const u8,
 ) std.mem.Allocator.Error!struct { env: CompileEnv, result: CompileResult } {
     var env = CompileEnv.init(alloc);
+    env.package_dbs = package_dbs;
     errdefer env.deinit();
 
     // ── Phase 1: Parse all modules once and cache ──────────────────────────
@@ -691,8 +711,26 @@ pub fn compileProgram(
     //      (tracked in #456).
     //   4. On cache miss: run `compileSingle`, then tag the iface with its
     //      fingerprint and write it to disk for future runs.
+    //
+    // If a module is not in the source list, check `package_dbs` for a
+    // pre-built `.rhi` and register it without compilation.
     for (topo.order) |mod_name| {
-        const m = src_map.get(mod_name) orelse continue;
+        if (src_map.get(mod_name) == null) {
+            // Module not provided as source: try to resolve via package-dbs.
+            if (try tryLoadFromPackageDbs(alloc, io, mod_name, package_dbs)) |iface| {
+                const ce = try deserialiseClassEnvFromIface(alloc, iface);
+                const owned_name = try alloc.dupe(u8, mod_name);
+                try env.class_envs.put(alloc, owned_name, ce);
+                const dict_names = try deserialiseDictNamesFromIface(alloc, iface);
+                try env.dict_names_map.put(alloc, owned_name, dict_names);
+                const empty_core = CoreProgram{ .data_decls = &.{}, .binds = &.{} };
+                try env.register(mod_name, iface, empty_core);
+            }
+            // Whether or not a package-db hit was found, do not attempt
+            // to compile this module from source — skip to the next.
+            continue;
+        }
+        const m = src_map.get(mod_name).?;
 
         // Collect dep fingerprints in import-declaration order.
         // dep_fps items are arena-allocated; no explicit free needed.
@@ -797,6 +835,82 @@ pub fn compileProgram(
             .module_order = topo.order,
         },
     };
+}
+
+// ── Package-database helpers ──────────────────────────────────────────────
+
+/// Convert a fully-qualified Haskell module name to a relative `.rhi` path.
+///
+/// Dots are replaced by the platform path separator so that nested module
+/// names map to nested directories.  For example:
+///   `"Data.Map"` → `"Data/Map.rhi"` (Linux/macOS)
+///   `"Main"`     → `"Main.rhi"`
+///
+/// The returned slice is allocated in `alloc`; caller owns it.
+fn moduleNameToRhiRelPath(
+    alloc: std.mem.Allocator,
+    module_name: []const u8,
+) std.mem.Allocator.Error![]u8 {
+    // Replace every '.' with the OS path separator.
+    const sep = std.fs.path.sep;
+    const with_sep = try alloc.dupe(u8, module_name);
+    for (with_sep) |*c| {
+        if (c.* == '.') c.* = sep;
+    }
+    defer alloc.free(with_sep);
+    return std.fmt.allocPrint(alloc, "{s}.rhi", .{with_sep});
+}
+
+/// Search `package_dbs` (in order) for a pre-built `.rhi` for `module_name`.
+///
+/// The search path for each database entry is:
+///   `<db>/<module_name_with_slashes>.rhi`
+///
+/// Returns the deserialized `ModIface` for the first matching file, or
+/// `null` if no package-db contains a file for this module.  Parse errors
+/// and I/O failures are silently treated as misses.
+///
+/// No fingerprint validation is performed — package-db interfaces are
+/// pre-built and assumed stable.
+fn tryLoadFromPackageDbs(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    module_name: []const u8,
+    package_dbs: []const []const u8,
+) std.mem.Allocator.Error!?mod_iface.ModIface {
+    if (package_dbs.len == 0) return null;
+
+    const rel = try moduleNameToRhiRelPath(alloc, module_name);
+    defer alloc.free(rel);
+
+    for (package_dbs) |db| {
+        const abs = try std.fs.path.join(alloc, &.{ db, rel });
+        defer alloc.free(abs);
+
+        const data = std.Io.Dir.readFileAlloc(
+            .cwd(),
+            io,
+            abs,
+            alloc,
+            .limited(16 * 1024 * 1024),
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => continue,
+        };
+        defer alloc.free(data);
+
+        const iface = mod_iface.readRhi(alloc, data) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => continue,
+        };
+
+        // Reject format-version mismatches so that stale package-db files
+        // do not silently corrupt the compilation session.
+        if (iface.format_version != mod_iface.rhi_format_version) continue;
+
+        return iface;
+    }
+    return null;
 }
 
 // ── Implicit Prelude helpers ──────────────────────────────────────────────
@@ -1496,7 +1610,7 @@ test "compileProgram: .rhi cache hit — second invocation loads cached interfac
             .source = source,
             .file_id = 1,
             .source_path = hs_path,
-        }});
+        }}, &.{});
         defer r1.env.deinit();
         try testing.expect(!r1.result.had_errors);
         // A real compilation must produce at least one Core bind.
@@ -1519,7 +1633,7 @@ test "compileProgram: .rhi cache hit — second invocation loads cached interfac
             .source = source,
             .file_id = 2,
             .source_path = hs_path,
-        }});
+        }}, &.{});
         defer r2.env.deinit();
         try testing.expect(!r2.result.had_errors);
 
@@ -1563,7 +1677,7 @@ test "compileProgram: .rhi cache miss — changed source produces new fingerprin
             .source = source_v1,
             .file_id = 1,
             .source_path = hs_path,
-        }});
+        }}, &.{});
         defer r.env.deinit();
         break :blk r.env.ifaces.get("CacheChanged").?.fingerprint;
     };
@@ -1575,7 +1689,7 @@ test "compileProgram: .rhi cache miss — changed source produces new fingerprin
             .source = source_v2,
             .file_id = 2,
             .source_path = hs_path,
-        }});
+        }}, &.{});
         defer r.env.deinit();
         // Cache miss: a full compile produced real Core binds.
         try testing.expect(r.result.core.binds.len > 0);
@@ -1625,7 +1739,7 @@ test "compileProgram: .rhi cache miss — changed dependency propagates new fing
         var r = try compileProgram(alloc, io, &.{
             .{ .module_name = "CacheLib", .source = lib_v1, .file_id = 1, .source_path = lib_path },
             .{ .module_name = "CacheApp", .source = app_src, .file_id = 2, .source_path = app_path },
-        });
+        }, &.{});
         defer r.env.deinit();
         break :blk r.env.ifaces.get("CacheApp").?.fingerprint;
     };
@@ -1636,7 +1750,7 @@ test "compileProgram: .rhi cache miss — changed dependency propagates new fing
         var r = try compileProgram(alloc, io, &.{
             .{ .module_name = "CacheLib", .source = lib_v2, .file_id = 3, .source_path = lib_path },
             .{ .module_name = "CacheApp", .source = app_src, .file_id = 4, .source_path = app_path },
-        });
+        }, &.{});
         defer r.env.deinit();
         break :blk r.env.ifaces.get("CacheApp").?.fingerprint;
     };
@@ -1645,4 +1759,114 @@ test "compileProgram: .rhi cache miss — changed dependency propagates new fing
     try testing.expect(app_fp2 != 0);
     // The dep fingerprint changed → CacheApp's fingerprint must differ.
     try testing.expect(app_fp1 != app_fp2);
+}
+
+// ── Package-database resolution tests ────────────────────────────────────
+
+test "compileProgram: package-db — import resolved via .rhi in package-db path" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const io = testing.io;
+
+    const tmp_path = try std.Io.Dir.realPathFileAlloc(tmp.dir, io, ".", alloc);
+
+    // ── Step 1: Compile PkgLib from source and serialise its interface ────
+    //
+    // We use a minimal module with one exported value so the renamer and
+    // typechecker in the downstream module have something to seed from.
+    const lib_source =
+        \\module PkgLib where
+        \\libAnswer :: Int
+        \\libAnswer = 42
+        \\
+    ;
+    const lib_iface: mod_iface.ModIface = blk: {
+        var r = try compileProgram(alloc, io, &.{.{
+            .module_name = "PkgLib",
+            .source = lib_source,
+            .file_id = 1,
+        }}, &.{});
+        defer r.env.deinit();
+        try testing.expect(!r.result.had_errors);
+        // Stamp the current format version so tryLoadFromPackageDbs accepts
+        // the file (it rejects version mismatches).
+        var iface = r.env.ifaces.get("PkgLib").?;
+        iface.format_version = mod_iface.rhi_format_version;
+        break :blk iface;
+    };
+
+    // ── Step 2: Write the interface to <tmpdir>/PkgLib.rhi ───────────────
+    const rhi_path = try std.fmt.allocPrint(alloc, "{s}/PkgLib.rhi", .{tmp_path});
+    try mod_iface.writeRhiToDisk(alloc, io, rhi_path, lib_iface);
+
+    // ── Step 3: Compile PkgApp that imports PkgLib, supplying the tmpdir
+    //           as the only package-db.  PkgLib source is NOT in `modules`.
+    const app_source =
+        \\{-# LANGUAGE NoImplicitPrelude #-}
+        \\module PkgApp where
+        \\import PkgLib
+        \\answer :: Int
+        \\answer = libAnswer
+        \\
+    ;
+    var r2 = try compileProgram(alloc, io, &.{.{
+        .module_name = "PkgApp",
+        .source = app_source,
+        .file_id = 2,
+    }}, &.{tmp_path});
+    defer r2.env.deinit();
+
+    // The compilation must succeed — the renamer and typechecker found
+    // PkgLib's exported symbols via the package-db .rhi.
+    try testing.expect(!r2.result.had_errors);
+
+    // PkgLib's interface must have been registered from the package-db.
+    try testing.expect(r2.env.ifaces.contains("PkgLib"));
+
+    // PkgApp must have produced at least one Core bind.
+    try testing.expect(r2.result.core.binds.len > 0);
+}
+
+test "moduleNameToRhiRelPath: simple module name" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const rel = try moduleNameToRhiRelPath(alloc, "Main");
+    try testing.expectEqualStrings("Main.rhi", rel);
+}
+
+test "moduleNameToRhiRelPath: qualified module name" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const rel = try moduleNameToRhiRelPath(alloc, "Data.Map");
+    const expected = "Data" ++ &[_]u8{std.fs.path.sep} ++ "Map.rhi";
+    try testing.expectEqualStrings(expected, rel);
+}
+
+test "tryLoadFromPackageDbs: returns null when package_dbs is empty" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try tryLoadFromPackageDbs(alloc, testing.io, "SomeModule", &.{});
+    try testing.expect(result == null);
+}
+
+test "tryLoadFromPackageDbs: returns null when no .rhi file exists" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const io = testing.io;
+
+    const tmp_path = try std.Io.Dir.realPathFileAlloc(tmp.dir, io, ".", alloc);
+    const result = try tryLoadFromPackageDbs(alloc, io, "NoSuchModule", &.{tmp_path});
+    try testing.expect(result == null);
 }
