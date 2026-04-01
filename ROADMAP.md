@@ -466,7 +466,7 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | [#612](https://github.com/adinapoli/rusholme/issues/612) | REPL: result display via Haskell's Show typeclass | [#607](https://github.com/adinapoli/rusholme/issues/607) | :green_circle: |
 | [#615](https://github.com/adinapoli/rusholme/issues/615) | GRIN evaluator: support dictionary-passing for typeclass dispatch | [#612](https://github.com/adinapoli/rusholme/issues/612) | :green_circle: |
 | [#616](https://github.com/adinapoli/rusholme/issues/616) | Module interface cache (.rhi) does not store ClassEnv or DictNameMap | [#612](https://github.com/adinapoli/rusholme/issues/612) | :green_circle: |
-| [#617](https://github.com/adinapoli/rusholme/issues/617) | Show Char and Show String instances lack escape sequence handling | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
+| [#617](https://github.com/adinapoli/rusholme/issues/617) | Show Char and Show String instances lack escape sequence handling | [#612](https://github.com/adinapoli/rusholme/issues/612) | :yellow_circle: |
 | [#618](https://github.com/adinapoli/rusholme/issues/618) | Native LLVM backend segfaults on dictionary-passing codegen | [#612](https://github.com/adinapoli/rusholme/issues/612) | :green_circle: |
 | [#621](https://github.com/adinapoli/rusholme/issues/621) | Unit and integer 0 are indistinguishable in JIT result formatting | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
 | [#623](https://github.com/adinapoli/rusholme/issues/623) | Where-clause bindings not in scope during renaming/typechecking | — | :green_circle: |
