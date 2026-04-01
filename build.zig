@@ -555,6 +555,17 @@ pub fn build(b: *std.Build) void {
     const diag_step = b.step("diag", "Diagnose parser conformance failures");
     diag_step.dependOn(&run_diag.step);
 
+    const pkg_cmd_test_module = b.createModule(.{
+        .root_source_file = b.path("tests/pkg_cmd_test.zig"),
+        .target = target,
+        .imports = &.{.{ .name = "rusholme", .module = mod }},
+    });
+    const pkg_cmd_tests = b.addTest(.{
+        .name = "pkg-cmd-tests",
+        .root_module = pkg_cmd_test_module,
+    });
+    const run_pkg_cmd_tests = b.addRunArtifact(pkg_cmd_tests);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
@@ -568,6 +579,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_repl_tests.step);
     test_step.dependOn(&run_cli_e2e_tests.step);
     test_step.dependOn(&run_wasm_e2e_tests.step);
+    test_step.dependOn(&run_pkg_cmd_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

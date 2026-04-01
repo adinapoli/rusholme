@@ -186,35 +186,29 @@ pub const Store = struct {
 
     /// Remove a package's registry entry from `package.conf.d/`.
     ///
-    /// Deletes the `.conf` file for the package named `name` at version
-    /// `version`. Does NOT delete the compiled artifact directory — artifacts
-    /// survive unregistration and must be cleaned up separately.
+    /// Deletes the `.conf` file identified by `key` (the string returned by
+    /// `computeKey`). Does NOT delete the compiled artifact directory —
+    /// artifacts survive unregistration and must be cleaned up separately.
     ///
-    /// Returns `error.PackageNotFound` if no matching entry exists.
+    /// Returns `error.PackageNotFound` if no `.conf` file for `key` exists.
     pub fn unregister(
         self: *Store,
         io: std.Io,
-        name: []const u8,
-        version: []const u8,
+        key: []const u8,
     ) Error!void {
-        const entries = try self.list(io);
-        defer {
-            for (entries) |e| e.deinit(self.allocator);
-            self.allocator.free(entries);
-        }
+        const conf_path = try computeConfPath(self, key);
+        defer self.allocator.free(conf_path);
 
-        for (entries) |entry| {
-            if (std.mem.eql(u8, entry.name, name) and
-                std.mem.eql(u8, entry.version, version))
-            {
-                const conf_path = try computeConfPath(self, entry.key);
-                defer self.allocator.free(conf_path);
-                try std.Io.Dir.deleteFile(.cwd(), io, conf_path);
-                return;
-            }
-        }
+        const exists = blk: {
+            std.Io.Dir.access(.cwd(), io, conf_path, .{}) catch |err| {
+                if (err == error.FileNotFound) break :blk false;
+                return err;
+            };
+            break :blk true;
+        };
+        if (!exists) return error.PackageNotFound;
 
-        return error.PackageNotFound;
+        try std.Io.Dir.deleteFile(.cwd(), io, conf_path);
     }
 };
 
@@ -801,7 +795,7 @@ test "Store.unregister removes conf file" {
     for (before) |e| e.deinit(std.testing.allocator);
     std.testing.allocator.free(before);
 
-    try s.unregister(std.testing.io, "pkg-a", "1.0.0");
+    try s.unregister(std.testing.io, key);
 
     const after = try s.list(std.testing.io);
     defer {
@@ -823,6 +817,6 @@ test "Store.unregister returns PackageNotFound for unknown package" {
 
     try std.testing.expectError(
         error.PackageNotFound,
-        s.unregister(std.testing.io, "ghost", "0.0.1"),
+        s.unregister(std.testing.io, "nonexistent-key"),
     );
 }

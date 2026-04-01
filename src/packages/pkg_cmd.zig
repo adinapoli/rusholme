@@ -100,7 +100,7 @@ pub fn cmdPkgDescribe(alloc: std.mem.Allocator, io: Io, s: *store.Store, name: [
 /// Prints `<name>-<version> installed` on success.
 /// Returns `store.Error.DuplicatePackage` if the package is already registered.
 pub fn cmdPkgInstall(alloc: std.mem.Allocator, io: Io, s: *store.Store, pkg_path: []const u8) !void {
-    const content = try std.Io.Dir.cwd().readFileAlloc(io, pkg_path, alloc, .unlimited);
+    const content = try std.Io.Dir.readFileAlloc(.cwd(), io, pkg_path, alloc, .limited(1024 * 64));
     defer alloc.free(content);
 
     const desc = try descriptor.parse(alloc, content);
@@ -138,7 +138,7 @@ pub fn cmdPkgUnregister(alloc: std.mem.Allocator, io: Io, s: *store.Store, name_
         defer alloc.free(full);
 
         if (std.mem.eql(u8, full, name_version)) {
-            try s.unregister(io, entry.name, entry.version);
+            try s.unregister(io, entry.key);
 
             var buf: [256]u8 = undefined;
             var fw: File.Writer = .init(.stdout(), io, &buf);
@@ -299,7 +299,7 @@ pub fn cmdPkg(alloc: std.mem.Allocator, io: Io, args: []const []const u8) !void 
     if (std.mem.eql(u8, subcommand, "check")) {
         cmdPkgCheck(alloc, io, &s) catch |err| {
             switch (err) {
-                CheckError.CheckFailed => std.process.exit(1),
+                error.CheckFailed => std.process.exit(1),
                 else => return err,
             }
         };
@@ -346,9 +346,7 @@ fn writePkgStderr(io: Io, msg: []const u8) !void {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 fn makeTestStore(alloc: std.mem.Allocator, tmp: *std.testing.TmpDir) !store.Store {
-    const path_z = try std.Io.Dir.realPathFileAlloc(tmp.dir, std.testing.io, ".", alloc);
-    defer alloc.free(path_z);
-    const path = try alloc.dupe(u8, path_z);
+    const path = try std.Io.Dir.realPathFileAlloc(tmp.dir, std.testing.io, ".", alloc);
     defer alloc.free(path);
     return store.init(alloc, std.testing.io, path);
 }
