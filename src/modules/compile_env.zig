@@ -726,6 +726,9 @@ pub fn compileProgram(
                 const empty_core = CoreProgram{ .data_decls = &.{}, .binds = &.{} };
                 try env.register(mod_name, iface, empty_core);
             }
+            // Module not found in source or package-db; no diagnostic yet.
+            // tracked in: https://github.com/adinapoli/rusholme/issues/687
+            //
             // Whether or not a package-db hit was found, do not attempt
             // to compile this module from source — skip to the next.
             continue;
@@ -1791,10 +1794,9 @@ test "compileProgram: package-db — import resolved via .rhi in package-db path
         }}, &.{});
         defer r.env.deinit();
         try testing.expect(!r.result.had_errors);
-        // Stamp the current format version so tryLoadFromPackageDbs accepts
-        // the file (it rejects version mismatches).
-        var iface = r.env.ifaces.get("PkgLib").?;
-        iface.format_version = mod_iface.rhi_format_version;
+        // `writeRhiToDisk` (called below) always stamps the current format
+        // version; no manual assignment needed here.
+        const iface = r.env.ifaces.get("PkgLib").?;
         break :blk iface;
     };
 
