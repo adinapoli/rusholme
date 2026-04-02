@@ -531,6 +531,7 @@ These existing issues must be resolved before any Phase 1 work begins:
 | [#676](https://github.com/adinapoli/rusholme/issues/676) | Package store: use platform-independent path separators | [#650](https://github.com/adinapoli/rusholme/issues/650) | :green_circle: |
 | [#651](https://github.com/adinapoli/rusholme/issues/651) | Implement `rhc-pkg` tool (list/describe/install/unregister/check) | [#650](https://github.com/adinapoli/rusholme/issues/650) | :green_circle: |
 | [#652](https://github.com/adinapoli/rusholme/issues/652) | Add `--package-db` flag to `rhc` compiler | [#650](https://github.com/adinapoli/rusholme/issues/650) | :green_circle: |
+| [#687](https://github.com/adinapoli/rusholme/issues/687) | compileProgram: emit 'module not found' diagnostic for missing imports | [#652](https://github.com/adinapoli/rusholme/issues/652) | :white_circle: |
 
 #### Phase 2 — Boot packages as real packages
 
