@@ -424,3 +424,7 @@ test "e2e: e2e_025_stderr_inline (#460)" {
 test "e2e: e2e_026_stderr_mismatch (#460)" {
     try testE2e(std.testing.allocator, "e2e_026_stderr_mismatch");
 }
+
+test "e2e: e2e_617_show_escape (#617)" {
+    try testE2e(std.testing.allocator, "e2e_617_show_escape");
+}
