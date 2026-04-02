@@ -88,6 +88,15 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
+    // ── Compiler version ──────────────────────────────────────────────────────
+    // The canonical version string for the Rusholme compiler.  Exposed as a
+    // build-time constant so that any module (e.g. src/packages/store.zig) can
+    // consume it without hard-coding the literal string.  Update this single
+    // definition whenever the version changes.
+    const compiler_version = "0.1.0";
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", compiler_version);
+
     const mod = b.addModule("rusholme", .{
         // The root source file is the "entry point" of this module. Users of
         // this module will only be able to access public declarations contained
@@ -100,6 +109,7 @@ pub fn build(b: *std.Build) void {
         // which requires us to specify a target.
         .target = target,
     });
+    mod.addOptions("build_options", build_options);
 
     // Wire LLVM-C headers and shared library for the backend.
     // This must be called before any compilation step that transitively
