@@ -517,7 +517,12 @@ fn formatJitResult(allocator: Allocator, raw: i64, tags: KnownTags, force_fn: ?F
         return std.fmt.allocPrint(allocator, "{d}", .{value});
     }
 
-    // Heap pointer (low bit clear). Null (0) is Unit.
+    // Heap pointer (low bit clear).
+    // A raw zero here means a null pointer — Unit is now always a real
+    // heap-allocated node (tag rts_node.Tag.Unit = 0), so a non-zero heap
+    // address will be caught by the node-dispatch path below.  If we ever
+    // receive a literal null, suppress it silently.
+    // See: https://github.com/adinapoli/rusholme/issues/621
     if (raw == 0) return allocator.dupe(u8, "");
 
     // Force thunks to WHNF if the RTS force function is available.
@@ -776,4 +781,63 @@ test "jit engine: execute literal expression" {
 
     const result = try engine.execute(&program);
     try testing.expectEqualStrings("42", result.value);
+}
+
+test "jit engine: execute integer zero" {
+    // Regression test for https://github.com/adinapoli/rusholme/issues/621:
+    // The Haskell integer `0` must display as "0", not be suppressed like
+    // Unit `()`.  Integer values are returned tagged (bit 0 set) so they
+    // are never confused with the Unit heap-node pointer.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var engine = try JitEngine.init(alloc);
+    defer engine.deinit();
+
+    const body = try alloc.create(grin_ast.Expr);
+    body.* = .{ .Return = .{ .Lit = .{ .Int = 0 } } };
+
+    const defs = try alloc.alloc(grin_ast.Def, 1);
+    defs[0] = .{
+        .name = .{ .base = "replExpr__", .unique = .{ .value = 0 } },
+        .params = &.{},
+        .body = body,
+    };
+
+    const program = grin_ast.Program{
+        .defs = defs,
+        .field_types = .{},
+        .arities = .{},
+    };
+
+    const result = try engine.execute(&program);
+    try testing.expectEqualStrings("0", result.value);
+}
+
+test "formatJitResult: tagged integer zero displays as '0'" {
+    // Tagged integer encoding: (value << 1) | 1
+    // So integer 0 is represented as raw i64 = 1.
+    // See: https://github.com/adinapoli/rusholme/issues/621
+    const raw: i64 = 1; // (0 << 1) | 1
+    const empty_tags = grin_to_llvm.KnownTags{};
+    const result = try formatJitResult(testing.allocator, raw, empty_tags, null);
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings("0", result);
+}
+
+test "formatJitResult: Unit heap node displays as empty string" {
+    // Unit is now a heap-allocated node with tag rts_node.Tag.Unit (= 0).
+    // It must display as "" (suppressed in REPL output).
+    // See: https://github.com/adinapoli/rusholme/issues/621
+    const heap = @import("../rts/heap.zig");
+    heap.init();
+    defer heap.deinit();
+
+    const unit_node = rts_node.createUnit();
+    const raw: i64 = @bitCast(@intFromPtr(unit_node));
+    const empty_tags = grin_to_llvm.KnownTags{};
+    const result = try formatJitResult(testing.allocator, raw, empty_tags, null);
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings("", result);
 }

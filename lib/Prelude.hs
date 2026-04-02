@@ -14,7 +14,7 @@ module Prelude
     , intToChar, charToInt
     , max
     , Eq(..)
-    , Show(..), show, showString, showListWith, showListTail
+    , Show(..), show, showString, showLitChar, showListWith, showListTail
     , intToDigit
     , enumFrom, enumFromTo, enumFromThen, enumFromThenTo
     ) where
@@ -317,11 +317,40 @@ showListWith :: Show a => [a] -> String
 showListWith []     = "[]"
 showListWith (x:xs) = '[' : show x ++ showListTail xs
 
+-- showLitChar renders a single character as its escaped representation
+-- (without surrounding quotes). Used by Show Char and showLitString.
+--
+-- Escape sequences handled: \\ \' \n \r \t \NUL \a \b \f \v \DEL
+-- Note: '"' is NOT escaped here — it is a printable character and is
+-- rendered literally. showLitString handles '"' separately because
+-- strings are double-quote-delimited.
+-- Non-printable characters with codepoint > 127 fall through to
+-- literal rendering; proper unicode escape handling is tracked in:
+-- https://github.com/adinapoli/rusholme/issues/682
+showLitChar :: Char -> String -> String
+showLitChar '\\'  rest = '\\' : '\\' : rest
+showLitChar '\''  rest = '\\' : '\'' : rest
+showLitChar '\n'  rest = '\\' : 'n'  : rest
+showLitChar '\r'  rest = '\\' : 'r'  : rest
+showLitChar '\t'  rest = '\\' : 't'  : rest
+showLitChar '\NUL' rest = '\\' : '0' : rest
+showLitChar '\a'  rest = '\\' : 'a'  : rest
+showLitChar '\b'  rest = '\\' : 'b'  : rest
+showLitChar '\f'  rest = '\\' : 'f'  : rest
+showLitChar '\v'  rest = '\\' : 'v'  : rest
+showLitChar '\DEL' rest = '\\' : 'D' : 'E' : 'L' : rest
+showLitChar c     rest = c : rest
+
 -- Monomorphic string display (avoids dictionary-passing, see #618).
 -- showLitString must precede showString (callee before caller, #566).
+--
+-- '"' is handled explicitly before delegating to showLitChar because
+-- showLitChar renders '"' literally (it is printable), but inside a
+-- double-quoted string literal it must be escaped.
 showLitString :: String -> String
-showLitString []     = "\""
-showLitString (x:xs) = x : showLitString xs
+showLitString []         = "\""
+showLitString ('"' : xs) = '\\' : '"' : showLitString xs
+showLitString (x   : xs) = showLitChar x (showLitString xs)
 
 showString :: String -> String
 showString s = '"' : showLitString s
@@ -345,7 +374,7 @@ instance Show Ordering where
       GT -> "GT"
 
 instance Show Char where
-  show c = '\'' : c : '\'' : []
+  show c = '\'' : showLitChar c "'"
 
 instance Show a => Show [a] where
   show xs = showListWith xs

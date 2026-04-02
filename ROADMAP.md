@@ -244,7 +244,7 @@
 | [#256](https://github.com/adinapoli/rusholme/issues/256) | parser: support quasi-quotation syntax ([name\| ... \|]) | [#29](https://github.com/adinapoli/rusholme/issues/29) | :green_circle: |
 | [#316](https://github.com/adinapoli/rusholme/issues/316) | Add validation for duplicate record field names in data types | [#135](https://github.com/adinapoli/rusholme/issues/135) | :green_circle: |
 | [#444](https://github.com/adinapoli/rusholme/issues/444) | Refactor parseImportHeaders to eliminate redundant parsing | [#29](https://github.com/adinapoli/rusholme/issues/29) | :white_circle: |
-| [#538](https://github.com/adinapoli/rusholme/issues/538) | Parser cannot handle `(-)` in export lists | [#29](https://github.com/adinapoli/rusholme/issues/29) | :white_circle: |
+| [#538](https://github.com/adinapoli/rusholme/issues/538) | Parser cannot handle `(-)` in export lists | [#29](https://github.com/adinapoli/rusholme/issues/29) | :yellow_circle: |
 | [#539](https://github.com/adinapoli/rusholme/issues/539) | Parser cannot handle infix operator definitions with parenthesized patterns | [#29](https://github.com/adinapoli/rusholme/issues/29), [#31](https://github.com/adinapoli/rusholme/issues/31) | :green_circle: |
 | [#540](https://github.com/adinapoli/rusholme/issues/540) | Parser cannot handle multiple consecutive parenthesized cons patterns | [#31](https://github.com/adinapoli/rusholme/issues/31) | :white_circle: |
 | [#543](https://github.com/adinapoli/rusholme/issues/543) | Layout processor injects virtual tokens inside parenthesized contexts | [#26](https://github.com/adinapoli/rusholme/issues/26) | :green_circle: |
@@ -466,9 +466,9 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | [#612](https://github.com/adinapoli/rusholme/issues/612) | REPL: result display via Haskell's Show typeclass | [#607](https://github.com/adinapoli/rusholme/issues/607) | :green_circle: |
 | [#615](https://github.com/adinapoli/rusholme/issues/615) | GRIN evaluator: support dictionary-passing for typeclass dispatch | [#612](https://github.com/adinapoli/rusholme/issues/612) | :green_circle: |
 | [#616](https://github.com/adinapoli/rusholme/issues/616) | Module interface cache (.rhi) does not store ClassEnv or DictNameMap | [#612](https://github.com/adinapoli/rusholme/issues/612) | :green_circle: |
-| [#617](https://github.com/adinapoli/rusholme/issues/617) | Show Char and Show String instances lack escape sequence handling | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
+| [#617](https://github.com/adinapoli/rusholme/issues/617) | Show Char and Show String instances lack escape sequence handling | [#612](https://github.com/adinapoli/rusholme/issues/612) | :yellow_circle: |
 | [#618](https://github.com/adinapoli/rusholme/issues/618) | Native LLVM backend segfaults on dictionary-passing codegen | [#612](https://github.com/adinapoli/rusholme/issues/612) | :green_circle: |
-| [#621](https://github.com/adinapoli/rusholme/issues/621) | Unit and integer 0 are indistinguishable in JIT result formatting | [#612](https://github.com/adinapoli/rusholme/issues/612) | :white_circle: |
+| [#621](https://github.com/adinapoli/rusholme/issues/621) | Unit and integer 0 are indistinguishable in JIT result formatting | [#612](https://github.com/adinapoli/rusholme/issues/612) | :yellow_circle: |
 | [#623](https://github.com/adinapoli/rusholme/issues/623) | Where-clause bindings not in scope during renaming/typechecking | — | :green_circle: |
 | [#624](https://github.com/adinapoli/rusholme/issues/624) | Runtime segfault in programs combining many different thunk types in long do-blocks | [#618](https://github.com/adinapoli/rusholme/issues/618) | :green_circle: |
 | [#631](https://github.com/adinapoli/rusholme/issues/631) | Regression in infinite list support: REPL crashes on `take 3 [1..]` after prior range expression | [#624](https://github.com/adinapoli/rusholme/issues/624) | :green_circle: |
@@ -525,10 +525,10 @@ These existing issues must be resolved before any Phase 1 work begins:
 |---|-------|------|--------|
 | [#649](https://github.com/adinapoli/rusholme/issues/649) | Implement `.rhc-pkg` package descriptor format and parser | — | :green_circle: |
 | [#650](https://github.com/adinapoli/rusholme/issues/650) | Implement package store layout at `~/.rhc/store/` | [#649](https://github.com/adinapoli/rusholme/issues/649) | :green_circle: |
-| [#675](https://github.com/adinapoli/rusholme/issues/675) | Package store: use `defaultPath` as the canonical store root | [#650](https://github.com/adinapoli/rusholme/issues/650) | :white_circle: |
+| [#675](https://github.com/adinapoli/rusholme/issues/675) | Package store: replace hardcoded VERSION constant with build-time version | [#650](https://github.com/adinapoli/rusholme/issues/650) | :green_circle: |
 | [#676](https://github.com/adinapoli/rusholme/issues/676) | Package store: use platform-independent path separators | [#650](https://github.com/adinapoli/rusholme/issues/650) | :yellow_circle: |
 | [#651](https://github.com/adinapoli/rusholme/issues/651) | Implement `rhc-pkg` tool (list/describe/install/unregister/check) | [#650](https://github.com/adinapoli/rusholme/issues/650) | :white_circle: |
-| [#652](https://github.com/adinapoli/rusholme/issues/652) | Add `--package-db` flag to `rhc` compiler | [#650](https://github.com/adinapoli/rusholme/issues/650) | :white_circle: |
+| [#652](https://github.com/adinapoli/rusholme/issues/652) | Add `--package-db` flag to `rhc` compiler | [#650](https://github.com/adinapoli/rusholme/issues/650) | :yellow_circle: |
 
 #### Phase 2 — Boot packages as real packages
 
