@@ -320,7 +320,7 @@ showListWith (x:xs) = '[' : show x ++ showListTail xs
 -- showLitChar renders a single character as its escaped representation
 -- (without surrounding quotes). Used by Show Char and showLitString.
 --
--- Escape sequences handled: \\ \' \n \r \t \0 \a \b \f \v \DEL
+-- Escape sequences handled: \\ \' \n \r \t \NUL \a \b \f \v \DEL
 -- Note: '"' is NOT escaped here — it is a printable character and is
 -- rendered literally. showLitString handles '"' separately because
 -- strings are double-quote-delimited.
@@ -328,31 +328,18 @@ showListWith (x:xs) = '[' : show x ++ showListTail xs
 -- literal rendering; proper unicode escape handling is tracked in:
 -- https://github.com/adinapoli/rusholme/issues/682
 showLitChar :: Char -> String -> String
-showLitChar c rest =
-    let n = charToInt c
-    in case primEqInt n 92 of          -- '\\'
-        True  -> '\\' : '\\' : rest
-        False -> case primEqInt n 39 of  -- '\''
-            True  -> '\\' : '\'' : rest
-            False -> case primEqInt n 10 of  -- '\n'
-                True  -> '\\' : 'n' : rest
-                False -> case primEqInt n 13 of  -- '\r'
-                    True  -> '\\' : 'r' : rest
-                    False -> case primEqInt n 9 of  -- '\t'
-                        True  -> '\\' : 't' : rest
-                        False -> case primEqInt n 0 of  -- '\0'
-                            True  -> '\\' : '0' : rest
-                            False -> case primEqInt n 7 of  -- '\a'
-                                True  -> '\\' : 'a' : rest
-                                False -> case primEqInt n 8 of  -- '\b'
-                                    True  -> '\\' : 'b' : rest
-                                    False -> case primEqInt n 12 of  -- '\f'
-                                        True  -> '\\' : 'f' : rest
-                                        False -> case primEqInt n 11 of  -- '\v'
-                                            True  -> '\\' : 'v' : rest
-                                            False -> case primEqInt n 127 of  -- '\DEL'
-                                                True  -> '\\' : 'D' : 'E' : 'L' : rest
-                                                False -> c : rest
+showLitChar '\\'  rest = '\\' : '\\' : rest
+showLitChar '\''  rest = '\\' : '\'' : rest
+showLitChar '\n'  rest = '\\' : 'n'  : rest
+showLitChar '\r'  rest = '\\' : 'r'  : rest
+showLitChar '\t'  rest = '\\' : 't'  : rest
+showLitChar '\NUL' rest = '\\' : '0' : rest
+showLitChar '\a'  rest = '\\' : 'a'  : rest
+showLitChar '\b'  rest = '\\' : 'b'  : rest
+showLitChar '\f'  rest = '\\' : 'f'  : rest
+showLitChar '\v'  rest = '\\' : 'v'  : rest
+showLitChar '\DEL' rest = '\\' : 'D' : 'E' : 'L' : rest
+showLitChar c     rest = c : rest
 
 -- Monomorphic string display (avoids dictionary-passing, see #618).
 -- showLitString must precede showString (callee before caller, #566).
