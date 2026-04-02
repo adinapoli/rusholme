@@ -6,9 +6,11 @@
 //!   rhc core <file.hs>     Parse, typecheck, and desugar; print Core IR
 //!   rhc grin <file.hs>     Full pipeline; print GRIN IR
 //!   rhc ll <file.hs>       Full pipeline; emit LLVM IR
-//!   rhc build [--backend <kind>] [-o <out>] <file.hs>
-//!                          Full pipeline; compile to native executable
-//!                          Backends: native (default), jit, wasm, c
+//!   rhc build [--backend <kind>] [-o <out>] [--package-db <path>] <file.hs>
+//!                          Full pipeline; compile to native executable.
+//!                          Backends: native (default), jit, wasm, c.
+//!                          --package-db may be given multiple times; paths
+//!                          are searched in order for pre-built .rhi files.
 //!   rhc repl               Interactive REPL (read-eval-print loop)
 //!   rhc pkg <subcommand>   Package management (list, describe, install, …)
 //!   rhc --help             Show this help message
@@ -185,9 +187,11 @@ pub fn main(init: std.process.Init) !void {
             try writeStderr(io, "Usage: rhc build [--backend <kind>] [-o <output>] <file.hs> [<file2.hs> ...]\n");
             std.process.exit(1);
         }
-        // Parse optional flags: -o <output>, --backend <kind>, --repl; collect file paths.
+        // Parse optional flags: -o <output>, --backend <kind>, --repl,
+        // --package-db <path>; collect file paths.
         var output_name: ?[]const u8 = null;
         var file_paths: std.ArrayListUnmanaged([]const u8) = .{};
+        var package_dbs: std.ArrayListUnmanaged([]const u8) = .{};
         var backend_kind = rusholme.backend.backend_mod.BackendKind.native;
         var is_repl = false;
         var i: usize = 0;
@@ -216,6 +220,14 @@ pub fn main(init: std.process.Init) !void {
                     try stderr.flush();
                     std.process.exit(1);
                 };
+            } else if (std.mem.eql(u8, cmd_args[i], "--package-db")) {
+                i += 1;
+                if (i >= cmd_args.len) {
+                    try writeStderr(io, "rhc build: --package-db requires an argument\n");
+                    try writeStderr(io, "Usage: rhc build [--package-db <path>] <file.hs> [<file2.hs> ...]\n");
+                    std.process.exit(1);
+                }
+                try package_dbs.append(arena_alloc, cmd_args[i]);
             } else if (std.mem.eql(u8, cmd_args[i], "--repl")) {
                 is_repl = true;
             } else {
@@ -229,7 +241,7 @@ pub fn main(init: std.process.Init) !void {
         }
         // Derive output name from the first file when -o is not given.
         const out = output_name orelse std.fs.path.stem(std.fs.path.basename(file_paths.items[0]));
-        try cmdBuild(allocator, io, file_paths.items, out, backend_kind, is_repl);
+        try cmdBuild(allocator, io, file_paths.items, out, backend_kind, is_repl, package_dbs.items);
         return;
     }
 
@@ -865,7 +877,7 @@ fn loadPrelude(
 /// - native: compiles to native executable via LLVM
 /// - wasm: compiles to WebAssembly binary (.wasm)
 /// - jit, c: not yet implemented
-fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8, output_name: []const u8, backend_kind: rusholme.backend.backend_mod.BackendKind, is_repl: bool) !void {
+fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8, output_name: []const u8, backend_kind: rusholme.backend.backend_mod.BackendKind, is_repl: bool, package_dbs: []const []const u8) !void {
     // REPL mode placeholder - for WASM backend compiles stateful REPL
     _ = is_repl;
 
@@ -938,7 +950,7 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
         next_file_id += 1;
     }
 
-    var session_result = try compile_env_mod.compileProgram(arena_alloc, io, source_modules.items);
+    var session_result = try compile_env_mod.compileProgram(arena_alloc, io, source_modules.items, package_dbs);
     var session = &session_result.env;
     defer session.deinit();
 
@@ -1656,9 +1668,11 @@ fn printUsage(io: Io) !void {
         \\  rhc core <file.hs>     Parse, typecheck, and desugar; print Core IR
         \\  rhc grin <file.hs>     Full pipeline; print GRIN IR
         \\  rhc ll <file.hs>       Full pipeline; emit LLVM IR
-        \\  rhc build [--backend <kind>] [-o <out>] <file.hs>
-        \\                         Full pipeline; compile to an executable
-        \\                         Backends: native (default), jit, wasm, c
+        \\  rhc build [--backend <kind>] [-o <out>] [--package-db <path>] <file.hs>
+        \\                         Full pipeline; compile to an executable.
+        \\                         Backends: native (default), jit, wasm, c.
+        \\                         --package-db may be repeated; paths are
+        \\                         searched in order for pre-built .rhi files.
         \\  rhc repl [--server]   Interactive REPL (read-eval-print loop)
         \\                         Use --server for JSON-RPC protocol mode
         \\  rhc pkg <subcommand>  Package management (list, describe, install, …)
