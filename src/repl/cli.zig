@@ -210,6 +210,14 @@ fn runSimple(alloc: Allocator, io: Io, session: *Session) !void {
     var multiline_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer multiline_buf.deinit(alloc);
 
+    // Create the stdin reader once and reuse it across all readLineRaw
+    // calls. A prior version recreated the reader on every call, which
+    // lost buffered bytes when input arrived in bulk via a pipe.
+    // See: https://github.com/adinapoli/rusholme/issues/487
+    var stdin_buf: [4096]u8 = undefined;
+    var stdin_rdr = File.stdin().reader(io, &stdin_buf);
+    const stdin = &stdin_rdr.interface;
+
     while (true) {
         const prompt = switch (mode) {
             .normal => "rusholme> ",
@@ -217,7 +225,7 @@ fn runSimple(alloc: Allocator, io: Io, session: *Session) !void {
         };
         try writeStdout(io, prompt);
 
-        const line = readLineRaw(io, &line_buf) catch {
+        const line = readLineRaw(stdin, &line_buf) catch {
             if (mode == .multiline) {
                 multiline_buf.clearRetainingCapacity();
                 mode = .normal;
@@ -294,14 +302,14 @@ fn runSimple(alloc: Allocator, io: Io, session: *Session) !void {
 
 // ── Line reading ──────────────────────────────────────────────────────
 
-/// Read a line from stdin into the provided buffer.
+/// Read a line from the given reader into the provided buffer.
 /// Returns the line contents without the trailing newline.
 /// Returns error on EOF or read failure.
-fn readLineRaw(io: Io, buf: []u8) ![]const u8 {
+///
+/// The caller must pass a long-lived reader (e.g. one created in
+/// `runSimple`) so that buffered bytes are preserved across calls.
+fn readLineRaw(rdr: anytype, buf: []u8) ![]const u8 {
     var pos: usize = 0;
-    var stdin_buf: [1]u8 = undefined;
-    var stdin_rdr = File.stdin().reader(io, &stdin_buf);
-    const rdr = &stdin_rdr.interface;
 
     while (pos < buf.len) {
         var byte_buf: [1]u8 = undefined;
