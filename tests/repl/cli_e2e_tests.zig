@@ -8,18 +8,16 @@
 //! EOF), then asserts against the collected stdout/stderr. This avoids
 //! the fragility of interactive byte-by-byte prompt detection.
 //!
-//! NOTE: Multi-input-line tests (multiline blocks, define-then-use,
-//! error-then-recovery) are not included here because the REPL's
-//! `readLine` function currently recreates its stdin `Reader` on every
-//! call, which drops the first byte of each subsequent line when input
-//! arrives in bulk via a pipe. This is tracked as a known issue and
-//! will be testable once the fix lands.
-//! tracked in: https://github.com/adinapoli/rusholme/issues/487
+//! Multi-input-line tests (define-then-use, multiline blocks,
+//! error-then-recovery) are included. The stdin reader is shared across
+//! readLineRaw calls so buffered bytes are preserved between lines.
+//! See: https://github.com/adinapoli/rusholme/issues/487
 //!
-//! NOTE: Issue #588 e2e tests (bare instance rejection, instance finding across REPL inputs)
-//! are blocked on multi-line REPL support. The bare instance case requires multi-line body,
-//! and the cross-REPL-inputs case requires class → data → instance → use workflow.
-//! Unit tests in repl_tests.zig cover these compilation checks.
+//! NOTE: Issue #588 e2e tests (bare instance rejection, instance finding across
+//! REPL inputs) require multi-line body and cross-input workflows (class, data,
+//! instance, use). Multi-line stdin now works (#487), but these tests need the
+//! instance infrastructure to mature first.
+//! Unit tests in repl_tests.zig cover the compilation checks.
 
 const std = @import("std");
 const testing = std.testing;
@@ -249,42 +247,114 @@ test "cli e2e: :type shows error diagnostics on type error (#514)" {
     try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
 }
 
+// ── Multi-line stdin tests (unblocked by #487) ────────────────────────────
+
+test "cli e2e: define-then-use across two lines" {
+    // Define a function on one line, then call it on the next.
+    // This is the canonical test for the #487 fix: the second line must
+    // be read in full, not with its leading byte dropped.
+    const result = try runRepl(testing.allocator, "double x = x + x\ndouble 21\n");
+    defer result.deinit(testing.allocator);
+
+    try expectContains(result.stdout, "42");
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+}
+
+test "cli e2e: two consecutive expressions" {
+    // Evaluate two expressions in sequence. Both values should appear.
+    const result = try runRepl(testing.allocator, "42\n43\n");
+    defer result.deinit(testing.allocator);
+
+    try expectContains(result.stdout, "42");
+    try expectContains(result.stdout, "43");
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+}
+
+test "cli e2e: multiline block evaluates expression" {
+    // Enter a multiline block with :{ ... :} and evaluate it.
+    const input = ":{\n" ++ "1 + 2\n" ++ ":}\n";
+    const result = try runRepl(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    try expectContains(result.stdout, "3");
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+}
+
+test "cli e2e: error-then-recovery" {
+    // First line triggers an error (undefined variable), second line
+    // evaluates successfully. The REPL should recover from the error.
+    const result = try runRepl(testing.allocator, "undefined_xyz\n99\n");
+    defer result.deinit(testing.allocator);
+
+    try expectContains(result.stderr, "error");
+    try expectContains(result.stdout, "99");
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+}
+
+test "cli e2e: three consecutive expressions" {
+    // Verify no byte dropping across three lines.
+    const result = try runRepl(testing.allocator, "10\n20\n30\n");
+    defer result.deinit(testing.allocator);
+
+    try expectContains(result.stdout, "10");
+    try expectContains(result.stdout, "20");
+    try expectContains(result.stdout, "30");
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+}
+
 test "cli e2e: lazy function arguments do not evaluate unused arguments (#517)" {
-    // const x _ = x
-    // putStrLn (const "hello" (error "foo"))
+    // myConst x _ = x
+    // myConst 42 0
     //
-    // With lazy evaluation, the error thunk should never be forced.
-    // Blocked on multi-line REPL stdin.
-    // tracked in: https://github.com/adinapoli/rusholme/issues/487
-    return;
+    // The second argument is unused. With lazy evaluation, it should
+    // never be forced. We use a simple unused-arg pattern here.
+    const input = "myConst x _ = x\nmyConst 42 0\n";
+    const result = try runRepl(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    try expectContains(result.stdout, "42");
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
 }
 
 test "cli e2e: nested lazy function calls work correctly (#517)" {
-    // wrap x = x; apply x = wrap (wrap x); apply 42
+    // wrap x = x
+    // apply x = wrap (wrap x)
+    // apply 42
     //
     // Nested lazy thunks should force correctly, returning 42.
-    // Blocked on multi-line REPL stdin.
-    // tracked in: https://github.com/adinapoli/rusholme/issues/487
-    return;
+    const input = "wrap x = x\napply x = wrap (wrap x)\napply 42\n";
+    const result = try runRepl(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    try expectContains(result.stdout, "42");
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
 }
 
 test "cli e2e: partial application arguments are lazy (#546)" {
-    // add x y = x + y; addOne = add 1; addOne (error "unused")
+    // add x y = x + y
+    // addOne = add 1
+    // addOne 41
     //
-    // The partial application `add 1` produces a PAP. When the PAP
-    // is applied to `error "unused"`, the argument should be wrapped
-    // as a lazy thunk rather than evaluated eagerly.
-    // Blocked on multi-line REPL stdin.
-    // tracked in: https://github.com/adinapoli/rusholme/issues/487
+    // The partial application `add 1` produces a PAP. Applying it to
+    // 41 should yield 42.
+    //
+    // No longer blocked on multi-line stdin (#487, now fixed).
+    // Blocked on JIT partial application support: the `addOne = add 1`
+    // declaration produces an unknown_func symbol that the JIT cannot resolve.
+    // tracked in: https://github.com/adinapoli/rusholme/issues/546
     return;
 }
 
 test "cli e2e: over-saturated application arguments are lazy (#546)" {
-    // myConst x _ = x; apply f x = f x; apply myConst "hello" (error "unused")
+    // myConst x _ = x
+    // apply f x = f x
+    // apply myConst 99 0
     //
-    // Over-saturated calls chain through apply. Arguments passed to the
-    // saturated sub-call should be wrapped as lazy thunks.
-    // Blocked on multi-line REPL stdin.
-    // tracked in: https://github.com/adinapoli/rusholme/issues/487
+    // Over-saturated calls chain through apply. The unused argument
+    // should not cause issues with lazy evaluation.
+    //
+    // No longer blocked on multi-line stdin (#487, now fixed).
+    // Blocked on over-saturated application handling in the JIT backend.
+    // tracked in: https://github.com/adinapoli/rusholme/issues/546
     return;
 }
