@@ -1,0 +1,40 @@
+=== GRIN Program (4 definitions) ===
+unwrapNode_1003 arg_0_1015 =
+  case arg_0_1015 of
+    (CNode_1001 _field_0_0_0_1018 x_1009 _field_0_0_2_1016) ->
+      pure x_1009
+    _ ->
+      case arg_0_1015 of
+        CLeaf_1000 ->
+          pure #0
+        _ ->
+          pure #"Non-exhaustive patterns in function"
+
+leftValue_1004 arg_0_1019 =
+  case arg_0_1019 of
+    (CNode_1001 _field_0_0_0_1022 _field_0_0_1_1021 _field_0_0_2_1020) ->
+      case _field_0_0_0_1022 of
+        (CNode_1001 _field_0_1_0_1025 x_1010 _field_0_1_2_1023) ->
+          pure x_1010
+        _ ->
+          pure #0
+    _ ->
+      pure #0
+
+wrapOrDefault_1005 arg_0_1026 =
+  pure arg_0_1026 ;
+  \w_1011 ->
+    case arg_0_1026 of
+      (CWrap_1002 _field_0_0_0_1027) ->
+        pure w_1011
+      _ ->
+        store (CWrap_1002 #0) ;
+        \node ->
+          pure node
+
+sumPair_1006 arg_0_1028 =
+  case arg_0_1028 of
+    (C(,) a_1012 _field_0_0_1_1029) ->
+      pure a_1012
+    _ ->
+      pure #"Non-exhaustive patterns in function"

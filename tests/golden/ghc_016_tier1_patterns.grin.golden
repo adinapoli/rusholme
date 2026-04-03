@@ -1,0 +1,18 @@
+=== GRIN Program (2 definitions) ===
+isRed_1003 arg_0_1006 =
+  case arg_0_1006 of
+    CRed_1000 ->
+      pure True_200
+    _ ->
+      pure False_201
+
+describeNumber_1004 arg_0_1007 =
+  case arg_0_1007 of
+    #0 ->
+      pure #"zero"
+    _ ->
+      case arg_0_1007 of
+        #1 ->
+          pure #"one"
+        _ ->
+          pure #"many"
