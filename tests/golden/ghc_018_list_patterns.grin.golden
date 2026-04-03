@@ -1,0 +1,33 @@
+=== GRIN Program (3 definitions) ===
+isEmpty_1000 arg_0_1006 =
+  case arg_0_1006 of
+    C[]_207 ->
+      pure True_200
+    _ ->
+      pure False_201
+
+firstOfTwo_1001 arg_0_1007 =
+  case arg_0_1007 of
+    (C(:)_208 a_1003 _field_0_0_1_1008) ->
+      case _field_0_0_1_1008 of
+        (C(:)_208 b_1004 _field_0_1_1_1009) ->
+          case _field_0_1_1_1009 of
+            C[]_207 ->
+              pure a_1003
+            _ ->
+              pure #0
+        _ ->
+          pure #0
+    _ ->
+      pure #0
+
+singleton_1002 arg_0_1012 =
+  case arg_0_1012 of
+    (C(:)_208 x_1005 _field_0_0_1_1013) ->
+      case _field_0_0_1_1013 of
+        C[]_207 ->
+          pure x_1005
+        _ ->
+          pure #0
+    _ ->
+      pure #0

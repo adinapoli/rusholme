@@ -1,0 +1,19 @@
+=== GRIN Program (3 definitions) ===
+describeColor_1003 c_1007 =
+  isRed_1004 c_1007 ;
+  \scrut ->
+    case scrut of
+      CTrue_200 ->
+        pure #"red"
+      _ ->
+        pure #"not red"
+
+isRed_1004 arg_0_1009 =
+  case arg_0_1009 of
+    CRed_1000 ->
+      pure True_200
+    _ ->
+      pure False_201
+
+alwaysYes_1005 arg_0_1010 =
+  pure #"yes"
