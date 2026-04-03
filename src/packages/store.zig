@@ -1,6 +1,6 @@
 //! Package store for Rusholme package management.
 //!
-//! The store lives at `~/.rhc/store/<arch>-<os>-<version>/` with
+//! The store lives at `~/.rhc/store/<arch>-<os>-<version>` with
 //! `package.conf.d/` containing JSON entries for each installed package.
 //!
 //! ## Reference
@@ -131,7 +131,7 @@ pub const Store = struct {
             if (dir_entry.kind != .file) continue;
             if (!std.mem.endsWith(u8, dir_entry.name, ".conf")) continue;
 
-            const conf_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.conf_dir_path, dir_entry.name });
+            const conf_path = try std.fs.path.join(self.allocator, &.{ self.conf_dir_path, dir_entry.name });
             defer self.allocator.free(conf_path);
 
             const entry = try parseConfFile(self.allocator, io, conf_path);
@@ -146,7 +146,9 @@ pub const Store = struct {
 
     /// Look up a package by its full key (hash-name-version).
     pub fn lookupByKey(self: *const Store, io: std.Io, key: []const u8) Error!?Entry {
-        const conf_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}.conf", .{ self.conf_dir_path, key });
+        const conf_filename = try std.fmt.allocPrint(self.allocator, "{s}.conf", .{key});
+        defer self.allocator.free(conf_filename);
+        const conf_path = try std.fs.path.join(self.allocator, &.{ self.conf_dir_path, conf_filename });
         defer self.allocator.free(conf_path);
 
         return parseConfFile(self.allocator, io, conf_path) catch |err| {
@@ -173,7 +175,7 @@ pub const Store = struct {
             if (entry.kind != .file) continue;
             if (!std.mem.endsWith(u8, entry.name, ".conf")) continue;
 
-            const conf_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.conf_dir_path, entry.name });
+            const conf_path = try std.fs.path.join(self.allocator, &.{ self.conf_dir_path, entry.name });
             defer self.allocator.free(conf_path);
 
             const parsed_entry = try parseConfFile(self.allocator, io, conf_path);
@@ -257,7 +259,7 @@ pub const Error = error{
 
 // ── Public functions ─────────────────────────────────────────────────────────
 
-/// Return the default store path: `~/.rhc/store/<arch>-<os>-<version>/`.
+/// Return the default store path: `~/.rhc/store/<arch>-<os>-<version>`.
 ///
 /// Path components:
 /// - `arch`: from `builtin.cpu.arch` (e.g., "x86_64")
@@ -268,7 +270,6 @@ pub const Error = error{
 /// The caller owns the returned string and must free it with `alloc.free`.
 ///
 pub fn defaultPath(alloc: std.mem.Allocator) Error![]const u8 {
-    // tracked in: https://github.com/adinapoli/rusholme/issues/676
     const VERSION = build_options.version;
     const arch = switch (builtin.cpu.arch) {
         .x86_64 => "x86_64",
@@ -283,12 +284,17 @@ pub fn defaultPath(alloc: std.mem.Allocator) Error![]const u8 {
         .wasi => "wasi",
         else => @tagName(builtin.os.tag),
     };
+    // On POSIX we rely on HOME; on Windows APPDATA or USERPROFILE would be
+    // needed instead.  Windows support is deferred — the Nix-based build
+    // currently only targets Linux and macOS.
+    if (builtin.os.tag == .windows) {
+        @compileError("defaultPath: Windows home-directory lookup is not yet implemented (see #676)");
+    }
     const home_ptr = std.c.getenv("HOME") orelse return error.HomeDirectoryUnset;
     const home: []const u8 = std.mem.span(home_ptr);
-    // tracked in: https://github.com/adinapoli/rusholme/issues/676
-    return std.fmt.allocPrint(alloc, "{s}/.rhc/store/{s}-{s}-{s}/", .{
-        home, arch, os_tag, VERSION,
-    });
+    const platform_segment = try std.fmt.allocPrint(alloc, "{s}-{s}-{s}", .{ arch, os_tag, VERSION });
+    defer alloc.free(platform_segment);
+    return std.fs.path.join(alloc, &.{ home, ".rhc", "store", platform_segment });
 }
 
 /// Initialize a package store.
@@ -306,7 +312,7 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io, root_path: ?[]const u8) Error!
     // Create root directory and package.conf.d/ (createDirPath is idempotent)
     try std.Io.Dir.cwd().createDirPath(io, root);
 
-    const conf_dir = try std.fmt.allocPrint(alloc, "{s}/package.conf.d", .{root});
+    const conf_dir = try std.fs.path.join(alloc, &.{ root, "package.conf.d" });
     errdefer alloc.free(conf_dir);
 
     try std.Io.Dir.cwd().createDirPath(io, conf_dir);
@@ -335,16 +341,16 @@ pub fn computeKey(alloc: std.mem.Allocator, name: []const u8, version: []const u
 
 /// Compute the full path to a .conf file for a given key.
 fn computeConfPath(store: *const Store, key: []const u8) std.mem.Allocator.Error![]const u8 {
-    return std.fmt.allocPrint(store.allocator, "{s}/{s}.conf", .{
-        store.conf_dir_path, key,
-    });
+    const filename = try std.fmt.allocPrint(store.allocator, "{s}.conf", .{key});
+    defer store.allocator.free(filename);
+    return std.fs.path.join(store.allocator, &.{ store.conf_dir_path, filename });
 }
 
 /// Compute the full path to a package directory.
 fn computePkgPath(store: *const Store, name: []const u8, version: []const u8) std.mem.Allocator.Error![]const u8 {
-    return std.fmt.allocPrint(store.allocator, "{s}/{s}-{s}", .{
-        store.root_path, name, version,
-    });
+    const dir_name = try std.fmt.allocPrint(store.allocator, "{s}-{s}", .{ name, version });
+    defer store.allocator.free(dir_name);
+    return std.fs.path.join(store.allocator, &.{ store.root_path, dir_name });
 }
 
 /// Parse a .conf file and return an Entry.
