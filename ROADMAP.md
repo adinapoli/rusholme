@@ -6,6 +6,15 @@
 **Architecture Decisions:**
 - **#0001**: PrimOps and RTS Architecture — defines the contract between compiler and runtime via ~15-30 primitive operations. See `docs/decisions/0001-primops-and-rts-architecture.md`.
 
+**Recent Progress (2026-04-03):**
+- ✓ #538: Parser cannot handle `(-)` in export lists (PR #688 merged)
+- ✓ #617: Show Char and Show String escape sequence handling (PR #681 merged)
+- ✓ #621: Unit and integer 0 indistinguishable in JIT formatting (PR merged)
+- ✓ #675: Package store: replace hardcoded VERSION constant (PR merged)
+- ✓ #676: Package store: platform-independent path separators (PR #685 merged)
+- ✓ #651: Implement `rhc-pkg` tool (PR merged)
+- ✓ #652: Add `--package-db` flag to `rhc` compiler (PR merged)
+
 **Recent Progress (2026-03-23):**
 - ✓ #624: Fix integer/pointer discrimination via low-bit tagging (PR #625 merged)
 - ✓ #618: Fix dictionary-passing codegen and enable polymorphic Show instances (PR #622 merged)
