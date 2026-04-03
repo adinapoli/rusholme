@@ -73,6 +73,26 @@ pub const Parser = struct {
         };
     }
 
+    /// Returns true if the token tag is a contextual keyword that is only
+    /// reserved in import declarations and acts as a regular variable name
+    /// elsewhere. In Haskell 2010 §2.4, `as`, `qualified`, and `hiding`
+    /// are NOT in the reservedid list — they are special identifiers used
+    /// only in import syntax.
+    pub fn isContextualVarId(tag: TokenTag) bool {
+        return tag == .kw_as or tag == .kw_qualified or tag == .kw_hiding;
+    }
+
+    /// Extracts the variable name string from a contextual keyword token.
+    /// Requires: `isContextualVarId(std.meta.activeTag(tok))` is true.
+    pub fn contextualVarIdName(tok: Token) []const u8 {
+        return switch (tok) {
+            .kw_as => "as",
+            .kw_qualified => "qualified",
+            .kw_hiding => "hiding",
+            else => unreachable,
+        };
+    }
+
     pub fn init(
         allocator: std.mem.Allocator,
         layout: *LayoutProcessor,
@@ -2973,6 +2993,12 @@ pub const Parser = struct {
             .kw_let => return try self.parseLet(),
             .kw_case => return try self.parseCase(),
             .kw_do => return try self.parseDo(),
+            // Contextual keywords (as, qualified, hiding) are valid variable
+            // names outside import declarations (Haskell 2010 §2.4).
+            .kw_as, .kw_qualified, .kw_hiding => {
+                const tok = try self.advance();
+                return .{ .Var = .{ .name = Parser.contextualVarIdName(tok.token), .span = tok.span } };
+            },
             else => return null,
         }
     }
@@ -3502,6 +3528,9 @@ pub const Parser = struct {
         const tag = try self.peekTag();
         return switch (tag) {
             .varid, .conid, .underscore, .lit_integer, .lit_char, .lit_string, .minus, .open_paren, .open_bracket, .bang => true,
+            // Contextual keywords (as, qualified, hiding) are valid variable
+            // names outside import declarations (Haskell 2010 §2.4).
+            .kw_as, .kw_qualified, .kw_hiding => true,
             else => false,
         };
     }
@@ -3547,6 +3576,13 @@ pub const Parser = struct {
             .lit_integer, .lit_char, .lit_string => try self.parseLitPattern(),
             .open_paren => try self.parseParenOrTuplePattern(),
             .open_bracket => try self.parseListPattern(),
+            // Contextual keywords (as, qualified, hiding) are valid variable
+            // names outside import declarations (Haskell 2010 §2.4).
+            .kw_as, .kw_qualified, .kw_hiding => {
+                const tok = try self.advance();
+                const name = Parser.contextualVarIdName(tok.token);
+                return .{ .Var = .{ .name = name, .span = tok.span } };
+            },
             else => {
                 const got = try self.peek();
                 try self.emitErrorMsg(got.span, "expected pattern");
@@ -5667,4 +5703,87 @@ test "parseLangPragma: no pragmas yields empty EnumSet" {
         \\x = 1
     );
     try std.testing.expectEqual(@as(usize, 0), mod.language_extensions.count());
+}
+
+// ============================================================================
+// Multiple consecutive parenthesized patterns (Issue #540)
+// ============================================================================
+
+test "decl: multiple consecutive parenthesized cons patterns" {
+    // Haskell 2010: zip (x:xs) (y:ys) = ... — two consecutive paren cons patterns
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\myzip (x:xs) (y:ys) = (x, y) : myzip xs ys
+    );
+    try std.testing.expectEqual(@as(usize, 1), mod.declarations.len);
+    try std.testing.expect(mod.declarations[0] == .FunBind);
+    const bind = mod.declarations[0].FunBind;
+    try std.testing.expectEqualStrings("myzip", bind.name);
+    try std.testing.expectEqual(@as(usize, 2), bind.equations[0].patterns.len);
+    try std.testing.expect(bind.equations[0].patterns[0] == .Paren);
+    try std.testing.expect(bind.equations[0].patterns[1] == .Paren);
+}
+
+test "decl: parenthesized cons pattern using contextual keyword 'as'" {
+    // In Haskell 2010, 'as' is NOT a reserved word — it is a contextual keyword
+    // that is only special in import declarations (§2.4). The pattern (a:as)
+    // must be accepted with 'as' parsed as a variable name.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\f (a:as) x = x
+    );
+    try std.testing.expectEqual(@as(usize, 1), mod.declarations.len);
+    try std.testing.expect(mod.declarations[0] == .FunBind);
+    const bind = mod.declarations[0].FunBind;
+    try std.testing.expectEqualStrings("f", bind.name);
+    try std.testing.expectEqual(@as(usize, 2), bind.equations[0].patterns.len);
+    try std.testing.expect(bind.equations[0].patterns[0] == .Paren);
+    try std.testing.expect(bind.equations[0].patterns[1] == .Var);
+}
+
+test "decl: multiple consecutive parenthesized cons patterns with 'as'" {
+    // The original failing case from issue #540: zip (a:as) (b:bs) = ...
+    // Uses 'as' which is a contextual keyword, not a reserved word.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\zip (a:as) (b:bs) = (a, b) : zip as bs
+    );
+    try std.testing.expectEqual(@as(usize, 1), mod.declarations.len);
+    try std.testing.expect(mod.declarations[0] == .FunBind);
+    const bind = mod.declarations[0].FunBind;
+    try std.testing.expectEqualStrings("zip", bind.name);
+    try std.testing.expectEqual(@as(usize, 2), bind.equations[0].patterns.len);
+    try std.testing.expect(bind.equations[0].patterns[0] == .Paren);
+    try std.testing.expect(bind.equations[0].patterns[1] == .Paren);
+}
+
+test "decl: multiple consecutive parenthesized constructor patterns" {
+    // f (Just x) (Just y) = (x, y) — two consecutive paren constructor patterns
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\f (Just x) (Just y) = (x, y)
+    );
+    try std.testing.expectEqual(@as(usize, 1), mod.declarations.len);
+    try std.testing.expect(mod.declarations[0] == .FunBind);
+    const bind = mod.declarations[0].FunBind;
+    try std.testing.expectEqualStrings("f", bind.name);
+    try std.testing.expectEqual(@as(usize, 2), bind.equations[0].patterns.len);
+    try std.testing.expect(bind.equations[0].patterns[0] == .Paren);
+    try std.testing.expect(bind.equations[0].patterns[1] == .Paren);
 }
