@@ -593,7 +593,7 @@ These existing issues must be resolved before any Phase 1 work begins:
 |---|-------|------|--------|
 | [#75](https://github.com/adinapoli/rusholme/issues/75) | Implement basic REPL loop (read-eval-print with interpreter) | [#50](https://github.com/adinapoli/rusholme/issues/50), [#51](https://github.com/adinapoli/rusholme/issues/51) | :green_circle: |
 | [#76](https://github.com/adinapoli/rusholme/issues/76) | Implement REPL auto-completion and multi-line input | [#75](https://github.com/adinapoli/rusholme/issues/75) | :green_circle: |
-| [#487](https://github.com/adinapoli/rusholme/issues/487) | REPL stdin reader drops first byte of subsequent lines in piped mode | [#75](https://github.com/adinapoli/rusholme/issues/75) | :white_circle: |
+| [#487](https://github.com/adinapoli/rusholme/issues/487) | REPL stdin reader drops first byte of subsequent lines in piped mode | [#75](https://github.com/adinapoli/rusholme/issues/75) | :yellow_circle: |
 | [#514](https://github.com/adinapoli/rusholme/issues/514) | Show type error diagnostics in REPL :type command | [#75](https://github.com/adinapoli/rusholme/issues/75) | :green_circle: |
 
 ### Epic: Multi-Backend Architecture
