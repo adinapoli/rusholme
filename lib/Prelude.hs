@@ -321,12 +321,10 @@ showListWith (x:xs) = '[' : show x ++ showListTail xs
 -- (without surrounding quotes). Used by Show Char and showLitString.
 --
 -- Escape sequences handled: \\ \' \n \r \t \NUL \a \b \f \v \DEL
+-- Non-printable characters with codepoint > 127 are rendered as \<decimal>.
 -- Note: '"' is NOT escaped here — it is a printable character and is
 -- rendered literally. showLitString handles '"' separately because
 -- strings are double-quote-delimited.
--- Non-printable characters with codepoint > 127 fall through to
--- literal rendering; proper unicode escape handling is tracked in:
--- https://github.com/adinapoli/rusholme/issues/682
 showLitChar :: Char -> String -> String
 showLitChar '\\'  rest = '\\' : '\\' : rest
 showLitChar '\''  rest = '\\' : '\'' : rest
@@ -339,7 +337,9 @@ showLitChar '\b'  rest = '\\' : 'b'  : rest
 showLitChar '\f'  rest = '\\' : 'f'  : rest
 showLitChar '\v'  rest = '\\' : 'v'  : rest
 showLitChar '\DEL' rest = '\\' : 'D' : 'E' : 'L' : rest
-showLitChar c     rest = c : rest
+showLitChar c     rest = case charToInt c > 127 of
+    True  -> '\\' : showPosInt (charToInt c) ++ rest
+    False -> c : rest
 
 -- Monomorphic string display (avoids dictionary-passing, see #618).
 -- showLitString must precede showString (callee before caller, #566).

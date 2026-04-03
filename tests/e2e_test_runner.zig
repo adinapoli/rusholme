@@ -428,3 +428,7 @@ test "e2e: e2e_026_stderr_mismatch (#460)" {
 test "e2e: e2e_617_show_escape (#617)" {
     try testE2e(std.testing.allocator, "e2e_617_show_escape");
 }
+
+test "e2e: e2e_show_nonascii_char (#682)" {
+    try testE2e(std.testing.allocator, "e2e_show_nonascii_char");
+}
