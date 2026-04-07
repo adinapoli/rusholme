@@ -21,6 +21,8 @@ const Io = std.Io;
 const Dir = Io.Dir;
 const File = Io.File;
 
+const clap = @import("clap");
+
 const rusholme = @import("rusholme");
 const Lexer = rusholme.frontend.lexer.Lexer;
 const LayoutProcessor = rusholme.frontend.layout.LayoutProcessor;
@@ -82,182 +84,197 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const arena_alloc = init.arena.allocator();
 
-    // Parse command-line arguments.
     const args = try init.minimal.args.toSlice(arena_alloc);
-
-    // Skip argv[0] (the program name).
     const user_args = if (args.len > 0) args[1..] else args;
 
-    if (user_args.len == 0) {
-        try printUsage(io);
+    // ── Top-level: global flags + subcommand ─────────────────────────────────
+    const top_params = comptime clap.parseParamsComptime(
+        \\-h, --help     Display this help and exit.
+        \\    --version  Display version information and exit.
+        \\<str>
+        \\
+    );
+
+    var it = clap.args.SliceIterator{ .args = user_args };
+    var diag = clap.Diagnostic{};
+    var top = clap.parseEx(clap.Help, &top_params, clap.parsers.default, &it, .{
+        .allocator = arena_alloc,
+        .diagnostic = &diag,
+        .terminating_positional = 0,
+    }) catch |err| {
+        diag.reportToFile(io, .stderr(), err) catch {};
         std.process.exit(1);
-    }
+    };
+    defer top.deinit();
 
-    const command = user_args[0];
-
-    if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
-        try printUsage(io);
+    if (top.args.help != 0) {
+        var buf: [4096]u8 = undefined;
+        var fw: File.Writer = .init(.stderr(), io, &buf);
+        try clap.help(&fw.interface, clap.Help, &top_params, .{});
+        try fw.interface.flush();
         return;
     }
 
-    if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
+    if (top.args.version != 0) {
         try printVersion(io);
         return;
     }
 
-    if (std.mem.eql(u8, command, "parse")) {
-        const cmd_args = user_args[1..];
-        if (cmd_args.len == 0) {
-            try writeStderr(io, "rhc parse: missing file argument\n");
-            try writeStderr(io, "Usage: rhc parse <file.hs>\n");
+    const subcommand = top.positionals[0] orelse {
+        var buf: [4096]u8 = undefined;
+        var fw: File.Writer = .init(.stderr(), io, &buf);
+        try clap.usage(&fw.interface, clap.Help, &top_params);
+        try fw.interface.flush();
+        std.process.exit(1);
+    };
+
+    // ── Shared params for single-file subcommands ─────────────────────────────
+    //
+    // parse, check, core, grin, ll all accept exactly one <file.hs> argument.
+    const file_params = comptime clap.parseParamsComptime(
+        \\-h, --help  Display this help and exit.
+        \\<str>
+        \\
+    );
+
+    if (std.mem.eql(u8, subcommand, "parse") or
+        std.mem.eql(u8, subcommand, "check") or
+        std.mem.eql(u8, subcommand, "core") or
+        std.mem.eql(u8, subcommand, "grin") or
+        std.mem.eql(u8, subcommand, "ll"))
+    {
+        var file_res = clap.parseEx(clap.Help, &file_params, clap.parsers.default, &it, .{
+            .allocator = arena_alloc,
+            .diagnostic = &diag,
+        }) catch |err| {
+            diag.reportToFile(io, .stderr(), err) catch {};
             std.process.exit(1);
-        }
-        const file_path = cmd_args[0];
-        try cmdParse(allocator, io, file_path);
-        return;
-    }
+        };
+        defer file_res.deinit();
 
-    if (std.mem.eql(u8, command, "check")) {
-        const cmd_args = user_args[1..];
-        if (cmd_args.len == 0) {
-            try writeStderr(io, "rhc check: missing file argument\n");
-            try writeStderr(io, "Usage: rhc check <file.hs>\n");
+        if (file_res.args.help != 0) {
+            var buf: [4096]u8 = undefined;
+            var fw: File.Writer = .init(.stderr(), io, &buf);
+            try clap.help(&fw.interface, clap.Help, &file_params, .{});
+            try fw.interface.flush();
+            return;
+        }
+
+        const file_path = file_res.positionals[0] orelse {
+            try writeStderr(io, "rhc ");
+            try writeStderr(io, subcommand);
+            try writeStderr(io, ": missing file argument\n");
             std.process.exit(1);
-        }
-        const file_path = cmd_args[0];
-        try cmdCheck(allocator, io, file_path);
-        return;
+        };
+
+        if (std.mem.eql(u8, subcommand, "parse")) return cmdParse(allocator, io, file_path);
+        if (std.mem.eql(u8, subcommand, "check")) return cmdCheck(allocator, io, file_path);
+        if (std.mem.eql(u8, subcommand, "core"))  return cmdCore(allocator, io, file_path);
+        if (std.mem.eql(u8, subcommand, "grin"))  return cmdGrin(allocator, io, file_path);
+        if (std.mem.eql(u8, subcommand, "ll"))    return cmdLl(allocator, io, file_path);
+        unreachable;
     }
 
-    if (std.mem.eql(u8, command, "core")) {
-        const cmd_args = user_args[1..];
-        if (cmd_args.len == 0) {
-            try writeStderr(io, "rhc core: missing file argument\n");
-            try writeStderr(io, "Usage: rhc core <file.hs>\n");
+    if (std.mem.eql(u8, subcommand, "repl")) {
+        const repl_params = comptime clap.parseParamsComptime(
+            \\-h, --help    Display this help and exit.
+            \\    --server  Run in JSON-RPC server mode.
+            \\
+        );
+        var repl_res = clap.parseEx(clap.Help, &repl_params, clap.parsers.default, &it, .{
+            .allocator = arena_alloc,
+            .diagnostic = &diag,
+        }) catch |err| {
+            diag.reportToFile(io, .stderr(), err) catch {};
             std.process.exit(1);
+        };
+        defer repl_res.deinit();
+
+        if (repl_res.args.help != 0) {
+            var buf: [4096]u8 = undefined;
+            var fw: File.Writer = .init(.stderr(), io, &buf);
+            try clap.help(&fw.interface, clap.Help, &repl_params, .{});
+            try fw.interface.flush();
+            return;
         }
-        const file_path = cmd_args[0];
-        try cmdCore(allocator, io, file_path);
-        return;
+        return cmdRepl(allocator, io, repl_res.args.server != 0);
     }
 
-    if (std.mem.eql(u8, command, "grin")) {
-        const cmd_args = user_args[1..];
-        if (cmd_args.len == 0) {
-            try writeStderr(io, "rhc grin: missing file argument\n");
-            try writeStderr(io, "Usage: rhc grin <file.hs>\n");
+    if (std.mem.eql(u8, subcommand, "build")) {
+        const build_params = comptime clap.parseParamsComptime(
+            \\-h, --help                   Display this help and exit.
+            \\-o, --output <str>           Output file name (default: stem of first input).
+            \\    --backend <str>          Backend: native (default), jit, wasm, c.
+            \\    --package-db <str>...    Package database path (may be repeated).
+            \\    --repl                   Compile for REPL use (internal).
+            \\<str>...
+            \\
+        );
+        var build_res = clap.parseEx(clap.Help, &build_params, clap.parsers.default, &it, .{
+            .allocator = arena_alloc,
+            .diagnostic = &diag,
+        }) catch |err| {
+            diag.reportToFile(io, .stderr(), err) catch {};
             std.process.exit(1);
-        }
-        const file_path = cmd_args[0];
-        try cmdGrin(allocator, io, file_path);
-        return;
-    }
+        };
+        defer build_res.deinit();
 
-    if (std.mem.eql(u8, command, "ll")) {
-        const cmd_args = user_args[1..];
-        if (cmd_args.len == 0) {
-            try writeStderr(io, "rhc ll: missing file argument\n");
-            try writeStderr(io, "Usage: rhc ll <file.hs>\n");
-            std.process.exit(1);
+        if (build_res.args.help != 0) {
+            var buf: [4096]u8 = undefined;
+            var fw: File.Writer = .init(.stderr(), io, &buf);
+            try clap.help(&fw.interface, clap.Help, &build_params, .{});
+            try fw.interface.flush();
+            return;
         }
-        const file_path = cmd_args[0];
-        try cmdLl(allocator, io, file_path);
-        return;
-    }
 
-    if (std.mem.eql(u8, command, "repl")) {
-        const cmd_args = user_args[1..];
-        var server_mode = false;
-        
-        // Parse flags for repl command
-        for (cmd_args) |arg| {
-            if (std.mem.eql(u8, arg, "--server")) {
-                server_mode = true;
-            }
-        }
-        
-        try cmdRepl(allocator, io, server_mode);
-        return;
-    }
-
-    if (std.mem.eql(u8, command, "build")) {
-        const cmd_args = user_args[1..];
-        if (cmd_args.len == 0) {
+        const file_paths = build_res.positionals[0];
+        if (file_paths.len == 0) {
             try writeStderr(io, "rhc build: missing file argument\n");
-            try writeStderr(io, "Usage: rhc build [--backend <kind>] [-o <output>] <file.hs> [<file2.hs> ...]\n");
             std.process.exit(1);
         }
-        // Parse optional flags: -o <output>, --backend <kind>, --repl,
-        // --package-db <path>; collect file paths.
-        var output_name: ?[]const u8 = null;
-        var file_paths: std.ArrayListUnmanaged([]const u8) = .{};
-        var package_dbs: std.ArrayListUnmanaged([]const u8) = .{};
-        var backend_kind = rusholme.backend.backend_mod.BackendKind.native;
-        var is_repl = false;
-        var i: usize = 0;
-        while (i < cmd_args.len) : (i += 1) {
-            if (std.mem.eql(u8, cmd_args[i], "-o")) {
-                i += 1;
-                if (i >= cmd_args.len) {
-                    try writeStderr(io, "rhc build: -o requires an argument\n");
-                    try writeStderr(io, "Usage: rhc build [--backend <kind>] [-o <output>] <file.hs> [<file2.hs> ...]\n");
-                    std.process.exit(1);
-                }
-                output_name = cmd_args[i];
-            } else if (std.mem.eql(u8, cmd_args[i], "--backend")) {
-                i += 1;
-                if (i >= cmd_args.len) {
-                    try writeStderr(io, "rhc build: --backend requires an argument\n");
-                    try writeStderr(io, "Usage: rhc build [--backend <kind>] [-o <output>] <file.hs> [<file2.hs> ...]\n");
-                    std.process.exit(1);
-                }
-                backend_kind = rusholme.backend.backend_mod.parseBackendKind(cmd_args[i]) orelse {
-                    var stderr_buf: [4096]u8 = undefined;
-                    var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
-                    const stderr = &stderr_fw.interface;
-                    try stderr.print("rhc build: unknown backend '{s}'\n", .{cmd_args[i]});
-                    try stderr.print("Valid backends: native, jit, wasm, c\n", .{});
-                    try stderr.flush();
-                    std.process.exit(1);
-                };
-            } else if (std.mem.eql(u8, cmd_args[i], "--package-db")) {
-                i += 1;
-                if (i >= cmd_args.len) {
-                    try writeStderr(io, "rhc build: --package-db requires an argument\n");
-                    try writeStderr(io, "Usage: rhc build [--package-db <path>] <file.hs> [<file2.hs> ...]\n");
-                    std.process.exit(1);
-                }
-                try package_dbs.append(arena_alloc, cmd_args[i]);
-            } else if (std.mem.eql(u8, cmd_args[i], "--repl")) {
-                is_repl = true;
-            } else {
-                try file_paths.append(arena_alloc, cmd_args[i]);
+
+        const backend_kind = if (build_res.args.backend) |b_str|
+            rusholme.backend.backend_mod.parseBackendKind(b_str) orelse {
+                var buf: [512]u8 = undefined;
+                var fw: File.Writer = .init(.stderr(), io, &buf);
+                try fw.interface.print(
+                    "rhc build: unknown backend '{s}'\nValid backends: native, jit, wasm, c\n",
+                    .{b_str},
+                );
+                try fw.interface.flush();
+                std.process.exit(1);
             }
-        }
-        if (file_paths.items.len == 0) {
-            try writeStderr(io, "rhc build: missing file argument\n");
-            try writeStderr(io, "Usage: rhc build [--backend <kind>] [-o <output>] <file.hs> [<file2.hs> ...]\n");
-            std.process.exit(1);
-        }
-        // Derive output name from the first file when -o is not given.
-        const out = output_name orelse std.fs.path.stem(std.fs.path.basename(file_paths.items[0]));
-        try cmdBuild(allocator, io, file_paths.items, out, backend_kind, is_repl, package_dbs.items);
-        return;
+        else
+            rusholme.backend.backend_mod.BackendKind.native;
+
+        const out = build_res.args.output orelse
+            std.fs.path.stem(std.fs.path.basename(file_paths[0]));
+
+        return cmdBuild(
+            allocator,
+            io,
+            file_paths,
+            out,
+            backend_kind,
+            build_res.args.repl != 0,
+            build_res.args.@"package-db",
+        );
     }
 
-    if (std.mem.eql(u8, command, "pkg")) {
-        const cmd_args = user_args[1..];
-        try rusholme.packages.pkg_cmd.cmdPkg(allocator, io, cmd_args);
-        return;
+    if (std.mem.eql(u8, subcommand, "pkg")) {
+        return rusholme.packages.pkg_cmd.cmdPkg(allocator, io, &it);
     }
 
     // Unknown command.
-    var stderr_buf: [4096]u8 = undefined;
-    var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
-    const stderr = &stderr_fw.interface;
-    try stderr.print("rhc: unknown command '{s}'\n", .{command});
-    try stderr.print("Run 'rhc --help' for usage information.\n", .{});
-    try stderr.flush();
+    {
+        var buf: [512]u8 = undefined;
+        var fw: File.Writer = .init(.stderr(), io, &buf);
+        try fw.interface.print(
+            "rhc: unknown command '{s}'\nRun 'rhc --help' for usage information.\n",
+            .{subcommand},
+        );
+        try fw.interface.flush();
+    }
     std.process.exit(1);
 }
 
@@ -1653,35 +1670,6 @@ fn readSourceFile(allocator: std.mem.Allocator, io: Io, path: []const u8) ![]u8 
     var read_buf: [8192]u8 = undefined;
     var rdr = file.reader(io, &read_buf);
     return try rdr.interface.allocRemaining(allocator, .limited(10 * 1024 * 1024));
-}
-
-fn printUsage(io: Io) !void {
-    var stdout_buf: [4096]u8 = undefined;
-    var stdout_fw: File.Writer = .init(.stdout(), io, &stdout_buf);
-    const stdout = &stdout_fw.interface;
-    try stdout.writeAll(
-        \\rhc — Rusholme Haskell Compiler
-        \\
-        \\Usage:
-        \\  rhc parse <file.hs>    Parse a Haskell file and pretty-print the AST
-        \\  rhc check <file.hs>    Parse, rename, and typecheck; print inferred types
-        \\  rhc core <file.hs>     Parse, typecheck, and desugar; print Core IR
-        \\  rhc grin <file.hs>     Full pipeline; print GRIN IR
-        \\  rhc ll <file.hs>       Full pipeline; emit LLVM IR
-        \\  rhc build [--backend <kind>] [-o <out>] [--package-db <path>] <file.hs>
-        \\                         Full pipeline; compile to an executable.
-        \\                         Backends: native (default), jit, wasm, c.
-        \\                         --package-db may be repeated; paths are
-        \\                         searched in order for pre-built .rhi files.
-        \\  rhc repl [--server]   Interactive REPL (read-eval-print loop)
-        \\                         Use --server for JSON-RPC protocol mode
-        \\  rhc pkg <subcommand>  Package management (list, describe, install, …)
-        \\                         Run 'rhc pkg' for subcommand help
-        \\  rhc --help             Show this help message
-        \\  rhc --version          Show version information
-        \\
-    );
-    try stdout.flush();
 }
 
 fn printVersion(io: Io) !void {
