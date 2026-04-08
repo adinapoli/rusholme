@@ -206,6 +206,20 @@ pub fn cmdPkgCheck(alloc: std.mem.Allocator, io: Io, s: *store.Store, out: *std.
 
 // ── cmdPkg ────────────────────────────────────────────────────────────────────
 
+/// All subcommands recognised by `rhc pkg`.
+const PkgSubCommand = enum {
+    list,
+    describe,
+    install,
+    unregister,
+    check,
+};
+
+/// Custom parser set that maps the `<command>` positional type to `PkgSubCommand`.
+const pkg_parsers = .{
+    .command = clap.parsers.enumeration(PkgSubCommand),
+};
+
 /// Top-level dispatcher for `rhc pkg <subcommand>`.
 ///
 /// `it` is a SliceIterator positioned at the first argument after "pkg"
@@ -213,30 +227,30 @@ pub fn cmdPkgCheck(alloc: std.mem.Allocator, io: Io, s: *store.Store, out: *std.
 pub fn cmdPkg(alloc: std.mem.Allocator, io: Io, it: *clap.args.SliceIterator) !void {
     const pkg_params = comptime clap.parseParamsComptime(
         \\-h, --help  Display this help and exit.
-        \\<str>
+        \\<command>
         \\
     );
 
-    var diag = clap.Diagnostic{};
-    var pkg = clap.parseEx(clap.Help, &pkg_params, clap.parsers.default, it, .{
+    var pkg_diag = clap.Diagnostic{};
+    var pkg = clap.parseEx(clap.Help, &pkg_params, pkg_parsers, it, .{
         .allocator = alloc,
-        .diagnostic = &diag,
+        .diagnostic = &pkg_diag,
         .terminating_positional = 0,
     }) catch |err| {
-        diag.reportToFile(io, .stderr(), err) catch {};
+        try pkg_diag.reportToFile(io, .stderr(), err);
         std.process.exit(1);
     };
     defer pkg.deinit();
 
     if (pkg.args.help != 0) {
         var buf: [4096]u8 = undefined;
-        var fw: File.Writer = .init(.stderr(), io, &buf);
+        var fw: File.Writer = .init(.stdout(), io, &buf);
         try clap.help(&fw.interface, clap.Help, &pkg_params, .{});
         try fw.interface.flush();
         return;
     }
 
-    const subcommand = pkg.positionals[0] orelse {
+    const subcommand: PkgSubCommand = pkg.positionals[0] orelse {
         var buf: [4096]u8 = undefined;
         var fw: File.Writer = .init(.stderr(), io, &buf);
         try clap.usage(&fw.interface, clap.Help, &pkg_params);
@@ -258,162 +272,147 @@ pub fn cmdPkg(alloc: std.mem.Allocator, io: Io, it: *clap.args.SliceIterator) !v
     var stdout_fw: File.Writer = .init(.stdout(), io, &stdout_buf);
     const out = &stdout_fw.interface;
 
-    if (std.mem.eql(u8, subcommand, "list")) {
-        try cmdPkgList(alloc, io, &s, out);
-        return;
-    }
+    switch (subcommand) {
+        .list => {
+            try cmdPkgList(alloc, io, &s, out);
+        },
 
-    // ── describe <name> ───────────────────────────────────────────────────────
-    if (std.mem.eql(u8, subcommand, "describe")) {
-        const desc_params = comptime clap.parseParamsComptime(
-            \\-h, --help  Display this help and exit.
-            \\<str>
-            \\
-        );
-        var desc_res = clap.parseEx(clap.Help, &desc_params, clap.parsers.default, it, .{
-            .allocator = alloc,
-            .diagnostic = &diag,
-        }) catch |err| {
-            diag.reportToFile(io, .stderr(), err) catch {};
-            std.process.exit(1);
-        };
-        defer desc_res.deinit();
+        // ── describe <name> ───────────────────────────────────────────────────
+        .describe => {
+            const desc_params = comptime clap.parseParamsComptime(
+                \\-h, --help  Display this help and exit.
+                \\<str>
+                \\
+            );
+            var desc_diag = clap.Diagnostic{};
+            var desc_res = clap.parseEx(clap.Help, &desc_params, clap.parsers.default, it, .{
+                .allocator = alloc,
+                .diagnostic = &desc_diag,
+            }) catch |err| {
+                try desc_diag.reportToFile(io, .stderr(), err);
+                std.process.exit(1);
+            };
+            defer desc_res.deinit();
 
-        if (desc_res.args.help != 0) {
-            var buf: [4096]u8 = undefined;
-            var fw: File.Writer = .init(.stderr(), io, &buf);
-            try clap.help(&fw.interface, clap.Help, &desc_params, .{});
-            try fw.interface.flush();
-            return;
-        }
-
-        const name = desc_res.positionals[0] orelse {
-            var buf: [512]u8 = undefined;
-            var fw: File.Writer = .init(.stderr(), io, &buf);
-            try fw.interface.writeAll("rhc pkg describe: missing package name\n");
-            try fw.interface.flush();
-            std.process.exit(1);
-        };
-        try cmdPkgDescribe(alloc, io, &s, name, out);
-        return;
-    }
-
-    // ── install <path> ────────────────────────────────────────────────────────
-    if (std.mem.eql(u8, subcommand, "install")) {
-        const inst_params = comptime clap.parseParamsComptime(
-            \\-h, --help  Display this help and exit.
-            \\<str>
-            \\
-        );
-        var inst_res = clap.parseEx(clap.Help, &inst_params, clap.parsers.default, it, .{
-            .allocator = alloc,
-            .diagnostic = &diag,
-        }) catch |err| {
-            diag.reportToFile(io, .stderr(), err) catch {};
-            std.process.exit(1);
-        };
-        defer inst_res.deinit();
-
-        if (inst_res.args.help != 0) {
-            var buf: [4096]u8 = undefined;
-            var fw: File.Writer = .init(.stderr(), io, &buf);
-            try clap.help(&fw.interface, clap.Help, &inst_params, .{});
-            try fw.interface.flush();
-            return;
-        }
-
-        const path = inst_res.positionals[0] orelse {
-            var buf: [512]u8 = undefined;
-            var fw: File.Writer = .init(.stderr(), io, &buf);
-            try fw.interface.writeAll("rhc pkg install: missing path to .rhc-pkg file\n");
-            try fw.interface.flush();
-            std.process.exit(1);
-        };
-        cmdPkgInstall(alloc, io, &s, path, out) catch |err| {
-            var buf: [512]u8 = undefined;
-            var fw: File.Writer = .init(.stderr(), io, &buf);
-            switch (err) {
-                error.DuplicatePackage => try fw.interface.writeAll("rhc pkg install: package already registered\n"),
-                else => try fw.interface.print("rhc pkg install: {}\n", .{err}),
+            if (desc_res.args.help != 0) {
+                var buf: [4096]u8 = undefined;
+                var fw: File.Writer = .init(.stdout(), io, &buf);
+                try clap.help(&fw.interface, clap.Help, &desc_params, .{});
+                try fw.interface.flush();
+                return;
             }
-            try fw.interface.flush();
-            std.process.exit(1);
-        };
-        return;
-    }
 
-    // ── unregister <name>-<version> ───────────────────────────────────────────
-    if (std.mem.eql(u8, subcommand, "unregister")) {
-        const unreg_params = comptime clap.parseParamsComptime(
-            \\-h, --help  Display this help and exit.
-            \\<str>
-            \\
-        );
-        var unreg_res = clap.parseEx(clap.Help, &unreg_params, clap.parsers.default, it, .{
-            .allocator = alloc,
-            .diagnostic = &diag,
-        }) catch |err| {
-            diag.reportToFile(io, .stderr(), err) catch {};
-            std.process.exit(1);
-        };
-        defer unreg_res.deinit();
+            const name = desc_res.positionals[0] orelse {
+                var buf: [512]u8 = undefined;
+                var fw: File.Writer = .init(.stderr(), io, &buf);
+                try fw.interface.writeAll("rhc pkg describe: missing package name\n");
+                try fw.interface.flush();
+                std.process.exit(1);
+            };
+            try cmdPkgDescribe(alloc, io, &s, name, out);
+        },
 
-        if (unreg_res.args.help != 0) {
-            var buf: [4096]u8 = undefined;
-            var fw: File.Writer = .init(.stderr(), io, &buf);
-            try clap.help(&fw.interface, clap.Help, &unreg_params, .{});
-            try fw.interface.flush();
-            return;
-        }
+        // ── install <path> ────────────────────────────────────────────────────
+        .install => {
+            const inst_params = comptime clap.parseParamsComptime(
+                \\-h, --help  Display this help and exit.
+                \\<str>
+                \\
+            );
+            var inst_diag = clap.Diagnostic{};
+            var inst_res = clap.parseEx(clap.Help, &inst_params, clap.parsers.default, it, .{
+                .allocator = alloc,
+                .diagnostic = &inst_diag,
+            }) catch |err| {
+                try inst_diag.reportToFile(io, .stderr(), err);
+                std.process.exit(1);
+            };
+            defer inst_res.deinit();
 
-        const name_ver = unreg_res.positionals[0] orelse {
-            var buf: [512]u8 = undefined;
-            var fw: File.Writer = .init(.stderr(), io, &buf);
-            try fw.interface.writeAll("rhc pkg unregister: missing package id\n");
-            try fw.interface.flush();
-            std.process.exit(1);
-        };
-        cmdPkgUnregister(alloc, io, &s, name_ver, out) catch |err| {
-            var buf: [512]u8 = undefined;
-            var fw: File.Writer = .init(.stderr(), io, &buf);
-            switch (err) {
-                error.PackageNotFound => try fw.interface.print(
-                    "rhc pkg unregister: package not found: {s}\n",
-                    .{name_ver},
-                ),
-                else => try fw.interface.print("rhc pkg unregister: {}\n", .{err}),
+            if (inst_res.args.help != 0) {
+                var buf: [4096]u8 = undefined;
+                var fw: File.Writer = .init(.stdout(), io, &buf);
+                try clap.help(&fw.interface, clap.Help, &inst_params, .{});
+                try fw.interface.flush();
+                return;
             }
-            try fw.interface.flush();
-            std.process.exit(1);
-        };
-        return;
-    }
 
-    // ── check ─────────────────────────────────────────────────────────────────
-    if (std.mem.eql(u8, subcommand, "check")) {
-        cmdPkgCheck(alloc, io, &s, out) catch |err| {
-            switch (err) {
-                error.CheckFailed => std.process.exit(1),
-                else => return err,
+            const path = inst_res.positionals[0] orelse {
+                var buf: [512]u8 = undefined;
+                var fw: File.Writer = .init(.stderr(), io, &buf);
+                try fw.interface.writeAll("rhc pkg install: missing path to .rhc-pkg file\n");
+                try fw.interface.flush();
+                std.process.exit(1);
+            };
+            cmdPkgInstall(alloc, io, &s, path, out) catch |err| {
+                var buf: [512]u8 = undefined;
+                var fw: File.Writer = .init(.stderr(), io, &buf);
+                switch (err) {
+                    error.DuplicatePackage => try fw.interface.writeAll("rhc pkg install: package already registered\n"),
+                    else => try fw.interface.print("rhc pkg install: {}\n", .{err}),
+                }
+                try fw.interface.flush();
+                std.process.exit(1);
+            };
+        },
+
+        // ── unregister <name>-<version> ───────────────────────────────────────
+        .unregister => {
+            const unreg_params = comptime clap.parseParamsComptime(
+                \\-h, --help  Display this help and exit.
+                \\<str>
+                \\
+            );
+            var unreg_diag = clap.Diagnostic{};
+            var unreg_res = clap.parseEx(clap.Help, &unreg_params, clap.parsers.default, it, .{
+                .allocator = alloc,
+                .diagnostic = &unreg_diag,
+            }) catch |err| {
+                try unreg_diag.reportToFile(io, .stderr(), err);
+                std.process.exit(1);
+            };
+            defer unreg_res.deinit();
+
+            if (unreg_res.args.help != 0) {
+                var buf: [4096]u8 = undefined;
+                var fw: File.Writer = .init(.stdout(), io, &buf);
+                try clap.help(&fw.interface, clap.Help, &unreg_params, .{});
+                try fw.interface.flush();
+                return;
             }
-        };
-        return;
-    }
 
-    // Unknown subcommand.
-    {
-        var buf: [512]u8 = undefined;
-        var fw: File.Writer = .init(.stderr(), io, &buf);
-        try fw.interface.print("rhc pkg: unknown subcommand '{s}'\n", .{subcommand});
-        try fw.interface.flush();
+            const name_ver = unreg_res.positionals[0] orelse {
+                var buf: [512]u8 = undefined;
+                var fw: File.Writer = .init(.stderr(), io, &buf);
+                try fw.interface.writeAll("rhc pkg unregister: missing package id\n");
+                try fw.interface.flush();
+                std.process.exit(1);
+            };
+            cmdPkgUnregister(alloc, io, &s, name_ver, out) catch |err| {
+                var buf: [512]u8 = undefined;
+                var fw: File.Writer = .init(.stderr(), io, &buf);
+                switch (err) {
+                    error.PackageNotFound => try fw.interface.print(
+                        "rhc pkg unregister: package not found: {s}\n",
+                        .{name_ver},
+                    ),
+                    else => try fw.interface.print("rhc pkg unregister: {}\n", .{err}),
+                }
+                try fw.interface.flush();
+                std.process.exit(1);
+            };
+        },
+
+        // ── check ─────────────────────────────────────────────────────────────
+        .check => {
+            cmdPkgCheck(alloc, io, &s, out) catch |err| {
+                switch (err) {
+                    error.CheckFailed => std.process.exit(1),
+                    else => return err,
+                }
+            };
+        },
     }
-    {
-        var buf: [4096]u8 = undefined;
-        var fw: File.Writer = .init(.stderr(), io, &buf);
-        try clap.usage(&fw.interface, clap.Help, &pkg_params);
-        try fw.interface.flush();
-    }
-    std.process.exit(1);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
