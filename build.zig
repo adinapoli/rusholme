@@ -110,6 +110,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
     mod.addOptions("build_options", build_options);
+    const clap_dep = b.dependency("clap", .{});
+    mod.addImport("clap", clap_dep.module("clap"));
 
     // Wire LLVM-C headers and shared library for the backend.
     // This must be called before any compilation step that transitively
@@ -361,6 +363,7 @@ pub fn build(b: *std.Build) void {
                 // can be extremely useful in case of collisions (which can happen
                 // importing modules from different packages).
                 .{ .name = "rusholme", .module = mod },
+                .{ .name = "clap", .module = clap_dep.module("clap") },
             },
         }),
     });

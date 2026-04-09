@@ -147,7 +147,7 @@
 | [#288](https://github.com/adinapoli/rusholme/issues/288) | Research: Evaluate zig-graph for dependency and analysis graphs | — | :green_circle: |
 | [#287](https://github.com/adinapoli/rusholme/issues/287) | Research: Evaluate zon2nix and zig2nix for Nix integration | — | :white_circle: |
 | [#291](https://github.com/adinapoli/rusholme/issues/291) | Research: Evaluate benchmarking libraries (zBench, poop) | — | :white_circle: |
-| [#292](https://github.com/adinapoli/rusholme/issues/292) | Research: Evaluate CLI argument parsing libraries (zig-clap, yazap, zli) | — | :white_circle: |
+| [#292](https://github.com/adinapoli/rusholme/issues/292) | Research: Evaluate CLI argument parsing libraries (zig-clap, yazap, zli) | — | :yellow_circle: |
 | [#295](https://github.com/adinapoli/rusholme/issues/295) | Research: Evaluate alternative allocators for compilation phases | — | :white_circle: |
 
 ### Epic [#3](https://github.com/adinapoli/rusholme/issues/3): Structured Error Diagnostics
