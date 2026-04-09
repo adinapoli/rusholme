@@ -56,9 +56,6 @@ const htype_mod = rusholme.tc.htype;
 
 pub const VERSION = "0.1.0";
 
-// For --version flag (maintain backwards compatibility)
-const version_display = VERSION;
-
 /// Get the path to the native RTS library baked in at compile time.
 /// Returns the path to librts.a that should be linked into native executables.
 fn getRtsLibPath() []const u8 {
@@ -108,8 +105,8 @@ pub fn main(init: std.process.Init) !void {
 
     // ── Top-level: global flags + subcommand ─────────────────────────────────
     const top_params = comptime clap.parseParamsComptime(
-        \\-h, --help     Display this help and exit.
-        \\    --version  Display version information and exit.
+        \\-h, --help        Display this help and exit.
+        \\-v, --version     Display version information and exit.
         \\<command>
         \\
     );
@@ -1685,7 +1682,7 @@ fn printVersion(io: Io) !void {
     var stdout_buf: [4096]u8 = undefined;
     var stdout_fw: File.Writer = .init(.stdout(), io, &stdout_buf);
     const stdout = &stdout_fw.interface;
-    try stdout.print("rhc {s}\n", .{version_display});
+    try stdout.print("rhc {s}\n", .{VERSION});
     try stdout.flush();
 }
 
