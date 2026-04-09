@@ -61,3 +61,6 @@ current-plan.md
 test
 current-issue.md
 .worktrees/
+docs/superpowers
+tmp
+zig-pkg
