@@ -743,15 +743,16 @@ pub fn compileProgram(
                     span_mod.SourcePos.invalid(),
                     span_mod.SourcePos.invalid(),
                 );
-                try env.diags.add(alloc, .{
+                try env.diags.emit(alloc, .{
                     .severity = .@"error",
                     .code = .module_not_found,
                     .span = zero_span,
                     .message = msg,
                 });
             }
-            // Whether or not a package-db hit was found, do not attempt
-            // to compile this module from source — skip to the next.
+            // In both cases (resolved from package-db, or not found anywhere)
+            // this module has no source entry — skip to the next without
+            // attempting source compilation.
             continue;
         }
         const m = src_map.get(mod_name).?;
@@ -1921,7 +1922,10 @@ test "compileProgram: missing import emits module_not_found diagnostic" {
     var found = false;
     for (r.env.diags.diagnostics.items) |d| {
         if (d.code == .module_not_found) {
-            try testing.expect(std.mem.indexOf(u8, d.message, "MissingLib") != null);
+            try testing.expectEqualStrings(
+                "Could not find module 'MissingLib' in source or any --package-db path",
+                d.message,
+            );
             found = true;
         }
     }
