@@ -726,11 +726,33 @@ pub fn compileProgram(
                 const empty_core = CoreProgram{ .data_decls = &.{}, .binds = &.{} };
                 try env.register(mod_name, iface, empty_core);
             }
-            // Module not found in source or package-db; no diagnostic yet.
-            // tracked in: https://github.com/adinapoli/rusholme/issues/687
-            //
-            // Whether or not a package-db hit was found, do not attempt
-            // to compile this module from source — skip to the next.
+            // Module not found in source or any package-db: emit a structured
+            // diagnostic so the user gets a clear "Could not find module" error
+            // instead of spurious downstream "unbound variable" messages.
+            else {
+                const msg = try std.fmt.allocPrint(
+                    alloc,
+                    "Could not find module '{s}' in source or any --package-db path",
+                    .{mod_name},
+                );
+                // The span points to the invalid position because the topo loop
+                // works on module names, not import declarations. Attaching the
+                // real import span is tracked in:
+                // https://github.com/adinapoli/rusholme/issues/699
+                const zero_span = span_mod.SourceSpan.init(
+                    span_mod.SourcePos.invalid(),
+                    span_mod.SourcePos.invalid(),
+                );
+                try env.diags.emit(alloc, .{
+                    .severity = .@"error",
+                    .code = .module_not_found,
+                    .span = zero_span,
+                    .message = msg,
+                });
+            }
+            // In both cases (resolved from package-db, or not found anywhere)
+            // this module has no source entry — skip to the next without
+            // attempting source compilation.
             continue;
         }
         const m = src_map.get(mod_name).?;
@@ -1871,4 +1893,41 @@ test "tryLoadFromPackageDbs: returns null when no .rhi file exists" {
     const tmp_path = try std.Io.Dir.realPathFileAlloc(tmp.dir, io, ".", alloc);
     const result = try tryLoadFromPackageDbs(alloc, io, "NoSuchModule", &.{tmp_path});
     try testing.expect(result == null);
+}
+
+test "compileProgram: missing import emits module_not_found diagnostic" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const io = testing.io;
+
+    // App imports MissingLib which is not provided as source or in any package-db.
+    const source =
+        \\module App where
+        \\import MissingLib
+        \\answer :: Int
+        \\answer = 42
+        \\
+    ;
+    var r = try compileProgram(alloc, io, &.{.{
+        .module_name = "App",
+        .source = source,
+        .file_id = 1,
+    }}, &.{});
+    defer r.env.deinit();
+
+    try testing.expect(r.result.had_errors);
+
+    // At least one diagnostic must be module_not_found for "MissingLib".
+    var found = false;
+    for (r.env.diags.diagnostics.items) |d| {
+        if (d.code == .module_not_found) {
+            try testing.expectEqualStrings(
+                "Could not find module 'MissingLib' in source or any --package-db path",
+                d.message,
+            );
+            found = true;
+        }
+    }
+    try testing.expect(found);
 }
