@@ -66,6 +66,11 @@
               echo "   lli:      $(lli --version 2>&1 | head -n1 || echo 'not found')"
               echo ""
               export REPLXX_PREFIX="${pkgs.replxx}"
+              # On non-NixOS systems (e.g. Ubuntu CI runners), ensure subprocesses
+              # spawned from this shell (including the compiled rhc binary) resolve
+              # shared libraries against the Nix store rather than the system glibc,
+              # which may be older and lack symbols required by Nix's glibc.
+              export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.glibc ]}:''${LD_LIBRARY_PATH:-}"
             '';
           };
 
