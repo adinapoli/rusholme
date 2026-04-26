@@ -1985,9 +1985,9 @@ pub const GrinTranslator = struct {
 
             // ── F-tag cases: force thunk ─────────────────────────────────
             // Collect all incoming phi values: entry_bb→pre_forced, ind_bb→ind_target, plus each ftag_bb→result.
-            var phi_incoming_vals = std.ArrayListUnmanaged(llvm.Value){};
+            var phi_incoming_vals = std.ArrayListUnmanaged(llvm.Value).empty;
             defer phi_incoming_vals.deinit(self.allocator);
-            var phi_incoming_bbs = std.ArrayListUnmanaged(llvm.BasicBlock){};
+            var phi_incoming_bbs = std.ArrayListUnmanaged(llvm.BasicBlock).empty;
             defer phi_incoming_bbs.deinit(self.allocator);
 
             // First two: entry (pre-forced) and ind.
@@ -2366,9 +2366,9 @@ pub const GrinTranslator = struct {
             const ind_target = c.LLVMBuildIntToPtr(self.builder, ind_target_i64, ptrType(), "ind.ptr");
             _ = c.LLVMBuildBr(self.builder, eval_bb);
 
-            var phi_incoming_vals = std.ArrayListUnmanaged(llvm.Value){};
+            var phi_incoming_vals = std.ArrayListUnmanaged(llvm.Value).empty;
             defer phi_incoming_vals.deinit(self.allocator);
-            var phi_incoming_bbs = std.ArrayListUnmanaged(llvm.BasicBlock){};
+            var phi_incoming_bbs = std.ArrayListUnmanaged(llvm.BasicBlock).empty;
             defer phi_incoming_bbs.deinit(self.allocator);
 
             // Entry uses pre-forced value so external __rhc_force result feeds in.
@@ -2530,9 +2530,9 @@ pub const GrinTranslator = struct {
         }
 
         // ── 4. Emit alternatives and collect values for phi ────────────────
-        var phi_values = std.ArrayListUnmanaged(llvm.Value){};
+        var phi_values = std.ArrayListUnmanaged(llvm.Value).empty;
         defer phi_values.deinit(self.allocator);
-        var phi_blocks = std.ArrayListUnmanaged(llvm.BasicBlock){};
+        var phi_blocks = std.ArrayListUnmanaged(llvm.BasicBlock).empty;
         defer phi_blocks.deinit(self.allocator);
 
         for (alts, 0..) |alt, i| {
@@ -2872,9 +2872,9 @@ pub const GrinTranslator = struct {
         _ = c.LLVMBuildBr(self.builder, eval_bb);
 
         // ── Phi incoming values ────────────────────────────────────────
-        var phi_vals = std.ArrayListUnmanaged(llvm.Value){};
+        var phi_vals = std.ArrayListUnmanaged(llvm.Value).empty;
         defer phi_vals.deinit(self.allocator);
-        var phi_bbs = std.ArrayListUnmanaged(llvm.BasicBlock){};
+        var phi_bbs = std.ArrayListUnmanaged(llvm.BasicBlock).empty;
         defer phi_bbs.deinit(self.allocator);
 
         phi_vals.append(self.allocator, param) catch return error.OutOfMemory;
@@ -3057,9 +3057,9 @@ pub const GrinTranslator = struct {
         _ = c.LLVMBuildBr(self.builder, eval_bb);
 
         // ── Collect phi incoming values ────────────────────────────────
-        var phi_vals = std.ArrayListUnmanaged(llvm.Value){};
+        var phi_vals = std.ArrayListUnmanaged(llvm.Value).empty;
         defer phi_vals.deinit(self.allocator);
-        var phi_bbs = std.ArrayListUnmanaged(llvm.BasicBlock){};
+        var phi_bbs = std.ArrayListUnmanaged(llvm.BasicBlock).empty;
         defer phi_bbs.deinit(self.allocator);
 
         phi_vals.append(self.allocator, llvm_val) catch return error.OutOfMemory;

@@ -34,7 +34,7 @@ The shell prints the toolchain versions on entry:
 
 ```
 🍛 Rusholme dev environment loaded
-   Zig:  0.16.0-dev.2611+f996d2866
+   Zig:  0.16.0
    LLVM: 19.1.7
 ```
 

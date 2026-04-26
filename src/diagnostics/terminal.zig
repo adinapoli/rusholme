@@ -404,7 +404,7 @@ pub const TerminalRenderer = struct {
 
 /// Parse a file's content into lines.
 fn parseLines(allocator: std.mem.Allocator, content: []const u8) ![][]const u8 {
-    var lines: std.ArrayListUnmanaged([]const u8) = .{};
+    var lines: std.ArrayListUnmanaged([]const u8) = .empty;
 
     var start: usize = 0;
     for (content, 0..) |byte, i| {

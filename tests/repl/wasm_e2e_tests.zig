@@ -115,7 +115,7 @@ fn hasError(allocator: std.mem.Allocator, line: []const u8) !bool {
 
 /// Split stdout into non-empty lines.
 fn splitLines(allocator: std.mem.Allocator, text: []const u8) ![][]const u8 {
-    var lines: std.ArrayListUnmanaged([]const u8) = .{};
+    var lines: std.ArrayListUnmanaged([]const u8) = .empty;
     var iter = std.mem.splitScalar(u8, text, '\n');
     while (iter.next()) |line| {
         if (line.len > 0) {

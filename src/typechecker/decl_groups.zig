@@ -205,7 +205,7 @@ pub fn computeDeclGroups(
     // Step 1: Collect top-level value binder uniques → vertex index.
     var unique_to_vertex = UniqueSet{};
     defer unique_to_vertex.deinit(alloc);
-    var vertex_to_decl = std.ArrayListUnmanaged(u32){};
+    var vertex_to_decl = std.ArrayListUnmanaged(u32).empty;
     defer vertex_to_decl.deinit(alloc);
     var unique_to_idx = std.AutoHashMapUnmanaged(u64, u32){};
     defer unique_to_idx.deinit(alloc);
@@ -232,7 +232,7 @@ pub fn computeDeclGroups(
 
     // Step 2: Build adjacency list.
     var edges = try alloc.alloc(std.ArrayListUnmanaged(u32), n);
-    for (0..n) |i| edges[i] = .{};
+    for (0..n) |i| edges[i] = .empty;
     defer {
         for (edges) |*e| e.deinit(alloc);
         alloc.free(edges);
@@ -250,7 +250,7 @@ pub fn computeDeclGroups(
         const src_vertex = if (src_unique) |su| unique_to_idx.get(su) else null;
         if (src_vertex == null) continue;
 
-        var refs = std.ArrayListUnmanaged(u64){};
+        var refs = std.ArrayListUnmanaged(u64).empty;
         defer refs.deinit(alloc);
         try collectDeclVarRefs(decl, &unique_to_vertex, &refs, alloc);
 
@@ -277,7 +277,7 @@ pub fn computeDeclGroups(
 
     // Step 4: Convert SCCs to DeclGroups.
     // Tarjan emits SCCs in reverse topological order (leaves first).
-    var groups = std.ArrayListUnmanaged(DeclGroup){};
+    var groups = std.ArrayListUnmanaged(DeclGroup).empty;
     for (sccs) |scc| {
         const decl_indices = try alloc.alloc(u32, scc.len);
         var is_recursive = scc.len > 1;
@@ -323,11 +323,11 @@ fn tarjanScc(
         .alloc = alloc,
         .edges = edges,
         .index_counter = 0,
-        .stack = .{},
+        .stack = .empty,
         .on_stack = try alloc.alloc(bool, n),
         .indices = try alloc.alloc(i64, n),
         .lowlinks = try alloc.alloc(u32, n),
-        .sccs = .{},
+        .sccs = .empty,
     };
     defer {
         state.stack.deinit(alloc);
@@ -363,7 +363,7 @@ fn tarjanVisit(s: *TarjanState, v: u32) std.mem.Allocator.Error!void {
     }
 
     if (s.lowlinks[v] == @as(u32, @intCast(s.indices[v]))) {
-        var scc = std.ArrayListUnmanaged(u32){};
+        var scc = std.ArrayListUnmanaged(u32).empty;
         while (true) {
             const w = s.stack.pop().?;
             s.on_stack[w] = false;

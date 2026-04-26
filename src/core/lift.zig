@@ -676,7 +676,7 @@ pub fn lambdaLift(alloc: std.mem.Allocator, program: core.CoreProgram, external_
     const top_level_slice = try lifter.top_level_vars.toSlice(alloc);
 
     // Phase 3: Generate lifted function bindings.
-    var lifted_binds = std.ArrayListUnmanaged(Bind){};
+    var lifted_binds = std.ArrayListUnmanaged(Bind).empty;
     defer lifted_binds.deinit(alloc);
 
     var it = lifter.lambdas.iterator();
@@ -752,7 +752,7 @@ pub fn lambdaLift(alloc: std.mem.Allocator, program: core.CoreProgram, external_
     // those inner lambdas are registered in Phase 2 but their pointers
     // inside the Phase 3 bodies are never rewritten unless we explicitly
     // pass them through rewriteExpr here.
-    var new_binds = std.ArrayListUnmanaged(Bind){};
+    var new_binds = std.ArrayListUnmanaged(Bind).empty;
     defer new_binds.deinit(alloc);
 
     for (program.binds) |bind| {

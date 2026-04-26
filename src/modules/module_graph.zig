@@ -68,8 +68,8 @@ pub const ModuleGraph = struct {
         return .{
             .alloc = alloc,
             .indices = .{},
-            .names = .{},
-            .edges = .{},
+            .names = .empty,
+            .edges = .empty,
         };
     }
 
@@ -86,7 +86,7 @@ pub const ModuleGraph = struct {
         const idx: u32 = @intCast(self.names.items.len);
         const owned = try self.alloc.dupe(u8, name);
         try self.names.append(self.alloc, owned);
-        try self.edges.append(self.alloc, .{});
+        try self.edges.append(self.alloc, .empty);
         try self.indices.put(self.alloc, owned, idx);
         return idx;
     }
@@ -157,7 +157,7 @@ pub fn topoSort(
         for (rev) |*r| r.deinit(alloc);
         alloc.free(rev);
     }
-    @memset(rev, .{});
+    @memset(rev, .empty);
 
     // in_degree[u] = number of modules u imports = out-degree in original graph.
     const in_degree = try alloc.alloc(u32, n);
@@ -173,14 +173,14 @@ pub fn topoSort(
     }
 
     // ── Initialise queue with zero-dependency vertices ──────────────────
-    var queue: std.ArrayListUnmanaged(u32) = .{};
+    var queue: std.ArrayListUnmanaged(u32) = .empty;
     defer queue.deinit(alloc);
     for (in_degree, 0..) |deg, i| {
         if (deg == 0) try queue.append(alloc, @intCast(i));
     }
 
     // ── Kahn's main loop ────────────────────────────────────────────────
-    var order: std.ArrayListUnmanaged([]const u8) = .{};
+    var order: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer order.deinit(alloc);
 
     while (queue.items.len > 0) {
@@ -222,7 +222,7 @@ pub fn topoSort(
             }
 
             // Build a human-readable cycle description.
-            var msg_buf: std.ArrayListUnmanaged(u8) = .{};
+            var msg_buf: std.ArrayListUnmanaged(u8) = .empty;
             defer msg_buf.deinit(alloc);
             try msg_buf.appendSlice(alloc, "import cycle detected: ");
             for (scc, 0..) |v, i| {
@@ -264,11 +264,11 @@ fn tarjanScc(graph: *const ModuleGraph, alloc: std.mem.Allocator) std.mem.Alloca
         .alloc = alloc,
         .graph = graph,
         .index_counter = 0,
-        .stack = .{},
+        .stack = .empty,
         .on_stack = try alloc.alloc(bool, n),
         .indices = try alloc.alloc(i64, n),
         .lowlinks = try alloc.alloc(u32, n),
-        .sccs = .{},
+        .sccs = .empty,
     };
     defer {
         state.stack.deinit(alloc);
@@ -317,7 +317,7 @@ fn tarjanVisit(s: *TarjanState, v: u32) std.mem.Allocator.Error!void {
 
     // Root of an SCC.
     if (s.lowlinks[v] == @as(u32, @intCast(s.indices[v]))) {
-        var scc: std.ArrayListUnmanaged(u32) = .{};
+        var scc: std.ArrayListUnmanaged(u32) = .empty;
         while (true) {
             const w = s.stack.pop().?;
             s.on_stack[w] = false;
@@ -358,12 +358,12 @@ pub fn discoverModules(
     search_paths: []const []const u8,
 ) std.mem.Allocator.Error!struct { graph: ModuleGraph, modules: []DiscoveredModule } {
     var graph = ModuleGraph.init(alloc);
-    var discovered: std.ArrayListUnmanaged(DiscoveredModule) = .{};
+    var discovered: std.ArrayListUnmanaged(DiscoveredModule) = .empty;
     var visited_files: std.StringHashMapUnmanaged(void) = .{};
     defer visited_files.deinit(alloc);
 
     // Work-list: (module_name, file_path) pairs to process.
-    var worklist: std.ArrayListUnmanaged(struct { name: []const u8, path: []const u8 }) = .{};
+    var worklist: std.ArrayListUnmanaged(struct { name: []const u8, path: []const u8 }) = .empty;
     defer worklist.deinit(alloc);
 
     const root_name = try inferModuleName(alloc, root_path);
@@ -422,7 +422,7 @@ fn parseImportHeaders(alloc: std.mem.Allocator, file_path: []const u8) std.mem.A
     var parser = parser_mod.Parser.init(alloc, &layout, &dummy_diags) catch return &.{};
     const module = parser.parseModule() catch return &.{};
 
-    var names: std.ArrayListUnmanaged([]const u8) = .{};
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
     for (module.imports) |imp| {
         try names.append(alloc, try alloc.dupe(u8, imp.module_name));
     }

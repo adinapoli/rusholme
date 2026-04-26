@@ -1135,7 +1135,7 @@ pub const GrinEvaluator = struct {
     /// Walk a (:)-list of Chars and produce a []const u8 string.
     /// Forces thunks in head and tail positions as needed.
     fn charListToString(self: *GrinEvaluator, list_val: Val) EvalError![]const u8 {
-        var buf = std.ArrayListUnmanaged(u8){};
+        var buf = std.ArrayListUnmanaged(u8).empty;
         var current = list_val;
         while (true) {
             switch (current) {
