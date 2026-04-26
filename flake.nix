@@ -19,7 +19,7 @@
 
         # Shared toolchain used by both dev shells
         zigToolchain = with pkgs; [
-          zigpkgs.master          # latest Zig nightly (matches 0.16.0-dev)
+          zigpkgs."0.16.0"        # pinned stable release
           llvmPackages_19.llvm    # LLVM for future backend work
           llvmPackages_19.lld     # LLVM linker
         ];

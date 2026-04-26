@@ -95,7 +95,7 @@ pub const JsonRenderer = struct {
 
         const path = self.path_lookup.get(diag.span.start.file_id) orelse "<unknown>";
 
-        var notes: std.ArrayListUnmanaged(JsonNote) = .{};
+        var notes: std.ArrayListUnmanaged(JsonNote) = .empty;
 
         for (diag.notes) |note| {
             var json_note: JsonNote = .{ .message = note.message };
@@ -140,7 +140,7 @@ pub const JsonRenderer = struct {
     ///
     /// Caller owns the returned string and must free it with the allocator.
     pub fn renderAll(self: JsonRenderer, diagnostics: []const Diagnostic) ![]const u8 {
-        var json_diags: std.ArrayListUnmanaged(JsonDiagnostic) = .{};
+        var json_diags: std.ArrayListUnmanaged(JsonDiagnostic) = .empty;
 
         for (diagnostics) |diag| {
             const severity_str = switch (diag.severity) {
@@ -152,7 +152,7 @@ pub const JsonRenderer = struct {
 
             const path = self.path_lookup.get(diag.span.start.file_id) orelse "<unknown>";
 
-            var notes: std.ArrayListUnmanaged(JsonNote) = .{};
+            var notes: std.ArrayListUnmanaged(JsonNote) = .empty;
 
             for (diag.notes) |note| {
                 var json_note: JsonNote = .{ .message = note.message };

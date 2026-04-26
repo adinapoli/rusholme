@@ -677,7 +677,7 @@ pub fn rename(module: ast.Module, env: *RenameEnv) !RenamedModule {
     }
 
     // ── Pass 2: rename declaration bodies ──────────────────────────────
-    var rdecls = std.ArrayListUnmanaged(RDecl){};
+    var rdecls = std.ArrayListUnmanaged(RDecl).empty;
     for (module.declarations) |decl| {
         if (try renameDecl(decl, env, &top_names)) |rd| {
             try rdecls.append(env.alloc, rd);
@@ -703,7 +703,7 @@ fn renameDecl(
         .FunBind => |fb| blk: {
             // The name was already bound in pass 1; look it up.
             const name = env.scope.lookup(fb.name) orelse env.freshName(fb.name);
-            var equations = std.ArrayListUnmanaged(RMatch){};
+            var equations = std.ArrayListUnmanaged(RMatch).empty;
             for (fb.equations) |eq| {
                 try equations.append(env.alloc, try renameMatch(eq, env));
             }
@@ -724,7 +724,7 @@ fn renameDecl(
             } };
         },
         .TypeSig => |ts| blk: {
-            var rnames = std.ArrayListUnmanaged(Name){};
+            var rnames = std.ArrayListUnmanaged(Name).empty;
             for (ts.names) |src_name| {
                 // Type signature names refer to already-bound top-level binders.
                 const dummy_span = ts.span;
@@ -760,7 +760,7 @@ fn renameDecl(
             const tyvar = env.freshName(tyvar_name);
 
             // Rename superclass constraints.
-            var ras = std.ArrayListUnmanaged(RAssertion){};
+            var ras = std.ArrayListUnmanaged(RAssertion).empty;
             if (cd.context) |ctx_| {
                 for (ctx_.constraints) |assertion| {
                     const class_n = try env.resolve(assertion.class_name, cd.span);
@@ -772,11 +772,11 @@ fn renameDecl(
             }
 
             // Rename methods.
-            var rms = std.ArrayListUnmanaged(RClassMethod){};
+            var rms = std.ArrayListUnmanaged(RClassMethod).empty;
             for (cd.methods) |m| {
                 const method_name = env.scope.lookup(m.name) orelse env.freshName(m.name);
                 const default_impl: ?[]const RMatch = if (m.default_implementation) |defs| impl_blk: {
-                    var renames = std.ArrayListUnmanaged(RMatch){};
+                    var renames = std.ArrayListUnmanaged(RMatch).empty;
                     for (defs) |def| {
                         try renames.append(env.alloc, try renameMatch(def, env));
                     }
@@ -813,7 +813,7 @@ fn renameDecl(
             const instance_type = decomposed.instance_type;
 
             // Rename context constraints.
-            var ras = std.ArrayListUnmanaged(RAssertion){};
+            var ras = std.ArrayListUnmanaged(RAssertion).empty;
             if (inst.context) |ctx_| {
                 for (ctx_.constraints) |assertion| {
                     const class_n = try env.resolve(assertion.class_name, inst.span);
@@ -825,10 +825,10 @@ fn renameDecl(
             }
 
             // Rename instance bindings.
-            var rbs = std.ArrayListUnmanaged(RInstanceBinding){};
+            var rbs = std.ArrayListUnmanaged(RInstanceBinding).empty;
             for (inst.bindings) |fb| {
                 const binding_name = env.scope.lookup(fb.name) orelse env.freshName(fb.name);
-                var reqs = std.ArrayListUnmanaged(RMatch){};
+                var reqs = std.ArrayListUnmanaged(RMatch).empty;
                 for (fb.equations) |eq| {
                     try reqs.append(env.alloc, try renameMatch(eq, env));
                 }
@@ -849,7 +849,7 @@ fn renameDecl(
         },
         .Data => |dd| blk: {
             const data_name = env.scope.lookup(dd.name) orelse env.freshName(dd.name);
-            var rcons = std.ArrayListUnmanaged(RConDecl){};
+            var rcons = std.ArrayListUnmanaged(RConDecl).empty;
             var selectors = std.StringHashMapUnmanaged(RSelectorInfo){};
 
             // Validate that field names are unique across all constructors.
@@ -985,7 +985,7 @@ fn renameMatch(match: ast.Match, env: *RenameEnv) RenameError!RMatch {
     try env.scope.push();
     defer env.scope.pop();
 
-    var pats = std.ArrayListUnmanaged(RPat){};
+    var pats = std.ArrayListUnmanaged(RPat).empty;
     for (match.patterns) |p| {
         try pats.append(env.alloc, try renamePat(p, env));
     }
@@ -1031,7 +1031,7 @@ fn renameWhereClause(
     }
 
     // Rename the declarations.
-    var rdecls = std.ArrayListUnmanaged(RDecl){};
+    var rdecls = std.ArrayListUnmanaged(RDecl).empty;
     var top: std.StringHashMapUnmanaged(Name) = .{};
     defer top.deinit(env.alloc);
     for (wc) |d| {
@@ -1049,7 +1049,7 @@ fn wrapRhsWithLet(alloc: std.mem.Allocator, rhs: RRhs, binds: []const RDecl) RRh
         .Guarded => |grhs_list| guarded_blk: {
             // Each guarded RHS expression gets wrapped with the where-clause
             // bindings, so the typechecker and desugarer see them as lets.
-            var new_grhs = std.ArrayListUnmanaged(RGuardedRhs){};
+            var new_grhs = std.ArrayListUnmanaged(RGuardedRhs).empty;
             for (grhs_list) |g| {
                 new_grhs.append(alloc, .{
                     .guards = g.guards,
@@ -1071,9 +1071,9 @@ fn renameRhs(rhs: ast.Rhs, env: *RenameEnv) RenameError!RRhs {
     return switch (rhs) {
         .UnGuarded => |e| RRhs{ .UnGuarded = try renameExpr(e, env) },
         .Guarded => |grhs_list| guarded_blk: {
-            var rgrhs = std.ArrayListUnmanaged(RGuardedRhs){};
+            var rgrhs = std.ArrayListUnmanaged(RGuardedRhs).empty;
             for (grhs_list) |g| {
-                var guards = std.ArrayListUnmanaged(RGuard){};
+                var guards = std.ArrayListUnmanaged(RGuard).empty;
                 for (g.guards) |guard| {
                     switch (guard) {
                         .ExprGuard => |ge| try guards.append(env.alloc, .{ .ExprGuard = try renameExpr(ge, env) }),
@@ -1149,8 +1149,8 @@ fn renameExpr(expr: ast.Expr, env: *RenameEnv) RenameError!RExpr {
         .Lambda => |lam| blk: {
             try env.scope.push();
             defer env.scope.pop();
-            var params = std.ArrayListUnmanaged(Name){};
-            var param_spans = std.ArrayListUnmanaged(SourceSpan){};
+            var params = std.ArrayListUnmanaged(Name).empty;
+            var param_spans = std.ArrayListUnmanaged(SourceSpan).empty;
             for (lam.patterns) |p| {
                 try collectPatBindersToScope(p, env, &params, &param_spans);
             }
@@ -1175,7 +1175,7 @@ fn renameExpr(expr: ast.Expr, env: *RenameEnv) RenameError!RExpr {
                     else => {},
                 }
             }
-            var rdecls = std.ArrayListUnmanaged(RDecl){};
+            var rdecls = std.ArrayListUnmanaged(RDecl).empty;
             var top: std.StringHashMapUnmanaged(Name) = .{};
             defer top.deinit(env.alloc);
             for (let.binds) |d| {
@@ -1193,7 +1193,7 @@ fn renameExpr(expr: ast.Expr, env: *RenameEnv) RenameError!RExpr {
         .Case => |c| blk: {
             const scr_r = try env.alloc.create(RExpr);
             scr_r.* = try renameExpr(c.scrutinee.*, env);
-            var alts = std.ArrayListUnmanaged(RAlt){};
+            var alts = std.ArrayListUnmanaged(RAlt).empty;
             for (c.alts) |alt| {
                 try alts.append(env.alloc, try renameAlt(alt, env));
             }
@@ -1244,19 +1244,19 @@ fn renameExpr(expr: ast.Expr, env: *RenameEnv) RenameError!RExpr {
         .Do => |stmts| blk: {
             try env.scope.push();
             defer env.scope.pop();
-            var rstmts = std.ArrayListUnmanaged(RStmt){};
+            var rstmts = std.ArrayListUnmanaged(RStmt).empty;
             for (stmts) |stmt| {
                 try rstmts.append(env.alloc, try renameStmt(stmt, env));
             }
             break :blk RExpr{ .Do = try rstmts.toOwnedSlice(env.alloc) };
         },
         .Tuple => |elems| blk: {
-            var relems = std.ArrayListUnmanaged(RExpr){};
+            var relems = std.ArrayListUnmanaged(RExpr).empty;
             for (elems) |e| try relems.append(env.alloc, try renameExpr(e, env));
             break :blk RExpr{ .Tuple = try relems.toOwnedSlice(env.alloc) };
         },
         .List => |elems| blk: {
-            var relems = std.ArrayListUnmanaged(RExpr){};
+            var relems = std.ArrayListUnmanaged(RExpr).empty;
             for (elems) |e| try relems.append(env.alloc, try renameExpr(e, env));
             break :blk RExpr{ .List = try relems.toOwnedSlice(env.alloc) };
         },
@@ -1314,7 +1314,7 @@ fn renameExpr(expr: ast.Expr, env: *RenameEnv) RenameError!RExpr {
         },
         .RecordCon => |rc| blk: {
             const con_name = try env.resolve(rc.con.name, rc.con.span);
-            var rfields = std.ArrayListUnmanaged(RFieldUpdate){};
+            var rfields = std.ArrayListUnmanaged(RFieldUpdate).empty;
             for (rc.fields) |f| {
                 const rexpr = try renameExpr(f.expr, env);
                 try rfields.append(env.alloc, .{ .field_name = f.field_name, .expr = rexpr });
@@ -1324,7 +1324,7 @@ fn renameExpr(expr: ast.Expr, env: *RenameEnv) RenameError!RExpr {
         .RecordUpdate => |ru| blk: {
             const rec_r = try env.alloc.create(RExpr);
             rec_r.* = try renameExpr(ru.expr.*, env);
-            var rfields = std.ArrayListUnmanaged(RFieldUpdate){};
+            var rfields = std.ArrayListUnmanaged(RFieldUpdate).empty;
             for (ru.fields) |f| {
                 const rexpr = try renameExpr(f.expr, env);
                 try rfields.append(env.alloc, .{ .field_name = f.field_name, .expr = rexpr });
@@ -1381,7 +1381,7 @@ fn renameStmt(stmt: ast.Stmt, env: *RenameEnv) RenameError!RStmt {
                     try env.scope.bind(d.FunBind.name, n);
                 }
             }
-            var rdecls = std.ArrayListUnmanaged(RDecl){};
+            var rdecls = std.ArrayListUnmanaged(RDecl).empty;
             var top: std.StringHashMapUnmanaged(Name) = .{};
             defer top.deinit(env.alloc);
             for (decls) |d| {
@@ -1406,7 +1406,7 @@ fn renamePat(pat: ast.Pattern, env: *RenameEnv) RenameError!RPat {
         },
         .Con => |c| blk: {
             const con_name = try env.resolve(c.name.name, c.name.span);
-            var args = std.ArrayListUnmanaged(RPat){};
+            var args = std.ArrayListUnmanaged(RPat).empty;
             for (c.args) |a| try args.append(env.alloc, try renamePat(a, env));
             break :blk RPat{ .Con = .{
                 .name = con_name,
@@ -1424,12 +1424,12 @@ fn renamePat(pat: ast.Pattern, env: *RenameEnv) RenameError!RPat {
             break :blk RPat{ .AsPat = .{ .name = n, .span = ap.name_span, .pat = inner } };
         },
         .Tuple => |t| blk: {
-            var rpats = std.ArrayListUnmanaged(RPat){};
+            var rpats = std.ArrayListUnmanaged(RPat).empty;
             for (t.patterns) |p| try rpats.append(env.alloc, try renamePat(p, env));
             break :blk RPat{ .Tuple = try rpats.toOwnedSlice(env.alloc) };
         },
         .List => |l| blk: {
-            var rpats = std.ArrayListUnmanaged(RPat){};
+            var rpats = std.ArrayListUnmanaged(RPat).empty;
             for (l.patterns) |p| try rpats.append(env.alloc, try renamePat(p, env));
             break :blk RPat{ .List = try rpats.toOwnedSlice(env.alloc) };
         },
@@ -1470,7 +1470,7 @@ fn renamePat(pat: ast.Pattern, env: *RenameEnv) RenameError!RPat {
         },
         .RecPat => |rp| blk: {
             const con_name = try env.resolve(rp.con.name, rp.con.span);
-            var rfields = std.ArrayListUnmanaged(RFieldPat){};
+            var rfields = std.ArrayListUnmanaged(RFieldPat).empty;
             for (rp.fields) |f| {
                 var rpat: ?*RPat = null;
                 if (f.pat) |p| {

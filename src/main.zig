@@ -910,7 +910,7 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     const arena_alloc = arena.allocator();
 
     const compile_env_mod = rusholme.modules.compile_env;
-    var source_modules: std.ArrayListUnmanaged(compile_env_mod.SourceModule) = .{};
+    var source_modules: std.ArrayListUnmanaged(compile_env_mod.SourceModule) = .empty;
 
     // ── Auto-prepend Prelude unless the user explicitly passed it ────────
     // Check if any user-provided file is the Prelude module.
@@ -991,7 +991,7 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     // Collect all top-level binding uniques across all modules so that the
     // lambda lifter for any single module treats cross-module references as
     // globally in-scope (not free variables).
-    var all_binding_ids = std.ArrayListUnmanaged(u64){};
+    var all_binding_ids = std.ArrayListUnmanaged(u64).empty;
     {
         var prog_it = session.programs.valueIterator();
         while (prog_it.next()) |prog| {
@@ -1017,7 +1017,7 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     var cross_module_con_map = std.AutoHashMapUnmanaged(u64, u32){};
     defer cross_module_con_map.deinit(arena_alloc);
 
-    var per_module_grin = std.ArrayListUnmanaged(rusholme.grin.ast.Program){};
+    var per_module_grin = std.ArrayListUnmanaged(rusholme.grin.ast.Program).empty;
     // Thread the lifted-function name counter across modules so that each
     // module's lifted functions get globally unique LLVM symbol names.
     var next_lift_id: u64 = 0;
@@ -1046,7 +1046,7 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     // ── Build merged GRIN for global tag table ──────────────────────────
     // The tag table must cover constructors from ALL modules because module B
     // may pattern-match on a constructor introduced in module A.
-    var all_grin_defs = std.ArrayListUnmanaged(rusholme.grin.ast.Def){};
+    var all_grin_defs = std.ArrayListUnmanaged(rusholme.grin.ast.Def).empty;
     for (per_module_grin.items) |prog| {
         try all_grin_defs.appendSlice(arena_alloc, prog.defs);
     }
@@ -1113,7 +1113,7 @@ fn emitNative(
 
     // Translate each module to a separate LLVM module and emit its bitcode.
     // Per-module .bc files are durable artifacts (kept after linking).
-    var llvm_modules = std.ArrayListUnmanaged(llvm.Module){};
+    var llvm_modules = std.ArrayListUnmanaged(llvm.Module).empty;
     for (module_order, per_module_grin) |mod_name, grin_prog| {
         const llvm_mod = translator.translateModuleGrin(mod_name, grin_prog) catch |err| {
             var stderr_buf: [4096]u8 = undefined;
@@ -1272,7 +1272,7 @@ fn emitJit(
     defer translator.deinit();
 
     // ── Per-module LLVM translation ───────────────────────────────────────
-    var llvm_modules = std.ArrayListUnmanaged(llvm.Module){};
+    var llvm_modules = std.ArrayListUnmanaged(llvm.Module).empty;
     for (module_order, per_module_grin) |mod_name, grin_prog| {
         const llvm_mod = translator.translateModuleGrin(mod_name, grin_prog) catch |err| {
             var stderr_buf: [4096]u8 = undefined;
@@ -1438,7 +1438,7 @@ fn emitWasm(
     // ── Per-module LLVM translation ───────────────────────────────────────
     // For WASM, we translate each module separately (like native) and then
     // merge the bitcode before emission to WASI binary format.
-    var llvm_modules = std.ArrayListUnmanaged(llvm.Module){};
+    var llvm_modules = std.ArrayListUnmanaged(llvm.Module).empty;
     for (module_order, per_module_grin) |mod_name, grin_prog| {
         const llvm_mod = translator.translateModuleGrin(mod_name, grin_prog) catch |err| {
             var stderr_buf: [4096]u8 = undefined;
@@ -1617,7 +1617,7 @@ fn renderMultiFileDiagnostics(
 /// lambda lifter treats imported/Prelude names as globally in-scope rather
 /// than capturing them as free variables of nested lambdas.
 fn collectExternalScope(alloc: std.mem.Allocator, module_types: *const infer_mod.ModuleTypes) ![]const u64 {
-    var ids = std.ArrayListUnmanaged(u64){};
+    var ids = std.ArrayListUnmanaged(u64).empty;
     var it = module_types.schemes.iterator();
     while (it.next()) |entry| {
         try ids.append(alloc, entry.key_ptr.value);

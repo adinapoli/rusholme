@@ -212,10 +212,10 @@ pub fn desugarModule(
     // can look up dictionary evidence for each variable use site.
     try buildEvidenceMap(&ctx);
 
-    var binds = std.ArrayListUnmanaged(ast_mod.Bind){};
+    var binds = std.ArrayListUnmanaged(ast_mod.Bind).empty;
     errdefer binds.deinit(alloc);
 
-    var data_decls = std.ArrayListUnmanaged(ast_mod.CoreDataDecl){};
+    var data_decls = std.ArrayListUnmanaged(ast_mod.CoreDataDecl).empty;
     errdefer data_decls.deinit(alloc);
 
     // Pass 1: Process class and instance declarations first.
@@ -1390,7 +1390,7 @@ fn findEvidenceForVar(
 ) std.mem.Allocator.Error![]const *const solver_mod.DictEvidence {
     if (scheme.constraints.len == 0) return &.{};
 
-    var result = std.ArrayListUnmanaged(*const solver_mod.DictEvidence){};
+    var result = std.ArrayListUnmanaged(*const solver_mod.DictEvidence).empty;
     for (scheme.constraints) |constraint| {
         const key = DesugarCtx.EvidenceKey{
             .var_unique = var_unique,
@@ -1581,7 +1581,7 @@ fn buildPrimOpWrapper(
     span: SourceSpan,
 ) !ast_mod.Bind {
     // Collect parameter types by walking the FunTy chain.
-    var param_types = std.ArrayListUnmanaged(ast_mod.CoreType){};
+    var param_types = std.ArrayListUnmanaged(ast_mod.CoreType).empty;
     defer param_types.deinit(alloc);
     var result_ty = core_ty;
     // Skip ForAllTy wrappers.
@@ -1892,7 +1892,7 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
             // desugars to either Rec binds or nested NonRec binds.
             // For M1, we'll assume mutually recursive and build a Rec block for all FunBinds.
             // Real desugarer would dependency-analyse.
-            var pairs = std.ArrayListUnmanaged(ast_mod.BindPair){};
+            var pairs = std.ArrayListUnmanaged(ast_mod.BindPair).empty;
             defer pairs.deinit(alloc);
 
             for (let_blk.binds) |bd| {

@@ -531,8 +531,8 @@ pub const CompileEnv = struct {
         alloc: std.mem.Allocator,
         module_order: []const []const u8,
     ) std.mem.Allocator.Error!CoreProgram {
-        var all_data: std.ArrayListUnmanaged(core_ast.CoreDataDecl) = .{};
-        var all_binds: std.ArrayListUnmanaged(core_ast.Bind) = .{};
+        var all_data: std.ArrayListUnmanaged(core_ast.CoreDataDecl) = .empty;
+        var all_binds: std.ArrayListUnmanaged(core_ast.Bind) = .empty;
 
         for (module_order) |name| {
             const prog = self.programs.get(name) orelse continue;
@@ -759,7 +759,7 @@ pub fn compileProgram(
 
         // Collect dep fingerprints in import-declaration order.
         // dep_fps items are arena-allocated; no explicit free needed.
-        var dep_fps: std.ArrayListUnmanaged(u64) = .{};
+        var dep_fps: std.ArrayListUnmanaged(u64) = .empty;
         if (env.parsed_modules.get(mod_name)) |pm| {
             for (pm.imports) |imp| {
                 if (env.ifaces.get(imp.module_name)) |dep_iface| {
@@ -1100,7 +1100,7 @@ fn conTypeToScheme(
     alloc: std.mem.Allocator,
     hty: htype_mod.HType,
 ) std.mem.Allocator.Error!env_mod.TyScheme {
-    var binders = std.ArrayListUnmanaged(u64){};
+    var binders = std.ArrayListUnmanaged(u64).empty;
     // We never free this — all allocations live on the arena.
 
     // Peel outer ForAll nodes, collecting binder unique IDs.
@@ -1131,8 +1131,8 @@ fn serialiseClassEnvIntoIface(
     iface: *mod_iface.ModIface,
     class_env: *const ClassEnv,
 ) std.mem.Allocator.Error!void {
-    var class_list: std.ArrayListUnmanaged(mod_iface.SerialisedClassInfo) = .{};
-    var inst_list: std.ArrayListUnmanaged(mod_iface.SerialisedInstanceInfo) = .{};
+    var class_list: std.ArrayListUnmanaged(mod_iface.SerialisedClassInfo) = .empty;
+    var inst_list: std.ArrayListUnmanaged(mod_iface.SerialisedInstanceInfo) = .empty;
 
     var class_it = class_env.classes.iterator();
     while (class_it.next()) |entry| {

@@ -63,7 +63,7 @@ pub fn evaluate(allocator: Allocator, session: *Session, input: []const u8) !Pro
     // Delegate to Session.eval which handles expression vs declaration
     const session_result = session.eval(input) catch |err| {
         // On error, return error status with diagnostics
-        var diags = session.getDiagnosticsForInput(allocator, input) catch &.{};
+        const diags = session.getDiagnosticsForInput(allocator, input) catch &.{};
 
         // Build error result - if no diagnostics, capture what we can from the error
         if (diags.len > 0) {
@@ -105,7 +105,7 @@ pub fn getDiagnostics(session: *Session) []const Diagnostic {
 pub fn typeOf(allocator: Allocator, session: *Session, input: []const u8) !ProtocolResult {
     const query_result = typequery.typeOf(allocator, session, input) catch |err| {
         // On error, return error status with diagnostics
-        var diags = session.getDiagnosticsForInput(allocator, input) catch &.{};
+        const diags = session.getDiagnosticsForInput(allocator, input) catch &.{};
 
         // Get the first diagnostic's error message (or fall back to error name)
         if (diags.len > 0) {

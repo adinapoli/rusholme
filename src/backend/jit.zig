@@ -40,7 +40,7 @@ pub fn buildRuntimeBitcode(allocator: std.mem.Allocator, output_path: []const u8
     try argv_slice.append(allocator, "-M");
     try argv_slice.append(allocator, output_path);
 
-    var result = try std.process.run(allocator, undefined, .{
+    const result = try std.process.run(allocator, undefined, .{
         .argv = argv_slice.items,
     });
     defer allocator.free(result.stdout);
@@ -63,7 +63,7 @@ pub fn linkBitcode(allocator: std.mem.Allocator, haskell_bc: []const u8, zig_bc:
     try argv_slice.append(allocator, "-o");
     try argv_slice.append(allocator, output_path);
 
-    var result = try std.process.run(allocator, undefined, .{
+    const result = try std.process.run(allocator, undefined, .{
         .argv = argv_slice.items,
     });
     defer allocator.free(result.stdout);
@@ -138,7 +138,7 @@ const link_run = struct {
         _ = backend;
 
         // Check lli is available on PATH
-        var which_result = try std.process.run(std.heap.page_allocator, undefined, .{
+        const which_result = try std.process.run(std.heap.page_allocator, undefined, .{
             .argv = &.{ "which", "lli" },
         });
         defer std.heap.page_allocator.free(which_result.stdout);

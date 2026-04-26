@@ -121,7 +121,7 @@ pub const DiagnosticCollector = struct {
 
     pub fn init() DiagnosticCollector {
         return .{
-            .diagnostics = .{},
+            .diagnostics = .empty,
         };
     }
 

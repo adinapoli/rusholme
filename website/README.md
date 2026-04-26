@@ -44,7 +44,7 @@ npx serve .                            # serve on http://localhost:3000
 
 ### Without Nix
 
-Prerequisites: Zig (0.16.0-dev), Node.js (v18+), npm.
+Prerequisites: Zig (0.16.0), Node.js (v18+), npm.
 
 ```bash
 zig build
