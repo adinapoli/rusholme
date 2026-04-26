@@ -407,7 +407,7 @@ pub fn buildModIface(
     module_types: *const ModuleTypes,
 ) std.mem.Allocator.Error!ModIface {
     // ── Collect exported value bindings ─────────────────────────────────
-    var values: std.ArrayListUnmanaged(ExportedValue) = .{};
+    var values: std.ArrayListUnmanaged(ExportedValue) = .empty;
 
     for (core_prog.binds) |bind| {
         switch (bind) {
@@ -427,13 +427,13 @@ pub fn buildModIface(
     }
 
     // ── Collect exported data declarations ──────────────────────────────
-    var data_decls: std.ArrayListUnmanaged(ExportedDataDecl) = .{};
+    var data_decls: std.ArrayListUnmanaged(ExportedDataDecl) = .empty;
 
     for (core_prog.data_decls) |dd| {
         if (!isTypeExported(dd.name, export_list)) continue;
 
         // Collect data constructors.
-        var cons: std.ArrayListUnmanaged(DataCon) = .{};
+        var cons: std.ArrayListUnmanaged(DataCon) = .empty;
         for (dd.constructors) |con| {
             // Only include constructors that are also exported.
             // When the export spec lists `T(..)`, all constructors are

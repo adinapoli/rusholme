@@ -371,7 +371,7 @@ const RigidSubst = []const RigidSubstEntry;
 ///
 /// Returns `null` if the types don't match.
 fn matchInstanceHead(alloc: std.mem.Allocator, ty: HType, head: HType) ?RigidSubst {
-    var subst = std.ArrayListUnmanaged(RigidSubstEntry){};
+    var subst = std.ArrayListUnmanaged(RigidSubstEntry).empty;
     if (matchInstanceHeadInner(alloc, ty.chase(), head.chase(), &subst)) {
         return subst.toOwnedSlice(alloc) catch return null;
     } else {

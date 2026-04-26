@@ -113,7 +113,7 @@ const TranslateCtx = struct {
     // Lambda-lifted helper functions generated during translation.
     // Non-App complex expressions in constructor arguments are lifted into
     // helper functions so they can be suspended as F-tagged thunks (issue #518).
-    lifted_defs: std.ArrayListUnmanaged(GrinDef) = .{},
+    lifted_defs: std.ArrayListUnmanaged(GrinDef) = .empty,
     // Cache for translated Core expressions, preserving pointer sharing.
     // The sequential pattern-match desugarer creates shared fallback nodes
     // (a DAG).  Without this cache, each shared node produces a separate
@@ -562,7 +562,7 @@ pub fn translateProgram(
         }
     }
 
-    var defs = std.ArrayListUnmanaged(GrinDef){};
+    var defs = std.ArrayListUnmanaged(GrinDef).empty;
     defer defs.deinit(alloc);
 
     // Process each top-level binding into a GRIN Def.
@@ -615,7 +615,7 @@ pub fn translateProgram(
 /// Translate a single Core binding to a GRIN definition.
 fn translateDef(ctx: *TranslateCtx, pair: CoreBindPair) !GrinDef {
     const name = try ctx.mapBinder(&pair.binder);
-    var params = std.ArrayListUnmanaged(GrinName){};
+    var params = std.ArrayListUnmanaged(GrinName).empty;
     defer params.deinit(ctx.alloc);
 
     // Collect all lambda parameters from the binding chain.
@@ -804,7 +804,7 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
     // Collect the function and all arguments from the application chain.
     // Core App is left-associative: f x y = ((f x) y)
     // We walk left collecting arguments, then reverse them.
-    var args = std.ArrayListUnmanaged(*const CoreExpr){};
+    var args = std.ArrayListUnmanaged(*const CoreExpr).empty;
     defer args.deinit(ctx.alloc);
 
     var current: *const CoreExpr = app_expr;
@@ -971,7 +971,7 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
     //   arg <- g x
     //   f arg
 
-    var pending_binds = std.ArrayListUnmanaged(PendingBind){};
+    var pending_binds = std.ArrayListUnmanaged(PendingBind).empty;
     defer pending_binds.deinit(ctx.alloc);
 
     var grin_args = try ctx.alloc.alloc(GrinVal, args.items.len);
@@ -1447,7 +1447,7 @@ fn wrapWithLazyBindsForCon(
 
     // Partition pending_binds: App expressions become lazy thunks,
     // everything else stays eager.
-    var eager_binds = std.ArrayListUnmanaged(PendingBind){};
+    var eager_binds = std.ArrayListUnmanaged(PendingBind).empty;
     defer eager_binds.deinit(ctx.alloc);
 
     var result = inner;
@@ -1506,7 +1506,7 @@ fn wrapWithLazyBindsForCon(
 
                     // Filter: remove top-level functions and constructors
                     // (they are global, not captured in the thunk).
-                    var free_vars = std.ArrayListUnmanaged(GrinName){};
+                    var free_vars = std.ArrayListUnmanaged(GrinName).empty;
                     defer free_vars.deinit(ctx.alloc);
 
                     var fv_iter = free_set.iterator();
@@ -2180,7 +2180,7 @@ pub fn generateEvalApply(alloc: std.mem.Allocator, program: GrinProgram) !GrinPr
     defer tag_info.deinit(alloc);
 
     // Create a new program with all existing defs plus eval and apply
-    var new_defs = std.ArrayListUnmanaged(GrinDef){};
+    var new_defs = std.ArrayListUnmanaged(GrinDef).empty;
     defer new_defs.deinit(alloc);
 
     // Copy all existing definitions
@@ -2228,7 +2228,7 @@ fn generateEvalFunc(alloc: std.mem.Allocator, tag_info: *const TagInfo) !GrinDef
     result_var.* = .{ .base = "result", .unique = .{ .value = eval_unique + 2 } };
 
     // Create alternatives for all tags
-    var alts = std.ArrayListUnmanaged(GrinAlt){};
+    var alts = std.ArrayListUnmanaged(GrinAlt).empty;
     defer alts.deinit(alloc);
 
     // Add C-tag alternatives (constructors - already evaluated)

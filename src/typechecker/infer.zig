@@ -146,7 +146,7 @@ pub const InferCtx = struct {
 
     /// Accumulated class constraints from polymorphic scheme instantiation.
     /// Filled during inference (Var case) and solved at the end of `inferModule`.
-    wanted_constraints: std.ArrayListUnmanaged(solver_mod.Constraint) = .{},
+    wanted_constraints: std.ArrayListUnmanaged(solver_mod.Constraint) = .empty,
 
     pub fn init(
         alloc: std.mem.Allocator,
@@ -376,7 +376,7 @@ pub fn generalisePtr(
     defer ty_metas.deinit(ctx.alloc);
     try collectFreeMetas(ty_node.*, &ty_metas, ctx.alloc);
 
-    var binder_ids = std.ArrayListUnmanaged(u64){};
+    var binder_ids = std.ArrayListUnmanaged(u64).empty;
 
     // Map from meta ID → rigid type, so we can substitute in constraints.
     var meta_to_rigid = std.AutoHashMapUnmanaged(u32, *HType){};
@@ -402,7 +402,7 @@ pub fn generalisePtr(
     // metavar copies. Those copies share the same .id as the metas in
     // the type, but are separate structs — solveMetaInTree doesn't reach
     // them. We match by meta ID and substitute the rigid type.
-    var constraints = std.ArrayListUnmanaged(ClassConstraint){};
+    var constraints = std.ArrayListUnmanaged(ClassConstraint).empty;
     for (ctx.wanted_constraints.items) |wc| {
         switch (wc) {
             .Class => |cc| {
@@ -526,7 +526,7 @@ fn astTypeToHTypeWithScope(
             }
 
             // Convert remaining parts as arguments
-            var args = std.ArrayListUnmanaged(HType){};
+            var args = std.ArrayListUnmanaged(HType).empty;
             for (parts[1..]) |arg| {
                 const arg_p = try astTypeToHTypeWithScope(arg.*, ctx, scope);
                 try args.append(ctx.alloc, ctx.conArgIndirection(arg_p));
@@ -542,7 +542,7 @@ fn astTypeToHTypeWithScope(
         },
         .Tuple => |parts| blk: {
             // Convert each part to HType
-            var elem_tys = std.ArrayListUnmanaged(HType){};
+            var elem_tys = std.ArrayListUnmanaged(HType).empty;
             for (parts) |part| {
                 const ty = try astTypeToHTypeWithScope(part.*, ctx, scope);
                 try elem_tys.append(ctx.alloc, ctx.conArgIndirection(ty));
@@ -574,7 +574,7 @@ fn astTypeToHTypeWithScope(
             // rigid names.  Then wrap the body in nested ForAll nodes.
             //
             // Step 1: Create rigid names and populate scope.
-            var binder_names = std.ArrayListUnmanaged(Name){};
+            var binder_names = std.ArrayListUnmanaged(Name).empty;
             for (fa.tyvars) |tv| {
                 const rigid_name = ctx.u_supply.freshName(tv);
                 const rigid_node = try ctx.alloc_ty(HType{ .Rigid = rigid_name });
@@ -665,7 +665,7 @@ fn skolemiseSignature(
     ast_ty: @import("../frontend/ast.zig").Type,
     ctx: *InferCtx,
 ) std.mem.Allocator.Error!SkolemiseResult {
-    var skolem_ids = std.ArrayListUnmanaged(u64){};
+    var skolem_ids = std.ArrayListUnmanaged(u64).empty;
     var scope = TypeVarMap{};
     defer scope.deinit(ctx.alloc);
 
@@ -684,7 +684,7 @@ fn skolemiseSignature(
                 // (e.g. `Show a => [a] -> String` without explicit forall).
                 // Collect free type variables from both context and body
                 // as implicit forall binders (Haskell 2010 §4.1.2).
-                var free_vars = std.ArrayListUnmanaged([]const u8){};
+                var free_vars = std.ArrayListUnmanaged([]const u8).empty;
                 defer free_vars.deinit(ctx.alloc);
                 try collectFreeTypeVars(fa.type.*, &free_vars, ctx.alloc);
                 if (fa.context) |fctx| {
@@ -726,7 +726,7 @@ fn skolemiseSignature(
         else => {
             // No explicit forall: collect free type variables as implicit forall
             // (Haskell 2010 §4.1.2: `f :: a -> a` means `f :: forall a. a -> a`).
-            var free_vars = std.ArrayListUnmanaged([]const u8){};
+            var free_vars = std.ArrayListUnmanaged([]const u8).empty;
             defer free_vars.deinit(ctx.alloc);
             try collectFreeTypeVars(ast_ty, &free_vars, ctx.alloc);
 
@@ -769,7 +769,7 @@ fn convertContextToConstraints(
     const ctx_ = context orelse return &.{};
     if (ctx_.constraints.len == 0) return &.{};
 
-    var result = std.ArrayListUnmanaged(ClassConstraint){};
+    var result = std.ArrayListUnmanaged(ClassConstraint).empty;
     for (ctx_.constraints) |assertion| {
         // Look up the class name in ClassEnv to get the resolved Name.
         const class_info = ctx.class_env.lookupClassByBaseName(assertion.class_name) orelse
@@ -823,7 +823,7 @@ fn collectFreeTypeVars(
         .Paren => |inner| try collectFreeTypeVars(inner.*, out, alloc),
         .Forall => |fa| {
             // Collect from the body, then remove any that are bound by this forall.
-            var inner = std.ArrayListUnmanaged([]const u8){};
+            var inner = std.ArrayListUnmanaged([]const u8).empty;
             defer inner.deinit(alloc);
             try collectFreeTypeVars(fa.type.*, &inner, alloc);
             for (inner.items) |v| {
@@ -951,7 +951,7 @@ pub fn inferPat(ctx: *InferCtx, pat: RPat) std.mem.Allocator.Error!*HType {
                 );
                 break :blk try ctx.recoverWithFreshMeta(msg, c.con_span);
             };
-            var inst_res = try scheme.instantiate(ctx.alloc, ctx.mv_supply);
+            const inst_res = try scheme.instantiate(ctx.alloc, ctx.mv_supply);
             var inst_ty = try ctx.alloc_ty(inst_res.ty);
 
             for (c.args) |arg_pat| {
@@ -971,7 +971,7 @@ pub fn inferPat(ctx: *InferCtx, pat: RPat) std.mem.Allocator.Error!*HType {
                 break :blk ctx.freshMeta();
             }
 
-            var elem_tys = std.ArrayListUnmanaged(HType){};
+            var elem_tys = std.ArrayListUnmanaged(HType).empty;
             for (pats) |p| {
                 const pt = try inferPat(ctx, p);
                 try elem_tys.append(ctx.alloc, ctx.conArgIndirection(pt));
@@ -1165,7 +1165,7 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
             try ctx.env.push();
             defer ctx.env.pop();
 
-            var param_tys = std.ArrayListUnmanaged(*HType){};
+            var param_tys = std.ArrayListUnmanaged(*HType).empty;
             for (lam.params) |param| {
                 const ty = try ctx.freshMeta();
                 try ctx.env.bindMono(param, ty.*);
@@ -1383,7 +1383,7 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                 break :blk ctx.freshMeta();
             }
 
-            var elem_tys = std.ArrayListUnmanaged(HType){};
+            var elem_tys = std.ArrayListUnmanaged(HType).empty;
             for (elems) |e| {
                 const et = try infer(ctx, e);
                 try elem_tys.append(ctx.alloc, ctx.conArgIndirection(et));
@@ -1863,7 +1863,7 @@ fn inferMatch(ctx: *InferCtx, match: RMatch) std.mem.Allocator.Error!*HType {
     try ctx.env.push();
     defer ctx.env.pop();
 
-    var param_tys = std.ArrayListUnmanaged(*HType){};
+    var param_tys = std.ArrayListUnmanaged(*HType).empty;
     for (match.patterns) |pat| {
         try param_tys.append(ctx.alloc, try inferPat(ctx, pat));
     }
@@ -2002,7 +2002,7 @@ pub fn inferModule(
 
                 // Pre-populate scope: collect free type variables from the
                 // instance head and context, mapping each to a fresh Rigid.
-                var tyvars = std.ArrayListUnmanaged([]const u8){};
+                var tyvars = std.ArrayListUnmanaged([]const u8).empty;
                 defer tyvars.deinit(ctx.alloc);
                 try collectFreeTypeVars(id_decl.instance_type, &tyvars, ctx.alloc);
                 for (id_decl.context) |assertion| {
@@ -2118,10 +2118,10 @@ pub fn inferModule(
                 var scope_dd = TypeVarMap{};
                 defer scope_dd.deinit(ctx.alloc);
 
-                var tyvar_ids = std.ArrayListUnmanaged(u64){};
+                var tyvar_ids = std.ArrayListUnmanaged(u64).empty;
                 defer tyvar_ids.deinit(ctx.alloc);
 
-                var ty_args = std.ArrayListUnmanaged(HType){};
+                var ty_args = std.ArrayListUnmanaged(HType).empty;
                 defer ty_args.deinit(ctx.alloc);
 
                 for (dd.tyvars) |tv| {
@@ -2383,7 +2383,7 @@ pub fn inferModule(
     };
     ctx.local_binders = .{}; // Ownership passed to ModuleTypes
     ctx.class_env = ClassEnv.init(ctx.alloc); // Ownership passed to ModuleTypes
-    ctx.wanted_constraints = .{}; // Ownership passed to ModuleTypes
+    ctx.wanted_constraints = .empty; // Ownership passed to ModuleTypes
 
     var it = top_metas.iterator();
     while (it.next()) |entry| {
@@ -2471,7 +2471,7 @@ pub const ModuleTypes = struct {
     class_env: ClassEnv,
     /// Solved class constraints with evidence.
     /// The desugarer reads these to know which dictionary to pass at each call site.
-    wanted_constraints: std.ArrayListUnmanaged(solver_mod.Constraint) = .{},
+    wanted_constraints: std.ArrayListUnmanaged(solver_mod.Constraint) = .empty,
 
     pub fn deinit(self: *ModuleTypes, alloc: std.mem.Allocator) void {
         self.schemes.deinit(alloc);

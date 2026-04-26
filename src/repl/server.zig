@@ -204,8 +204,8 @@ pub const ReplServer = struct {
         defer parsed.deinit();
 
         // Build a data object: {"diagnostics": [...]}
-        var data_obj = std.json.ObjectMap.init(self.allocator);
-        try data_obj.put("diagnostics", parsed.value);
+        var data_obj = try std.json.ObjectMap.init(self.allocator, &.{}, &.{});
+        try data_obj.put(self.allocator, "diagnostics", parsed.value);
 
         const response = jsonrpc_mod.Response{
             .jsonrpc = "2.0",

@@ -305,7 +305,7 @@ pub const TagRegistry = struct {
 
     /// Ensure intermediate partial tags exist for the apply function.
     fn registerIntermediatePartialTags(self: *TagRegistry, alloc: std.mem.Allocator) !void {
-        var to_add = std.ArrayListUnmanaged(struct { tag: grin.Tag, n_fields: u32 }){};
+        var to_add = std.ArrayListUnmanaged(struct { tag: grin.Tag, n_fields: u32 }).empty;
         defer to_add.deinit(alloc);
 
         var iter = self.partial_tag_info.iterator();

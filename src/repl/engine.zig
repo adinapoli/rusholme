@@ -163,7 +163,7 @@ fn formatConstTagNode(
 /// Try to format a (:)-list as a quoted string.  Returns null if
 /// any element is not a Char literal (e.g. an unforced thunk).
 fn tryFormatCharList(allocator: Allocator, ctn: anytype) ?[]const u8 {
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     buf.append(allocator, '"') catch return null;
     var current_fields = ctn.fields;
     while (true) {

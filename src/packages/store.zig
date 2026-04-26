@@ -158,7 +158,7 @@ pub const Store = struct {
 
     /// List all packages in the store.
     pub fn list(self: *const Store, io: std.Io) Error![]const Entry {
-        var entries: std.ArrayListUnmanaged(Entry) = .{};
+        var entries: std.ArrayListUnmanaged(Entry) = .empty;
         errdefer {
             for (entries.items) |e| e.deinit(self.allocator);
             entries.deinit(self.allocator);

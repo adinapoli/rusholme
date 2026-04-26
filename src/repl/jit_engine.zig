@@ -632,7 +632,7 @@ fn formatList(allocator: Allocator, head_node: *const rts_node.Node, tags: Known
         return formatCharList(allocator, head_node, cons_disc, nil_disc);
     }
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     try buf.append(allocator, '[');
 
     var current: *const rts_node.Node = head_node;
@@ -709,7 +709,7 @@ fn isCharList(head_node: *const rts_node.Node, cons_disc: i64, nil_disc: i64) bo
 
 /// Format a [Char] list as a quoted string: "hello".
 fn formatCharList(allocator: Allocator, head_node: *const rts_node.Node, cons_disc: i64, nil_disc: i64) Allocator.Error![]const u8 {
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     try buf.append(allocator, '"');
 
     var current: *const rts_node.Node = head_node;

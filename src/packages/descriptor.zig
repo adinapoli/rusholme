@@ -79,7 +79,7 @@ pub const Error = error{
 ///
 /// The caller owns the returned slice and must free it with `alloc.free`.
 pub fn format(desc: PackageDescriptor, alloc: std.mem.Allocator) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .{};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(alloc);
 
     try buf.appendSlice(alloc, "name    = ");
@@ -191,7 +191,7 @@ const Parser = struct {
     fn parseQuotedString(self: *Parser) Error![]const u8 {
         try self.consumeChar('"');
 
-        var buf: std.ArrayListUnmanaged(u8) = .{};
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
         errdefer buf.deinit(self.alloc);
 
         while (true) {
@@ -223,7 +223,7 @@ const Parser = struct {
     fn parseStringList(self: *Parser) Error![]const []const u8 {
         try self.consumeChar('[');
 
-        var list: std.ArrayListUnmanaged([]const u8) = .{};
+        var list: std.ArrayListUnmanaged([]const u8) = .empty;
         errdefer {
             for (list.items) |s| self.alloc.free(s);
             list.deinit(self.alloc);
