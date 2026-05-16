@@ -99,15 +99,7 @@ fn tryParse(allocator: std.mem.Allocator, comptime path: []const u8) !bool {
 
     _ = parser.parseModule() catch return false;
 
-    const has_errors = diags.hasErrors();
-    if (has_errors) {
-        const errors = try diags.getAll(aa);
-        std.debug.print("  Diagnostics for {s}:\n", .{path});
-        for (errors) |err| {
-            std.debug.print("    {s}\n", .{err.message});
-        }
-    }
-    return !has_errors;
+    return !diags.hasErrors();
 }
 
 // ── should_compile ────────────────────────────────────────────────────────
