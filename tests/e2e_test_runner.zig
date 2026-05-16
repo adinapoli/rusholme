@@ -136,6 +136,7 @@ fn runTest(
     comptime stdout_ref_path: []const u8,
     expected_exit: u8,
     expected_stderr: ?[]const u8,
+    quiet: bool,
 ) !bool {
     const io = std.testing.io;
     const rhc_path = e2e_options.rhc_path;
@@ -162,12 +163,14 @@ fn runTest(
 
     switch (compile_result.term) {
         .exited => |code| if (code != 0) {
-            std.debug.print("  [e2e] compile failed (exit {d}):\n", .{code});
-            printIndented(compile_result.stderr);
+            if (!quiet) {
+                std.debug.print("  [e2e] compile failed (exit {d}):\n", .{code});
+                printIndented(compile_result.stderr);
+            }
             return false;
         },
         else => {
-            std.debug.print("  [e2e] compile terminated abnormally\n", .{});
+            if (!quiet) std.debug.print("  [e2e] compile terminated abnormally\n", .{});
             return false;
         },
     }
@@ -183,7 +186,7 @@ fn runTest(
     const actual_exit: u8 = switch (run_result.term) {
         .exited => |code| @intCast(code),
         else => {
-            std.debug.print("  [e2e] binary terminated abnormally\n", .{});
+            if (!quiet) std.debug.print("  [e2e] binary terminated abnormally\n", .{});
             return false;
         },
     };
@@ -195,7 +198,7 @@ fn runTest(
 
     // ── Step 4: Assert stdout ─────────────────────────────────────────────────
     if (!std.mem.eql(u8, run_result.stdout, expected_stdout)) {
-        std.debug.print(
+        if (!quiet) std.debug.print(
             "  [e2e] stdout mismatch:\n  expected: {s}  actual:   {s}\n",
             .{ expected_stdout, run_result.stdout },
         );
@@ -204,7 +207,7 @@ fn runTest(
 
     // ── Step 5: Assert exit code ──────────────────────────────────────────────
     if (actual_exit != expected_exit) {
-        std.debug.print(
+        if (!quiet) std.debug.print(
             "  [e2e] exit code mismatch: expected {d}, got {d}\n",
             .{ expected_exit, actual_exit },
         );
@@ -214,11 +217,13 @@ fn runTest(
     // ── Step 6: Assert stderr (when expected_stderr is set) ───────────────────
     if (expected_stderr) |exp| {
         if (!std.mem.eql(u8, run_result.stderr, exp)) {
-            std.debug.print("  [e2e] stderr mismatch:\n", .{});
-            std.debug.print("  expected:\n", .{});
-            printIndented(exp);
-            std.debug.print("  actual:\n", .{});
-            printIndented(run_result.stderr);
+            if (!quiet) {
+                std.debug.print("  [e2e] stderr mismatch:\n", .{});
+                std.debug.print("  expected:\n", .{});
+                printIndented(exp);
+                std.debug.print("  actual:\n", .{});
+                printIndented(run_result.stderr);
+            }
             return false;
         }
     }
@@ -242,6 +247,7 @@ fn testE2e(allocator: std.mem.Allocator, comptime basename: []const u8) !void {
         stdout_ref_path,
         props.exit_code,
         props.expected_stderr,
+        props.xfail,
     );
 
     if (props.xfail) {
