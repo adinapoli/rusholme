@@ -432,3 +432,7 @@ test "e2e: e2e_617_show_escape (#617)" {
 test "e2e: e2e_show_nonascii_char (#682)" {
     try testE2e(std.testing.allocator, "e2e_show_nonascii_char");
 }
+
+test "e2e: e2e_679_deriving_eq (#679)" {
+    try testE2e(std.testing.allocator, "e2e_679_deriving_eq");
+}

@@ -51,6 +51,7 @@ const TerminalRenderer = rusholme.diagnostics.terminal.TerminalRenderer;
 const DiagnosticCollector = rusholme.diagnostics.diagnostic.DiagnosticCollector;
 const FileId = rusholme.FileId;
 const renamer_mod = rusholme.renamer.renamer;
+const deriving_mod = rusholme.deriving.deriving;
 const infer_mod = rusholme.tc.infer;
 const htype_mod = rusholme.tc.htype;
 
@@ -383,7 +384,7 @@ fn cmdCheck(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
         std.process.exit(1);
     };
 
-    const module = parser.parseModule() catch {
+    var module = parser.parseModule() catch {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
     };
@@ -417,6 +418,7 @@ fn cmdCheck(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
         prelude_result = loadPrelude(arena_alloc, io, &pipeline_check, &u_supply, &rename_env, &ty_env, &mv_supply, &diags) catch null;
     }
 
+    try deriving_mod.derive(arena_alloc, &module, &diags);
     const renamed = try renamer_mod.rename(module, &rename_env);
 
     if (diags.hasErrors()) {
@@ -491,7 +493,7 @@ fn cmdCore(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
     };
-    const module = parser.parseModule() catch {
+    var module = parser.parseModule() catch {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
     };
@@ -518,6 +520,7 @@ fn cmdCore(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
         prelude_result = loadPrelude(arena_alloc, io, &pipeline_core, &u_supply, &rename_env, &ty_env, &mv_supply, &diags) catch null;
     }
 
+    try deriving_mod.derive(arena_alloc, &module, &diags);
     const renamed = try renamer_mod.rename(module, &rename_env);
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
@@ -591,7 +594,7 @@ fn cmdGrin(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
     };
-    const module = parser.parseModule() catch {
+    var module = parser.parseModule() catch {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
     };
@@ -619,6 +622,7 @@ fn cmdGrin(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
         prelude_result = loadPrelude(arena_alloc, io, &pipeline_grin, &u_supply, &rename_env, &ty_env, &mv_supply, &diags) catch null;
     }
 
+    try deriving_mod.derive(arena_alloc, &module, &diags);
     const renamed = try renamer_mod.rename(module, &rename_env);
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
@@ -709,7 +713,7 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
     };
-    const module = parser.parseModule() catch {
+    var module = parser.parseModule() catch {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
     };
@@ -737,6 +741,7 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
         prelude_result = loadPrelude(arena_alloc, io, &pipeline_ll, &u_supply, &rename_env, &ty_env, &mv_supply, &diags) catch null;
     }
 
+    try deriving_mod.derive(arena_alloc, &module, &diags);
     const renamed = try renamer_mod.rename(module, &rename_env);
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
