@@ -1,21 +1,19 @@
 //! Synthesise an `Eq` instance.
 //!
-//! Emits a top-level helper `derivedEq_<TypeName> x y = case x of …; case y of …`
-//! and an instance whose `(==)` method is eta-reduced to that helper:
-//!
-//!     derivedEq_Color x y = case x of
-//!       Red   -> case y of Red   -> True; _ -> False
-//!       Green -> case y of Green -> True; _ -> False
-//!       Blue  -> case y of Blue  -> True; _ -> False
+//! Emits a single instance with method bodies in the canonical shape
 //!
 //!     instance Eq Color where
-//!       (==) = derivedEq_Color
+//!       (==) x y = case x of
+//!         Red   -> case y of Red   -> True; _ -> False
+//!         Green -> case y of Green -> True; _ -> False
+//!         Blue  -> case y of Blue  -> True; _ -> False
 //!       (/=) x y = not (x == y)
 //!
-//! Placing the nested-case body at the top level (rather than directly
-//! inside the instance method) sidesteps an instance-method desugaring
-//! bug where nested `case` expressions in the method body always take
-//! the wildcard branch (filed as follow-up).
+//! The desugarer hoists each method's lambda chain to a top-level
+//! binding (`_inst$Eq$<TypeName>$<method>`), so the dictionary slot
+//! holds a Var reference to a properly-arited function rather than a
+//! 1-argument outer lambda — without this hoist the LLVM call-lowering
+//! drops the second argument when the dict method is called with two.
 
 const std = @import("std");
 const ast = @import("../frontend/ast.zig");
@@ -88,7 +86,7 @@ pub fn synth(
         try outer_alts.append(arena, builder.mkAlt(outer_con, inner_case, span));
     }
 
-    const helper_body: ast.Expr = if (decl.constructors.len == 0)
+    const eq_body: ast.Expr = if (decl.constructors.len == 0)
         try builder.mkApp(
             arena,
             builder.mkVar("error", span),
@@ -101,31 +99,15 @@ pub fn synth(
             outer_alts.items,
         );
 
-    // Top-level helper: `derivedEq_<TypeName> x y = case x of ...`.
-    // The instance method (==) is eta-reduced to point at this helper
-    // because nested case expressions inside instance method bodies
-    // misbehave in the current desugarer.
-    const helper_name = try std.fmt.allocPrint(arena, "derivedEq_{s}", .{decl.name});
-    const helper_match = try builder.mkMatch(
-        arena,
-        &.{ builder.mkVarPat("x", span), builder.mkVarPat("y", span) },
-        helper_body,
-        span,
-    );
-    const helper_fb = try builder.mkFunBind(arena, helper_name, &.{helper_match}, span);
-    const helper_decl: ast.Decl = .{ .FunBind = helper_fb };
-
-    // `(==) = derivedEq_<TypeName>` — eta-reduced binding.
     const eq_method_match = try builder.mkMatch(
         arena,
-        &.{},
-        builder.mkVar(helper_name, span),
+        &.{ builder.mkVarPat("x", span), builder.mkVarPat("y", span) },
+        eq_body,
         span,
     );
     const eq_fb = try builder.mkFunBind(arena, "==", &.{eq_method_match}, span);
 
-    // `(/=) x y = not (x == y)` — inline; uses the class method so the
-    // dictionary dispatch resolves through (==).
+    // `(/=) x y = not (x == y)`.
     const ne_body_eq = try builder.mkInfix(
         arena,
         builder.mkVar("x", span),
@@ -158,7 +140,5 @@ pub fn synth(
     const head = try builder.mkInstanceHead(arena, "Eq", applied, span);
     const instance = try builder.mkInstance(arena, ctx, head, &.{ eq_fb, ne_fb }, span);
 
-    const helpers = try arena.alloc(ast.Decl, 1);
-    helpers[0] = helper_decl;
-    return .{ .helpers = helpers, .instance = instance };
+    return .{ .helpers = &.{}, .instance = instance };
 }
