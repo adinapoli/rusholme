@@ -57,6 +57,7 @@ const layout_mod = @import("../frontend/layout.zig");
 const parser_mod = @import("../frontend/parser.zig");
 const ast_mod = @import("../frontend/ast.zig");
 const renamer_mod = @import("../renamer/renamer.zig");
+const deriving_mod = @import("../deriving/deriving.zig");
 const htype_mod = @import("../typechecker/htype.zig");
 const env_mod = @import("../typechecker/env.zig");
 const infer_mod = @import("../typechecker/infer.zig");
@@ -434,11 +435,28 @@ pub const CompileEnv = struct {
         // Unless the module carries {-# LANGUAGE NoImplicitPrelude #-} or
         // already has an explicit `import Prelude`, prepend a synthetic
         // `import Prelude` to the import list.
-        const module = if (parsed.language_extensions.contains(.NoImplicitPrelude) or
+        var module = if (parsed.language_extensions.contains(.NoImplicitPrelude) or
             mentionsPrelude(parsed.imports))
             parsed
         else
             try injectImplicitPrelude(self.alloc, parsed);
+
+        // ── Deriving (issue #679) ────────────────────────────────────────
+        // Walk the parsed module, synthesise `InstanceDecl` nodes for every
+        // `deriving` clause, and append them to the declaration list before
+        // the renamer runs.
+        try deriving_mod.derive(self.alloc, &module, &self.diags);
+        if (self.diags.hasErrors()) return null;
+
+        if (std.c.getenv("RHC_DUMP_DERIVING") != null) {
+            const pretty_mod = @import("../frontend/pretty.zig");
+            var pp = pretty_mod.PrettyPrinter.init(self.alloc);
+            defer pp.deinit();
+            const s = pp.printModule(module) catch null;
+            if (s) |out| {
+                std.debug.print("--- after deriving ---\n{s}\n----------------------\n", .{out});
+            }
+        }
 
         // ── Rename ───────────────────────────────────────────────────────
         const no_implicit_prelude = parsed.language_extensions.contains(.NoImplicitPrelude);

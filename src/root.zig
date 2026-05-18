@@ -30,6 +30,18 @@ pub const renamer = struct {
     pub const renamer = @import("renamer/renamer.zig");
 };
 
+// Deriving pass (runs between parser and renamer)
+pub const deriving = struct {
+    pub const deriving = @import("deriving/deriving.zig");
+    pub const shape = @import("deriving/shape.zig");
+    pub const builder = @import("deriving/builder.zig");
+    pub const eq = @import("deriving/eq.zig");
+    pub const ord = @import("deriving/ord.zig");
+    pub const show = @import("deriving/show.zig");
+    pub const bounded = @import("deriving/bounded.zig");
+    pub const enum_class = @import("deriving/enum_class.zig");
+};
+
 // Type checking
 pub const typechecker = @import("typechecker.zig");
 

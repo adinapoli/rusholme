@@ -46,6 +46,9 @@ pub const DiagnosticCode = enum {
     import_cycle,
     unknown_primop,
     module_not_found,
+    deriving_unsupported_class,
+    deriving_shape_mismatch,
+    deriving_empty_bounded,
 
     /// Returns a stable string code like "E001" for programmatic use.
     pub fn code(self: DiagnosticCode) []const u8 {
@@ -61,6 +64,9 @@ pub const DiagnosticCode = enum {
             .import_cycle => "E009",
             .unknown_primop => "E010",
             .module_not_found => "E011",
+            .deriving_unsupported_class => "E012",
+            .deriving_shape_mismatch => "E013",
+            .deriving_empty_bounded => "E014",
         };
     }
 

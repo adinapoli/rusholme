@@ -24,6 +24,7 @@ const parser_mod = @import("../frontend/parser.zig");
 const Parser = parser_mod.Parser;
 
 const renamer_mod = @import("../renamer/renamer.zig");
+const deriving_mod = @import("../deriving/deriving.zig");
 const RenameEnv = renamer_mod.RenameEnv;
 
 const diag_mod = @import("../diagnostics/diagnostic.zig");
@@ -324,8 +325,14 @@ pub const Pipeline = struct {
         var parser = Parser.init(alloc, &layout, diags) catch {
             return CompileError.ParserInitFailed;
         };
-        const module = parser.parseModule() catch {
+        var module = parser.parseModule() catch {
             return CompileError.CompilationFailed;
+        };
+        if (diags.hasErrors()) return CompileError.CompilationFailed;
+
+        // ── Deriving (issue #679) ──────────────────────────────────
+        deriving_mod.derive(alloc, &module, diags) catch {
+            return CompileError.OutOfMemory;
         };
         if (diags.hasErrors()) return CompileError.CompilationFailed;
 
