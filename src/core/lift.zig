@@ -260,32 +260,55 @@ pub const LambdaLifter = struct {
                 const is_leading = leading_lams.contains(@intFromPtr(expr));
                 const needs_lifting = !is_leading;
 
-                const lambda_id = try self.registerLambda(expr);
-                const param_id = l.binder.name.unique.value;
-
                 if (needs_lifting) {
                     // Expression lambda: will be lifted to top level.
                     //
-                    // Scope resets to top-level vars + own parameter.
-                    // Enclosing lambda parameters are NOT in scope for the
-                    // lifted function — they become free variables passed as
-                    // extra arguments at the call site.
+                    // Peel the entire leading Lam chain and register it as
+                    // a single multi-parameter lifted function.  Per-Lam
+                    // registration (each level its own lifted_N) makes the
+                    // outer lifted function arity-1 — it returns a partial
+                    // application of the next level.  When the dictionary
+                    // slot for a multi-arg method holds that partial, the
+                    // LLVM call lowering performs a direct call at the
+                    // call-site arity and silently drops all but the first
+                    // argument.  Coalescing the chain into one N-arg lifted
+                    // function makes the dict slot's function pointer
+                    // arity-correct for direct invocation.
+                    //
+                    // Scope resets to top-level vars plus every peeled
+                    // parameter.  Enclosing lambda parameters remain free
+                    // variables passed at the call site.
                     var inner_scope = try self.top_level_vars.clone(self.alloc);
                     defer inner_scope.deinit(self.alloc);
-                    try inner_scope.add(self.alloc, param_id);
 
-                    var inner_fvs = try self.collectFreeVarsOf(l.body, inner_scope, leading_lams);
+                    var params_list: std.ArrayListUnmanaged(Id) = .empty;
+                    defer params_list.deinit(self.alloc);
+
+                    var deep_body: *const Expr = expr;
+                    while (true) {
+                        switch (deep_body.*) {
+                            .Lam => |inner_l| {
+                                try params_list.append(self.alloc, inner_l.binder);
+                                try inner_scope.add(self.alloc, inner_l.binder.name.unique.value);
+                                deep_body = inner_l.body;
+                            },
+                            else => break,
+                        }
+                    }
+
+                    const lambda_id = try self.registerLambda(expr);
+
+                    var inner_fvs = try self.collectFreeVarsOf(deep_body, inner_scope, leading_lams);
                     defer inner_fvs.deinit(self.alloc);
 
-                    // Complete lambda registration with free variables.
                     const fvs_slice = try inner_fvs.toSlice(self.alloc);
                     // Heap-allocate the params slice so it outlives this scope.
                     // Using a temporary `&.{l.binder}` would create a dangling
                     // reference — all lifted lambdas would share the same
                     // (overwritten) stack slot.
-                    const param_slice = try self.alloc.alloc(Id, 1);
-                    param_slice[0] = l.binder;
-                    try self.completeLambda(lambda_id, fvs_slice, param_slice, l.body, l.binder.ty, needs_lifting);
+                    const param_slice = try self.alloc.alloc(Id, params_list.items.len);
+                    @memcpy(param_slice, params_list.items);
+                    try self.completeLambda(lambda_id, fvs_slice, param_slice, deep_body, l.binder.ty, needs_lifting);
 
                     // Compute function type with free vars added as parameters.
                     var lifted_ty = l.binder.ty;
@@ -312,6 +335,8 @@ pub const LambdaLifter = struct {
                         }
                     }
                 } else {
+                    const lambda_id = try self.registerLambda(expr);
+                    const param_id = l.binder.name.unique.value;
                     // Parameter lambda: part of the leading chain on a
                     // top-level binding RHS. Keep in place — translateDef
                     // will peel it as a function parameter.
@@ -1202,7 +1227,7 @@ test "VarSet: clone" {
     try testing.expect(!set1.contains(3));
 }
 
-test "lambdaLift: two-arg expression lambda does not propagate own param as free var (#659)" {
+test "lambdaLift: chained expression lambdas coalesce into a single multi-arg lifted function" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -1259,8 +1284,14 @@ test "lambdaLift: two-arg expression lambda does not propagate own param as free
 
     const lifted = try lambdaLift(alloc, program, null, 0);
 
-    // Should have 3 bindings: lifted \y, lifted \x, rewritten g.
-    try testing.expectEqual(@as(usize, 3), lifted.program.binds.len);
+    // The chained Lams `\x -> \y -> x` coalesce into a SINGLE lifted
+    // function with two parameters, so we expect 2 bindings: one lifted
+    // and the rewritten g.  Per-Lam splitting (one lifted per level)
+    // would emit a 1-arg outer that returns a partial application —
+    // when the dict slot of a 2-arg method holds that partial, the
+    // LLVM call lowering does a 2-arg direct call and silently drops
+    // the second argument.
+    try testing.expectEqual(@as(usize, 2), lifted.program.binds.len);
 
     // Also verify via direct lifter inspection.
     var lifter = LambdaLifter.init(alloc);
@@ -1274,22 +1305,22 @@ test "lambdaLift: two-arg expression lambda does not propagate own param as free
     var result_fvs = try lifter.collectFreeVarsOf(g_bind.NonRec.rhs, lifter.top_level_vars, &leading_lams);
     result_fvs.deinit(alloc);
 
-    // Check each lifted lambda.
+    // The single lifted function takes [x, y] as parameters and has
+    // zero free vars (x is its own param, so it does not propagate
+    // upward — the original #659 assertion).
     var lifted_it = lifter.lambdas.iterator();
+    var saw_coalesced = false;
     while (lifted_it.next()) |entry| {
         const info = &entry.value_ptr.*;
         if (!info.needs_lifting) continue;
 
-        if (info.params.len == 1 and info.params[0].name.unique.value == y_id.name.unique.value) {
-            // \y -> x: should have x (unique=1) as free var.
-            try testing.expectEqual(@as(usize, 1), info.free_vars.len);
-            try testing.expectEqual(@as(u64, 1), info.free_vars[0]);
-        } else if (info.params.len == 1 and info.params[0].name.unique.value == x_id.name.unique.value) {
-            // \x -> (\y -> x): x is own param, so ZERO free vars.
-            // This is the core assertion for #659.
-            try testing.expectEqual(@as(usize, 0), info.free_vars.len);
-        }
+        try testing.expectEqual(@as(usize, 2), info.params.len);
+        try testing.expectEqual(x_id.name.unique.value, info.params[0].name.unique.value);
+        try testing.expectEqual(y_id.name.unique.value, info.params[1].name.unique.value);
+        try testing.expectEqual(@as(usize, 0), info.free_vars.len);
+        saw_coalesced = true;
     }
+    try testing.expect(saw_coalesced);
 }
 
 test "lambdaLift: doubly-nested expression lambda — lifted body is rewritten (#623)" {

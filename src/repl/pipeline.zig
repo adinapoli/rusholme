@@ -24,6 +24,7 @@ const parser_mod = @import("../frontend/parser.zig");
 const Parser = parser_mod.Parser;
 
 const renamer_mod = @import("../renamer/renamer.zig");
+const deriving_mod = @import("../deriving/deriving.zig");
 const RenameEnv = renamer_mod.RenameEnv;
 
 const diag_mod = @import("../diagnostics/diagnostic.zig");
@@ -324,8 +325,14 @@ pub const Pipeline = struct {
         var parser = Parser.init(alloc, &layout, diags) catch {
             return CompileError.ParserInitFailed;
         };
-        const module = parser.parseModule() catch {
+        var module = parser.parseModule() catch {
             return CompileError.CompilationFailed;
+        };
+        if (diags.hasErrors()) return CompileError.CompilationFailed;
+
+        // ── Deriving (issue #679) ──────────────────────────────────
+        deriving_mod.derive(alloc, &module, diags) catch {
+            return CompileError.OutOfMemory;
         };
         if (diags.hasErrors()) return CompileError.CompilationFailed;
 
@@ -366,7 +373,30 @@ pub const Pipeline = struct {
         }
 
         // ── Lambda lift ────────────────────────────────────────────
-        const lift_result = lift_mod.lambdaLift(alloc, desugar_result.program, null, 0) catch {
+        // Thread the unique IDs of all previously-known bindings (Prelude
+        // and earlier REPL inputs) into the lifter as its external scope.
+        // Without this, references to top-level functions like `not` or
+        // `(==)` from within a lifted lambda body are mis-classified as
+        // free variables; the rewriter then synthesises Var nodes with
+        // `base = "fv"` for them, the GRIN translator's var_map locks in
+        // that synthetic base, and downstream lookups for the real
+        // symbol (e.g. `not_1035`) emit `fv_1035` — which the JIT cannot
+        // resolve.
+        var external_unique_list: std.ArrayListUnmanaged(u64) = .empty;
+        defer external_unique_list.deinit(alloc);
+        if (external_arities) |arities| {
+            var it = arities.iterator();
+            while (it.next()) |entry| {
+                try external_unique_list.append(alloc, entry.key_ptr.*);
+            }
+        }
+        if (external_dict_names) |dicts| {
+            var it = dicts.iterator();
+            while (it.next()) |entry| {
+                try external_unique_list.append(alloc, entry.value_ptr.*.unique.value);
+            }
+        }
+        const lift_result = lift_mod.lambdaLift(alloc, desugar_result.program, external_unique_list.items, 0) catch {
             module_types.deinit(alloc);
             return CompileError.OutOfMemory;
         };
