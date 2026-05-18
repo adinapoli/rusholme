@@ -142,7 +142,91 @@ pub fn synth(
         span,
     );
     const fb = try builder.mkFunBind(arena, "compare", &.{m}, span);
-    return .{ .helpers = &.{}, .instance = try finalize(arena, decl, &.{fb}, span) };
+
+    // `(<) x y = case compare x y of LT -> True; _ -> False`
+    const lt_fb = try mkOrdRelation(arena, "<", "LT", span);
+    // `(>) x y = case compare x y of GT -> True; _ -> False`
+    const gt_fb = try mkOrdRelation(arena, ">", "GT", span);
+    // `(<=) x y = case compare x y of GT -> False; _ -> True`
+    const le_fb = try mkOrdNegRelation(arena, "<=", "GT", span);
+    // `(>=) x y = case compare x y of LT -> False; _ -> True`
+    const ge_fb = try mkOrdNegRelation(arena, ">=", "LT", span);
+
+    return .{
+        .helpers = &.{},
+        .instance = try finalize(
+            arena,
+            decl,
+            &.{ fb, lt_fb, gt_fb, le_fb, ge_fb },
+            span,
+        ),
+    };
+}
+
+/// Synthesise a binding of the form
+///   `op x y = case compare x y of <ordering> -> True; _ -> False`
+fn mkOrdRelation(
+    arena: Allocator,
+    op: []const u8,
+    ordering_con: []const u8,
+    span: SourceSpan,
+) Allocator.Error!ast.FunBinding {
+    const cmp = try builder.mkApp(
+        arena,
+        builder.mkVar("compare", span),
+        &.{ builder.mkVar("x", span), builder.mkVar("y", span) },
+    );
+    const match_alt = builder.mkAlt(
+        try builder.mkConPat(arena, ordering_con, &.{}, span),
+        builder.mkVar("True", span),
+        span,
+    );
+    const wild_alt = builder.mkAlt(
+        builder.mkWildPat(span),
+        builder.mkVar("False", span),
+        span,
+    );
+    const body = try builder.mkCase(arena, cmp, &.{ match_alt, wild_alt });
+    const m = try builder.mkMatch(
+        arena,
+        &.{ builder.mkVarPat("x", span), builder.mkVarPat("y", span) },
+        body,
+        span,
+    );
+    return builder.mkFunBind(arena, op, &.{m}, span);
+}
+
+/// Synthesise a binding of the form
+///   `op x y = case compare x y of <ordering> -> False; _ -> True`
+fn mkOrdNegRelation(
+    arena: Allocator,
+    op: []const u8,
+    ordering_con: []const u8,
+    span: SourceSpan,
+) Allocator.Error!ast.FunBinding {
+    const cmp = try builder.mkApp(
+        arena,
+        builder.mkVar("compare", span),
+        &.{ builder.mkVar("x", span), builder.mkVar("y", span) },
+    );
+    const match_alt = builder.mkAlt(
+        try builder.mkConPat(arena, ordering_con, &.{}, span),
+        builder.mkVar("False", span),
+        span,
+    );
+    const wild_alt = builder.mkAlt(
+        builder.mkWildPat(span),
+        builder.mkVar("True", span),
+        span,
+    );
+    const body = try builder.mkCase(arena, cmp, &.{ match_alt, wild_alt });
+    const m = try builder.mkMatch(
+        arena,
+        &.{ builder.mkVarPat("x", span), builder.mkVarPat("y", span) },
+        body,
+        span,
+    );
+    return builder.mkFunBind(arena, op, &.{m}, span);
 }
 
 /// Build `case compare x0 y0 of { EQ -> case compare x1 y1 of { ... }; o -> o }`

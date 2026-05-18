@@ -4,7 +4,7 @@ module Prelude
     , String
     , not, (&&), (||), otherwise
     , (+), (-), (*), negate, abs, div, mod
-    , (==), (/=), (<), (>), (<=), (>=)
+    , (==), (/=), (<), (>), (<=), (>=), compare
     , id, const, flip, (.), ($)
     , map, filter, (++), head, tail, null, length
     , foldr, foldl, concat, take, drop
@@ -14,6 +14,7 @@ module Prelude
     , intToChar, charToInt
     , max
     , Eq(..)
+    , Ord(..)
     , Show(..), show, showString, showLitChar, showListWith, showListTail
     , intToDigit
     , enumFrom, enumFromTo, enumFromThen, enumFromThenTo
@@ -160,22 +161,6 @@ max x y = case x >= y of
     False -> y
 
 -- ========================================================================
--- Comparison (monomorphic on Int, pending Ord class in #531)
--- ========================================================================
-
-(<) :: Int -> Int -> Bool
-(<) = primLtInt
-
-(>) :: Int -> Int -> Bool
-(>) = primGtInt
-
-(<=) :: Int -> Int -> Bool
-(<=) = primLeInt
-
-(>=) :: Int -> Int -> Bool
-(>=) = primGeInt
-
--- ========================================================================
 -- Eq type class
 -- ========================================================================
 
@@ -208,6 +193,36 @@ instance Eq Int where
 instance Eq Bool where
   (==) = eqBool
   (/=) = neBool
+
+-- ========================================================================
+-- Ord type class
+-- ========================================================================
+
+-- `compareInt` is a top-level helper rather than an inline instance method
+-- body because nested case-of inside instance methods historically tripped
+-- desugarer/lifter bugs (now fixed by #704).  Kept top-level for clarity
+-- and to avoid relying on the still-experimental default-method machinery
+-- in the first class declaration (#660).
+compareInt :: Int -> Int -> Ordering
+compareInt x y = case primLtInt x y of
+    True  -> LT
+    False -> case primEqInt x y of
+        True  -> EQ
+        False -> GT
+
+class Ord a where
+  compare :: a -> a -> Ordering
+  (<)     :: a -> a -> Bool
+  (<=)    :: a -> a -> Bool
+  (>)     :: a -> a -> Bool
+  (>=)    :: a -> a -> Bool
+
+instance Ord Int where
+  compare = compareInt
+  (<)  = primLtInt
+  (<=) = primLeInt
+  (>)  = primGtInt
+  (>=) = primGeInt
 
 -- ========================================================================
 -- Higher-order combinators
