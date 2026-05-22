@@ -406,19 +406,46 @@ pub fn buildModIface(
     core_prog: CoreProgram,
     module_types: *const ModuleTypes,
 ) std.mem.Allocator.Error!ModIface {
+    // ── Expand class `C(..)` exports into method name Var entries ───────
+    // Haskell 2010 §5.2: `C(..)` for a class C exports all of C's methods.
+    // The export parser produces `Type{ name="C", with_constructors=true }`,
+    // which `isValueExported` cannot match by base name alone (it only
+    // handles `Var` and `Con` specs).  We expand each class `(..)` export
+    // into synthetic `Var` entries for its methods so that the method
+    // selector bindings are picked up by the value-export loop below.
+    var expanded_exports: std.ArrayListUnmanaged(ExportSpec) = .empty;
+    defer expanded_exports.deinit(alloc);
+    if (export_list) |specs| {
+        for (specs) |spec| {
+            try expanded_exports.append(alloc, spec);
+            switch (spec) {
+                .Type => |ts| if (ts.with_constructors) {
+                    // If this type name is a class, add its method names as Var exports.
+                    if (module_types.class_env.lookupClassByBaseName(ts.name)) |class_info| {
+                        for (class_info.methods) |method| {
+                            try expanded_exports.append(alloc, .{ .Var = method.name.base });
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+    const effective_exports = if (export_list != null) expanded_exports.items else null;
+
     // ── Collect exported value bindings ─────────────────────────────────
     var values: std.ArrayListUnmanaged(ExportedValue) = .empty;
 
     for (core_prog.binds) |bind| {
         switch (bind) {
             .NonRec => |bp| {
-                if (!isValueExported(bp.binder.name, export_list)) continue;
+                if (!isValueExported(bp.binder.name, effective_exports)) continue;
                 const ev = try buildExportedValue(alloc, bp.binder.name, module_types) orelse continue;
                 try values.append(alloc, ev);
             },
             .Rec => |pairs| {
                 for (pairs) |bp| {
-                    if (!isValueExported(bp.binder.name, export_list)) continue;
+                    if (!isValueExported(bp.binder.name, effective_exports)) continue;
                     const ev = try buildExportedValue(alloc, bp.binder.name, module_types) orelse continue;
                     try values.append(alloc, ev);
                 }
@@ -570,6 +597,11 @@ fn isValueExported(name: Name, export_list: ?[]const ExportSpec) bool {
         switch (spec) {
             .Var => |v| if (std.mem.eql(u8, v, name.base)) return true,
             .Con => |c| if (std.mem.eql(u8, c, name.base)) return true,
+.Type => {},
+            // `Type(..)` exports for classes are expanded into individual
+            // method `Var` exports in `buildModIface` so that `isValueExported`
+            // matches by name.  Data type constructors are handled by
+            // `isConExported`, not here.
             else => {},
         }
     }

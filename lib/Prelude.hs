@@ -15,6 +15,8 @@ module Prelude
     , max
     , Eq(..)
     , Ord(..)
+    , Bounded(..)
+    , Enum(..)
     , Show(..), show, showString, showLitChar, showListWith, showListTail
     , intToDigit
     , enumFrom, enumFromTo, enumFromThen, enumFromThenTo
@@ -225,6 +227,134 @@ instance Ord Int where
   (>=) = primGeInt
 
 -- ========================================================================
+-- Bounded type class
+-- ========================================================================
+
+class Bounded a where
+  minBound :: a
+  maxBound :: a
+
+-- Bounded Int is deferred because Int.minBound (-9223372036854775808)
+-- cannot be expressed as a static literal in the current backend.
+-- The negative-literal syntax `-9223372036854775807 - 1` desugars to
+-- a Negate AST node that the LLVM backend doesn't yet lower.
+-- Tracked in: https://github.com/adinapoli/rusholme/issues/212
+
+instance Bounded Char where
+  minBound = '\NUL'
+  maxBound = '\DEL'
+
+instance Bounded Bool where
+  minBound = False
+  maxBound = True
+
+instance Bounded Ordering where
+  minBound = LT
+  maxBound = GT
+
+-- ========================================================================
+-- Enum type class
+-- ========================================================================
+
+class Enum a where
+  succ :: a -> a
+  pred :: a -> a
+  toEnum :: Int -> a
+  fromEnum :: a -> Int
+  enumFrom :: a -> [a]
+  enumFromThen :: a -> a -> [a]
+  enumFromTo :: a -> a -> [a]
+  enumFromThenTo :: a -> a -> a -> [a]
+
+instance Enum Int where
+  succ n = n + 1
+  pred n = n - 1
+  toEnum n = n
+  fromEnum n = n
+  enumFrom n = n : enumFrom (n + 1)
+  enumFromTo n m = if n > m then [] else n : enumFromTo (n + 1) m
+  enumFromThen n n2 = n : enumFromThen n2 (n2 + (n2 - n))
+  enumFromThenTo n n2 m =
+    let step = n2 - n
+    in if step >= 0
+       then if n > m then [] else n : enumFromThenTo n2 (n2 + step) m
+       else if n < m then [] else n : enumFromThenTo n2 (n2 + step) m
+
+instance Enum Char where
+  succ c = intToChar (charToInt c + 1)
+  pred c = intToChar (charToInt c - 1)
+  toEnum n = intToChar n
+  fromEnum c = charToInt c
+  enumFrom c = c : enumFrom (intToChar (charToInt c + 1))
+  enumFromTo c end = if charToInt c > charToInt end
+                     then []
+                     else c : enumFromTo (intToChar (charToInt c + 1)) end
+  enumFromThen c c2 = c : enumFromThen c2 (intToChar (charToInt c2 + (charToInt c2 - charToInt c)))
+  enumFromThenTo c c2 end =
+    let step = charToInt c2 - charToInt c
+    in if step >= 0
+       then if charToInt c > charToInt end
+            then []
+            else c : enumFromThenTo c2 (intToChar (charToInt c2 + step)) end
+       else if charToInt c < charToInt end
+            then []
+            else c : enumFromThenTo c2 (intToChar (charToInt c2 + step)) end
+
+instance Enum Bool where
+  succ False = True
+  succ True  = error "succ: True is maxBound for Bool"
+  pred True  = False
+  pred False = error "pred: False is minBound for Bool"
+  toEnum 0 = False
+  toEnum 1 = True
+  toEnum _ = error "toEnum: out of range for Bool"
+  fromEnum False = 0
+  fromEnum True  = 1
+  enumFrom n = n : enumFrom (succ n)
+  enumFromTo n m = if fromEnum n > fromEnum m
+                   then []
+                   else n : enumFromTo (succ n) m
+  enumFromThen n n2 = n : enumFromThen n2 (succ n2)
+  enumFromThenTo n n2 m =
+    let step = fromEnum n2 - fromEnum n
+    in if step >= 0
+       then if fromEnum n > fromEnum m
+            then []
+            else n : enumFromThenTo n2 (succ n2) m
+       else if fromEnum n < fromEnum m
+            then []
+            else n : enumFromThenTo n2 (succ n2) m
+
+instance Enum Ordering where
+  succ LT = EQ
+  succ EQ = GT
+  succ GT = error "succ: GT is maxBound for Ordering"
+  pred GT = EQ
+  pred EQ = LT
+  pred LT = error "pred: LT is minBound for Ordering"
+  toEnum 0 = LT
+  toEnum 1 = EQ
+  toEnum 2 = GT
+  toEnum _ = error "toEnum: out of range for Ordering"
+  fromEnum LT = 0
+  fromEnum EQ = 1
+  fromEnum GT = 2
+  enumFrom n = n : enumFrom (succ n)
+  enumFromTo n m = if fromEnum n > fromEnum m
+                   then []
+                   else n : enumFromTo (succ n) m
+  enumFromThen n n2 = n : enumFromThen n2 (succ n2)
+  enumFromThenTo n n2 m =
+    let step = fromEnum n2 - fromEnum n
+    in if step >= 0
+       then if fromEnum n > fromEnum m
+            then []
+            else n : enumFromThenTo n2 (succ n2) m
+       else if fromEnum n < fromEnum m
+            then []
+            else n : enumFromThenTo n2 (succ n2) m
+
+-- ========================================================================
 -- Higher-order combinators
 -- ========================================================================
 
@@ -419,28 +549,10 @@ either f g (Left x)  = f x
 either f g (Right y) = g y
 
 -- ========================================================================
--- Arithmetic sequences
+-- Arithmetic sequences are now methods of the Enum class (see above).
+-- The monomorphic Int versions have been replaced by class methods.
 -- ========================================================================
 
--- [n..] infinite list starting at n
-enumFrom :: Int -> [Int]
-enumFrom n = n : enumFrom (n + 1)
-
--- [n..m] finite list from n to m inclusive
-enumFromTo :: Int -> Int -> [Int]
-enumFromTo n m = if n > m then [] else n : enumFromTo (n + 1) m
-
--- [n,n2..] infinite list with step (n2 - n)
-enumFromThen :: Int -> Int -> [Int]
-enumFromThen n n2 = n : enumFromThen n2 (n2 + (n2 - n))
-
--- [n,n2..m] finite list with step, up to m
-enumFromThenTo :: Int -> Int -> Int -> [Int]
-enumFromThenTo n n2 m =
-    let step = n2 - n
-    in if step >= 0
-       then if n > m then [] else n : enumFromThenTo n2 (n2 + step) m
-       else if n < m then [] else n : enumFromThenTo n2 (n2 + step) m
 
 -- ========================================================================
 -- Polymorphic functions still blocked:
