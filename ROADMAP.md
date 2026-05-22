@@ -438,6 +438,7 @@
 | [#546](https://github.com/adinapoli/rusholme/issues/546) | Lazy arguments for partial/over-saturated/higher-order applications | [#517](https://github.com/adinapoli/rusholme/issues/517) | :green_circle: |
 | [#549](https://github.com/adinapoli/rusholme/issues/549) | Lazy wrapping for primop arguments | [#545](https://github.com/adinapoli/rusholme/issues/545) | :white_circle: |
 | [#551](https://github.com/adinapoli/rusholme/issues/551) | Lazy arguments for higher-order function applications | [#546](https://github.com/adinapoli/rusholme/issues/546) | :white_circle: |
+| [#605](https://github.com/adinapoli/rusholme/issues/605) | Allocate thunks with minimum 1 field for update frames | [#56](https://github.com/adinapoli/rusholme/issues/56) | :yellow_circle: |
 
 ---
 
