@@ -339,7 +339,10 @@
 | [#378](https://github.com/adinapoli/rusholme/issues/378) | Tier 3: Optimal decision trees with exhaustiveness/redundancy checking | [#377](https://github.com/adinapoli/rusholme/issues/377) | :white_circle: |
 | [#297](https://github.com/adinapoli/rusholme/issues/297) | Compare Core IR emitted by GHC vs Rusholme | [#38](https://github.com/adinapoli/rusholme/issues/38) | :white_circle: |
 | [#309](https://github.com/adinapoli/rusholme/issues/309) | Implement list comprehension (ListComp) support | [#38](https://github.com/adinapoli/rusholme/issues/38) | :white_circle: |
-| [#679](https://github.com/adinapoli/rusholme/issues/679) | Implement `deriving` mechanism for stock classes (`Eq`, `Ord`, `Show`, `Bounded`, `Enum`) and newtype strategy | [#33](https://github.com/adinapoli/rusholme/issues/33), [#530](https://github.com/adinapoli/rusholme/issues/530) | :yellow_circle: |
+| [#679](https://github.com/adinapoli/rusholme/issues/679) | Implement `deriving` mechanism for stock classes (`Eq`, `Ord`, `Show`, `Bounded`, `Enum`) and newtype strategy | [#33](https://github.com/adinapoli/rusholme/issues/33), [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
+| [#704](https://github.com/adinapoli/rusholme/issues/704) | Nested case-of in instance method body falls through to wildcard | [#679](https://github.com/adinapoli/rusholme/issues/679) | :green_circle: |
+| [#705](https://github.com/adinapoli/rusholme/issues/705) | Implement newtype deriving strategy via coerce (H2010 §11.2) | [#679](https://github.com/adinapoli/rusholme/issues/679) | :white_circle: |
+| [#708](https://github.com/adinapoli/rusholme/issues/708) | Add Bounded and Enum classes + exports to Prelude | [#679](https://github.com/adinapoli/rusholme/issues/679) | :white_circle: |
 | [#680](https://github.com/adinapoli/rusholme/issues/680) | Implement `deriving Generic` / `Generic1` and `GHC.Generics` compatibility module | [#679](https://github.com/adinapoli/rusholme/issues/679), [#655](https://github.com/adinapoli/rusholme/issues/655) | :white_circle: |
 
 ### Epic [#6](https://github.com/adinapoli/rusholme/issues/6): GRIN IR and Core→GRIN Translation
