@@ -1,19 +1,18 @@
 //! Synthesise an `Enum` instance.  Only legal for enumeration types (all
 //! constructors nullary).
 //!
-//! Generates: `fromEnum`, `toEnum`, `succ`, `pred`.
+//! Generates all 8 Enum methods: `fromEnum`, `toEnum`, `succ`, `pred`,
+//! `enumFrom`, `enumFromTo`, `enumFromThen`, `enumFromThenTo`.
 //!
-//! The four arithmetic-sequence methods (`enumFrom`, `enumFromThen`,
-//! `enumFromTo`, `enumFromThenTo`) are NOT synthesised here.  They require
-//! recursive self-calls (`succ`, `fromEnum`) that trigger GRIN thunk-
-//! naming collisions, and their full semantics need list construction with
-//! step arithmetic that the non-recursive deriving pass cannot express.
+//! The four arithmetic-sequence methods use explicit case-matching
+//! over all constructor combinations rather than recursive self-calls.
+//! This avoids GRIN thunk-naming collisions (see issue #714) and keeps
+//! the generated code self-contained within the instance.  The trade-off
+//! is O(n²) and O(n³) code size for `enumFromThen` and `enumFromThenTo`
+//! respectively, which is acceptable for enumeration types (few constructors).
 //!
-//! When a derived `Enum` instance omits these methods and the class has no
-//! default implementation, the desugarer will emit a "missing method"
-//! diagnostic.  Adding robust defaults or generating all eight methods
-//! correctly is tracked in a follow-up issue.
-
+//! A more compact recursive approach (e.g. `enumFrom x = x : enumFrom (succ x)`)
+//! is deferred to issue #714 due to the thunk-naming collision it triggers.
 const std = @import("std");
 const ast = @import("../frontend/ast.zig");
 const span_mod = @import("../diagnostics/span.zig");
@@ -203,10 +202,9 @@ pub fn synth(
     const eft_fb = try builder.mkFunBind(arena, "enumFromTo", &.{eft_match}, span);
 
     // enumFromThen — explicit case enumeration for both arguments.
-    // Simplified: produce a two-element list [Ck, Cj].
-    // A fully correct implementation would need to compute step arithmetic,
-    // which is deferred.  The two-element approximation covers the common
-    // test case `[Ck..]` (which uses enumFrom, not enumFromThen).
+    // For each pair (Ck, Cj), produce the arithmetic sequence
+    //   [Ck, C{k+step}, ...] limited to the constructor range.
+    // Lists are built right-to-left to ensure correct element order.
     // tracked in: https://github.com/adinapoli/rusholme/issues/708
     var eftn_alts: std.ArrayListUnmanaged(ast.Alt) = .empty;
     for (decl.constructors, 0..) |c, idx| {
@@ -214,26 +212,36 @@ pub fn synth(
         var inner_alts: std.ArrayListUnmanaged(ast.Alt) = .empty;
         for (decl.constructors, 0..) |c2, idx2| {
             const inner_pat = try builder.mkConPat(arena, c2.name, &.{}, span);
-            // Compute step direction and produce the list of elements.
-            // For simplicity, generate [Ck, Ck2, ...] up to Cn-1 or C0.
             const step: isize = @as(isize, @intCast(idx2)) - @as(isize, @intCast(idx));
             var list_expr: ast.Expr = .{ .List = &.{} };
             if (step > 0) {
-                // Ascending: Ck, C{k+step}, C{k+2*step}, ...
-                var pos: usize = idx;
-                while (pos < decl.constructors.len) : (pos += @intCast(step)) {
-                    const elem = builder.mkVar(decl.constructors[pos].name, span);
-                    list_expr = try builder.mkInfix(arena, elem, ":", list_expr, span);
+                // Ascending: [Ck, C{k+step}, C{k+2*step}, ...] up to last in range
+                // Build right-to-left: iterate from last element back to first
+                var pos: usize = decl.constructors.len - 1;
+                while (pos > idx) : (pos -= 1) {
+                    // Only include elements on the step grid
+                    if ((pos - idx) % @as(usize, @intCast(step)) == 0) {
+                        const elem = builder.mkVar(decl.constructors[pos].name, span);
+                        list_expr = try builder.mkInfix(arena, elem, ":", list_expr, span);
+                    }
                 }
+                // Always include the first element
+                const first = builder.mkVar(decl.constructors[idx].name, span);
+                list_expr = try builder.mkInfix(arena, first, ":", list_expr, span);
             } else if (step < 0) {
-                // Descending: Ck, C{k+step}, C{k+2*step}, ...
-                var pos: isize = @intCast(idx);
-                while (pos >= 0) : (pos += step) {
-                    const usize_pos: usize = @intCast(pos);
-                    const elem = builder.mkVar(decl.constructors[usize_pos].name, span);
-                    list_expr = try builder.mkInfix(arena, elem, ":", list_expr, span);
-                    if (step == -1 and usize_pos == 0) break;
+                // Descending: [Ck, C{k+step}, C{k+2*step}, ...] down to first in range
+                // Build right-to-left: iterate from first element forward to k
+                var pos: usize = 0;
+                while (pos < idx) : (pos += 1) {
+                    const abs_step = @as(usize, @intCast(-step));
+                    if ((idx - pos) % abs_step == 0) {
+                        const elem = builder.mkVar(decl.constructors[pos].name, span);
+                        list_expr = try builder.mkInfix(arena, elem, ":", list_expr, span);
+                    }
                 }
+                // Always include the first element
+                const first = builder.mkVar(decl.constructors[idx].name, span);
+                list_expr = try builder.mkInfix(arena, first, ":", list_expr, span);
             } else {
                 // step == 0: infinite repeat, just return [Ck]
                 const elem = builder.mkVar(c.name, span);
@@ -255,6 +263,7 @@ pub fn synth(
 
     // enumFromThenTo — explicit case enumeration for all three arguments.
     // Produces the arithmetic sequence [Ck, C{k+step}, ...] up to Cm.
+    // Lists are built right-to-left to ensure correct element order.
     var eftt_alts: std.ArrayListUnmanaged(ast.Alt) = .empty;
     for (decl.constructors, 0..) |cx, x_idx| {
         const outer_pat = try builder.mkConPat(arena, cx.name, &.{}, span);
@@ -267,21 +276,30 @@ pub fn synth(
                 const step: isize = @as(isize, @intCast(y_idx)) - @as(isize, @intCast(x_idx));
                 var list_expr: ast.Expr = .{ .List = &.{} };
                 if (step > 0) {
-                    // Ascending: [x, x+step, ...] up to z
-                    var pos: isize = @intCast(x_idx);
-                    while (pos <= @as(isize, @intCast(z_idx))) : (pos += step) {
-                        const usize_pos: usize = @intCast(pos);
-                        const elem = builder.mkVar(decl.constructors[usize_pos].name, span);
-                        list_expr = try builder.mkInfix(arena, elem, ":", list_expr, span);
+                    // Ascending: build [Ck, C{k+step}, ...] right-to-left up to Cm
+                    var pos: usize = z_idx + 1;
+                    while (pos > x_idx) : (pos -= 1) {
+                        if ((pos - 1 - x_idx) % @as(usize, @intCast(step)) == 0) {
+                            const elem = builder.mkVar(decl.constructors[pos - 1].name, span);
+                            list_expr = try builder.mkInfix(arena, elem, ":", list_expr, span);
+                        }
                     }
+                    // Always include the first element Ck
+                    const first = builder.mkVar(decl.constructors[x_idx].name, span);
+                    list_expr = try builder.mkInfix(arena, first, ":", list_expr, span);
                 } else if (step < 0) {
-                    // Descending: [x, x+step, ...] down to z
-                    var pos: isize = @intCast(x_idx);
-                    while (pos >= @as(isize, @intCast(z_idx))) : (pos += step) {
-                        const usize_pos: usize = @intCast(pos);
-                        const elem = builder.mkVar(decl.constructors[usize_pos].name, span);
-                        list_expr = try builder.mkInfix(arena, elem, ":", list_expr, span);
+                    // Descending: build [Ck, C{k+step}, ...] right-to-left down to Cm
+                    const abs_step = @as(usize, @intCast(-step));
+                    var pos: usize = 0;
+                    while (pos < x_idx) : (pos += 1) {
+                        if ((x_idx - pos) % abs_step == 0) {
+                            const elem = builder.mkVar(decl.constructors[pos].name, span);
+                            list_expr = try builder.mkInfix(arena, elem, ":", list_expr, span);
+                        }
                     }
+                    // Always include the first element Ck
+                    const first = builder.mkVar(decl.constructors[x_idx].name, span);
+                    list_expr = try builder.mkInfix(arena, first, ":", list_expr, span);
                 } else {
                     // step == 0: [x] (infinite repeat, cap at single element)
                     const elem = builder.mkVar(cx.name, span);
