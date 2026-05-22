@@ -1795,8 +1795,23 @@ pub const GrinTranslator = struct {
         switch (val) {
             .ConstTagNode => |ctn| {
                 const tag = ctn.tag;
-                const n_fields: u32 = @intCast(ctn.fields.len);
+                var n_fields: u32 = @intCast(ctn.fields.len);
                 const disc = self.registry.discriminant(tag) orelse return error.UnsupportedGrinVal;
+
+                // Ensure F-tag thunks always have ≥1 field so the eval loop can
+                // write an indirection update (tag=Ind, field[0]=result) after
+                // forcing. Without this, 0-field thunks violate call-by-need
+                // semantics because they get re-evaluated on every access.
+                //
+                // This invariant is also relied upon by:
+                //   - translateCase: unconditional Ind update (line ~2053)
+                //   - translateCaseToValue: unconditional Ind update (line ~2411)
+                //   - emitInlineEval (__rhc_force): unconditional Ind update
+                //   - translateUpdate: unconditional field[0] write
+                // See: https://github.com/adinapoli/rusholme/issues/605
+                if (tag.tag_type == .Fun and n_fields == 0) {
+                    n_fields = 1;
+                }
 
                 // Allocate a node via rts_alloc(tag, n_fields).
                 const rts_alloc_fn = declareRtsAlloc(self.module);
@@ -2045,10 +2060,9 @@ pub const GrinTranslator = struct {
                 );
 
                 // Update the thunk with an indirection: tag = Ind, field[0] = result.
-                // Only update if the thunk has space for the result (ftag_n_fields > 0).
-                // Thunks with 0 fields can't be updated and will be re-evaluated each time.
-                // TODO(issue #602): Allocate thunks with 1 field minimum for update frame.
-                if (ftag_n_fields > 0) {
+                // All F-tag thunks are now allocated with ≥1 field (see
+                // translateStoreToValue), so the update is unconditional.
+                {
                     const upd_tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, phi, &tag_idx, 2, "ftag.upd.tag");
                     _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(llvm.i64Type(), 0x101, 0), upd_tag_gep);
                     const rts_store_fn = declareRtsStoreField(self.module);
@@ -2404,10 +2418,9 @@ pub const GrinTranslator = struct {
                 const func = c.LLVMGetNamedFunction(self.module, fn_name_z) orelse llvm.addFunction(self.module, fn_name_z, fn_type);
                 const result = c.LLVMBuildCall2(self.builder, fn_type, func, @ptrCast(&call_args), @intCast(n_args), "ftag.result");
 
-                // Update thunk to indirection (only if it has space for the result)
-                // Thunks with 0 fields can't be updated — they'll be re-evaluated each time.
-                // TODO(issue #602): Allocate thunks with 1 field minimum for update frame.
-                if (ftag_n_fields > 0) {
+                // Update thunk to indirection. All F-tag thunks are allocated
+                // with ≥1 field, so the update is unconditional.
+                {
                     const upd_tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, phi, &tag_idx, 2, "ftag.upd.tag");
                     _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(llvm.i64Type(), 0x101, 0), upd_tag_gep);
                     const rts_store_fn = declareRtsStoreField(self.module);
