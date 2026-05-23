@@ -222,9 +222,16 @@ const pkg_parsers = .{
 
 /// Top-level dispatcher for `rhc pkg <subcommand>`.
 ///
-/// `it` is a SliceIterator positioned at the first argument after "pkg"
-/// (i.e. the pkg subcommand name and its arguments).
-pub fn cmdPkg(alloc: std.mem.Allocator, io: Io, it: *clap.args.SliceIterator) !void {
+/// `args` is the slice of argv following `"pkg"`: the pkg subcommand name
+/// and its arguments (e.g. `["list"]`, `["describe", "base"]`).
+///
+/// The CLI argument parser is an internal implementation detail; the public
+/// signature is intentionally library-agnostic so callers (tests, language
+/// server actions, future scripting interfaces) don't have to construct a
+/// `clap.args.SliceIterator` artificially. See issue #695.
+pub fn cmdPkg(alloc: std.mem.Allocator, io: Io, args: []const []const u8) !void {
+    var it = clap.args.SliceIterator{ .args = args };
+
     const pkg_params = comptime clap.parseParamsComptime(
         \\-h, --help  Display this help and exit.
         \\<command>
@@ -232,7 +239,7 @@ pub fn cmdPkg(alloc: std.mem.Allocator, io: Io, it: *clap.args.SliceIterator) !v
     );
 
     var pkg_diag = clap.Diagnostic{};
-    var pkg = clap.parseEx(clap.Help, &pkg_params, pkg_parsers, it, .{
+    var pkg = clap.parseEx(clap.Help, &pkg_params, pkg_parsers, &it, .{
         .allocator = alloc,
         .diagnostic = &pkg_diag,
         .terminating_positional = 0,
@@ -285,7 +292,7 @@ pub fn cmdPkg(alloc: std.mem.Allocator, io: Io, it: *clap.args.SliceIterator) !v
                 \\
             );
             var desc_diag = clap.Diagnostic{};
-            var desc_res = clap.parseEx(clap.Help, &desc_params, clap.parsers.default, it, .{
+            var desc_res = clap.parseEx(clap.Help, &desc_params, clap.parsers.default, &it, .{
                 .allocator = alloc,
                 .diagnostic = &desc_diag,
             }) catch |err| {
@@ -320,7 +327,7 @@ pub fn cmdPkg(alloc: std.mem.Allocator, io: Io, it: *clap.args.SliceIterator) !v
                 \\
             );
             var inst_diag = clap.Diagnostic{};
-            var inst_res = clap.parseEx(clap.Help, &inst_params, clap.parsers.default, it, .{
+            var inst_res = clap.parseEx(clap.Help, &inst_params, clap.parsers.default, &it, .{
                 .allocator = alloc,
                 .diagnostic = &inst_diag,
             }) catch |err| {
@@ -364,7 +371,7 @@ pub fn cmdPkg(alloc: std.mem.Allocator, io: Io, it: *clap.args.SliceIterator) !v
                 \\
             );
             var unreg_diag = clap.Diagnostic{};
-            var unreg_res = clap.parseEx(clap.Help, &unreg_params, clap.parsers.default, it, .{
+            var unreg_res = clap.parseEx(clap.Help, &unreg_params, clap.parsers.default, &it, .{
                 .allocator = alloc,
                 .diagnostic = &unreg_diag,
             }) catch |err| {
