@@ -357,6 +357,27 @@ pub const PrimOp = enum(u16) {
         if (std.mem.eql(u8, str, "print")) return .write_stdout;
         return null;
     }
+
+    /// Backend-only primop names that the LLVM `PrimOpMapping` recognises
+    /// directly via string equality but that have no corresponding
+    /// `PrimOp` enum variant. The desugarer must accept these in
+    /// `foreign import prim` declarations and pass the name through
+    /// unchanged so the backend can intercept it.
+    ///
+    /// Currently:
+    ///   - `>>`, `>>=`   — monad-bind sequencing (#464)
+    ///   - `div#`, `mod#`, `quot#`, `rem#` — hash-suffixed integer aliases
+    ///
+    /// See `src/backend/grin_to_llvm.zig` `PrimOpMapping.lookup` for the
+    /// canonical list. Keep these two locations in sync.  Tracked by #534.
+    pub fn isBackendOnlyName(str: []const u8) bool {
+        return std.mem.eql(u8, str, ">>") or
+            std.mem.eql(u8, str, ">>=") or
+            std.mem.eql(u8, str, "div#") or
+            std.mem.eql(u8, str, "mod#") or
+            std.mem.eql(u8, str, "quot#") or
+            std.mem.eql(u8, str, "rem#");
+    }
 };
 
 /// Categories of PrimOps for documentation and organization.
@@ -422,6 +443,25 @@ test "PrimOp: fromString" {
     try testing.expectEqual(PrimOp.add_Int, PrimOp.fromString("add_Int"));
     try testing.expectEqual(PrimOp.@"error", PrimOp.fromString("error"));
     try testing.expectEqual(@as(?PrimOp, null), PrimOp.fromString("nonexistent"));
+}
+
+test "PrimOp: isBackendOnlyName recognises backend-only aliases (#534)" {
+    // Names the LLVM PrimOpMapping handles directly but that have no
+    // PrimOp enum variant. The desugarer must let these through so users
+    // can write e.g. `foreign import prim ">>="`.
+    try testing.expect(PrimOp.isBackendOnlyName(">>"));
+    try testing.expect(PrimOp.isBackendOnlyName(">>="));
+    try testing.expect(PrimOp.isBackendOnlyName("div#"));
+    try testing.expect(PrimOp.isBackendOnlyName("mod#"));
+    try testing.expect(PrimOp.isBackendOnlyName("quot#"));
+    try testing.expect(PrimOp.isBackendOnlyName("rem#"));
+
+    // Names with a real enum variant are NOT considered backend-only;
+    // they go through fromString/fromPreludeName.
+    try testing.expect(!PrimOp.isBackendOnlyName("add_Int"));
+    try testing.expect(!PrimOp.isBackendOnlyName("error"));
+    try testing.expect(!PrimOp.isBackendOnlyName("putStrLn"));
+    try testing.expect(!PrimOp.isBackendOnlyName("nonexistent"));
 }
 
 test "PrimOpRegistry: stable names" {
