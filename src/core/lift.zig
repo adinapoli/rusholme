@@ -43,8 +43,6 @@ const SourceSpan = core.SourceSpan;
 const LambdaInfo = struct {
     /// Unique ID for tracking this lambda during collection.
     id: u64,
-    /// Pointer to the original lambda expression (for identification).
-    expr: *const Expr,
     /// Body of the lambda (needed for reconstruction during lifting).
     body: *const Expr,
     /// Free variables of this lambda (by unique ID).
@@ -200,7 +198,6 @@ pub const LambdaLifter = struct {
 
         const info = LambdaInfo{
             .id = lambda_id,
-            .expr = body,
             .body = body,
             .free_vars = free_vars,
             .params = params,
