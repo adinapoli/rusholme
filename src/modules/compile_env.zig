@@ -1976,8 +1976,10 @@ test "compileProgram: missing import emits module_not_found diagnostic" {
             try testing.expect(d.span.end.isValid());
             try testing.expectEqual(@as(u32, 1), d.span.start.file_id);
             // The `import MissingLib` line is the second line of the source
-            // above (after `module App where`).
+            // above (after `module App where`); the `import` keyword starts
+            // at column 1.
             try testing.expectEqual(@as(u32, 2), d.span.start.line);
+            try testing.expectEqual(@as(u32, 1), d.span.start.column);
             found = true;
         }
     }
