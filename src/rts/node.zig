@@ -409,3 +409,37 @@ test "rts_load_field reads stored values" {
     try std.testing.expectEqual(@as(u64, 0xDEAD), rts_load_field(n, 0));
     try std.testing.expectEqual(@as(u64, 0xBEEF), rts_load_field(n, 1));
 }
+
+test "0-field F-tag thunk: padded slot supports Ind update" {
+    // Documents the invariant from issue #605 / PR #710: every F-tag thunk
+    // is allocated with at least one field so the eval loop can write an
+    // indirection update (tag := Ind, field[0] := result *Node) after
+    // forcing. This is what makes call-by-need correct for nullary thunks.
+    //
+    // See: backend/grin_to_llvm.zig `translateStoreToValue` (≥1 field
+    // padding for F-tag thunks).
+    heap.init();
+    defer heap.deinit();
+
+    // Allocate a thunk for a nullary GRIN function. The F-tag discriminant
+    // is chosen by the backend at compile time; any value outside the
+    // built-in range works here. The 1-field padding is the load-bearing
+    // part.
+    const f_tag: u64 = 0x2000;
+    const thunk = rts_alloc(f_tag, 1);
+    try std.testing.expectEqual(@as(u32, 1), thunk.n_fields);
+
+    // The padded slot is zero-initialised by rts_alloc.
+    try std.testing.expectEqual(@as(u64, 0), rts_load_field(thunk, 0));
+
+    // Simulate forcing: allocate the WHNF result, then overwrite the
+    // thunk's header (tag → Ind) and field[0] (→ result *Node).
+    const result = createInt(123);
+    thunk.tag = .Ind;
+    rts_store_field(thunk, 0, @intFromPtr(result));
+
+    // The post-update node behaves as a proper indirection.
+    try std.testing.expectEqual(Tag.Ind, thunk.tag);
+    try std.testing.expectEqual(result, indTarget(thunk));
+    try std.testing.expectEqual(@as(i64, 123), intValue(indTarget(thunk)));
+}

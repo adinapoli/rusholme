@@ -1808,7 +1808,10 @@ pub const GrinTranslator = struct {
                 //   - translateCaseToValue: unconditional Ind update (line ~2411)
                 //   - emitInlineEval (__rhc_force): unconditional Ind update
                 //   - translateUpdate: unconditional field[0] write
+                // Unit-tested by `rts/node.zig` test
+                // "0-field F-tag thunk: padded slot supports Ind update".
                 // See: https://github.com/adinapoli/rusholme/issues/605
+                // and: https://github.com/adinapoli/rusholme/issues/711
                 if (tag.tag_type == .Fun and n_fields == 0) {
                     n_fields = 1;
                 }
