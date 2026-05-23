@@ -380,10 +380,15 @@ pub fn desugarModule(
             },
             .ForeignPrim => |fp| {
                 // Validate the PrimOp name at compile time.
-                // Accept both raw PrimOp enum names (e.g. "add_Int") and
-                // Prelude-level names (e.g. "putStrLn" → putStrLn_).
+                // Accept:
+                //   1. raw PrimOp enum names (e.g. "add_Int") via fromString
+                //   2. Prelude-level aliases (e.g. "putStrLn" → putStrLn_)
+                //   3. backend-only names recognised directly by the LLVM
+                //      backend's `PrimOpMapping` but with no PrimOp enum
+                //      variant (e.g. ">>=", "div#"). See #534.
                 const is_known = primop_mod.PrimOp.fromString(fp.primop_name) != null or
-                    primop_mod.PrimOp.fromPreludeName(fp.primop_name) != null;
+                    primop_mod.PrimOp.fromPreludeName(fp.primop_name) != null or
+                    primop_mod.PrimOp.isBackendOnlyName(fp.primop_name);
                 if (!is_known) {
                     const msg = try std.fmt.allocPrint(
                         alloc,
@@ -417,7 +422,10 @@ pub fn desugarModule(
                 else if (primop_mod.PrimOp.fromPreludeName(fp.primop_name)) |op|
                     op.name()
                 else
-                    fp.primop_name; // validated above — shouldn't reach here
+                    // Backend-only names (#534): pass through unchanged so
+                    // the LLVM backend's `PrimOpMapping` can intercept them
+                    // via string equality. Validated above.
+                    fp.primop_name;
 
                 const primop_name = Name{
                     .base = canonical_base,
