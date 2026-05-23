@@ -67,7 +67,8 @@ fn readProperties(
             const rest = trimmed["expected_code:".len..];
             const code = std.mem.trim(u8, rest, " \t");
             if (code.len > 0) {
-                props.expected_code = code;
+                // Dupe out of `content` so the slice survives the free.
+                props.expected_code = try allocator.dupe(u8, code);
             }
         }
     }
@@ -159,7 +160,7 @@ fn collectCodes(
     arena_alloc: std.mem.Allocator,
 ) !CompileResult {
     const all = try diags.getAll(arena_alloc);
-    var codes = std.ArrayListUnmanaged(DiagnosticCode){};
+    var codes: std.ArrayListUnmanaged(DiagnosticCode) = .empty;
     defer codes.deinit(allocator);
     for (all) |d| {
         if (d.severity == .@"error") {
@@ -181,6 +182,7 @@ fn testShouldFailCompile(
     comptime basename: []const u8,
 ) !void {
     const props = try readProperties(allocator, basename);
+    defer if (props.expected_code) |c| allocator.free(c);
     if (props.skip) return;
 
     const result = try tryCompile(allocator, test_dir ++ "/" ++ basename ++ ".hs");
