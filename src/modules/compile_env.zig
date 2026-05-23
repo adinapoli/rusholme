@@ -698,6 +698,13 @@ pub fn compileProgram(
     var graph = ModuleGraph.init(alloc);
     defer graph.deinit();
 
+    // Record the source span of the first `import` declaration that names
+    // each imported module. Used in Phase 3 to attach a non-trivial span to
+    // `module_not_found` diagnostics so the terminal renderer can highlight
+    // the offending `import` line instead of pointing nowhere (#699).
+    var import_spans: std.StringHashMapUnmanaged(span_mod.SourceSpan) = .{};
+    defer import_spans.deinit(alloc);
+
     var iter = env.parsed_modules.iterator();
     while (iter.next()) |entry| {
         const mod_name = entry.key_ptr.*;
@@ -705,6 +712,10 @@ pub fn compileProgram(
         _ = try graph.addModule(mod_name);
         for (parsed.imports) |imp| {
             try graph.addEdge(mod_name, imp.module_name);
+            // Only record the first span we see for a given imported name;
+            // it's the one we point at when the import can't be resolved.
+            const gop = try import_spans.getOrPut(alloc, imp.module_name);
+            if (!gop.found_existing) gop.value_ptr.* = imp.span;
         }
     }
 
@@ -768,18 +779,18 @@ pub fn compileProgram(
                     "Could not find module '{s}' in source or any --package-db path",
                     .{mod_name},
                 );
-                // The span points to the invalid position because the topo loop
-                // works on module names, not import declarations. Attaching the
-                // real import span is tracked in:
-                // https://github.com/adinapoli/rusholme/issues/699
-                const zero_span = span_mod.SourceSpan.init(
+                // Point at the first `import <mod_name>` declaration we
+                // recorded during graph build. If — somehow — no source
+                // module imports this name (the topo sort dragged it in by
+                // another route), fall back to invalid positions.
+                const diag_span = import_spans.get(mod_name) orelse span_mod.SourceSpan.init(
                     span_mod.SourcePos.invalid(),
                     span_mod.SourcePos.invalid(),
                 );
                 try env.diags.emit(alloc, .{
                     .severity = .@"error",
                     .code = .module_not_found,
-                    .span = zero_span,
+                    .span = diag_span,
                     .message = msg,
                 });
             }
@@ -1959,6 +1970,16 @@ test "compileProgram: missing import emits module_not_found diagnostic" {
                 "Could not find module 'MissingLib' in source or any --package-db path",
                 d.message,
             );
+            // #699: the span must point at the actual `import` declaration,
+            // not the invalid sentinel position.
+            try testing.expect(d.span.start.isValid());
+            try testing.expect(d.span.end.isValid());
+            try testing.expectEqual(@as(u32, 1), d.span.start.file_id);
+            // The `import MissingLib` line is the second line of the source
+            // above (after `module App where`); the `import` keyword starts
+            // at column 1.
+            try testing.expectEqual(@as(u32, 2), d.span.start.line);
+            try testing.expectEqual(@as(u32, 1), d.span.start.column);
             found = true;
         }
     }
