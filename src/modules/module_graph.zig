@@ -11,9 +11,11 @@
 //!    compilation order (dependencies first).  Import cycles are detected and
 //!    reported as structured diagnostics using Tarjan's SCC algorithm.
 //!
-//! 3. **`discoverModules`** — given a root module file path and a search path
-//!    list, scans import declarations (header-only parse) and walks transitively
-//!    to build the complete `ModuleGraph` for a compilation session.
+//! Module discovery used to live here as a header-only-parse walker
+//! (`discoverModules` / `parseImportHeaders`). It was superseded by the
+//! parse-cache-driven flow in `CompileEnv.compileProgram`, which parses
+//! each source exactly once and reuses the AST for both graph construction
+//! and compilation. Removed in the PR for issue #444.
 //!
 //! ## Algorithm references
 //!
@@ -33,10 +35,6 @@
 //!   Tracked in: https://github.com/adinapoli/rusholme/issues/368
 
 const std = @import("std");
-const ast = @import("../frontend/ast.zig");
-const lexer_mod = @import("../frontend/lexer.zig");
-const layout_mod = @import("../frontend/layout.zig");
-const parser_mod = @import("../frontend/parser.zig");
 const diag_mod = @import("../diagnostics/diagnostic.zig");
 const span_mod = @import("../diagnostics/span.zig");
 
@@ -328,106 +326,7 @@ fn tarjanVisit(s: *TarjanState, v: u32) std.mem.Allocator.Error!void {
     }
 }
 
-// ── Module discovery ─────────────────────────────────────────────────────
-
-/// A discovered module: its name and the path to its source file.
-pub const DiscoveredModule = struct {
-    /// Fully-qualified module name (e.g. `"Data.Map"`).
-    module_name: []const u8,
-    /// Absolute or relative path to the `.hs` source file.
-    file_path: []const u8,
-};
-
-/// Scan a root `.hs` file and transitively discover all imported modules,
-/// building the full `ModuleGraph`.
-///
-/// `root_path` is the path to the root module's source file.
-/// `search_paths` is a list of directories to search for imported modules
-/// (e.g. `&.{".", "lib/"}` — tried in order).
-///
-/// For each imported module name `Foo.Bar`, the resolver looks for
-/// `Foo/Bar.hs` under each search path.  Modules not found on the search
-/// path are recorded in the graph as external/unknown but do not trigger
-/// a discovery error (they will fail at compile time when needed).
-///
-/// `alloc` is used for all allocations (expected arena).
-/// The returned `ModuleGraph` and discovered module list are owned by `alloc`.
-pub fn discoverModules(
-    alloc: std.mem.Allocator,
-    root_path: []const u8,
-    search_paths: []const []const u8,
-) std.mem.Allocator.Error!struct { graph: ModuleGraph, modules: []DiscoveredModule } {
-    var graph = ModuleGraph.init(alloc);
-    var discovered: std.ArrayListUnmanaged(DiscoveredModule) = .empty;
-    var visited_files: std.StringHashMapUnmanaged(void) = .{};
-    defer visited_files.deinit(alloc);
-
-    // Work-list: (module_name, file_path) pairs to process.
-    var worklist: std.ArrayListUnmanaged(struct { name: []const u8, path: []const u8 }) = .empty;
-    defer worklist.deinit(alloc);
-
-    const root_name = try inferModuleName(alloc, root_path);
-    try worklist.append(alloc, .{ .name = root_name, .path = root_path });
-
-    while (worklist.items.len > 0) {
-        const item = worklist.orderedRemove(0);
-
-        // Skip already-visited files.
-        if (visited_files.contains(item.path)) continue;
-        try visited_files.put(alloc, item.path, {});
-
-        // Ensure the vertex exists.
-        _ = try graph.addModule(item.name);
-        try discovered.append(alloc, .{
-            .module_name = item.name,
-            .file_path = item.path,
-        });
-
-        // Header-parse to extract import declarations.
-        const imports = parseImportHeaders(alloc, item.path) catch continue;
-
-        for (imports) |imp_name| {
-            // Add the dependency edge.
-            try graph.addEdge(item.name, imp_name);
-
-            // Try to locate the source file on the search path.
-            if (try resolveModule(alloc, imp_name, search_paths)) |imp_path| {
-                if (!visited_files.contains(imp_path)) {
-                    try worklist.append(alloc, .{ .name = imp_name, .path = imp_path });
-                }
-            }
-            // If not found, the vertex is still in the graph (as an external dep).
-        }
-    }
-
-    return .{ .graph = graph, .modules = try discovered.toOwnedSlice(alloc) };
-}
-
-/// Parse only the import declarations from a `.hs` file, returning the list
-/// of imported module names.  Does a full parse of the module header but
-/// stops after imports (does not parse declarations).
-///
-/// Returns an empty slice on read or parse error (discovery is best-effort).
-fn parseImportHeaders(alloc: std.mem.Allocator, file_path: []const u8) std.mem.Allocator.Error![]const []const u8 {
-    // Read the source.
-    const source = std.fs.cwd().readFileAlloc(alloc, file_path, 10 * 1024 * 1024) catch return &.{};
-    defer alloc.free(source);
-
-    var lexer = lexer_mod.Lexer.init(alloc, source, 0);
-    var layout = layout_mod.LayoutProcessor.init(alloc, &lexer);
-    var dummy_diags = diag_mod.DiagnosticCollector.init();
-    defer dummy_diags.deinit(alloc);
-    layout.setDiagnostics(&dummy_diags);
-
-    var parser = parser_mod.Parser.init(alloc, &layout, &dummy_diags) catch return &.{};
-    const module = parser.parseModule() catch return &.{};
-
-    var names: std.ArrayListUnmanaged([]const u8) = .empty;
-    for (module.imports) |imp| {
-        try names.append(alloc, try alloc.dupe(u8, imp.module_name));
-    }
-    return names.toOwnedSlice(alloc);
-}
+// ── Module name inference ────────────────────────────────────────────────
 
 /// Infer the module name from a file path.
 ///
@@ -455,31 +354,6 @@ pub fn inferModuleName(alloc: std.mem.Allocator, path: []const u8) std.mem.Alloc
         if (c.* == '/') c.* = '.';
     }
     return result;
-}
-
-/// Resolve a module name to a file path by searching `search_paths`.
-///
-/// `"Data.Map"` → looks for `Data/Map.hs` in each search path.
-/// Returns `null` if not found.
-fn resolveModule(
-    alloc: std.mem.Allocator,
-    module_name: []const u8,
-    search_paths: []const []const u8,
-) std.mem.Allocator.Error!?[]const u8 {
-    // Convert "Data.Map" → "Data/Map.hs".
-    const rel = try std.mem.replaceOwned(u8, alloc, module_name, ".", std.fs.path.sep_str);
-    defer alloc.free(rel);
-    const filename = try std.fmt.allocPrint(alloc, "{s}.hs", .{rel});
-    defer alloc.free(filename);
-
-    for (search_paths) |sp| {
-        const full = try std.fs.path.join(alloc, &.{ sp, filename });
-        defer alloc.free(full);
-
-        std.fs.cwd().access(full, .{}) catch continue;
-        return try alloc.dupe(u8, full);
-    }
-    return null;
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
