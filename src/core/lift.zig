@@ -138,6 +138,13 @@ pub const LambdaLifter = struct {
     /// without this cache rewriteExpr would clone each shared subtree at
     /// every occurrence, causing exponential blowup in AST size.
     rewrite_cache: std.AutoHashMapUnmanaged(usize, *Expr) = .{},
+    /// `unique → original base name` map for every `Var` node observed
+    /// during free-variable collection. Used at rewrite time to label
+    /// lifted-function free-variable parameters with their human-readable
+    /// names rather than the placeholder `fv` (#510). Lookups that miss
+    /// (e.g. for variables only seen via patterns or synthesised IDs)
+    /// fall back to `"fv"`.
+    var_names: std.AutoHashMapUnmanaged(u64, []const u8) = .{},
 
     pub fn init(alloc: std.mem.Allocator) LambdaLifter {
         return .{
@@ -160,6 +167,7 @@ pub const LambdaLifter = struct {
         self.expr_to_lambda.deinit(self.alloc);
         self.top_level_vars.deinit(self.alloc);
         self.rewrite_cache.deinit(self.alloc);
+        self.var_names.deinit(self.alloc);
     }
 
     /// Walk the leading Lam chain of an expression and record the pointer
@@ -176,6 +184,16 @@ pub const LambdaLifter = struct {
                 else => break,
             }
         }
+    }
+
+    /// Return the original source-level base name for a free variable's
+    /// unique ID, falling back to `"fv"` if the lifter never observed a
+    /// `Var` node carrying this unique (e.g. for synthesised IDs that only
+    /// appear as binders). The fallback exists only as a safety net — every
+    /// unique that becomes a "free variable" of some lambda came from a
+    /// `Var` reference that `collectFreeVarsOf` recorded.
+    fn fvBaseName(self: *const LambdaLifter, fv_id: u64) []const u8 {
+        return self.var_names.get(fv_id) orelse "fv";
     }
 
     /// Register a lambda expression and return its unique ID.
@@ -246,6 +264,12 @@ pub const LambdaLifter = struct {
                 if (!isDataCon(v.name.base) and !scope.contains(v.name.unique.value)) {
                     try fvs.add(self.alloc, v.name.unique.value);
                 }
+                // Remember the source-level base name for this unique so
+                // that rewriteExpr can label lifted-function parameters
+                // with the real identifier rather than the `fv` placeholder
+                // (#510). First-write-wins; later occurrences must agree by
+                // construction (same unique ⇒ same Name).
+                _ = try self.var_names.getOrPutValue(self.alloc, v.name.unique.value, v.name.base);
             },
             .Lit => {},
             .App => |a| {
@@ -476,7 +500,7 @@ pub const LambdaLifter = struct {
                             for (info.free_vars) |fv_id| {
                                 const fv_var = try self.alloc.create(Expr);
                                 fv_var.* = .{ .Var = .{
-                                    .name = .{ .base = "fv", .unique = .{ .value = fv_id } },
+                                    .name = .{ .base = self.fvBaseName(fv_id), .unique = .{ .value = fv_id } },
                                     .ty = intType(), // tracked in: follow-up issue for placeholder types
                                     .span = l.span,
                                 } };
@@ -744,7 +768,7 @@ pub fn lambdaLift(alloc: std.mem.Allocator, program: core.CoreProgram, external_
             fv_i -= 1;
             const fv = info.free_vars[fv_i];
             const fv_binder = Id{
-                .name = .{ .base = "fv", .unique = .{ .value = fv } },
+                .name = .{ .base = lifter.fvBaseName(fv), .unique = .{ .value = fv } },
                 .ty = intType(), // tracked in: follow-up issue for placeholder types
                 .span = info.params[0].span,
             };
@@ -1431,4 +1455,72 @@ test "LambdaLifter: initialization" {
     try testing.expectEqual(@as(u64, 0), lifter.lambda_counter);
     try testing.expectEqual(@as(usize, 0), lifter.lambdas.count());
     try testing.expectEqual(@as(usize, 0), lifter.top_level_vars.set.count());
+}
+
+test "lambdaLift: lifted function preserves free-variable source names (#510)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // f = \x -> (\y -> x) 5
+    // The lifted function is `lifted_0 x y = x` — its outermost binder
+    // must carry the source base name "x", not the legacy placeholder
+    // "fv".
+    const x_id = testId("x", 1);
+    const y_id = testId("y", 2);
+
+    const five_lit = try alloc.create(Expr);
+    five_lit.* = .{ .Lit = .{ .val = .{ .Int = 5 }, .span = testSpan() } };
+
+    const x_var = try alloc.create(Expr);
+    x_var.* = .{ .Var = x_id };
+
+    const inner_lambda = try alloc.create(Expr);
+    inner_lambda.* = .{ .Lam = .{
+        .binder = y_id,
+        .body = x_var,
+        .span = testSpan(),
+    } };
+
+    const inner_app = try alloc.create(Expr);
+    inner_app.* = .{ .App = .{
+        .fn_expr = inner_lambda,
+        .arg = five_lit,
+        .span = testSpan(),
+    } };
+
+    const outer_lambda = try alloc.create(Expr);
+    outer_lambda.* = .{ .Lam = .{
+        .binder = x_id,
+        .body = inner_app,
+        .span = testSpan(),
+    } };
+
+    const f_bind = Bind{ .NonRec = .{
+        .binder = testId("f", 10),
+        .rhs = outer_lambda,
+    } };
+
+    const program: core.CoreProgram = .{
+        .data_decls = &.{},
+        .binds = &.{f_bind},
+    };
+
+    const lifted = try lambdaLift(alloc, program, null, 0);
+
+    // Lifted bindings appear first; the lifted_0 function is binds[0].
+    // Its RHS is a Lam chain whose *outermost* binder is the free-var
+    // parameter — i.e. the parameter standing in for `x`.
+    const lifted_bind = lifted.program.binds[0];
+    const lifted_rhs = switch (lifted_bind) {
+        .NonRec => |pair| pair.rhs,
+        .Rec => unreachable,
+    };
+    const outermost_binder = switch (lifted_rhs.*) {
+        .Lam => |l| l.binder,
+        else => unreachable,
+    };
+
+    try testing.expectEqualStrings("x", outermost_binder.name.base);
+    try testing.expectEqual(@as(u64, 1), outermost_binder.name.unique.value);
 }
