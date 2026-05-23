@@ -438,8 +438,10 @@ test "0-field F-tag thunk: padded slot supports Ind update" {
     thunk.tag = .Ind;
     rts_store_field(thunk, 0, @intFromPtr(result));
 
-    // The post-update node behaves as a proper indirection.
+    // The post-update node behaves as a proper indirection. n_fields is
+    // unchanged — the padded slot is the load-bearing reuse target.
     try std.testing.expectEqual(Tag.Ind, thunk.tag);
+    try std.testing.expectEqual(@as(u32, 1), thunk.n_fields);
     try std.testing.expectEqual(result, indTarget(thunk));
     try std.testing.expectEqual(@as(i64, 123), intValue(indTarget(thunk)));
 }
