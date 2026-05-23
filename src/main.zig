@@ -230,6 +230,10 @@ pub fn main(init: std.process.Init) !void {
                 \\<str>...
                 \\
             );
+            // Keep in sync with `build_params` above: this slice MUST equal
+            // `build_params` minus internal-only flags. zig-clap v0.11.0 has
+            // no built-in hidden-parameter support, so we maintain two
+            // comptime slices.
             const build_params_help = comptime clap.parseParamsComptime(
                 \\-h, --help                   Display this help and exit.
                 \\-o, --output <str>           Output file name (default: stem of first input).
