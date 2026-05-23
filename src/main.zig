@@ -218,12 +218,27 @@ pub fn main(init: std.process.Init) !void {
         },
 
         .build => {
+            // Internal flags (e.g. `--repl`) are accepted by the parser but
+            // omitted from `--help` output so they don't appear as user-facing
+            // options. See issue #696.
             const build_params = comptime clap.parseParamsComptime(
                 \\-h, --help                   Display this help and exit.
                 \\-o, --output <str>           Output file name (default: stem of first input).
                 \\    --backend <str>          Backend: native (default), jit, wasm, c.
                 \\    --package-db <str>...    Package database path (may be repeated).
                 \\    --repl                   Compile for REPL use (internal).
+                \\<str>...
+                \\
+            );
+            // Keep in sync with `build_params` above: this slice MUST equal
+            // `build_params` minus internal-only flags. zig-clap v0.11.0 has
+            // no built-in hidden-parameter support, so we maintain two
+            // comptime slices.
+            const build_params_help = comptime clap.parseParamsComptime(
+                \\-h, --help                   Display this help and exit.
+                \\-o, --output <str>           Output file name (default: stem of first input).
+                \\    --backend <str>          Backend: native (default), jit, wasm, c.
+                \\    --package-db <str>...    Package database path (may be repeated).
                 \\<str>...
                 \\
             );
@@ -240,7 +255,7 @@ pub fn main(init: std.process.Init) !void {
             if (build_res.args.help != 0) {
                 var buf: [4096]u8 = undefined;
                 var fw: File.Writer = .init(.stdout(), io, &buf);
-                try clap.help(&fw.interface, clap.Help, &build_params, .{});
+                try clap.help(&fw.interface, clap.Help, &build_params_help, .{});
                 try fw.interface.flush();
                 return;
             }
