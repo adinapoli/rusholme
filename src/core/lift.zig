@@ -147,6 +147,17 @@ pub const LambdaLifter = struct {
     /// lifter assumes the AST's allocator outlives the lifter (true in
     /// every current caller, which uses a single arena for both).
     var_names: std.AutoHashMapUnmanaged(u64, []const u8) = .{},
+    /// `unique → actual Core type` map for every `Var` node observed
+    /// during free-variable collection. Used at lift time to give lifted-
+    /// function free-variable parameters their real types instead of the
+    /// `intType()` placeholder (#511). Lookups that miss fall back to
+    /// `intType()` (defensive — every unique that ends up in a lambda's
+    /// free-variable set came from a `Var` reference that
+    /// `collectFreeVarsOf` recorded).
+    ///
+    /// Values borrow into the input Core AST; the lifter assumes that
+    /// allocator outlives it.
+    var_types: std.AutoHashMapUnmanaged(u64, CoreType) = .{},
 
     pub fn init(alloc: std.mem.Allocator) LambdaLifter {
         return .{
@@ -170,6 +181,17 @@ pub const LambdaLifter = struct {
         self.top_level_vars.deinit(self.alloc);
         self.rewrite_cache.deinit(self.alloc);
         self.var_names.deinit(self.alloc);
+        self.var_types.deinit(self.alloc);
+    }
+
+    /// Return the actual Core type recorded for a free variable's unique
+    /// ID, falling back to `intType()` if the lifter never observed a
+    /// `Var` node carrying this unique. The fallback exists only as a
+    /// safety net — every unique that becomes a "free variable" of some
+    /// lambda came from a `Var` reference that `collectFreeVarsOf`
+    /// recorded.
+    fn fvType(self: *const LambdaLifter, fv_id: u64) CoreType {
+        return self.var_types.get(fv_id) orelse intType();
     }
 
     /// Walk the leading Lam chain of an expression and record the pointer
@@ -265,22 +287,26 @@ pub const LambdaLifter = struct {
                 if (!isDataCon(v.name.base) and !scope.contains(v.name.unique.value)) {
                     try fvs.add(self.alloc, v.name.unique.value);
                 }
-                // Remember the source-level base name for this unique so
-                // that rewriteExpr can label lifted-function parameters
-                // with the real identifier rather than the `fv` placeholder
-                // (#510). Data constructors are skipped — they never appear
-                // in any lambda's free-variable set. The same unique can
-                // legitimately reach this point under multiple Var nodes;
-                // first-write-wins, but assert that later occurrences agree
-                // by construction (the renamer guarantees one unique ⇒ one
-                // base name).
+                // Remember the source-level base name AND the actual Core
+                // type for this unique so that rewriteExpr / the lifted
+                // function builder can stamp the real identifier (#510)
+                // and the real type (#511) onto lifted-function free-
+                // variable parameters instead of the `"fv"` / `intType()`
+                // placeholders. Data constructors are skipped — they never
+                // appear in any lambda's free-variable set.
+                //
+                // The same unique can legitimately reach this point under
+                // multiple Var nodes; first-write-wins. For the name we
+                // assert later occurrences agree (the renamer guarantees
+                // one unique ⇒ one base name).
                 if (!isDataCon(v.name.base)) {
-                    const gop = try self.var_names.getOrPut(self.alloc, v.name.unique.value);
-                    if (!gop.found_existing) {
-                        gop.value_ptr.* = v.name.base;
+                    const gop_name = try self.var_names.getOrPut(self.alloc, v.name.unique.value);
+                    if (!gop_name.found_existing) {
+                        gop_name.value_ptr.* = v.name.base;
                     } else {
-                        std.debug.assert(std.mem.eql(u8, gop.value_ptr.*, v.name.base));
+                        std.debug.assert(std.mem.eql(u8, gop_name.value_ptr.*, v.name.base));
                     }
+                    _ = try self.var_types.getOrPutValue(self.alloc, v.name.unique.value, v.ty);
                 }
             },
             .Lit => {},
@@ -348,9 +374,9 @@ pub const LambdaLifter = struct {
 
                     // Compute function type with free vars added as parameters.
                     var lifted_ty = l.binder.ty;
-                    for (fvs_slice) |_| {
+                    for (fvs_slice) |fv_id| {
                         const p_ty = try self.alloc.create(CoreType);
-                        p_ty.* = intType(); // tracked in: follow-up issue for placeholder types
+                        p_ty.* = self.fvType(fv_id);
                         const param_ty = try self.alloc.create(CoreType);
                         param_ty.* = lifted_ty;
                         lifted_ty = CoreType{ .FunTy = .{ .arg = p_ty, .res = param_ty } };
@@ -513,7 +539,7 @@ pub const LambdaLifter = struct {
                                 const fv_var = try self.alloc.create(Expr);
                                 fv_var.* = .{ .Var = .{
                                     .name = .{ .base = self.fvBaseName(fv_id), .unique = .{ .value = fv_id } },
-                                    .ty = intType(), // tracked in: follow-up issue for placeholder types
+                                    .ty = self.fvType(fv_id),
                                     .span = l.span,
                                 } };
 
@@ -781,7 +807,7 @@ pub fn lambdaLift(alloc: std.mem.Allocator, program: core.CoreProgram, external_
             const fv = info.free_vars[fv_i];
             const fv_binder = Id{
                 .name = .{ .base = lifter.fvBaseName(fv), .unique = .{ .value = fv } },
-                .ty = intType(), // tracked in: follow-up issue for placeholder types
+                .ty = lifter.fvType(fv),
                 .span = info.params[0].span,
             };
 
@@ -1535,4 +1561,86 @@ test "lambdaLift: lifted function preserves free-variable source names (#510)" {
 
     try testing.expectEqualStrings("x", outermost_binder.name.base);
     try testing.expectEqual(@as(u64, 1), outermost_binder.name.unique.value);
+}
+
+test "lambdaLift: lifted function preserves free-variable types (#511)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // f = \x -> (\y -> x) 'a'
+    // x has type Char, y has type Char, the inner-lambda result has type
+    // Char.  After lifting, the outermost binder of `lifted_0` is the
+    // free-variable parameter for `x` — its `.ty` must be Char, not the
+    // legacy `intType()` placeholder.
+
+    const char_ty: CoreType = .{ .TyCon = .{
+        .name = .{ .base = "Char", .unique = .{ .value = 0 } },
+        .args = &.{},
+    } };
+
+    const x_id = Id{
+        .name = .{ .base = "x", .unique = .{ .value = 1 } },
+        .ty = char_ty,
+        .span = testSpan(),
+    };
+    const y_id = Id{
+        .name = .{ .base = "y", .unique = .{ .value = 2 } },
+        .ty = char_ty,
+        .span = testSpan(),
+    };
+
+    const a_lit = try alloc.create(Expr);
+    a_lit.* = .{ .Lit = .{ .val = .{ .Char = 'a' }, .span = testSpan() } };
+
+    const x_var = try alloc.create(Expr);
+    x_var.* = .{ .Var = x_id };
+
+    const inner_lambda = try alloc.create(Expr);
+    inner_lambda.* = .{ .Lam = .{
+        .binder = y_id,
+        .body = x_var,
+        .span = testSpan(),
+    } };
+
+    const inner_app = try alloc.create(Expr);
+    inner_app.* = .{ .App = .{
+        .fn_expr = inner_lambda,
+        .arg = a_lit,
+        .span = testSpan(),
+    } };
+
+    const outer_lambda = try alloc.create(Expr);
+    outer_lambda.* = .{ .Lam = .{
+        .binder = x_id,
+        .body = inner_app,
+        .span = testSpan(),
+    } };
+
+    const f_bind = Bind{ .NonRec = .{
+        .binder = testId("f", 10),
+        .rhs = outer_lambda,
+    } };
+
+    const program: core.CoreProgram = .{
+        .data_decls = &.{},
+        .binds = &.{f_bind},
+    };
+
+    const lifted = try lambdaLift(alloc, program, null, 0);
+
+    // Lifted bindings appear first; lifted_0 is binds[0]. Its outermost
+    // binder is the free-variable parameter standing in for `x`.
+    const lifted_bind = lifted.program.binds[0];
+    const lifted_rhs = switch (lifted_bind) {
+        .NonRec => |pair| pair.rhs,
+        .Rec => unreachable,
+    };
+    const outermost_binder = switch (lifted_rhs.*) {
+        .Lam => |l| l.binder,
+        else => unreachable,
+    };
+
+    try testing.expect(outermost_binder.ty == .TyCon);
+    try testing.expectEqualStrings("Char", outermost_binder.ty.TyCon.name.base);
 }
