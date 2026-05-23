@@ -144,6 +144,10 @@ pub const LambdaLifter = struct {
     /// names rather than the placeholder `fv` (#510). Lookups that miss
     /// (e.g. for variables only seen via patterns or synthesised IDs)
     /// fall back to `"fv"`.
+    ///
+    /// Lifetime: values are borrowed slices into the input Core AST. The
+    /// lifter assumes the AST's allocator outlives the lifter (true in
+    /// every current caller, which uses a single arena for both).
     var_names: std.AutoHashMapUnmanaged(u64, []const u8) = .{},
 
     pub fn init(alloc: std.mem.Allocator) LambdaLifter {
@@ -267,9 +271,20 @@ pub const LambdaLifter = struct {
                 // Remember the source-level base name for this unique so
                 // that rewriteExpr can label lifted-function parameters
                 // with the real identifier rather than the `fv` placeholder
-                // (#510). First-write-wins; later occurrences must agree by
-                // construction (same unique ⇒ same Name).
-                _ = try self.var_names.getOrPutValue(self.alloc, v.name.unique.value, v.name.base);
+                // (#510). Data constructors are skipped — they never appear
+                // in any lambda's free-variable set. The same unique can
+                // legitimately reach this point under multiple Var nodes;
+                // first-write-wins, but assert that later occurrences agree
+                // by construction (the renamer guarantees one unique ⇒ one
+                // base name).
+                if (!isDataCon(v.name.base)) {
+                    const gop = try self.var_names.getOrPut(self.alloc, v.name.unique.value);
+                    if (!gop.found_existing) {
+                        gop.value_ptr.* = v.name.base;
+                    } else {
+                        std.debug.assert(std.mem.eql(u8, gop.value_ptr.*, v.name.base));
+                    }
+                }
             },
             .Lit => {},
             .App => |a| {
