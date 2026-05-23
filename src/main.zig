@@ -1104,7 +1104,6 @@ fn emitNative(
     all_grin: rusholme.grin.ast.Program,
     output_name: []const u8,
 ) !void {
-    _ = session; // Unused for native backend
     const llvm = rusholme.backend.llvm;
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -1144,7 +1143,15 @@ fn emitNative(
             std.process.exit(1);
         };
 
-        const bc_path = try std.fmt.allocPrint(arena_alloc, "{s}.bc", .{mod_name});
+        // Prefer the source-declared module name (`module Foo where`) for
+        // the on-disk `.bc` stem so that files given as absolute paths
+        // (e.g. `/tmp/Foo.hs`) produce `Foo.bc` rather than the
+        // path-mangled `.tmp.Foo.bc` `inferModuleName` would yield (#453).
+        const bc_stem: []const u8 = if (session.parsed_modules.get(mod_name)) |parsed|
+            parsed.module_name
+        else
+            mod_name;
+        const bc_path = try std.fmt.allocPrint(arena_alloc, "{s}.bc", .{bc_stem});
         llvm.writeBitcodeToFile(llvm_mod, bc_path) catch |err| {
             var stderr_buf: [4096]u8 = undefined;
             var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
