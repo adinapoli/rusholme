@@ -357,6 +357,21 @@ pub const CompileEnv = struct {
                 try env.scope.bind(con.name, con_name);
             }
         }
+        // Seed class method names so that derived instance bindings resolve
+        // to the same unique IDs as the class declaration's methods.  Without
+        // this, the desugarer's unique-based method matching fails because
+        // the renamer creates fresh uniques for method names it cannot find
+        // in scope (e.g. `minBound`, `succ`), which then diverge from the
+        // class method's unique recorded in ClassEnv.
+        for (iface.class_infos) |ci| {
+            for (ci.methods) |m| {
+                const method_name = Name{
+                    .base = m.name.base,
+                    .unique = .{ .value = m.name.unique },
+                };
+                try env.scope.bind(m.name.base, method_name);
+            }
+        }
     }
 
     /// Seed a `TyEnv` from a single module interface.

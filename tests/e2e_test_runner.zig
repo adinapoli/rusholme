@@ -446,3 +446,7 @@ test "e2e: e2e_679_deriving_eq (#679)" {
 test "e2e: e2e_605_zero_field_thunk (#605)" {
     try testE2e(std.testing.allocator, "e2e_605_zero_field_thunk");
 }
+
+test "e2e: e2e_708_bounded_enum (#708)" {
+    try testE2e(std.testing.allocator, "e2e_708_bounded_enum");
+}
