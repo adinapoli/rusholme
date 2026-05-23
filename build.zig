@@ -468,6 +468,21 @@ pub fn build(b: *std.Build) void {
     });
     const run_parser_tests = b.addRunArtifact(parser_tests);
 
+    // Compile-failure test runner (should_fail_compile/) — covers
+    // post-parser diagnostics (renamer, typechecker, desugarer). The
+    // parser-only should_fail/should_compile tests are handled above.
+    // See issue #535.
+    const compile_fail_test_module = b.createModule(.{
+        .root_source_file = b.path("tests/compile_fail_test_runner.zig"),
+        .target = target,
+        .imports = &.{.{ .name = "rusholme", .module = mod }},
+    });
+    const compile_fail_tests = b.addTest(.{
+        .name = "compile-fail-tests",
+        .root_module = compile_fail_test_module,
+    });
+    const run_compile_fail_tests = b.addRunArtifact(compile_fail_tests);
+
     // Runtime test runner - tests LLVM-based runtime (src/rts/)
     const runtime_test_module = b.createModule(.{
         .root_source_file = b.path("tests/runtime_test_runner.zig"),
@@ -587,6 +602,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_golden_tests.step);
     test_step.dependOn(&run_parser_tests.step);
+    test_step.dependOn(&run_compile_fail_tests.step);
     test_step.dependOn(&run_runtime_tests.step);
     test_step.dependOn(&run_e2e_tests.step);
     test_step.dependOn(&run_repl_tests.step);
