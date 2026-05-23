@@ -295,7 +295,7 @@ pub fn main(init: std.process.Init) !void {
         },
 
         .pkg => {
-            return rusholme.packages.pkg_cmd.cmdPkg(allocator, io, &it);
+            return rusholme.packages.pkg_cmd.cmdPkg(allocator, io, it.args[it.index..]);
         },
     }
 }
