@@ -12,7 +12,9 @@ module Prelude
     , putChar, putStr, putStrLn, print
     , error
     , intToChar, charToInt
-    , max
+    , max, min, signum
+    , even, odd
+    , sum, product, replicate
     , Eq(..)
     , Ord(..)
     , Bounded(..)
@@ -161,6 +163,24 @@ max :: Int -> Int -> Int
 max x y = case x >= y of
     True  -> x
     False -> y
+
+min :: Int -> Int -> Int
+min x y = case x <= y of
+    True  -> x
+    False -> y
+
+signum :: Int -> Int
+signum n = case n == 0 of
+    True  -> 0
+    False -> case n > 0 of
+        True  -> 1
+        False -> negate 1
+
+even :: Int -> Bool
+even n = mod n 2 == 0
+
+odd :: Int -> Bool
+odd n = mod n 2 /= 0
 
 -- ========================================================================
 -- Eq type class
@@ -422,6 +442,23 @@ drop n []     = []
 drop n (x:xs) = case n <= 0 of
     True  -> x : xs
     False -> drop (n - 1) xs
+
+-- ========================================================================
+-- More numeric and list utilities
+-- ========================================================================
+
+sum :: [Int] -> Int
+sum []     = 0
+sum (x:xs) = x + sum xs
+
+product :: [Int] -> Int
+product []     = 1
+product (x:xs) = x * product xs
+
+replicate :: Int -> a -> [a]
+replicate n x = case n <= 0 of
+    True  -> []
+    False -> x : replicate (n - 1) x
 
 -- ========================================================================
 -- Show typeclass
