@@ -257,6 +257,7 @@
 | [#539](https://github.com/adinapoli/rusholme/issues/539) | Parser cannot handle infix operator definitions with parenthesized patterns | [#29](https://github.com/adinapoli/rusholme/issues/29), [#31](https://github.com/adinapoli/rusholme/issues/31) | :green_circle: |
 | [#540](https://github.com/adinapoli/rusholme/issues/540) | Parser cannot handle multiple consecutive parenthesized cons patterns | [#31](https://github.com/adinapoli/rusholme/issues/31) | :green_circle: |
 | [#543](https://github.com/adinapoli/rusholme/issues/543) | Layout processor injects virtual tokens inside parenthesized contexts | [#26](https://github.com/adinapoli/rusholme/issues/26) | :green_circle: |
+| [#734](https://github.com/adinapoli/rusholme/issues/734) | parser: 'let' qualifier in list comprehensions fails to layout | [#26](https://github.com/adinapoli/rusholme/issues/26), [#309](https://github.com/adinapoli/rusholme/issues/309) | :white_circle: |
 
 ### CLI
 
@@ -335,7 +336,7 @@
 | [#418](https://github.com/adinapoli/rusholme/issues/418) | Desugar list patterns in match compiler | [#377](https://github.com/adinapoli/rusholme/issues/377) | :green_circle: |
 | [#378](https://github.com/adinapoli/rusholme/issues/378) | Tier 3: Optimal decision trees with exhaustiveness/redundancy checking | [#377](https://github.com/adinapoli/rusholme/issues/377) | :white_circle: |
 | [#297](https://github.com/adinapoli/rusholme/issues/297) | Compare Core IR emitted by GHC vs Rusholme | [#38](https://github.com/adinapoli/rusholme/issues/38) | :white_circle: |
-| [#309](https://github.com/adinapoli/rusholme/issues/309) | Implement list comprehension (ListComp) support | [#38](https://github.com/adinapoli/rusholme/issues/38) | :white_circle: |
+| [#309](https://github.com/adinapoli/rusholme/issues/309) | Implement list comprehension (ListComp) support | [#38](https://github.com/adinapoli/rusholme/issues/38) | :yellow_circle: |
 | [#679](https://github.com/adinapoli/rusholme/issues/679) | Implement `deriving` mechanism for stock classes (`Eq`, `Ord`, `Show`, `Bounded`, `Enum`) and newtype strategy | [#33](https://github.com/adinapoli/rusholme/issues/33), [#530](https://github.com/adinapoli/rusholme/issues/530) | :yellow_circle: |
 | [#680](https://github.com/adinapoli/rusholme/issues/680) | Implement `deriving Generic` / `Generic1` and `GHC.Generics` compatibility module | [#679](https://github.com/adinapoli/rusholme/issues/679), [#655](https://github.com/adinapoli/rusholme/issues/655) | :white_circle: |
 
