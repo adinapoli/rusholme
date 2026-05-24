@@ -1481,16 +1481,6 @@ fn patternIsIrrefutable(p: ast.Pattern) bool {
     };
 }
 
-/// `ast.Expr.getSpan()` panics for container exprs (Do, Tuple, List).  When
-/// desugaring list comprehensions we may encounter these as the generator
-/// source, so fall back to the comprehension's outer span.
-fn bestExprSpan(e: ast.Expr, fallback: SourceSpan) SourceSpan {
-    return switch (e) {
-        .Do, .Tuple, .List => fallback,
-        else => e.getSpan(),
-    };
-}
-
 // ── Alt / Stmt renaming ────────────────────────────────────────────────
 
 fn renameAlt(alt: ast.Alt, env: *RenameEnv) RenameError!RAlt {
