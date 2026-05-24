@@ -332,7 +332,7 @@ pub const Expr = union(enum) {
     /// Arithmetic sequence: [e, e' .. e'']
     EnumFromThenTo: struct { from: *const Expr, then: *const Expr, to: *const Expr, span: SourceSpan },
     /// List comprehension: [x * 2 | x <- xs]
-    ListComp: struct { expr: *const Expr, qualifiers: []const Qualifier },
+    ListComp: struct { expr: *const Expr, qualifiers: []const Qualifier, span: SourceSpan },
     /// Type annotation: 5 :: Int
     TypeAnn: struct { expr: *const Expr, type: Type },
     /// Type application: f @Int (GHC TypeApplications extension)
@@ -365,7 +365,7 @@ pub const Expr = union(enum) {
             .EnumFromThen => |e| e.span,
             .EnumFromTo => |e| e.span,
             .EnumFromThenTo => |e| e.span,
-            .ListComp => |l| l.expr.getSpan(),
+            .ListComp => |l| l.span,
             .TypeAnn => |a| a.expr.getSpan(),
             .TypeApp => |a| a.fn_expr.getSpan().merge(a.span),
             .Negate, .Paren => |e| e.getSpan(),
