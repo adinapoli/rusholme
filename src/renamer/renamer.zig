@@ -1336,17 +1336,155 @@ fn renameExpr(expr: ast.Expr, env: *RenameEnv) RenameError!RExpr {
             expr_r.* = try renameExpr(f.expr.*, env);
             break :blk RExpr{ .Field = .{ .expr = expr_r, .field_name = f.field_name, .span = f.span } };
         },
-        // ── Not yet implemented ─────────────────────────────────────────
-        //
-        // IMPORTANT: Each unsupported case MUST have a tracking issue. When
-        // adding a new AST case, if full support is deferred:
-        // 1. Add the case here with an issue reference
-        // 2. File a GitHub issue if none exists
-        // 3. See CONTRIBUTING.md for the "deferred features" policy
-        .ListComp => {
-            // tracked in: https://github.com/adinapoli/rusholme/issues/309
-            return RExpr{ .Var = .{ .name = env.freshName("< ListComp not yet implemented >"), .span = expr.getSpan() } };
+        .ListComp => |lc| {
+            // Desugar list comprehensions to `concat`/`map`/`if`/`let` per
+            // Haskell 2010 §3.11, then rename the resulting AST.
+            const desugared = try desugarListComp(env, lc.expr.*, lc.qualifiers, lc.span);
+            return try renameExpr(desugared, env);
         },
+    };
+}
+
+// ── List comprehension desugaring ──────────────────────────────────────
+//
+// Per Haskell 2010 §3.11:
+//
+//   [ e | ]              = [e]
+//   [ e | b, Q ]         = if b then [e | Q] else []
+//   [ e | p <- l, Q ]    = concat (map (\v -> case v of { p -> [e|Q]
+//                                                       ; _ -> [] }) l)
+//   [ e | let decls, Q ] = let decls in [e | Q]
+//
+// `concat` and `map` come from the Prelude.  For irrefutable patterns the
+// wildcard alternative is omitted to keep the desugared output tidy.
+fn desugarListComp(
+    env: *RenameEnv,
+    body: ast.Expr,
+    quals: []const ast.Qualifier,
+    lc_span: SourceSpan,
+) RenameError!ast.Expr {
+    if (quals.len == 0) {
+        const items = try env.alloc.alloc(ast.Expr, 1);
+        items[0] = body;
+        return ast.Expr{ .List = items };
+    }
+    const q = quals[0];
+    const rest = quals[1..];
+    switch (q) {
+        .Generator => |g| {
+            const gen_span = bestExprSpan(g.expr, lc_span);
+
+            // Synthesise lambda argument variable.  The name is a string
+            // that the user cannot type at source level, so it cannot
+            // shadow anything user-written.
+            const arg_name: []const u8 = "$listcomp_v";
+
+            const rest_expr = try desugarListComp(env, body, rest, lc_span);
+
+            const alts = blk: {
+                if (patternIsIrrefutable(g.pat)) {
+                    const arr = try env.alloc.alloc(ast.Alt, 1);
+                    arr[0] = .{
+                        .pattern = g.pat,
+                        .rhs = .{ .UnGuarded = rest_expr },
+                        .span = gen_span,
+                    };
+                    break :blk arr;
+                } else {
+                    const arr = try env.alloc.alloc(ast.Alt, 2);
+                    arr[0] = .{
+                        .pattern = g.pat,
+                        .rhs = .{ .UnGuarded = rest_expr },
+                        .span = gen_span,
+                    };
+                    arr[1] = .{
+                        .pattern = .{ .Wild = gen_span },
+                        .rhs = .{ .UnGuarded = ast.Expr{ .List = &.{} } },
+                        .span = gen_span,
+                    };
+                    break :blk arr;
+                }
+            };
+
+            const scrutinee_p = try env.alloc.create(ast.Expr);
+            scrutinee_p.* = .{ .Var = .{ .name = arg_name, .span = gen_span } };
+            const case_expr = ast.Expr{ .Case = .{
+                .scrutinee = scrutinee_p,
+                .alts = alts,
+            } };
+
+            const lambda_body_p = try env.alloc.create(ast.Expr);
+            lambda_body_p.* = case_expr;
+            const lambda_pats = try env.alloc.alloc(ast.Pattern, 1);
+            lambda_pats[0] = .{ .Var = .{ .name = arg_name, .span = gen_span } };
+            const lambda_expr = ast.Expr{ .Lambda = .{
+                .patterns = lambda_pats,
+                .body = lambda_body_p,
+            } };
+
+            // map <lambda> <list>
+            const map_var_p = try env.alloc.create(ast.Expr);
+            map_var_p.* = .{ .Var = .{ .name = "map", .span = gen_span } };
+            const lambda_p = try env.alloc.create(ast.Expr);
+            lambda_p.* = lambda_expr;
+            const map_app1_p = try env.alloc.create(ast.Expr);
+            map_app1_p.* = .{ .App = .{ .fn_expr = map_var_p, .arg_expr = lambda_p } };
+            const list_arg_p = try env.alloc.create(ast.Expr);
+            list_arg_p.* = g.expr;
+            const map_app_p = try env.alloc.create(ast.Expr);
+            map_app_p.* = .{ .App = .{ .fn_expr = map_app1_p, .arg_expr = list_arg_p } };
+
+            // concat (map ...)
+            const concat_var_p = try env.alloc.create(ast.Expr);
+            concat_var_p.* = .{ .Var = .{ .name = "concat", .span = gen_span } };
+            return ast.Expr{ .App = .{ .fn_expr = concat_var_p, .arg_expr = map_app_p } };
+        },
+        .Qualifier => |b| {
+            const rest_expr = try desugarListComp(env, body, rest, lc_span);
+
+            const cond_p = try env.alloc.create(ast.Expr);
+            cond_p.* = b;
+            const then_p = try env.alloc.create(ast.Expr);
+            then_p.* = rest_expr;
+            const else_p = try env.alloc.create(ast.Expr);
+            else_p.* = .{ .List = &.{} };
+            return ast.Expr{ .If = .{
+                .condition = cond_p,
+                .then_expr = then_p,
+                .else_expr = else_p,
+            } };
+        },
+        .LetQualifier => |decls| {
+            const rest_expr = try desugarListComp(env, body, rest, lc_span);
+            const body_p = try env.alloc.create(ast.Expr);
+            body_p.* = rest_expr;
+            return ast.Expr{ .Let = .{ .binds = decls, .body = body_p } };
+        },
+    }
+}
+
+fn patternIsIrrefutable(p: ast.Pattern) bool {
+    return switch (p) {
+        .Var, .Wild => true,
+        .AsPar => |a| patternIsIrrefutable(a.pat.*),
+        .Paren => |x| patternIsIrrefutable(x.pat.*),
+        // Tuples are single-constructor and therefore irrefutable when all
+        // components are irrefutable (Haskell 2010 §3.17.2).
+        .Tuple => |t| {
+            for (t.patterns) |sub| if (!patternIsIrrefutable(sub)) return false;
+            return true;
+        },
+        else => false,
+    };
+}
+
+/// `ast.Expr.getSpan()` panics for container exprs (Do, Tuple, List).  When
+/// desugaring list comprehensions we may encounter these as the generator
+/// source, so fall back to the comprehension's outer span.
+fn bestExprSpan(e: ast.Expr, fallback: SourceSpan) SourceSpan {
+    return switch (e) {
+        .Do, .Tuple, .List => fallback,
+        else => e.getSpan(),
     };
 }
 
@@ -2325,4 +2463,68 @@ test "rename #660: second class method resolves correctly after first class with
     try testing.expectEqualStrings("myNeq", my_neq_method.name.base);
     try testing.expect(my_neq_method.default_impl != null);
     try testing.expectEqual(@as(usize, 1), my_neq_method.default_impl.?.len);
+}
+
+test "rename #309: list comprehension desugars via concat/map" {
+    // `f xs = [x | x <- xs]`
+    //
+    // After desugaring per Haskell 2010 §3.11 we expect:
+    //   concat (map (\$listcomp_v -> case $listcomp_v of x -> [x]) xs)
+    //
+    // We only verify that:
+    //   (a) the rename pass produces no errors,
+    //   (b) the body's outermost expression is `App` whose head resolves to
+    //       `concat` — i.e. the desugaring was actually run.
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var supply = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var env = try RenameEnv.init(alloc, &supply, &diags, false);
+    defer env.deinit();
+
+    // Body: `[x | x <- xs]`
+    const var_x = ast.Expr{ .Var = testQName("x") };
+    const var_xs = ast.Expr{ .Var = testQName("xs") };
+    const quals = [_]ast.Qualifier{
+        .{ .Generator = .{ .pat = testPatternVar("x"), .expr = var_xs } },
+    };
+    const lc_body = ast.Expr{ .ListComp = .{
+        .expr = &var_x,
+        .qualifiers = &quals,
+        .span = testSpan(),
+    } };
+
+    const decls = [_]ast.Decl{.{ .FunBind = .{
+        .name = "f",
+        .equations = &.{.{
+            .patterns = &.{testPatternVar("xs")},
+            .rhs = .{ .UnGuarded = lc_body },
+            .where_clause = null,
+            .span = testSpan(),
+        }},
+        .span = testSpan(),
+    } }};
+    const module = makeModule(&decls);
+    const rm = try rename(module, &env);
+
+    try testing.expect(!diags.hasErrors());
+
+    // Inspect the renamed body: should be `App(App(Var(concat), _), _)` after
+    // application of `concat` to `map ... xs` — i.e. the outermost node is App
+    // and its head, following the App chain, resolves to a Var named "concat".
+    const body = rm.declarations[0].FunBind.equations[0].rhs.UnGuarded;
+    try testing.expect(body == .App);
+    const head = headOfApp(&body);
+    try testing.expect(head.* == .Var);
+    try testing.expectEqualStrings("concat", head.Var.name.base);
+}
+
+fn headOfApp(e: *const RExpr) *const RExpr {
+    var cur = e;
+    while (cur.* == .App) cur = cur.App.fn_expr;
+    return cur;
 }

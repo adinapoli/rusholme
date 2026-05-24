@@ -2935,10 +2935,10 @@ pub const Parser = struct {
                     _ = try self.advance(); // consume '|'
                     const qualifiers = try self.parseQualifiers();
                     const close_tok = try self.expect(.close_bracket);
-                    _ = close_tok;
                     return .{ .ListComp = .{
                         .expr = try self.allocNode(ast_mod.Expr, first),
                         .qualifiers = qualifiers,
+                        .span = open_tok.span.merge(close_tok.span),
                     } };
                 }
 
