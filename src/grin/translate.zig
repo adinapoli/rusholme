@@ -2174,6 +2174,23 @@ fn partialTag(base: []const u8, unique: u64, missing: u32) GrinTag {
 ///
 /// This is issue #315: Generate whole-program eval and apply functions.
 /// Takes a GRIN program and returns it augmented with the special functions.
+///
+/// ## Status (#520)
+///
+/// **No backend currently calls this function.** The LLVM backend
+/// (`grin_to_llvm.zig::translateCase`) inlines its own eval loop at every
+/// case scrutinee site instead. This pair is MVP-grade scaffolding:
+/// `generateApplyFunc` in particular returns unit and would not actually
+/// drive partial-application dispatch if called.
+///
+/// The architecture question — fully inline (current behaviour) vs. lower
+/// the inline loop into a callable GRIN-level `eval` so GRIN-level
+/// optimisations can see it — is tracked as a research sub-issue of #520:
+///
+///   https://github.com/adinapoli/rusholme/issues/732
+///
+/// Do not assume this code works end-to-end. Resurrect or replace via the
+/// research issue's outcome; do not extend in place.
 pub fn generateEvalApply(alloc: std.mem.Allocator, program: GrinProgram) !GrinProgram {
     // Collect all tags from the program
     var tag_info = try collectTags(alloc, program);
@@ -2546,205 +2563,6 @@ test "translateProgram: literal value" {
     }
 }
 
-test "generateEvalApply: adds eval and apply to program" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    // Create a simple GRIN program with one function
-    const body = try alloc.create(GrinExpr);
-    body.* = .{ .Return = .{ .Lit = .{ .Int = 42 } } };
-
-    const def = GrinDef{
-        .name = .{ .base = "main", .unique = .{ .value = 0 } },
-        .params = &.{},
-        .body = body,
-    };
-
-    const defs = try alloc.alloc(GrinDef, 1);
-    defs[0] = def;
-
-    const program = GrinProgram{
-        .defs = defs,
-        .field_types = .{},
-        .arities = .{},
-    };
-
-    // Generate eval/apply functions
-    const augmented = try generateEvalApply(alloc, program);
-
-    // Should have 3 definitions: original + eval + apply
-    try testing.expectEqual(@as(usize, 3), augmented.defs.len);
-
-    // Original function should be present
-    try testing.expectEqualStrings("main", augmented.defs[0].name.base);
-
-    // eval function should be present
-    var eval_found = false;
-    for (augmented.defs) |d| {
-        if (std.mem.eql(u8, d.name.base, "eval")) {
-            eval_found = true;
-            try testing.expectEqual(@as(usize, 1), d.params.len);
-            try testing.expectEqualStrings("p", d.params[0].base);
-        }
-    }
-    try testing.expect(eval_found);
-
-    // apply function should be present
-    var apply_found = false;
-    for (augmented.defs) |d| {
-        if (std.mem.eql(u8, d.name.base, "apply")) {
-            apply_found = true;
-            try testing.expectEqual(@as(usize, 2), d.params.len);
-            try testing.expectEqualStrings("f", d.params[0].base);
-            try testing.expectEqualStrings("x", d.params[1].base);
-        }
-    }
-    try testing.expect(apply_found);
-}
-
-test "generateEvalFunc: has proper structure" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    // Create a program with a constructor
-    const con_node = try alloc.create(GrinExpr);
-    con_node.* = .{ .Store = .{ .ConstTagNode = .{
-        .tag = conTag("Just", 1),
-        .fields = &.{.{ .Lit = .{ .Int = 42 } }},
-    } } };
-
-    const def = GrinDef{
-        .name = .{ .base = "testFunc", .unique = .{ .value = 10 } },
-        .params = &.{},
-        .body = con_node,
-    };
-
-    const defs = try alloc.alloc(GrinDef, 1);
-    defs[0] = def;
-
-    const program = GrinProgram{
-        .defs = defs,
-        .field_types = .{},
-        .arities = .{},
-    };
-
-    // Generate eval function
-    var tag_info = try collectTags(alloc, program);
-    defer tag_info.deinit(alloc);
-
-    const eval_def = try generateEvalFunc(alloc, &tag_info);
-
-    // Verify eval structure
-    try testing.expectEqualStrings("eval", eval_def.name.base);
-    try testing.expectEqual(@as(usize, 1), eval_def.params.len);
-    try testing.expectEqualStrings("p", eval_def.params[0].base);
-
-    // Body should be a Bind: fetch p >>= \node -> case node of ...
-    switch (eval_def.body.*) {
-        .Bind => |bind| {
-            // LHS should be a Fetch
-            switch (bind.lhs.*) {
-                .Fetch => |fetch| {
-                    try testing.expectEqualStrings("p", fetch.ptr.base);
-                    try testing.expect(fetch.index == null);
-                },
-                else => try testing.expect(false), // LHS should be Fetch
-            }
-
-            // RHS should be a Case
-            switch (bind.rhs.*) {
-                .Case => |case_expr| {
-                    // Scrutinee should be the node variable
-                    try testing.expectEqualStrings("node", case_expr.scrutinee.Var.base);
-
-                    // Should have at least one alternative (for constructor)
-                    try testing.expect(case_expr.alts.len >= 1);
-                },
-                else => try testing.expect(false), // RHS should be Case
-            }
-        },
-        else => try testing.expect(false), // Body should be Bind
-    }
-}
-
-test "TagInfo: collects constructor tags" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    // Create a program with multiple constructors
-    const just_node = try alloc.create(GrinExpr);
-    just_node.* = .{ .Store = .{ .ConstTagNode = .{
-        .tag = conTag("Just", 1),
-        .fields = &.{.{ .Lit = .{ .Int = 42 } }},
-    } } };
-
-    const nothing_node = try alloc.create(GrinExpr);
-    nothing_node.* = .{ .Store = .{ .ConstTagNode = .{
-        .tag = conTag("Nothing", 2),
-        .fields = &.{},
-    } } };
-
-    const def = GrinDef{
-        .name = .{ .base = "testFunc", .unique = .{ .value = 10 } },
-        .params = &.{},
-        .body = just_node,
-    };
-
-    const defs = try alloc.alloc(GrinDef, 1);
-    defs[0] = def;
-
-    const program = GrinProgram{
-        .defs = defs,
-        .field_types = .{},
-        .arities = .{},
-    };
-
-    // Collect tags
-    var tag_info = try collectTags(alloc, program);
-    defer tag_info.deinit(alloc);
-
-    // Should have collected the Just constructor
-    try testing.expect(tag_info.con_tags.items.len >= 1);
-
-    // Find the Just tag
-    var just_found = false;
-    for (tag_info.con_tags.items) |tag| {
-        if (std.mem.eql(u8, tag.name.base, "Just")) {
-            just_found = true;
-            try testing.expect(tag.tag_type == .Con);
-        }
-    }
-    try testing.expect(just_found);
-
-    // Should have collected the function name (keyed by unique ID)
-    try testing.expect(tag_info.fun_tags.count() >= 1);
-    try testing.expect(tag_info.fun_tags.contains(10)); // testFunc unique = 10
-}
-
-test "generateApplyFunc: has proper signature" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const apply_def = try generateApplyFunc(alloc);
-
-    // Verify apply structure
-    try testing.expectEqualStrings("apply", apply_def.name.base);
-    try testing.expectEqual(@as(usize, 2), apply_def.params.len);
-    try testing.expectEqualStrings("f", apply_def.params[0].base);
-    try testing.expectEqualStrings("x", apply_def.params[1].base);
-
-    // Body should be a Return with Unit (MVP)
-    switch (apply_def.body.*) {
-        .Return => |v| {
-            try testing.expect(v == .Unit);
-        },
-        else => try testing.expect(false), // Body should be Return
-    }
-}
 
 test "buildArityMap: correctly counts lambda parameters" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
