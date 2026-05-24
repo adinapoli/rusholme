@@ -3,7 +3,7 @@
 -- Haskell 2010 §3.4 / §3.5:
 --   (e op)  ≡  \x -> e  op x       -- left section
 --   (op e)  ≡  \x -> x  op e       -- right section
---   -e      ≡  negate e
+--   -e      ≡  negate e            -- including the parenthesised form (- e)
 
 incOne :: Int -> Int
 incOne = (+ 1)
@@ -20,3 +20,5 @@ main = do
     print (prependZero 3)
     print negFive
     print (negate 8)
+    print (- 9)
+    print (map (+ 10) [1, 2, 3])

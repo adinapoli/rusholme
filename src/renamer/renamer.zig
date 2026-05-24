@@ -1754,11 +1754,20 @@ fn buildSectionLambda(
     op: ast.QName,
     side: enum { left, right },
 ) RenameError!ast.Expr {
-    const arg_name: []const u8 = "$sec_arg";
-    const span = bestExprSpan(section_expr, op.span);
+    // Uniquify the synthetic parameter so that nested sections do not
+    // share a base name in pretty-printed Core/GRIN dumps.
+    const arg_name = try std.fmt.allocPrint(
+        env.alloc,
+        "$sec_arg_{d}",
+        .{env.supply.fresh().value},
+    );
+    // Fall back to the operator's span (always present) if the operand
+    // expression has no usable getSpan().
+    const operand_span = bestExprSpan(section_expr, op.span);
+    const lambda_span = operand_span.merge(op.span);
 
     const arg_var_p = try env.alloc.create(ast.Expr);
-    arg_var_p.* = .{ .Var = .{ .name = arg_name, .span = span } };
+    arg_var_p.* = .{ .Var = .{ .name = arg_name, .span = op.span } };
 
     const fixed_p = try env.alloc.create(ast.Expr);
     fixed_p.* = section_expr;
@@ -1770,7 +1779,7 @@ fn buildSectionLambda(
     body_p.* = .{ .InfixApp = .{ .left = left_p, .op = op, .right = right_p } };
 
     const pats = try env.alloc.alloc(ast.Pattern, 1);
-    pats[0] = .{ .Var = .{ .name = arg_name, .span = span } };
+    pats[0] = .{ .Var = .{ .name = arg_name, .span = lambda_span } };
     return ast.Expr{ .Lambda = .{ .patterns = pats, .body = body_p } };
 }
 
