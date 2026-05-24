@@ -1468,6 +1468,12 @@ fn patternIsIrrefutable(p: ast.Pattern) bool {
         .Var, .Wild => true,
         .AsPar => |a| patternIsIrrefutable(a.pat.*),
         .Paren => |x| patternIsIrrefutable(x.pat.*),
+        // Tuples are single-constructor and therefore irrefutable when all
+        // components are irrefutable (Haskell 2010 §3.17.2).
+        .Tuple => |t| {
+            for (t.patterns) |sub| if (!patternIsIrrefutable(sub)) return false;
+            return true;
+        },
         else => false,
     };
 }
