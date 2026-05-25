@@ -2735,6 +2735,14 @@ pub const Parser = struct {
 
                     const right_expr = try self.parseExpr();
                     _ = try self.expect(.close_paren);
+
+                    // Haskell 2010 §3.5: `(- e)` is NOT a right section — it is
+                    // prefix negation, equivalent to `negate e`.  All other
+                    // operators in this position form a right section.
+                    if (next_tag == .minus) {
+                        return .{ .Negate = try self.allocNode(ast_mod.Expr, right_expr) };
+                    }
+
                     return .{ .RightSection = .{
                         .op = .{ .name = op_name, .span = op_tok.span },
                         .expr = try self.allocNode(ast_mod.Expr, right_expr),

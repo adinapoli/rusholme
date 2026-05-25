@@ -2403,32 +2403,11 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
 
             node.* = app2.*;
         },
-        .LeftSection => {
-            // Left operator section (e.g., (x +))
-            // tracked in: https://github.com/adinapoli/rusholme/issues/361
-            node.* = .{ .Var = .{
-                .name = Name{ .base = "todo_leftsection", .unique = .{ .value = 0 } },
-                .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
-                .span = syntheticSpan(),
-            } };
-        },
-        .RightSection => {
-            // Right operator section (e.g., (+ x))
-            // tracked in: https://github.com/adinapoli/rusholme/issues/361
-            node.* = .{ .Var = .{
-                .name = Name{ .base = "todo_rightsection", .unique = .{ .value = 0 } },
-                .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
-                .span = syntheticSpan(),
-            } };
-        },
-        .Negate => {
-            // Numeric negation
-            // tracked in: https://github.com/adinapoli/rusholme/issues/361
-            node.* = .{ .Var = .{
-                .name = Name{ .base = "todo_negate", .unique = .{ .value = 0 } },
-                .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
-                .span = syntheticSpan(),
-            } };
+        .LeftSection, .RightSection, .Negate => {
+            // The renamer rewrites operator sections to `Lambda + InfixApp`
+            // and `Negate` to `App(negate, e)` (Haskell 2010 §3.4 / §3.5),
+            // so these variants must never reach the Core desugarer.
+            std.debug.panic("desugar: unexpected RExpr variant {s} (renamer desugaring failed)", .{@tagName(expr)});
         },
         .Tuple => {
             // Tuple expressions

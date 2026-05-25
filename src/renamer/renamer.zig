@@ -1134,17 +1134,15 @@ fn renameExpr(expr: ast.Expr, env: *RenameEnv) RenameError!RExpr {
                 .right = right_r,
             } };
         },
-        .LeftSection => |ls| blk: {
-            const expr_r = try env.alloc.create(RExpr);
-            expr_r.* = try renameExpr(ls.expr.*, env);
-            const op_name = try env.resolve(ls.op.name, ls.op.span);
-            break :blk RExpr{ .LeftSection = .{ .expr = expr_r, .op = op_name, .op_span = ls.op.span } };
+        .LeftSection => |ls| {
+            // (e op)  ≡  \$sec_arg -> e op $sec_arg     (Haskell 2010 §3.5)
+            const lam = try buildSectionLambda(env, ls.expr.*, ls.op, .left);
+            return try renameExpr(lam, env);
         },
-        .RightSection => |rs| blk: {
-            const expr_r = try env.alloc.create(RExpr);
-            expr_r.* = try renameExpr(rs.expr.*, env);
-            const op_name = try env.resolve(rs.op.name, rs.op.span);
-            break :blk RExpr{ .RightSection = .{ .op = op_name, .op_span = rs.op.span, .expr = expr_r } };
+        .RightSection => |rs| {
+            // (op e)  ≡  \$sec_arg -> $sec_arg op e     (Haskell 2010 §3.5)
+            const lam = try buildSectionLambda(env, rs.expr.*, rs.op, .right);
+            return try renameExpr(lam, env);
         },
         .Lambda => |lam| blk: {
             try env.scope.push();
@@ -1270,10 +1268,15 @@ fn renameExpr(expr: ast.Expr, env: *RenameEnv) RenameError!RExpr {
             fn_r.* = try renameExpr(ta.fn_expr.*, env);
             break :blk RExpr{ .TypeApp = .{ .fn_expr = fn_r, .type = ta.type, .span = ta.span } };
         },
-        .Negate => |e| blk: {
-            const r = try env.alloc.create(RExpr);
-            r.* = try renameExpr(e.*, env);
-            break :blk RExpr{ .Negate = r };
+        .Negate => |e| {
+            // -e  ≡  negate e   (Haskell 2010 §3.4)
+            const e_p = try env.alloc.create(ast.Expr);
+            e_p.* = e.*;
+            const span = bestExprSpan(e.*, invalidSpan());
+            const negate_var_p = try env.alloc.create(ast.Expr);
+            negate_var_p.* = .{ .Var = .{ .name = "negate", .span = span } };
+            const app = ast.Expr{ .App = .{ .fn_expr = negate_var_p, .arg_expr = e_p } };
+            return try renameExpr(app, env);
         },
         .Paren => |e| blk: {
             const r = try env.alloc.create(RExpr);
@@ -1475,16 +1478,6 @@ fn patternIsIrrefutable(p: ast.Pattern) bool {
             return true;
         },
         else => false,
-    };
-}
-
-/// `ast.Expr.getSpan()` panics for container exprs (Do, Tuple, List).  When
-/// desugaring list comprehensions we may encounter these as the generator
-/// source, so fall back to the comprehension's outer span.
-fn bestExprSpan(e: ast.Expr, fallback: SourceSpan) SourceSpan {
-    return switch (e) {
-        .Do, .Tuple, .List => fallback,
-        else => e.getSpan(),
     };
 }
 
@@ -1720,6 +1713,64 @@ fn collectPatBindersToScope(
             }
         },
     }
+}
+
+// ── Operator section / Negate desugaring helpers ───────────────────────
+
+/// `ast.Expr.getSpan()` panics for container exprs (Do, Tuple, List).
+/// Return a sensible fallback for those cases.
+fn bestExprSpan(e: ast.Expr, fallback: SourceSpan) SourceSpan {
+    return switch (e) {
+        .Do, .Tuple, .List => fallback,
+        else => e.getSpan(),
+    };
+}
+
+fn invalidSpan() SourceSpan {
+    return SourceSpan.init(SourcePos.invalid(), SourcePos.invalid());
+}
+
+/// Build the synthetic AST lambda corresponding to an operator section
+/// (Haskell 2010 §3.5):
+///
+///   left  : (e op)  ≡  \$sec_arg -> e  op $sec_arg
+///   right : (op e)  ≡  \$sec_arg -> $sec_arg op e
+///
+/// The synthetic lambda parameter name cannot be typed at source level,
+/// so it cannot accidentally shadow a user binding.
+fn buildSectionLambda(
+    env: *RenameEnv,
+    section_expr: ast.Expr,
+    op: ast.QName,
+    side: enum { left, right },
+) RenameError!ast.Expr {
+    // Uniquify the synthetic parameter so that nested sections do not
+    // share a base name in pretty-printed Core/GRIN dumps.
+    const arg_name = try std.fmt.allocPrint(
+        env.alloc,
+        "$sec_arg_{d}",
+        .{env.supply.fresh().value},
+    );
+    // Fall back to the operator's span (always present) if the operand
+    // expression has no usable getSpan().
+    const operand_span = bestExprSpan(section_expr, op.span);
+    const lambda_span = operand_span.merge(op.span);
+
+    const arg_var_p = try env.alloc.create(ast.Expr);
+    arg_var_p.* = .{ .Var = .{ .name = arg_name, .span = op.span } };
+
+    const fixed_p = try env.alloc.create(ast.Expr);
+    fixed_p.* = section_expr;
+
+    const left_p: *const ast.Expr = if (side == .left) fixed_p else arg_var_p;
+    const right_p: *const ast.Expr = if (side == .left) arg_var_p else fixed_p;
+
+    const body_p = try env.alloc.create(ast.Expr);
+    body_p.* = .{ .InfixApp = .{ .left = left_p, .op = op, .right = right_p } };
+
+    const pats = try env.alloc.alloc(ast.Pattern, 1);
+    pats[0] = .{ .Var = .{ .name = arg_name, .span = lambda_span } };
+    return ast.Expr{ .Lambda = .{ .patterns = pats, .body = body_p } };
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -2527,4 +2578,77 @@ fn headOfApp(e: *const RExpr) *const RExpr {
     var cur = e;
     while (cur.* == .App) cur = cur.App.fn_expr;
     return cur;
+}
+
+test "rename #736: sections desugar to Lambda+InfixApp" {
+    // `f = (1 :)` uses the cons operator which is wired in by populateWiredIn.
+    // The renamer should rewrite it into a Lambda whose body is an InfixApp.
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var supply = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var env = try RenameEnv.init(alloc, &supply, &diags, false);
+    defer env.deinit();
+
+    const one = ast.Expr{ .Lit = .{ .Int = .{ .value = 1, .span = testSpan() } } };
+    const op_qname = ast.QName{ .name = ":", .span = testSpan() };
+    const left_sec = ast.Expr{ .LeftSection = .{ .expr = &one, .op = op_qname } };
+
+    const decls = [_]ast.Decl{.{ .FunBind = .{
+        .name = "f",
+        .equations = &.{.{
+            .patterns = &.{},
+            .rhs = .{ .UnGuarded = left_sec },
+            .where_clause = null,
+            .span = testSpan(),
+        }},
+        .span = testSpan(),
+    } }};
+    const module = makeModule(&decls);
+    const rm = try rename(module, &env);
+    try testing.expect(!diags.hasErrors());
+
+    const body = rm.declarations[0].FunBind.equations[0].rhs.UnGuarded;
+    try testing.expect(body == .Lambda);
+    try testing.expectEqual(@as(usize, 1), body.Lambda.params.len);
+    try testing.expect(body.Lambda.body.* == .InfixApp);
+    try testing.expectEqualStrings("(:)", body.Lambda.body.InfixApp.op.base);
+}
+
+test "rename #736: Negate desugars to App(negate, e)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var supply = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var env = try RenameEnv.init(alloc, &supply, &diags, false);
+    defer env.deinit();
+
+    const five = ast.Expr{ .Lit = .{ .Int = .{ .value = 5, .span = testSpan() } } };
+    const neg = ast.Expr{ .Negate = &five };
+
+    const decls = [_]ast.Decl{.{ .FunBind = .{
+        .name = "f",
+        .equations = &.{.{
+            .patterns = &.{},
+            .rhs = .{ .UnGuarded = neg },
+            .where_clause = null,
+            .span = testSpan(),
+        }},
+        .span = testSpan(),
+    } }};
+    const module = makeModule(&decls);
+    const rm = try rename(module, &env);
+    try testing.expect(!diags.hasErrors());
+
+    const body = rm.declarations[0].FunBind.equations[0].rhs.UnGuarded;
+    try testing.expect(body == .App);
+    try testing.expect(body.App.fn_expr.* == .Var);
+    try testing.expectEqualStrings("negate", body.App.fn_expr.Var.name.base);
 }
