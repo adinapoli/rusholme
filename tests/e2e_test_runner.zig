@@ -319,6 +319,10 @@ test "e2e: ghc_008_list_comprehension" {
     try testE2e(std.testing.allocator, "ghc_008_list_comprehension");
 }
 
+test "e2e: e2e_prelude_utils" {
+    try testE2e(std.testing.allocator, "e2e_prelude_utils");
+}
+
 test "e2e: ghc_009_list_comp" {
     try testE2e(std.testing.allocator, "ghc_009_list_comp");
 }
