@@ -28,6 +28,11 @@ pub const ContextKind = enum {
 const Context = struct {
     column: usize,
     kind: ContextKind,
+    // Explicit-delimiter nesting depth at the moment this context was opened.
+    // Used to close contexts that began inside a `(`/`[` pair when the matching
+    // `)`/`]` is reached (e.g. a `let` qualifier inside a list comprehension).
+    // See `closeContextsAboveDelimiterDepth`.
+    delim_depth: usize,
 };
 
 /// Implements the Haskell 2010 layout rule (Report section 2.7 and 10.3).
@@ -156,7 +161,7 @@ pub const LayoutProcessor = struct {
         if (self.first_token) {
             self.first_token = false;
             if (tok.token != .kw_module and tok.token != .open_brace) {
-                try self.pushContext(.{ .column = tok.span.start.column, .kind = .block });
+                try self.pushContext(tok.span.start.column, .block);
                 self.peeked_token = tok;
                 return LocatedToken.init(.v_open_brace, tok.span);
             }
@@ -165,7 +170,7 @@ pub const LayoutProcessor = struct {
         // 5. Explicit braces (Section 10.3, case 2 & 3).
         if (tok.token == .open_brace) {
             self.layout_pending = false;
-            try self.pushContext(.{ .column = 0, .kind = .explicit });
+            try self.pushContext(0, .explicit);
             try self.updateDelimiterStack(tok.token);
             return tok;
         }
@@ -192,7 +197,7 @@ pub const LayoutProcessor = struct {
                 const n = tok.span.start.column;
                 const m = if (self.peekContext()) |ctx| ctx.column else 0;
                 if (n > m) {
-                    try self.pushContext(.{ .column = n, .kind = kind });
+                    try self.pushContext(n, kind);
                     self.peeked_token = tok;
                     return LocatedToken.init(.v_open_brace, tok.span);
                 } else {
@@ -218,25 +223,59 @@ pub const LayoutProcessor = struct {
         //
         //    `kw_in` is handled specially: it closes contexts eagerly via the
         //    pending queue, so we skip the ordinary column comparison for it.
-        if (tok.token != .kw_in) {
+        //
+        //    Layout inside explicit delimiters (Haskell 2010 §2.7): the column
+        //    rules are suppressed *only* for tokens that belong directly to the
+        //    bracketed phrase — i.e. when the innermost layout context was
+        //    opened at a shallower delimiter depth than we are now in.  A
+        //    `let`/`do`/`of` written *inside* `(...)`/`[...]` still opens a real
+        //    layout context (rule below), and the bindings of that context obey
+        //    the ordinary column rules.  This is what makes a `let` qualifier in
+        //    a list comprehension work:  `[ y | x <- xs, let y = x*2 ]`.
+        const owns_inner_context = if (self.peekContext()) |ctx|
+            ctx.kind != .explicit and ctx.delim_depth >= self.delimiter_stack.items.len
+        else
+            false;
+        if (skip_layout and !owns_inner_context and tok.token != .kw_in) {
+            // No layout context belongs to this delimiter level: the token is
+            // part of a bracketed phrase, so emit it verbatim with no virtual
+            // delimiters — except a layout keyword, which falls through to step
+            // 8 to open its own context.
+            if (!self.isLayoutKeyword(tok.token)) {
+                self.context_just_opened = false;
+                try self.updateDelimiterStack(tok.token);
+                return tok;
+            }
+        } else if (tok.token != .kw_in) {
             const n = tok.span.start.column;
-            while (self.peekContext()) |ctx| {
-                // Skip layout processing when inside explicit delimiters.
-                // Per Haskell 2010 §2.7, layout rules don't apply inside parentheses/brackets.
-                // We check `skip_layout` which includes closing delimiters themselves.
-                if (skip_layout) {
-                    // Just clear the just_opened flag if needed
-                    if (self.peekContext()) |inner_ctx| {
-                        if (n > inner_ctx.column or inner_ctx.kind == .explicit) {
-                            self.context_just_opened = false;
-                        }
-                    }
-                    // Return token normally - no virtual tokens injected
-                    try self.updateDelimiterStack(tok.token);
-                    return tok;
-                }
 
+            // A `)`/`]` or a top-level `,` ends the bracketed phrase, and with
+            // it any layout context opened inside the current delimiter — that
+            // context has no column-based closer because the terminator sits on
+            // the same line (e.g. the `]` in `[ y | x <- xs, let y = x*2 ]`, or
+            // the `,` in `[ y | x <- xs, let y = x*x, y > 5 ]`).  Contexts owned
+            // by an outer delimiter level keep a smaller delim_depth and stay.
+            const terminator = switch (tok.token) {
+                .close_paren, .close_bracket, .comma => true,
+                else => false,
+            };
+            if (terminator and self.delimiter_stack.items.len > 0) {
+                try self.closeContextsAboveDelimiterDepth(self.delimiter_stack.items.len - 1, tok.span);
+                if (self.pending.items.len > 0) {
+                    try self.pending.append(self.allocator, tok);
+                    const result = self.pending.orderedRemove(0);
+                    try self.updateDelimiterStack(result.token);
+                    return result;
+                }
+            }
+
+            while (self.peekContext()) |ctx| {
                 if (ctx.kind == .explicit) break; // Explicit context — never auto-closed here
+                // Stop at a context that belongs to an outer delimiter level:
+                // inside `(...)`/`[...]` the column rules do not apply to it
+                // (§2.7), so it must not be closed by dedent here.  It is closed
+                // instead by its own line-based dedent once the delimiter ends.
+                if (ctx.delim_depth < self.delimiter_stack.items.len) break;
                 if (n == ctx.column) {
                     // Same column: insert a virtual semicolon (case 5).
                     if (self.context_just_opened) {
@@ -342,10 +381,38 @@ pub const LayoutProcessor = struct {
         return tok;
     }
 
-    fn pushContext(self: *LayoutProcessor, ctx: Context) !void {
-        try self.stack.append(self.allocator, ctx);
-        if (ctx.kind != .explicit) {
+    /// Push a layout context, recording the current explicit-delimiter depth so
+    /// the context can be closed when its enclosing `(`/`[` is closed.
+    /// Callers supply only `column` and `kind`; the delimiter depth is derived
+    /// from the processor's own state, keeping the bracket-tracking knowledge
+    /// encapsulated here.
+    fn pushContext(self: *LayoutProcessor, column: usize, kind: ContextKind) !void {
+        try self.stack.append(self.allocator, .{
+            .column = column,
+            .kind = kind,
+            .delim_depth = self.delimiter_stack.items.len,
+        });
+        if (kind != .explicit) {
             self.context_just_opened = true;
+        }
+    }
+
+    /// Close every implicit layout context that was opened while nested deeper
+    /// than `depth` explicit delimiters, queueing a `v_close_brace` for each.
+    ///
+    /// Called just before a `)`/`]` is returned: a `let`/`do`/`of` block that
+    /// began inside the delimiter pair (Haskell 2010 §3.11 list-comprehension
+    /// `let` qualifiers, or a parenthesised `do`) has no column-based closer,
+    /// because the closing delimiter sits on the same line.  This is the
+    /// layout-side analogue of the Report's parse-error(t) rule (§10.3): the
+    /// delimiter that ends the bracketed phrase also ends any layout context
+    /// it enclosed.  Explicit `{ }` contexts are never auto-closed.
+    fn closeContextsAboveDelimiterDepth(self: *LayoutProcessor, depth: usize, span_val: span_mod.SourceSpan) !void {
+        while (self.peekContext()) |ctx| {
+            if (ctx.kind == .explicit) break;
+            if (ctx.delim_depth <= depth) break;
+            _ = self.popContext();
+            try self.pending.append(self.allocator, LocatedToken.init(.v_close_brace, span_val));
         }
     }
 
@@ -703,6 +770,40 @@ test "Layout: case with list patterns" {
     try expectToken(&layout, .eof);
 }
 
+test "Layout: let qualifier inside list comprehension" {
+    // Regression test for #734.  A `let` block that begins inside `[...]` must
+    // still open a layout context (v_open_brace) and be closed by the matching
+    // `]` (v_close_brace), so the parser's expectOpenBrace/expectCloseBrace pair
+    // around the let-qualifier declarations is satisfied.
+    const allocator = std.testing.allocator;
+    var lexer = Lexer.init(allocator, "main = print [y | x <- xs, let y = x * 2]", 0);
+    var layout = LayoutProcessor.init(allocator, &lexer);
+    defer layout.deinit();
+
+    try expectToken(&layout, .v_open_brace); // module
+    try expectToken(&layout, Token{ .varid = "main" });
+    try expectToken(&layout, .equals);
+    try expectToken(&layout, Token{ .varid = "print" });
+    try expectToken(&layout, .open_bracket);
+    try expectToken(&layout, Token{ .varid = "y" });
+    try expectToken(&layout, .pipe);
+    try expectToken(&layout, Token{ .varid = "x" });
+    try expectToken(&layout, .arrow_left);
+    try expectToken(&layout, Token{ .varid = "xs" });
+    try expectToken(&layout, .comma);
+    try expectToken(&layout, .kw_let);
+    try expectToken(&layout, .v_open_brace); // let qualifier context, inside the brackets
+    try expectToken(&layout, Token{ .varid = "y" });
+    try expectToken(&layout, .equals);
+    try expectToken(&layout, Token{ .varid = "x" });
+    try expectToken(&layout, Token{ .varsym = "*" });
+    try expectToken(&layout, Token{ .lit_integer = 2 });
+    try expectToken(&layout, .v_close_brace); // ']' closes the let context
+    try expectToken(&layout, .close_bracket);
+    try expectToken(&layout, .v_close_brace); // module
+    try expectToken(&layout, .eof);
+}
+
 fn expectToken(layout: *LayoutProcessor, expected: anytype) !void {
     const tok = try layout.nextToken();
     defer tok.token.deinit(layout.allocator);
@@ -719,4 +820,48 @@ fn expectToken(layout: *LayoutProcessor, expected: anytype) !void {
         const expected_token: Token = expected;
         try std.testing.expectEqualDeep(expected_token, tok.token);
     }
+}
+
+test "Layout: multi-line let qualifier inside list comprehension" {
+    // Regression test for #734.  A `let` qualifier inside `[...]` may span
+    // multiple lines; its bindings follow the ordinary column rules (a `v_semi`
+    // between aligned bindings), and the matching `]` closes the context.  The
+    // continuation `b` is padded so it aligns exactly under the first binding
+    // `a` (kw_let is at col 33, so `a` is at col 37 → 36 leading spaces).
+    const allocator = std.testing.allocator;
+    const src = "  print [a + b | x <- [1,2,3], let a = x\n" ++ (" " ** 36) ++ "b = x]";
+    var lexer = Lexer.init(allocator, src, 0);
+    var layout = LayoutProcessor.init(allocator, &lexer);
+    defer layout.deinit();
+
+    try expectToken(&layout, .v_open_brace); // module
+    try expectToken(&layout, Token{ .varid = "print" });
+    try expectToken(&layout, .open_bracket);
+    try expectToken(&layout, Token{ .varid = "a" });
+    try expectToken(&layout, Token{ .varsym = "+" });
+    try expectToken(&layout, Token{ .varid = "b" });
+    try expectToken(&layout, .pipe);
+    try expectToken(&layout, Token{ .varid = "x" });
+    try expectToken(&layout, .arrow_left);
+    try expectToken(&layout, .open_bracket);
+    try expectToken(&layout, Token{ .lit_integer = 1 });
+    try expectToken(&layout, .comma);
+    try expectToken(&layout, Token{ .lit_integer = 2 });
+    try expectToken(&layout, .comma);
+    try expectToken(&layout, Token{ .lit_integer = 3 });
+    try expectToken(&layout, .close_bracket);
+    try expectToken(&layout, .comma);
+    try expectToken(&layout, .kw_let);
+    try expectToken(&layout, .v_open_brace); // let qualifier context
+    try expectToken(&layout, Token{ .varid = "a" });
+    try expectToken(&layout, .equals);
+    try expectToken(&layout, Token{ .varid = "x" });
+    try expectToken(&layout, .v_semi); // second binding aligned under the first
+    try expectToken(&layout, Token{ .varid = "b" });
+    try expectToken(&layout, .equals);
+    try expectToken(&layout, Token{ .varid = "x" });
+    try expectToken(&layout, .v_close_brace); // ']' closes the let context
+    try expectToken(&layout, .close_bracket);
+    try expectToken(&layout, .v_close_brace); // module
+    try expectToken(&layout, .eof);
 }

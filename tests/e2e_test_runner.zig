@@ -331,6 +331,10 @@ test "e2e: ghc_010_sections_negate" {
     try testE2e(std.testing.allocator, "ghc_010_sections_negate");
 }
 
+test "e2e: ghc_011_listcomp_let (#734)" {
+    try testE2e(std.testing.allocator, "ghc_011_listcomp_let");
+}
+
 test "e2e: e2e_006_peano" {
     try testE2e(std.testing.allocator, "e2e_006_peano");
 }

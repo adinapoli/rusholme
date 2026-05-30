@@ -4723,6 +4723,27 @@ test "expr: do notation with binding" {
     try std.testing.expectEqualStrings("y", gen_pat.Var.name);
 }
 
+test "expr: list comprehension with let qualifier" {
+    // Regression test for #734: the `let` qualifier inside a list comprehension
+    // must layout correctly even though it sits inside `[...]`.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const expr = try parseTestExpr(&arena, "x = [y | z <- zs, let y = z * 2]");
+    try std.testing.expect(expr == .ListComp);
+    const quals = expr.ListComp.qualifiers;
+    try std.testing.expectEqual(2, quals.len);
+
+    // First qualifier: generator `z <- zs`.
+    try std.testing.expect(quals[0] == .Generator);
+    try std.testing.expect(quals[0].Generator.pat == .Var);
+    try std.testing.expectEqualStrings("z", quals[0].Generator.pat.Var.name);
+
+    // Second qualifier: `let y = z * 2`, holding a single binding.
+    try std.testing.expect(quals[1] == .LetQualifier);
+    try std.testing.expectEqual(1, quals[1].LetQualifier.len);
+}
+
 test "expr: tuple expression" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
