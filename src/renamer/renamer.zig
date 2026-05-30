@@ -1458,6 +1458,11 @@ fn desugarListComp(
             } };
         },
         .LetQualifier => |decls| {
+            // NOTE: a `let` qualifier that binds MULTIPLE bindings currently
+            // miscompiles downstream and segfaults at runtime (the layout/parse
+            // here is correct; the bug is in the multi-binding Rec lowering path,
+            // same family as #664). Tracked in:
+            //   https://github.com/adinapoli/rusholme/issues/747
             const rest_expr = try desugarListComp(env, body, rest, lc_span);
             const body_p = try env.alloc.create(ast.Expr);
             body_p.* = rest_expr;
