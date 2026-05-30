@@ -30,12 +30,6 @@ pub const DesugarCtx = struct {
     /// when translating `DictEvidence.instance` to a Core variable reference.
     dict_names: DictNameMap = .empty,
 
-    /// Maps `(class_unique, method_unique)` → default method `Name`.
-    /// Populated by `desugarClassDecl` (section 3), queried by
-    /// `desugarInstanceDecl` when a method has no explicit binding and
-    /// the class provides a default implementation.
-    default_method_names: std.AutoHashMapUnmanaged(DefaultMethodKey, Name) = .{},
-
     /// Evidence map built from solved constraints. Keyed by
     /// `(var_unique, class_name_unique)` → list of `DictEvidence` pointers.
     /// Multiple constraints for the same variable can arise from multiple
@@ -63,11 +57,6 @@ pub const DesugarCtx = struct {
         class_unique: u64,
         /// Unique ID of the Rigid type variable.  Zero for non-Rigid or unknown.
         tyvar_unique: u64,
-    };
-
-    pub const DefaultMethodKey = struct {
-        class_unique: u64,
-        method_unique: u64,
     };
 
     pub const DictNameKey = struct {
@@ -736,12 +725,16 @@ fn desugarClassDecl(
             .unique = ctx.u_supply.fresh(),
         };
 
-        // Register the default method name so that desugarInstanceDecl can
-        // reference the same unique when a method is not explicitly provided.
-        try ctx.default_method_names.put(alloc, .{
-            .class_unique = cd.name.unique.value,
-            .method_unique = method.name.unique.value,
-        }, default_name);
+        // Record the default-method name in the ClassEnv so that
+        // desugarInstanceDecl — possibly in a *different* module — can reference
+        // the same unique when a method is not explicitly provided.  Stored in
+        // the (cross-module, serialised) ClassEnv rather than a per-ctx map so
+        // that user instances of a Prelude class can find Prelude defaults.
+        ctx.types.class_env.setDefaultName(
+            cd.name.unique.value,
+            method.name.unique.value,
+            default_name,
+        );
 
         // Compile the default method body using the pattern match compiler.
         // The default body is a slice of RMatch equations (same as FunBind).
@@ -931,14 +924,20 @@ fn desugarInstanceDecl(
             //
             // Then the dictionary constructor uses _inst$... as the field.
             //
-            // Look up the name registered during class desugaring so that
-            // the reference matches the binding's unique (issue #660).
-            const default_method_name = ctx.default_method_names.get(.{
-                .class_unique = id_decl.class_name.unique.value,
-                .method_unique = method.name.unique.value,
-            }) orelse {
-                // Defensive fallback — should not happen if desugarClassDecl ran first.
-                return error.OutOfMemory;
+            // Look up the name recorded in the ClassEnv during class desugaring
+            // so that the reference matches the binding's unique (issue #660).
+            // This is read from `MethodInfo.default_name`, which the ClassEnv
+            // carries across module boundaries (issue #713).
+            const default_method_name = method.default_name orelse {
+                // `has_default` is true but no compiled default-binding name was
+                // recorded.  This is an internal inconsistency: the class was
+                // type-checked with a default but never desugared (or the
+                // ClassEnv was not threaded through).  Crash rather than emit a
+                // dangling reference.
+                std.debug.panic(
+                    "desugarInstanceDecl: missing default-method binding for {s}.{s}",
+                    .{ id_decl.class_name.base, method.name.base },
+                );
             };
 
             // Count the method arity (excluding the dict param which we supply).
@@ -2633,6 +2632,18 @@ fn desugarMatch(
     // because `inferPat` already populated `local_binders`.
     try registerPatBinders(ctx, equations, arg_tys);
 
+    // Also pre-register binders introduced *inside* each equation's body
+    // (let bindings, lambda parameters, case/do pattern variables).  Class
+    // default methods and instance methods are not type-checked, so binders
+    // such as the `step` in `let step = ... in ...` never reach
+    // `local_binders` via inference and would otherwise crash `desugarExpr`
+    // with a "Variable ... not found in type definitions" panic.  As with
+    // `registerPatBinders`, this is a no-op for already-typed bodies thanks
+    // to the `contains` guard in `registerBinder`.
+    for (equations) |eq| {
+        try registerRhsBinders(ctx, eq.rhs);
+    }
+
     var eq_idx: usize = equations.len;
     while (eq_idx > 0) {
         eq_idx -= 1;
@@ -3103,20 +3114,10 @@ fn registerPatBindersRec(
 ) std.mem.Allocator.Error!void {
     const dummy = dummyCoreType();
     switch (pat) {
-        .Var => |v| {
-            // Only register if not already present (the typechecker may have
-            // populated it for top-level FunBinds).
-            if (!ctx.types.local_binders.contains(v.name.unique)) {
-                const hty = try coreTypeToHType(ctx.alloc, ty);
-                try ctx.types.local_binders.put(ctx.alloc, v.name.unique, hty);
-            }
-        },
+        .Var => |v| try registerBinder(ctx, v.name, ty),
         .Paren => |inner| try registerPatBindersRec(ctx, inner.*, ty),
         .AsPat => |as_| {
-            if (!ctx.types.local_binders.contains(as_.name.unique)) {
-                const hty = try coreTypeToHType(ctx.alloc, ty);
-                try ctx.types.local_binders.put(ctx.alloc, as_.name.unique, hty);
-            }
+            try registerBinder(ctx, as_.name, ty);
             try registerPatBindersRec(ctx, as_.pat.*, ty);
         },
         .Con => |c| {
@@ -3139,6 +3140,156 @@ fn registerPatBindersRec(
             }
         },
         .Lit, .Wild => {},
+    }
+}
+
+/// Register a single binder in `local_binders` with the given Core type,
+/// converted to an `HType`.  No-op if the binder is already present, so it
+/// never overwrites a type computed by the typechecker (top-level FunBinds)
+/// or by an earlier registration pass.
+fn registerBinder(
+    ctx: *DesugarCtx,
+    name: Name,
+    ty: ast_mod.CoreType,
+) std.mem.Allocator.Error!void {
+    if (ctx.types.local_binders.contains(name.unique)) return;
+    const hty = try coreTypeToHType(ctx.alloc, ty);
+    try ctx.types.local_binders.put(ctx.alloc, name.unique, hty);
+}
+
+/// Register every binder introduced inside the body of an *untyped* equation
+/// so that `desugarExpr` can resolve them.
+///
+/// Class default methods and instance methods are not type-checked (the
+/// typechecker skips their bodies), so any binder introduced *within* the
+/// body — a `let`-bound name, a lambda parameter, or a `case`/`do` pattern
+/// variable — is absent from `local_binders`.  `desugarExpr` panics when it
+/// cannot resolve such a binder.  `registerPatBinders` already covers the
+/// equation's *argument* patterns; these helpers complete the invariant for
+/// the body so the panic is removed by construction rather than by an ad-hoc
+/// limit.  Each binder is registered with a placeholder type, which is all the
+/// downstream GRIN translator needs (the Core types of these binders are only
+/// used structurally; see `registerPatBindersRec`).
+fn registerRhsBinders(ctx: *DesugarCtx, rhs: renamer_mod.RRhs) std.mem.Allocator.Error!void {
+    switch (rhs) {
+        .UnGuarded => |expr| try registerExprBinders(ctx, expr),
+        .Guarded => |grhs_list| {
+            for (grhs_list) |grhs| {
+                for (grhs.guards) |guard| {
+                    switch (guard) {
+                        .ExprGuard => |e| try registerExprBinders(ctx, e),
+                        .PatGuard => |pg| {
+                            try registerPatBindersRec(ctx, pg.pat, dummyCoreType());
+                            try registerExprBinders(ctx, pg.expr);
+                        },
+                    }
+                }
+                try registerExprBinders(ctx, grhs.rhs);
+            }
+        },
+    }
+}
+
+/// Walk an `RExpr` and register all binders it introduces.  See
+/// `registerRhsBinders` for why this is necessary.
+fn registerExprBinders(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.Error!void {
+    const dummy = dummyCoreType();
+    switch (expr) {
+        .Var, .Lit => {},
+        .App => |a| {
+            try registerExprBinders(ctx, a.fn_expr.*);
+            try registerExprBinders(ctx, a.arg_expr.*);
+        },
+        .InfixApp => |ia| {
+            try registerExprBinders(ctx, ia.left.*);
+            try registerExprBinders(ctx, ia.right.*);
+        },
+        .LeftSection => |ls| try registerExprBinders(ctx, ls.expr.*),
+        .RightSection => |rs| try registerExprBinders(ctx, rs.expr.*),
+        .Lambda => |lam| {
+            for (lam.params) |p| try registerBinder(ctx, p, dummy);
+            try registerExprBinders(ctx, lam.body.*);
+        },
+        .Let => |let_blk| {
+            try registerDeclBinders(ctx, let_blk.binds);
+            try registerExprBinders(ctx, let_blk.body.*);
+        },
+        .Case => |c| {
+            try registerExprBinders(ctx, c.scrutinee.*);
+            for (c.alts) |alt| {
+                try registerPatBindersRec(ctx, alt.pattern, dummy);
+                try registerRhsBinders(ctx, alt.rhs);
+            }
+        },
+        .If => |i| {
+            try registerExprBinders(ctx, i.condition.*);
+            try registerExprBinders(ctx, i.then_expr.*);
+            try registerExprBinders(ctx, i.else_expr.*);
+        },
+        .Do => |stmts| {
+            for (stmts) |stmt| {
+                switch (stmt) {
+                    .Generator => |g| {
+                        try registerPatBindersRec(ctx, g.pat, dummy);
+                        try registerExprBinders(ctx, g.expr);
+                    },
+                    .Qualifier, .Stmt => |e| try registerExprBinders(ctx, e),
+                    .LetStmt => |binds| try registerDeclBinders(ctx, binds),
+                }
+            }
+        },
+        .Tuple, .List => |elems| {
+            for (elems) |e| try registerExprBinders(ctx, e);
+        },
+        .EnumFrom => |e| try registerExprBinders(ctx, e.from.*),
+        .EnumFromThen => |e| {
+            try registerExprBinders(ctx, e.from.*);
+            try registerExprBinders(ctx, e.then.*);
+        },
+        .EnumFromTo => |e| {
+            try registerExprBinders(ctx, e.from.*);
+            try registerExprBinders(ctx, e.to.*);
+        },
+        .EnumFromThenTo => |e| {
+            try registerExprBinders(ctx, e.from.*);
+            try registerExprBinders(ctx, e.then.*);
+            try registerExprBinders(ctx, e.to.*);
+        },
+        .TypeAnn => |ta| try registerExprBinders(ctx, ta.expr.*),
+        .TypeApp => |ta| try registerExprBinders(ctx, ta.fn_expr.*),
+        .Negate => |inner| try registerExprBinders(ctx, inner.*),
+        .Paren => |inner| try registerExprBinders(ctx, inner.*),
+        .RecordCon => |rc| {
+            for (rc.fields) |f| try registerExprBinders(ctx, f.expr);
+        },
+        .RecordUpdate => |ru| {
+            try registerExprBinders(ctx, ru.expr.*);
+            for (ru.fields) |f| try registerExprBinders(ctx, f.expr);
+        },
+        .Field => |f| try registerExprBinders(ctx, f.expr.*),
+    }
+}
+
+/// Register binders for the declarations bound by a `let`/`where` block inside
+/// an untyped body: the names of `FunBind` equations, their argument patterns,
+/// and `PatBind` patterns, descending into each body recursively.
+fn registerDeclBinders(ctx: *DesugarCtx, binds: []const renamer_mod.RDecl) std.mem.Allocator.Error!void {
+    const dummy = dummyCoreType();
+    for (binds) |bd| {
+        switch (bd) {
+            .FunBind => |fb| {
+                try registerBinder(ctx, fb.name, dummy);
+                for (fb.equations) |eq| {
+                    for (eq.patterns) |pat| try registerPatBindersRec(ctx, pat, dummy);
+                    try registerRhsBinders(ctx, eq.rhs);
+                }
+            },
+            .PatBind => |pb| {
+                try registerPatBindersRec(ctx, pb.pattern, dummy);
+                try registerRhsBinders(ctx, pb.rhs);
+            },
+            else => {},
+        }
     }
 }
 
@@ -3822,4 +3973,58 @@ test "desugarRhs: otherwise-only guard is transparent" {
     // `otherwise` is trivially true: no Case wrapper, just the Lit directly.
     try testing.expect(result == .Lit);
     try testing.expectEqual(@as(i64, 42), result.Lit.val.Int);
+}
+
+test "registerRhsBinders: let-bound name in an untyped body is registered (#713)" {
+    // Reproduces the desugarer crash that issue #713 fixed: a default/instance
+    // method body containing `let step = 0 in step` introduces the binder
+    // `step`, which the typechecker never sees (class/instance bodies are not
+    // type-checked).  Before the fix, `desugarExpr` panicked with
+    // "Variable step not found in type definitions".  `registerRhsBinders`
+    // must populate `local_binders` for such interior binders.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var types = infer_mod.ModuleTypes{
+        .schemes = .{},
+        .local_binders = .{},
+        .class_env = infer_mod.ClassEnv.init(alloc),
+    };
+    defer types.deinit(alloc);
+
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var u_supply = naming_mod.UniqueSupply{};
+    var ctx = makeCtx(alloc, &types, &diags, &u_supply);
+
+    const step_name = testName("step", 9001);
+
+    // let step = 0 in step
+    const zero_lit = renamer_mod.RExpr{ .Lit = .{ .Int = .{ .value = 0, .span = syntheticSpan() } } };
+    const step_var = try alloc.create(renamer_mod.RExpr);
+    step_var.* = .{ .Var = .{ .name = step_name, .span = syntheticSpan() } };
+    const step_decl = renamer_mod.RDecl{ .PatBind = .{
+        .pattern = .{ .Var = .{ .name = step_name, .span = syntheticSpan() } },
+        .rhs = .{ .UnGuarded = zero_lit },
+        .span = syntheticSpan(),
+    } };
+    const let_expr = renamer_mod.RExpr{ .Let = .{
+        .binds = try alloc.dupe(renamer_mod.RDecl, &.{step_decl}),
+        .body = step_var,
+    } };
+    const rhs = renamer_mod.RRhs{ .UnGuarded = let_expr };
+
+    // Precondition: the binder is unknown to the typechecker.
+    try testing.expect(!types.local_binders.contains(step_name.unique));
+
+    try registerRhsBinders(&ctx, rhs);
+
+    // The interior `step` binder is now registered, so `desugarExpr` will not
+    // panic when it reaches the let binding.
+    try testing.expect(types.local_binders.contains(step_name.unique));
+
+    const result = try desugarExpr(&ctx, let_expr);
+    try testing.expect(result.* == .Let);
 }

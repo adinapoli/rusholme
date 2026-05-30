@@ -234,6 +234,10 @@ pub const SerialisedMethodInfo = struct {
     name: SerialisedNameRef,
     ty: SerialisedCoreType,
     has_default: bool,
+    /// Compiled default-method binding name (mirrors `MethodInfo.default_name`).
+    /// `null` when the method has no default.  Carried across modules so a
+    /// downstream instance can reference the upstream default (issue #713).
+    default_name: ?SerialisedNameRef = null,
 };
 
 /// A JSON-serialisable class declaration (mirrors `class_env.ClassInfo`).
@@ -746,6 +750,10 @@ fn deepCopySerialisedMethodInfo(alloc: std.mem.Allocator, src: SerialisedMethodI
         .name = try deepCopySerialisedNameRef(alloc, src.name),
         .ty = try deepCopySerialisedCoreType(alloc, src.ty),
         .has_default = src.has_default,
+        .default_name = if (src.default_name) |dn|
+            try deepCopySerialisedNameRef(alloc, dn)
+        else
+            null,
     };
 }
 
