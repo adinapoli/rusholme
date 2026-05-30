@@ -336,7 +336,12 @@ pub const TyEnv = struct {
     /// env's own initialisers (`initBuiltins`) must be allocated here so that
     /// `deinit` reclaims it.  Lookups/instantiations that produce *transient*
     /// types not stored in the env should keep using the caller's allocator.
-    pub fn typeAllocator(self: *const TyEnv) std.mem.Allocator {
+    ///
+    /// Intentionally non-`pub`: keeping the only writer (`initBuiltins`) inside
+    /// this module is what makes `deinit`'s arena teardown sound.  Allocations
+    /// from this allocator are owned by the `TyEnv` and freed at `deinit`, so
+    /// they must never escape into longer-lived state.
+    fn typeAllocator(self: *const TyEnv) std.mem.Allocator {
         return self.type_arena.allocator();
     }
 
@@ -1001,6 +1006,16 @@ test "TyEnv: init -> initBuiltins -> deinit is leak-free under testing.allocator
 
     // Sanity: the prelude bindings were actually installed.
     try testing.expect(env.current.bindings.count() > 0);
+
+    // Deep-walk an arena-allocated built-in body so this also guards against
+    // use-after-free, not just leaks.  Instantiating `(:) : forall a. a ->
+    // [a] -> [a]` dereferences the `Fun.arg`/`Fun.res` pointers that live in
+    // the env's private type arena.
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    var mv_supply = MetaVarSupply{};
+    const cons_ty = (try env.lookup(Known.Con.Cons.unique, scratch.allocator(), &mv_supply)).?;
+    try testing.expect(cons_ty == .Fun);
 }
 
 test "TyEnv: NoImplicitPrelude init -> initBuiltins -> deinit is leak-free" {
@@ -1013,6 +1028,14 @@ test "TyEnv: NoImplicitPrelude init -> initBuiltins -> deinit is leak-free" {
     try initBuiltins(&env, &u_supply, true);
 
     try testing.expect(env.current.bindings.count() > 0);
+
+    // As above, deep-walk an arena-allocated body to guard against
+    // use-after-free.  `(:)` is a wired-in binding present on this path too.
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    var mv_supply = MetaVarSupply{};
+    const cons_ty = (try env.lookup(Known.Con.Cons.unique, scratch.allocator(), &mv_supply)).?;
+    try testing.expect(cons_ty == .Fun);
 }
 
 test "TyEnv: push/pop and lookup keep the env arena self-contained (no leak)" {
@@ -1033,8 +1056,10 @@ test "TyEnv: push/pop and lookup keep the env arena self-contained (no leak)" {
     const cons_ty = try env.lookup(Known.Con.Cons.unique, scratch.allocator(), &mv_supply);
     try testing.expect(cons_ty != null);
 
-    // Push an inner frame, bind a monomorphic type allocated on the env arena,
-    // then pop it.  The env's bookkeeping (frame + map) is freed by `pop`.
+    // Push an inner frame, bind a nullary type (a stack-resident `Con` that
+    // allocates nothing), then pop it.  This checks the frame *bookkeeping*
+    // cleanup: `pop` must free the inner frame and its binding map without
+    // touching the env's type arena.
     try env.push();
     try env.bindMono(testName("x", 7), conTy(Known.Type.Int));
     env.pop();
