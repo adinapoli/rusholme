@@ -2402,12 +2402,6 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
 
             node.* = app2.*;
         },
-        .LeftSection, .RightSection, .Negate => {
-            // The renamer rewrites operator sections to `Lambda + InfixApp`
-            // and `Negate` to `App(negate, e)` (Haskell 2010 §3.4 / §3.5),
-            // so these variants must never reach the Core desugarer.
-            std.debug.panic("desugar: unexpected RExpr variant {s} (renamer desugaring failed)", .{@tagName(expr)});
-        },
         .Tuple => {
             // Tuple expressions
             // tracked in: https://github.com/adinapoli/rusholme/issues/361
