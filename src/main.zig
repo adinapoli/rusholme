@@ -421,7 +421,7 @@ fn cmdCheck(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     // during renaming.
     var mv_supply = htype_mod.MetaVarSupply{};
     var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
-    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply, no_implicit_prelude);
+    try rusholme.tc.env.initBuiltins(&ty_env, &u_supply, no_implicit_prelude);
 
     // Respect the NoImplicitPrelude language extension: only load Prelude
     // when the user has NOT enabled NoImplicitPrelude.
@@ -525,7 +525,7 @@ fn cmdCore(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     // ── Load Prelude before user rename ───────────────────────────────
     var mv_supply = htype_mod.MetaVarSupply{};
     var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
-    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply, no_implicit_prelude);
+    try rusholme.tc.env.initBuiltins(&ty_env, &u_supply, no_implicit_prelude);
 
     // Respect the NoImplicitPrelude language extension: only load Prelude
     // when the user has NOT enabled NoImplicitPrelude.
@@ -627,7 +627,7 @@ fn cmdGrin(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     // ── Load Prelude before user rename ───────────────────────────────
     var mv_supply = htype_mod.MetaVarSupply{};
     var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
-    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply, no_implicit_prelude);
+    try rusholme.tc.env.initBuiltins(&ty_env, &u_supply, no_implicit_prelude);
 
     // Respect the NoImplicitPrelude language extension: only load Prelude
     // when the user has NOT enabled NoImplicitPrelude.
@@ -746,7 +746,7 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     // ── Load Prelude before user rename ───────────────────────────────
     var mv_supply = htype_mod.MetaVarSupply{};
     var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
-    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply, no_implicit_prelude);
+    try rusholme.tc.env.initBuiltins(&ty_env, &u_supply, no_implicit_prelude);
 
     // Respect the NoImplicitPrelude language extension: only load Prelude
     // when the user has NOT enabled NoImplicitPrelude.

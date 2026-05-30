@@ -73,9 +73,10 @@ pub fn runServer(allocator: Allocator, io: Io) !void {
 /// inline hints, syntax highlighting, and persistent history.
 /// Falls back to `runSimple` when not on a TTY or replxx fails to init.
 pub fn run(allocator: Allocator, io: Io) !void {
-    // Use an arena allocator for the session lifetime. The typechecker's
-    // initBuiltins allocates type structures that outlive the session's
-    // deinit — an arena ensures bulk cleanup on exit.
+    // Use an arena allocator for the session lifetime. The TyEnv now owns its
+    // own type arena and frees its built-in HType trees on deinit (#496), but
+    // other Session-wide state still leaks under a checked allocator (tracked
+    // separately) — an arena ensures bulk cleanup on exit regardless.
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const alloc = arena.allocator();

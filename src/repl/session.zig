@@ -189,7 +189,7 @@ pub const Session = struct {
         };
         errdefer ty_env.deinit();
 
-        env_mod.initBuiltins(&ty_env, allocator, &u_supply, false) catch {
+        env_mod.initBuiltins(&ty_env, &u_supply, false) catch {
             return SessionError.OutOfMemory;
         };
 

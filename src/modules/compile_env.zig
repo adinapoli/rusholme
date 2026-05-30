@@ -484,7 +484,7 @@ pub const CompileEnv = struct {
 
         // ── Typecheck ────────────────────────────────────────────────────
         var ty_env = try env_mod.TyEnv.init(self.alloc);
-        try env_mod.initBuiltins(&ty_env, self.alloc, &self.u_supply, no_implicit_prelude);
+        try env_mod.initBuiltins(&ty_env, &self.u_supply, no_implicit_prelude);
         // Seed with types from imported modules only.
         try self.seedTyEnvFromImports(&ty_env, module.imports);
 
