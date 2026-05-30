@@ -58,18 +58,6 @@ fn collectExprVarRefs(
             }
             try collectExprVarRefs(ia.right.*, top_level, refs, alloc);
         },
-        .LeftSection => |ls| {
-            try collectExprVarRefs(ls.expr.*, top_level, refs, alloc);
-            if (top_level.contains(ls.op.unique.value)) {
-                try refs.append(alloc, ls.op.unique.value);
-            }
-        },
-        .RightSection => |rs| {
-            if (top_level.contains(rs.op.unique.value)) {
-                try refs.append(alloc, rs.op.unique.value);
-            }
-            try collectExprVarRefs(rs.expr.*, top_level, refs, alloc);
-        },
         .Lambda => |lam| {
             try collectExprVarRefs(lam.body.*, top_level, refs, alloc);
         },
@@ -126,7 +114,6 @@ fn collectExprVarRefs(
         },
         .TypeAnn => |ta| try collectExprVarRefs(ta.expr.*, top_level, refs, alloc),
         .TypeApp => |ta| try collectExprVarRefs(ta.fn_expr.*, top_level, refs, alloc),
-        .Negate => |e| try collectExprVarRefs(e.*, top_level, refs, alloc),
         .Paren => |e| try collectExprVarRefs(e.*, top_level, refs, alloc),
         .RecordCon => |rc| {
             for (rc.fields) |f| try collectExprVarRefs(f.expr, top_level, refs, alloc);

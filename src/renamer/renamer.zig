@@ -330,8 +330,6 @@ pub const RExpr = union(enum) {
     Lit: ast.Literal,
     App: struct { fn_expr: *const RExpr, arg_expr: *const RExpr },
     InfixApp: struct { left: *const RExpr, op: Name, op_span: SourceSpan, right: *const RExpr },
-    LeftSection: struct { expr: *const RExpr, op: Name, op_span: SourceSpan },
-    RightSection: struct { op: Name, op_span: SourceSpan, expr: *const RExpr },
     Lambda: struct { params: []const Name, param_spans: []const SourceSpan, body: *const RExpr },
     Let: struct { binds: []const RDecl, body: *const RExpr },
     Case: struct { scrutinee: *const RExpr, alts: []const RAlt },
@@ -350,7 +348,6 @@ pub const RExpr = union(enum) {
     TypeAnn: struct { expr: *const RExpr, type: ast.Type },
     /// Type application: f @Int (GHC TypeApplications extension)
     TypeApp: struct { fn_expr: *const RExpr, type: ast.Type, span: SourceSpan },
-    Negate: *const RExpr,
     Paren: *const RExpr,
     /// Record construction: Point { x = 1, y = 2 }
     RecordCon: struct { con: Name, fields: []const RFieldUpdate },

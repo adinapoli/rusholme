@@ -865,8 +865,6 @@ fn getExprSpan(expr: RExpr) SourceSpan {
         .EnumFromThenTo => |e| e.span,
         .TypeApp => |tapp| tapp.span,
         .InfixApp => |ia| ia.op_span,
-        .LeftSection => |ls| ls.op_span,
-        .RightSection => |rs| rs.op_span,
         else => syntheticSpan(),
     };
 }
@@ -1458,59 +1456,6 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
             break :blk res_ty;
         },
 
-        // ── Sections ─────────────────────────────────────────────────
-        .LeftSection => |ls| blk: {
-            const op_scheme = ctx.env.lookupScheme(ls.op.unique);
-            const op_ty = if (op_scheme) |s| blk2: {
-                const inst = try s.instantiate(ctx.alloc, ctx.mv_supply);
-                for (inst.wanted) |wc| {
-                    try ctx.wanted_constraints.append(ctx.alloc, .{ .Class = .{
-                        .class_name = wc.class_name,
-                        .ty = wc.ty,
-                        .span = ls.op_span,
-                        .var_unique = ls.op.unique,
-                    } });
-                }
-                break :blk2 try ctx.alloc_ty(inst.ty);
-            } else
-                try ctx.freshMeta();
-
-            const expr_ty = try infer(ctx, ls.expr.*);
-            const right_ty = try ctx.freshMeta();
-            const res_ty = try ctx.freshMeta();
-
-            const inner = try ctx.alloc_ty(HType{ .Fun = .{ .arg = right_ty, .res = res_ty } });
-            const expected = try ctx.alloc_ty(HType{ .Fun = .{ .arg = expr_ty, .res = inner } });
-            try ctx.unifyNow(op_ty, expected, ls.op_span);
-            break :blk ctx.alloc_ty(HType{ .Fun = .{ .arg = right_ty, .res = res_ty } });
-        },
-
-        .RightSection => |rs| blk: {
-            const op_scheme = ctx.env.lookupScheme(rs.op.unique);
-            const op_ty = if (op_scheme) |s| blk2: {
-                const inst = try s.instantiate(ctx.alloc, ctx.mv_supply);
-                for (inst.wanted) |wc| {
-                    try ctx.wanted_constraints.append(ctx.alloc, .{ .Class = .{
-                        .class_name = wc.class_name,
-                        .ty = wc.ty,
-                        .span = rs.op_span,
-                        .var_unique = rs.op.unique,
-                    } });
-                }
-                break :blk2 try ctx.alloc_ty(inst.ty);
-            } else
-                try ctx.freshMeta();
-
-            const expr_ty = try infer(ctx, rs.expr.*);
-            const left_ty = try ctx.freshMeta();
-            const res_ty = try ctx.freshMeta();
-
-            const inner = try ctx.alloc_ty(HType{ .Fun = .{ .arg = expr_ty, .res = res_ty } });
-            const expected = try ctx.alloc_ty(HType{ .Fun = .{ .arg = left_ty, .res = inner } });
-            try ctx.unifyNow(op_ty, expected, rs.op_span);
-            break :blk ctx.alloc_ty(HType{ .Fun = .{ .arg = left_ty, .res = res_ty } });
-        },
-
         // ── TypeAnn ───────────────────────────────────────────────────
         //
         // Γ ⊢ e : τ'    τ' ~ τ_ann
@@ -1544,25 +1489,6 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
             _ = try astTypeToHType(ta.type, ctx); // Convert but ignore for now
             const fn_ty = try infer(ctx, ta.fn_expr.*);
             break :blk fn_ty;
-        },
-
-        // ── Negate ────────────────────────────────────────────────────
-        .Negate => |inner| blk: {
-            const inner_ty = try infer(ctx, inner.*);
-            const int_node = try ctx.alloc_ty(intTy());
-            // Use span from inner expression for better error messages
-            const neg_span = switch (inner.*) {
-                .Var => |v| v.span,
-                .Lit => |l| l.getSpan(),
-                .EnumFrom => |e| e.span,
-                .EnumFromThen => |e| e.span,
-                .EnumFromTo => |e| e.span,
-                .EnumFromThenTo => |e| e.span,
-                .TypeApp => |ta| ta.span,
-                else => syntheticSpan(),
-            };
-            try ctx.unifyNow(inner_ty, int_node, neg_span);
-            break :blk int_node;
         },
 
         // ── Arithmetic sequences (Haskell 2010 §3.10) ────────────────
