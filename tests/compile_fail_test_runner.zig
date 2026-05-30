@@ -137,7 +137,7 @@ fn tryCompile(
     // ── Typecheck ────────────────────────────────────────────────────────
     var mv_supply = htype_mod.MetaVarSupply{};
     var ty_env = try rusholme.tc.env.TyEnv.init(aa);
-    try rusholme.tc.env.initBuiltins(&ty_env, aa, &u_supply, no_implicit_prelude);
+    try rusholme.tc.env.initBuiltins(&ty_env, &u_supply, no_implicit_prelude);
     var infer_ctx = infer_mod.InferCtx.init(aa, &ty_env, &mv_supply, &u_supply, &diags);
     var module_types = infer_mod.inferModule(&infer_ctx, renamed, null) catch
         return collectCodes(allocator, &diags, aa);

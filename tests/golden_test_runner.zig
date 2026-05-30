@@ -276,7 +276,7 @@ fn pipelineToCore(allocator: std.mem.Allocator, source: []const u8) ![]const u8 
     // ── Typecheck ────────────────────────────────────────────────────────
     var mv_supply = htype_mod.MetaVarSupply{};
     var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
-    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply, no_implicit_prelude);
+    try rusholme.tc.env.initBuiltins(&ty_env, &u_supply, no_implicit_prelude);
     var infer_ctx = infer_mod.InferCtx.init(arena_alloc, &ty_env, &mv_supply, &u_supply, &diags);
     var module_types = try infer_mod.inferModule(&infer_ctx, renamed, null);
     defer module_types.deinit(arena_alloc);
@@ -356,7 +356,7 @@ fn pipelineToGrin(allocator: std.mem.Allocator, source: []const u8) ![]const u8 
     // ── Typecheck ────────────────────────────────────────────────────────
     var mv_supply = htype_mod.MetaVarSupply{};
     var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
-    try rusholme.tc.env.initBuiltins(&ty_env, arena_alloc, &u_supply, no_implicit_prelude);
+    try rusholme.tc.env.initBuiltins(&ty_env, &u_supply, no_implicit_prelude);
     var infer_ctx = infer_mod.InferCtx.init(arena_alloc, &ty_env, &mv_supply, &u_supply, &diags);
     var module_types = try infer_mod.inferModule(&infer_ctx, renamed, null);
     defer module_types.deinit(arena_alloc);

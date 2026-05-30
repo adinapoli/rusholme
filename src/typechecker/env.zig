@@ -36,10 +36,24 @@
 //!
 //! ## Memory
 //!
-//! `TyEnv` does not own the `HType` values stored in schemes — they must be
-//! allocated on the typechecker's arena, which outlives any individual env
-//! frame.  The env itself (frame nodes and hash maps) is allocated on the
-//! provided allocator, which should also be the typechecker's arena.
+//! `TyEnv` owns a private `std.heap.ArenaAllocator` (the *type arena*) that
+//! backs every `HType` tree the env itself allocates — notably the built-in
+//! schemes created by `initBuiltins`.  `deinit` tears the arena down in one
+//! shot, so there is never any per-node ownership tracking or recursive
+//! free of `*const HType` pointers (those pointers may be shared, stack-, or
+//! caller-arena-allocated, which is precisely what made an earlier recursive
+//! `freeHTypeWithTracking` attempt crash with use-after-free; see #496).
+//!
+//! Code that mints `HType` nodes destined to be stored in this env (e.g. the
+//! built-in initialiser) must allocate them on `typeAllocator()`.  The frame
+//! nodes and hash maps themselves are allocated on the *backing* allocator
+//! passed to `init`.
+//!
+//! The typechecker may also `bind` schemes whose bodies it allocated on its
+//! own pass arena (not the env's type arena).  Those are not owned by the
+//! env: the env never frees individual scheme bodies, only the type arena and
+//! the frame/map bookkeeping.  This keeps the ownership boundary crisp — the
+//! env owns exactly what it allocated through `typeAllocator()`.
 
 const std = @import("std");
 const htype_mod = @import("htype.zig");
@@ -289,20 +303,44 @@ const Frame = struct {
 /// Call `push` / `pop` around each syntactic scope.  Prefer `enterScope` /
 /// `Scope.exit` for RAII-style management.
 pub const TyEnv = struct {
+    /// Backing allocator for frame nodes and hash maps.
     alloc: std.mem.Allocator,
+    /// Private arena that owns every `HType` tree allocated *by this env*
+    /// (e.g. the built-in schemes from `initBuiltins`).  Tearing it down in
+    /// `deinit` frees those trees in one shot, with no per-node ownership
+    /// tracking — see the module-level "Memory" note.  Heap-boxed so the
+    /// `TyEnv` value stays trivially movable (`init` returns by value).
+    type_arena: *std.heap.ArenaAllocator,
     /// The current (innermost) frame.  Never null after `init`.
     current: *Frame,
 
     // ── Lifecycle ──────────────────────────────────────────────────────
 
     /// Create an empty environment with one (global) frame.
+    ///
+    /// `alloc` backs the frame/map bookkeeping and the private type arena.
     pub fn init(alloc: std.mem.Allocator) std.mem.Allocator.Error!TyEnv {
+        const type_arena = try alloc.create(std.heap.ArenaAllocator);
+        errdefer alloc.destroy(type_arena);
+        type_arena.* = std.heap.ArenaAllocator.init(alloc);
+        errdefer type_arena.deinit();
+
         const frame = try alloc.create(Frame);
         frame.* = .{ .bindings = .{}, .outer = null };
-        return .{ .alloc = alloc, .current = frame };
+        return .{ .alloc = alloc, .type_arena = type_arena, .current = frame };
     }
 
-    /// Free all frames and their binding maps.
+    /// The allocator for `HType` nodes owned by this env.
+    ///
+    /// Any `HType` tree that will be stored in this env's bindings via the
+    /// env's own initialisers (`initBuiltins`) must be allocated here so that
+    /// `deinit` reclaims it.  Lookups/instantiations that produce *transient*
+    /// types not stored in the env should keep using the caller's allocator.
+    pub fn typeAllocator(self: *const TyEnv) std.mem.Allocator {
+        return self.type_arena.allocator();
+    }
+
+    /// Free all frames, their binding maps, and the private type arena.
     pub fn deinit(self: *TyEnv) void {
         var frame: ?*Frame = self.current;
         while (frame) |f| {
@@ -311,6 +349,8 @@ pub const TyEnv = struct {
             self.alloc.destroy(f);
             frame = outer;
         }
+        self.type_arena.deinit();
+        self.alloc.destroy(self.type_arena);
     }
 
     // ── Binding ────────────────────────────────────────────────────────
@@ -512,8 +552,16 @@ fn collectHTypeFreeMetas(
 ///
 /// `supply` is the typechecker's `UniqueSupply` — used to mint fresh
 /// `Name` values for the rigid type variables in polymorphic schemes.
-pub fn initBuiltins(env: *TyEnv, alloc: std.mem.Allocator, supply: *UniqueSupply, no_implicit_prelude: bool) std.mem.Allocator.Error!void {
+///
+/// All `HType` trees built here are allocated on the env's private type
+/// arena (`env.typeAllocator()`), so `env.deinit()` reclaims them with no
+/// per-node tracking.  This is what lets `TyEnv.init → initBuiltins →
+/// deinit` run leak-free under `std.testing.allocator` (#496).
+pub fn initBuiltins(env: *TyEnv, supply: *UniqueSupply, no_implicit_prelude: bool) std.mem.Allocator.Error!void {
     _ = supply; // reserved for future use if we need to mint fresh IDs for other built-ins
+
+    // Every HType allocated below is owned by the env's type arena.
+    const alloc = env.typeAllocator();
 
     // ── Type constructor helpers ───────────────────────────────────────
     // These are HType values for common base types.
@@ -871,7 +919,7 @@ test "initBuiltins: putStrLn is in scope" {
     var u_supply = UniqueSupply{}; // Starts at 1000
 
     // Since initBuiltins now uses stable IDs (0-999), it doesn't move the supply.
-    try initBuiltins(&env, alloc, &u_supply, false);
+    try initBuiltins(&env, &u_supply, false);
 
     try testing.expect(u_supply.next == 1000);
 
@@ -889,7 +937,7 @@ test "initBuiltins: True and False are bound" {
     var env = try TyEnv.init(alloc);
     defer env.deinit();
     var u_supply = UniqueSupply{};
-    try initBuiltins(&env, alloc, &u_supply, false);
+    try initBuiltins(&env, &u_supply, false);
 
     var mv_supply = MetaVarSupply{};
     const true_ty = try env.lookup(Known.Con.True.unique, alloc, &mv_supply);
@@ -910,7 +958,7 @@ test "initBuiltins: bindings are polymorphic where expected" {
     var env = try TyEnv.init(alloc);
     defer env.deinit();
     var u_supply = UniqueSupply{};
-    try initBuiltins(&env, alloc, &u_supply, false);
+    try initBuiltins(&env, &u_supply, false);
 
     // We'll just verify that some bindings in the map are polymorphic.
     var it = env.current.bindings.iterator();
@@ -932,7 +980,62 @@ test "initBuiltins: at least one binder exists" {
     var env = try TyEnv.init(alloc);
     defer env.deinit();
     var u_supply = UniqueSupply{};
-    try initBuiltins(&env, alloc, &u_supply, false);
+    try initBuiltins(&env, &u_supply, false);
 
     try testing.expect(env.current.bindings.count() > 0);
+}
+
+// ── Leak regression (#496) ─────────────────────────────────────────────
+
+test "TyEnv: init -> initBuiltins -> deinit is leak-free under testing.allocator" {
+    // Acceptance test for #496.  No arena wrapper here: the built-in HType
+    // trees are owned by the env's private type arena, so `deinit` must
+    // reclaim every allocation.  Any leak is reported by the leak-detecting
+    // testing allocator.  This also proves there is no use-after-free: the
+    // arena teardown never recursively walks shared `*const HType` pointers.
+    var env = try TyEnv.init(testing.allocator);
+    defer env.deinit();
+
+    var u_supply = UniqueSupply{};
+    try initBuiltins(&env, &u_supply, false);
+
+    // Sanity: the prelude bindings were actually installed.
+    try testing.expect(env.current.bindings.count() > 0);
+}
+
+test "TyEnv: NoImplicitPrelude init -> initBuiltins -> deinit is leak-free" {
+    // The wired-in-only path (NoImplicitPrelude) allocates a different subset
+    // of HType trees; exercise it too under the leak-detecting allocator.
+    var env = try TyEnv.init(testing.allocator);
+    defer env.deinit();
+
+    var u_supply = UniqueSupply{};
+    try initBuiltins(&env, &u_supply, true);
+
+    try testing.expect(env.current.bindings.count() > 0);
+}
+
+test "TyEnv: push/pop and lookup keep the env arena self-contained (no leak)" {
+    // Lookups instantiate schemes onto a *caller* allocator (here, a scratch
+    // arena), distinct from the env's type arena.  Pushing/popping frames and
+    // binding fresh schemes must not leak when run under testing.allocator.
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+
+    var env = try TyEnv.init(testing.allocator);
+    defer env.deinit();
+
+    var u_supply = UniqueSupply{};
+    try initBuiltins(&env, &u_supply, false);
+
+    var mv_supply = MetaVarSupply{};
+    // Instantiate a polymorphic built-in (the cons constructor) onto scratch.
+    const cons_ty = try env.lookup(Known.Con.Cons.unique, scratch.allocator(), &mv_supply);
+    try testing.expect(cons_ty != null);
+
+    // Push an inner frame, bind a monomorphic type allocated on the env arena,
+    // then pop it.  The env's bookkeeping (frame + map) is freed by `pop`.
+    try env.push();
+    try env.bindMono(testName("x", 7), conTy(Known.Type.Int));
+    env.pop();
 }
