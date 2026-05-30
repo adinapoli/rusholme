@@ -276,6 +276,64 @@ instance Bounded Ordering where
 -- Enum type class
 -- ========================================================================
 
+-- Int-domain enumeration helpers.
+--
+-- These are ordinary, fully-monomorphic Int functions (so they ARE
+-- type-checked, unlike class-default bodies) that build the integer index
+-- sequence the Haskell 2010 Report uses to define the ranged enumerations:
+--
+--   enumFromTo x y       = map toEnum [fromEnum x .. fromEnum y]
+--   enumFromThenTo x y z = map toEnum [fromEnum x, fromEnum y .. fromEnum z]
+--
+-- The class defaults below call these to produce the list of indices and
+-- then `map toEnum` over it.  The crucial correctness property: every index
+-- they yield lies between `fromEnum n` and `fromEnum m`/`fromEnum z`
+-- inclusive, and `m`/`z` are themselves valid values of the enum, so every
+-- index is necessarily <= fromEnum maxBound (and >= fromEnum minBound).
+-- `toEnum` is therefore *structurally* only ever applied in range — the
+-- "toEnum: out of range" error is defined out of existence by construction
+-- rather than guarded against after the fact.
+--
+-- They use the monomorphic Int primitives (primGtInt / primLtInt …) rather
+-- than the Ord (>)/(<) methods purely so the class defaults that call them
+-- need no Ord Int dictionary; the helpers themselves are well-typed and
+-- could use Ord just as well.
+-- Unbounded ascending/stepped Int sequences, used by the generic (unbounded)
+-- enumFrom / enumFromThen class defaults.  These are correct only for
+-- unbounded enums (Int); bounded instances override the two methods that use
+-- them (see Bool/Ordering/Char below).
+enumFromInt :: Int -> [Int]
+enumFromInt i = i : enumFromInt (primAddInt i 1)
+
+enumFromThenInt :: Int -> Int -> [Int]
+enumFromThenInt i j = enumFromStepInt i (primSubInt j i)
+
+enumFromStepInt :: Int -> Int -> [Int]
+enumFromStepInt i step = i : enumFromStepInt (primAddInt i step) step
+
+enumIntFromTo :: Int -> Int -> [Int]
+enumIntFromTo i j =
+  if primGtInt i j then [] else i : enumIntFromTo (primAddInt i 1) j
+
+-- `step` is computed ONCE by the caller and threaded through unchanged, so a
+-- successor index is never recomputed from (and never forces) a later list
+-- element.  An ascending range (step >= 0) stops once the index passes the
+-- upper bound; a descending range (step < 0) stops once it passes the lower
+-- bound.  A zero step with i <= j yields an infinite list of i, matching GHC.
+enumIntFromThenToStep :: Int -> Int -> Int -> [Int]
+enumIntFromThenToStep i step limit =
+  if primGeInt step 0
+  then if primGtInt i limit
+       then []
+       else i : enumIntFromThenToStep (primAddInt i step) step limit
+  else if primLtInt i limit
+       then []
+       else i : enumIntFromThenToStep (primAddInt i step) step limit
+
+enumIntFromThenTo :: Int -> Int -> Int -> [Int]
+enumIntFromThenTo i j limit =
+  enumIntFromThenToStep i (primSubInt j i) limit
+
 class Enum a where
   succ :: a -> a
   pred :: a -> a
@@ -285,49 +343,38 @@ class Enum a where
   enumFromThen :: a -> a -> [a]
   enumFromTo :: a -> a -> [a]
   enumFromThenTo :: a -> a -> a -> [a]
-  -- Default implementations per the Haskell 2010 Report (§6.3.4), expressed in
-  -- terms of succ, fromEnum and toEnum so that any instance defining those
-  -- three (plus pred) gets the four ranged enumerations for free.  Three
-  -- deliberate deviations from a naive transcription of the Report:
+  -- Default implementations per the Haskell 2010 Report (§6.3.4).  The Report
+  -- defines the ranged enumerations by mapping `toEnum` over the corresponding
+  -- *Int-domain* sequence:
   --
-  --  * Range bounds are compared on the Int results of fromEnum using the
-  --    monomorphic primitives (primGtInt / primLtInt / primEqInt) rather than
-  --    the Ord (>)/(<) methods.  Default-method bodies are not yet type-checked,
-  --    so the evidence resolver cannot supply the Ord Int dictionary that Ord
-  --    (>) would require (#629); the primitive comparison is semantically
-  --    identical and needs no dictionary.
+  --   enumFrom x         = map toEnum [fromEnum x ..]
+  --   enumFromThen x y   = map toEnum [fromEnum x, fromEnum y ..]
+  --   enumFromTo x y     = map toEnum [fromEnum x .. fromEnum y]
+  --   enumFromThenTo x y z = map toEnum [fromEnum x, fromEnum y .. fromEnum z]
   --
-  --  * The `step` of enumFromThen/enumFromThenTo is written inline rather than
-  --    bound with `let`.  A `let`-bound name inside a (not-yet-type-checked)
-  --    default-method body is mistranslated by the GRIN→LLVM backend (the case
-  --    scrutinee resolves to a garbage value).  Inlining the pure expression
-  --    sidesteps that.
-  --    Tracked in: https://github.com/adinapoli/rusholme/issues/744
-  --    The recompute-the-step formulation also forces `toEnum` one step past
-  --    the limit for finite enums (enumFromThen/enumFromThenTo only).
-  --    Tracked in: https://github.com/adinapoli/rusholme/issues/745
+  -- We follow that formulation exactly, using the monomorphic Int helpers
+  -- (enumIntFromTo / enumIntFromThenTo) for the bounded sequences.  Because
+  -- the upper/lower bound passed to those helpers is itself a valid value of
+  -- the enum, every index they emit is in range, so `map toEnum` never applies
+  -- `toEnum` to an out-of-range index.  enumFromTo and enumFromThenTo are thus
+  -- TOTAL for every Enum instance, finite or not — no "toEnum: out of range"
+  -- crash is possible by construction.
   --
-  --  * enumFromTo stops with an explicit equality check (primEqInt) so that
-  --    `succ` is never evaluated one step past the last element — otherwise the
-  --    final `succ maxBound` would raise the maxBound error before the bound
-  --    check could terminate the list.
-  enumFrom n = n : enumFrom (succ n)
-  enumFromTo n m =
-    if primGtInt (fromEnum n) (fromEnum m)
-    then []
-    else if primEqInt (fromEnum n) (fromEnum m)
-         then [n]
-         else n : enumFromTo (succ n) m
+  -- enumFrom and enumFromThen, by contrast, are inherently partial for FINITE
+  -- types: the Report's generic default runs the Int sequence unbounded, which
+  -- is correct only for unbounded types such as Int.  For the bounded Prelude
+  -- instances (Bool, Ordering, Char) those two methods are OVERRIDDEN below to
+  -- terminate at the type's maximum/minimum (mirroring GHC, where bounded
+  -- instances override enumFrom/enumFromThen).
+  --
+  -- (`map` is referenced before its definition; that is fine because the
+  -- renamer resolves all top-level names before processing bodies.)
+  enumFrom n = map toEnum (enumFromInt (fromEnum n))
   enumFromThen n n2 =
-    n : enumFromThen n2 (toEnum (fromEnum n2 + (fromEnum n2 - fromEnum n)))
+    map toEnum (enumFromThenInt (fromEnum n) (fromEnum n2))
+  enumFromTo n m = map toEnum (enumIntFromTo (fromEnum n) (fromEnum m))
   enumFromThenTo n n2 m =
-    if primGeInt (fromEnum n2 - fromEnum n) 0
-    then if primGtInt (fromEnum n) (fromEnum m)
-         then []
-         else n : enumFromThenTo n2 (toEnum (fromEnum n2 + (fromEnum n2 - fromEnum n))) m
-    else if primLtInt (fromEnum n) (fromEnum m)
-         then []
-         else n : enumFromThenTo n2 (toEnum (fromEnum n2 + (fromEnum n2 - fromEnum n))) m
+    map toEnum (enumIntFromThenTo (fromEnum n) (fromEnum n2) (fromEnum m))
 
 instance Enum Int where
   succ n = n + 1
@@ -343,14 +390,35 @@ instance Enum Int where
        then if n > m then [] else n : enumFromThenTo n2 (n2 + step) m
        else if n < m then [] else n : enumFromThenTo n2 (n2 + step) m
 
--- Char, Bool and Ordering need only define succ/pred/toEnum/fromEnum: the
--- four ranged enumerations (enumFrom, enumFromTo, enumFromThen,
--- enumFromThenTo) are inherited from the Enum class defaults above.
+-- Char, Bool and Ordering inherit enumFromTo / enumFromThenTo from the class
+-- defaults (those are total for finite types).  They OVERRIDE enumFrom and
+-- enumFromThen, however: the generic defaults run the Int sequence unbounded
+-- and would feed an out-of-range index to toEnum once they pass maxBound.  GHC
+-- handles this exactly the same way — bounded instances terminate enumFrom /
+-- enumFromThen at the type's bounds.
+--
+-- We express the bounded form directly in terms of the (total) enumFromTo /
+-- enumFromThenTo methods, terminating at the type's concrete maxBound /
+-- minBound *value*.  We write those bounds as the relevant constructor rather
+-- than via the Bounded `maxBound`/`minBound` methods: an instance-method body
+-- is not type-checked, so a bare `maxBound :: a` cannot be resolved to the
+-- right Bounded instance.  Naming the constructor keeps the dispatch
+-- unambiguous and the definition total.
+--
+--   enumFrom x       = enumFromTo x maxBound
+--   enumFromThen x y = enumFromThenTo x y (if ascending then maxBound else minBound)
+--
+-- where "ascending" is `fromEnum y >= fromEnum x`.
 instance Enum Char where
   succ c = intToChar (charToInt c + 1)
   pred c = intToChar (charToInt c - 1)
   toEnum n = intToChar n
   fromEnum c = charToInt c
+  enumFrom c = enumFromTo c '\DEL'
+  enumFromThen c d =
+    if primGeInt (fromEnum d) (fromEnum c)
+    then enumFromThenTo c d '\DEL'
+    else enumFromThenTo c d '\NUL'
 
 instance Enum Bool where
   succ False = True
@@ -362,6 +430,11 @@ instance Enum Bool where
   toEnum _ = error "toEnum: out of range for Bool"
   fromEnum False = 0
   fromEnum True  = 1
+  enumFrom b = enumFromTo b True
+  enumFromThen b c =
+    if primGeInt (fromEnum c) (fromEnum b)
+    then enumFromThenTo b c True
+    else enumFromThenTo b c False
 
 instance Enum Ordering where
   succ LT = EQ
@@ -377,6 +450,11 @@ instance Enum Ordering where
   fromEnum LT = 0
   fromEnum EQ = 1
   fromEnum GT = 2
+  enumFrom o = enumFromTo o GT
+  enumFromThen o p =
+    if primGeInt (fromEnum p) (fromEnum o)
+    then enumFromThenTo o p GT
+    else enumFromThenTo o p LT
 
 -- ========================================================================
 -- Higher-order combinators
