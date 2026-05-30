@@ -462,3 +462,7 @@ test "e2e: e2e_605_zero_field_thunk (#605)" {
 test "e2e: e2e_708_bounded_enum (#708)" {
     try testE2e(std.testing.allocator, "e2e_708_bounded_enum");
 }
+
+test "e2e: e2e_713_enum_defaults (#713)" {
+    try testE2e(std.testing.allocator, "e2e_713_enum_defaults");
+}

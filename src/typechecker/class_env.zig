@@ -86,6 +86,17 @@ pub const MethodInfo = struct {
     ty: HType,
     /// Whether a default implementation exists.
     has_default: bool,
+    /// Name of the compiled default-method binding (e.g.
+    /// `default$Enum$enumFromTo`), or `null` if the method has no default.
+    ///
+    /// Populated during desugaring (`desugarClassDecl`) via
+    /// `ClassEnv.setDefaultName`, mirroring `ClassInfo.dict_con_name`.  Stored
+    /// here — rather than in a per-module map — so that an instance declared in
+    /// a *different* module from the class (e.g. a user `instance Enum Color`
+    /// against the Prelude's `Enum`) can still find the shared default binding's
+    /// unique.  The `ClassEnv` is serialised into the `.rhi` interface, so this
+    /// survives the module boundary.
+    default_name: ?Name = null,
 };
 
 // ── InstanceInfo ──────────────────────────────────────────────────────
@@ -165,6 +176,26 @@ pub const ClassEnv = struct {
             std.debug.panic("setDictConName: class {d} not found in ClassEnv", .{class_unique});
         };
         entry.dict_con_name = dict_con_name;
+    }
+
+    /// Record the compiled default-method binding name for one method of an
+    /// existing class.  Called by the desugarer after compiling the default
+    /// body, mirroring `setDictConName`.  Asserts that both the class and the
+    /// method exist.
+    pub fn setDefaultName(self: *ClassEnv, class_unique: u64, method_unique: u64, default_name: Name) void {
+        const entry = self.classes.getPtr(class_unique) orelse {
+            std.debug.panic("setDefaultName: class {d} not found in ClassEnv", .{class_unique});
+        };
+        for (entry.methods) |*m| {
+            if (m.name.unique.value == method_unique) {
+                // `methods` is stored as `[]const` but the backing slice is
+                // mutable (allocated during type inference); mutate in place to
+                // attach the default name, just as `dict_con_name` is set.
+                @constCast(m).default_name = default_name;
+                return;
+            }
+        }
+        std.debug.panic("setDefaultName: method {d} not found in class {d}", .{ method_unique, class_unique });
     }
 
     /// Register an instance declaration.

@@ -285,6 +285,49 @@ class Enum a where
   enumFromThen :: a -> a -> [a]
   enumFromTo :: a -> a -> [a]
   enumFromThenTo :: a -> a -> a -> [a]
+  -- Default implementations per the Haskell 2010 Report (§6.3.4), expressed in
+  -- terms of succ, fromEnum and toEnum so that any instance defining those
+  -- three (plus pred) gets the four ranged enumerations for free.  Three
+  -- deliberate deviations from a naive transcription of the Report:
+  --
+  --  * Range bounds are compared on the Int results of fromEnum using the
+  --    monomorphic primitives (primGtInt / primLtInt / primEqInt) rather than
+  --    the Ord (>)/(<) methods.  Default-method bodies are not yet type-checked,
+  --    so the evidence resolver cannot supply the Ord Int dictionary that Ord
+  --    (>) would require (#629); the primitive comparison is semantically
+  --    identical and needs no dictionary.
+  --
+  --  * The `step` of enumFromThen/enumFromThenTo is written inline rather than
+  --    bound with `let`.  A `let`-bound name inside a (not-yet-type-checked)
+  --    default-method body is mistranslated by the GRIN→LLVM backend (the case
+  --    scrutinee resolves to a garbage value).  Inlining the pure expression
+  --    sidesteps that.
+  --    Tracked in: https://github.com/adinapoli/rusholme/issues/744
+  --    The recompute-the-step formulation also forces `toEnum` one step past
+  --    the limit for finite enums (enumFromThen/enumFromThenTo only).
+  --    Tracked in: https://github.com/adinapoli/rusholme/issues/745
+  --
+  --  * enumFromTo stops with an explicit equality check (primEqInt) so that
+  --    `succ` is never evaluated one step past the last element — otherwise the
+  --    final `succ maxBound` would raise the maxBound error before the bound
+  --    check could terminate the list.
+  enumFrom n = n : enumFrom (succ n)
+  enumFromTo n m =
+    if primGtInt (fromEnum n) (fromEnum m)
+    then []
+    else if primEqInt (fromEnum n) (fromEnum m)
+         then [n]
+         else n : enumFromTo (succ n) m
+  enumFromThen n n2 =
+    n : enumFromThen n2 (toEnum (fromEnum n2 + (fromEnum n2 - fromEnum n)))
+  enumFromThenTo n n2 m =
+    if primGeInt (fromEnum n2 - fromEnum n) 0
+    then if primGtInt (fromEnum n) (fromEnum m)
+         then []
+         else n : enumFromThenTo n2 (toEnum (fromEnum n2 + (fromEnum n2 - fromEnum n))) m
+    else if primLtInt (fromEnum n) (fromEnum m)
+         then []
+         else n : enumFromThenTo n2 (toEnum (fromEnum n2 + (fromEnum n2 - fromEnum n))) m
 
 instance Enum Int where
   succ n = n + 1
@@ -300,25 +343,14 @@ instance Enum Int where
        then if n > m then [] else n : enumFromThenTo n2 (n2 + step) m
        else if n < m then [] else n : enumFromThenTo n2 (n2 + step) m
 
+-- Char, Bool and Ordering need only define succ/pred/toEnum/fromEnum: the
+-- four ranged enumerations (enumFrom, enumFromTo, enumFromThen,
+-- enumFromThenTo) are inherited from the Enum class defaults above.
 instance Enum Char where
   succ c = intToChar (charToInt c + 1)
   pred c = intToChar (charToInt c - 1)
   toEnum n = intToChar n
   fromEnum c = charToInt c
-  enumFrom c = c : enumFrom (intToChar (charToInt c + 1))
-  enumFromTo c end = if charToInt c > charToInt end
-                     then []
-                     else c : enumFromTo (intToChar (charToInt c + 1)) end
-  enumFromThen c c2 = c : enumFromThen c2 (intToChar (charToInt c2 + (charToInt c2 - charToInt c)))
-  enumFromThenTo c c2 end =
-    let step = charToInt c2 - charToInt c
-    in if step >= 0
-       then if charToInt c > charToInt end
-            then []
-            else c : enumFromThenTo c2 (intToChar (charToInt c2 + step)) end
-       else if charToInt c < charToInt end
-            then []
-            else c : enumFromThenTo c2 (intToChar (charToInt c2 + step)) end
 
 instance Enum Bool where
   succ False = True
@@ -330,20 +362,6 @@ instance Enum Bool where
   toEnum _ = error "toEnum: out of range for Bool"
   fromEnum False = 0
   fromEnum True  = 1
-  enumFrom n = n : enumFrom (succ n)
-  enumFromTo n m = if fromEnum n > fromEnum m
-                   then []
-                   else n : enumFromTo (succ n) m
-  enumFromThen n n2 = n : enumFromThen n2 (succ n2)
-  enumFromThenTo n n2 m =
-    let step = fromEnum n2 - fromEnum n
-    in if step >= 0
-       then if fromEnum n > fromEnum m
-            then []
-            else n : enumFromThenTo n2 (succ n2) m
-       else if fromEnum n < fromEnum m
-            then []
-            else n : enumFromThenTo n2 (succ n2) m
 
 instance Enum Ordering where
   succ LT = EQ
@@ -359,20 +377,6 @@ instance Enum Ordering where
   fromEnum LT = 0
   fromEnum EQ = 1
   fromEnum GT = 2
-  enumFrom n = n : enumFrom (succ n)
-  enumFromTo n m = if fromEnum n > fromEnum m
-                   then []
-                   else n : enumFromTo (succ n) m
-  enumFromThen n n2 = n : enumFromThen n2 (succ n2)
-  enumFromThenTo n n2 m =
-    let step = fromEnum n2 - fromEnum n
-    in if step >= 0
-       then if fromEnum n > fromEnum m
-            then []
-            else n : enumFromThenTo n2 (succ n2) m
-       else if fromEnum n < fromEnum m
-            then []
-            else n : enumFromThenTo n2 (succ n2) m
 
 -- ========================================================================
 -- Higher-order combinators

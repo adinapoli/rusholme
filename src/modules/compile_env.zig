@@ -1195,6 +1195,10 @@ fn serialiseClassEnvIntoIface(
                 .name = .{ .base = m.name.base, .unique = m.name.unique.value },
                 .ty = s_ty,
                 .has_default = m.has_default,
+                .default_name = if (m.default_name) |dn|
+                    .{ .base = dn.base, .unique = dn.unique.value }
+                else
+                    null,
             };
         }
 
@@ -1279,6 +1283,10 @@ fn deserialiseClassEnvFromIface(
                 .name = .{ .base = sm.name.base, .unique = .{ .value = sm.name.unique } },
                 .ty = hty,
                 .has_default = sm.has_default,
+                .default_name = if (sm.default_name) |dn|
+                    .{ .base = dn.base, .unique = .{ .value = dn.unique } }
+                else
+                    null,
             };
         }
 
