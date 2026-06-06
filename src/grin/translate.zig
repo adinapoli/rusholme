@@ -1801,6 +1801,16 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
                     },
                     .Return => {
                         // Simple value: update placeholder directly.
+                        // NOTE: every binding in the Rec group must emit its
+                        // own update; previously this branch only chained a
+                        // new update onto a non-null `current_expr` and then
+                        // `continue`d, silently DROPPING the update for the
+                        // first binding when it was a simple `Return`.  The
+                        // first binding's placeholder was left pointing at
+                        // the unit sentinel allocated in Step 1, and any
+                        // later forcing of that binding read a wrong value
+                        // (or segfaulted, see #747).  We now always assign
+                        // `current_expr` so the placeholder is backpatched.
                         const rhs_val = try exprToVal(rhs_expr);
                         const update_expr = try ctx.alloc.create(GrinExpr);
                         update_expr.* = .{ .Update = .{
@@ -1816,6 +1826,8 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
                                 .rhs = update_expr,
                             } };
                             current_expr = bind_update;
+                        } else {
+                            current_expr = update_expr;
                         }
                         continue;
                     },

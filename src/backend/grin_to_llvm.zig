@@ -516,13 +516,17 @@ pub const GrinTranslator = struct {
     /// Used by entry-point functions that need to return a
     /// distinguishable "no value" result (as opposed to integer 0,
     /// which is boolean False).
-    fn buildUnitNode(self: *GrinTranslator) llvm.Value {
+    ///
+    /// `n_fields` defaults to 0; pass a positive value when the
+    /// returned node will subsequently be mutated by `rts_store_field`
+    /// (e.g. as a `Rec` let placeholder that gets `update`d).
+    fn buildUnitNode(self: *GrinTranslator, n_fields: u32) llvm.Value {
         const rts_alloc_fn = declareRtsAlloc(self.module);
         const unit_tag = @intFromEnum(rts_node.Tag.Unit);
         const unit_disc = c.LLVMConstInt(llvm.i64Type(), unit_tag, 0);
         var alloc_args = [_]llvm.Value{
             unit_disc,
-            c.LLVMConstInt(llvm.i32Type(), 0, 0), // n_fields = 0
+            c.LLVMConstInt(llvm.i32Type(), n_fields, 0),
         };
         return c.LLVMBuildCall2(
             self.builder,
@@ -795,7 +799,7 @@ pub const GrinTranslator = struct {
                             // IO primops return a null pointer placeholder
                             // (see translateAppToValue). Treat as Unit.
                             if (c.LLVMIsAConstantPointerNull(val) != null) {
-                                const unit_ptr = self.buildUnitNode();
+                                const unit_ptr = self.buildUnitNode(0);
                                 _ = llvm.buildRet(self.builder, c.LLVMBuildPtrToInt(self.builder, unit_ptr, llvm.i64Type(), "unit_i64"));
                             } else {
                                 // Force any F-tagged thunks to WHNF before
@@ -845,7 +849,7 @@ pub const GrinTranslator = struct {
                         // Body returned no value (e.g. IO action) —
                         // return a Unit heap node so the REPL displays
                         // nothing rather than a random integer.
-                        const unit_ptr2 = self.buildUnitNode();
+                        const unit_ptr2 = self.buildUnitNode(0);
                         _ = llvm.buildRet(self.builder, c.LLVMBuildPtrToInt(self.builder, unit_ptr2, llvm.i64Type(), "unit_i64"));
                     } else {
                         _ = llvm.buildRet(self.builder, c.LLVMConstPointerNull(value_type));
@@ -861,7 +865,7 @@ pub const GrinTranslator = struct {
                 if (is_repl_entry) {
                     // REPL entry point: return a Unit heap node so
                     // formatJitResult can distinguish unit from boolean False.
-                    const unit_ptr3 = self.buildUnitNode();
+                    const unit_ptr3 = self.buildUnitNode(0);
                     _ = llvm.buildRet(self.builder, c.LLVMBuildPtrToInt(self.builder, unit_ptr3, llvm.i64Type(), "unit_i64"));
                 } else if (is_entry) {
                     // Native main: return 0 (success exit code, C ABI).
@@ -1689,7 +1693,7 @@ pub const GrinTranslator = struct {
                 //    Unit is special: always returns a heap node so the REPL can
                 //    distinguish "no value" from integer 0.
                 if (name.unique.value == known.unit_val) {
-                    break :blk self.buildUnitNode();
+                    break :blk self.buildUnitNode(0);
                 }
 
                 // 2b. If not a known literal, check tag discriminant for nullary constructors.
@@ -1872,7 +1876,7 @@ pub const GrinTranslator = struct {
 
                 return node_ptr;
             },
-            .Unit => return @as(?llvm.Value, c.LLVMGetUndef(llvm.i32Type())),
+            .Unit => return @as(?llvm.Value, self.buildUnitNode(1)),
             .Var => |name| return @as(?llvm.Value, try self.translateValToLlvm(.{ .Var = name })),
             else => return @as(?llvm.Value, try self.translateValToLlvm(val)),
         }
