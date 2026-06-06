@@ -355,6 +355,7 @@
 | [#315](https://github.com/adinapoli/rusholme/issues/315) | Generate whole-program eval and apply functions for GRIN | [#314](https://github.com/adinapoli/rusholme/issues/314) | :green_circle: |
 | [#317](https://github.com/adinapoli/rusholme/issues/317) | Handle partial application and over-application in Core→GRIN | [#314](https://github.com/adinapoli/rusholme/issues/314), [#315](https://github.com/adinapoli/rusholme/issues/315) | :green_circle: |
 | [#347](https://github.com/adinapoli/rusholme/issues/347) | Implement proper backpatching for recursive let bindings in GRIN translator | [#314](https://github.com/adinapoli/rusholme/issues/314) | :green_circle: |
+| [#747](https://github.com/adinapoli/rusholme/issues/747) | Multi-binding `let` (incl. let-qualifier) miscompiles/segfaults | [#149](https://github.com/adinapoli/rusholme/issues/149), [#347](https://github.com/adinapoli/rusholme/issues/347) | :yellow_circle: |
 
 ### Epic: PrimOps and Runtime System (Decision #0001)
 
