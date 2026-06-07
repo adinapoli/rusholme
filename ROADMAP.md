@@ -504,7 +504,7 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#70](https://github.com/adinapoli/rusholme/issues/70) | Define runtime allocator interface for GC-swappable heap | [#56](https://github.com/adinapoli/rusholme/issues/56) | :white_circle: |
+| [#70](https://github.com/adinapoli/rusholme/issues/70) | Define runtime allocator interface for GC-swappable heap | [#56](https://github.com/adinapoli/rusholme/issues/56) | :yellow_circle: |
 | [#71](https://github.com/adinapoli/rusholme/issues/71) | Implement Immix block and line allocator | [#70](https://github.com/adinapoli/rusholme/issues/70) | :white_circle: |
 | [#72](https://github.com/adinapoli/rusholme/issues/72) | Implement Immix mark-and-sweep collection | [#71](https://github.com/adinapoli/rusholme/issues/71) | :white_circle: |
 | [#73](https://github.com/adinapoli/rusholme/issues/73) | Implement Immix opportunistic defragmentation | [#72](https://github.com/adinapoli/rusholme/issues/72) | :white_circle: |
