@@ -55,6 +55,33 @@ zig build run -- ll     FILE.hs   # emit LLVM IR
 zig build run -- build  FILE.hs   # compile to native executable
 ```
 
+### Optimisation Levels
+
+`rhc build` accepts an `-O <level>` flag with the same syntax as Clang:
+
+| Flag   | Mid-level pipeline | Back-end (`LLVMCodeGenOptLevel`) | Notes |
+|--------|--------------------|----------------------------------|-------|
+| `-O0`  | (skipped)          | `None`                           | Fast compile, no optimisation. |
+| `-O1`  | `default<O1>`      | `Less`                           | Light optimisation. |
+| `-O2`  | `default<O2>`      | `Default`                        | **Default for `rhc build`.** Good speed/size balance. |
+| `-O3`  | `default<O3>`      | `Aggressive`                     | Aggressive inlining + vectorisation. |
+| `-Os`  | `default<Os>`      | `Default`                        | Optimise for size. |
+| `-Oz`  | `default<Oz>`      | `Default`                        | Optimise for size, even more aggressively. |
+
+The mid-level optimiser is invoked via LLVM's new pass manager
+(`LLVMRunPasses` from `llvm-c/Transforms/PassBuilder.h`). At `-O0` the
+optimiser is skipped entirely so debug builds stay fast.
+
+```bash
+rhc build -O2 prog.hs            # native, -O2 (default)
+rhc build -O0 prog.hs            # native, no optimisation
+rhc build -O3 prog.hs -o fast    # native, aggressive
+rhc build -Os prog.hs            # native, size-optimised
+```
+
+The REPL JIT engine keeps `-O0` for fast iteration; this flag affects
+`rhc build` only.
+
 ## WASM REPL (Browser-based Demo)
 
 Rusholme includes a browser-based REPL built with WebAssembly for live Haskell

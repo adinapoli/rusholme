@@ -17,6 +17,8 @@ const llvm_c = @cImport({
     @cInclude("llvm-c/Orc.h");
     @cInclude("llvm-c/LLJIT.h");
     @cInclude("llvm-c/OrcEE.h");
+    @cInclude("llvm-c/Error.h");
+    @cInclude("llvm-c/Transforms/PassBuilder.h");
 });
 
 // Import C stdio for file I/O
@@ -323,12 +325,89 @@ pub const TargetError = error{
     TargetLookupFailed,
     TargetMachineCreationFailed,
     EmitFailed,
+    PassPipelineFailed,
 };
 
-/// Create a target machine for the native (host) architecture.
-/// Returns both the machine and the target triple string (caller must
-/// dispose both via `disposeTargetMachine` and `LLVMDisposeMessage`).
-pub fn createNativeTargetMachine() TargetError!TargetMachine {
+/// Optimisation level selected by the user (`-O<level>` on `rhc build`).
+///
+/// Mirrors Clang's familiar syntax. The mapping to LLVM is:
+///
+/// | Level | Code-gen (`LLVMCodeGenOptLevel`) | Mid-level pipeline string |
+/// |-------|----------------------------------|---------------------------|
+/// | `O0`  | `None`                           | `default<O0>`             |
+/// | `O1`  | `Less`                           | `default<O1>`             |
+/// | `O2`  | `Default`                        | `default<O2>`             |
+/// | `O3`  | `Aggressive`                     | `default<O3>`             |
+/// | `Os`  | `Default`                        | `default<Os>`             |
+/// | `Oz`  | `Default`                        | `default<Oz>`             |
+///
+/// The mid-level pipeline is run via `runOptimizationPasses` before object
+/// emission (see `LLVMRunPasses` from `llvm-c/Transforms/PassBuilder.h`).
+pub const OptLevel = enum {
+    O0,
+    O1,
+    O2,
+    O3,
+    Os,
+    Oz,
+
+    /// Parse the textual form of an `-O` flag.  Accepts `0|1|2|3|s|z`,
+    /// matching Clang. Returns `null` on unknown input.
+    pub fn parse(text: []const u8) ?OptLevel {
+        if (text.len != 1) return null;
+        return switch (text[0]) {
+            '0' => .O0,
+            '1' => .O1,
+            '2' => .O2,
+            '3' => .O3,
+            's' => .Os,
+            'z' => .Oz,
+            else => null,
+        };
+    }
+
+    /// Short textual form (e.g. `"2"`, `"s"`). Used in `-O<level>` echoes.
+    pub fn shortName(self: OptLevel) []const u8 {
+        return switch (self) {
+            .O0 => "0",
+            .O1 => "1",
+            .O2 => "2",
+            .O3 => "3",
+            .Os => "s",
+            .Oz => "z",
+        };
+    }
+
+    /// Map to LLVM's `LLVMCodeGenOptLevel` enum for target-machine creation.
+    /// `Os`/`Oz` map to `Default` because the size-optimisation lives in the
+    /// mid-level pipeline (`default<Os>`/`default<Oz>`), not the back-end.
+    fn codeGenLevel(self: OptLevel) llvm_c.LLVMCodeGenOptLevel {
+        return switch (self) {
+            .O0 => llvm_c.LLVMCodeGenLevelNone,
+            .O1 => llvm_c.LLVMCodeGenLevelLess,
+            .O2, .Os, .Oz => llvm_c.LLVMCodeGenLevelDefault,
+            .O3 => llvm_c.LLVMCodeGenLevelAggressive,
+        };
+    }
+
+    /// `opt`-style pipeline string accepted by `LLVMRunPasses`.
+    fn pipelineString(self: OptLevel) [:0]const u8 {
+        return switch (self) {
+            .O0 => "default<O0>",
+            .O1 => "default<O1>",
+            .O2 => "default<O2>",
+            .O3 => "default<O3>",
+            .Os => "default<Os>",
+            .Oz => "default<Oz>",
+        };
+    }
+};
+
+/// Create a target machine for the native (host) architecture at the
+/// given optimisation level.
+///
+/// Caller must dispose with `disposeTargetMachine`.
+pub fn createNativeTargetMachine(opt: OptLevel) TargetError!TargetMachine {
     const triple = llvm_c.LLVMGetDefaultTargetTriple();
     defer llvm_c.LLVMDisposeMessage(triple);
 
@@ -345,7 +424,7 @@ pub fn createNativeTargetMachine() TargetError!TargetMachine {
         triple,
         "generic", // CPU
         "", // features
-        llvm_c.LLVMCodeGenLevelDefault,
+        opt.codeGenLevel(),
         llvm_c.LLVMRelocPIC,
         llvm_c.LLVMCodeModelDefault,
     );
@@ -355,9 +434,10 @@ pub fn createNativeTargetMachine() TargetError!TargetMachine {
     return machine;
 }
 
-/// Create a target machine for WebAssembly (wasm32-wasi).
-/// Used by the WASM backend to compile Haskell to .wasm binaries.
-pub fn createWasmTargetMachine() TargetError!TargetMachine {
+/// Create a target machine for WebAssembly (wasm32-wasi) at the given
+/// optimisation level.  Used by the WASM backend to compile Haskell to
+/// `.wasm` binaries.
+pub fn createWasmTargetMachine(opt: OptLevel) TargetError!TargetMachine {
     // Use wasm32-wasi for WASI-compliant WebAssembly
     const triple = "wasm32-wasi";
 
@@ -374,7 +454,7 @@ pub fn createWasmTargetMachine() TargetError!TargetMachine {
         triple.ptr,
         "generic", // CPU
         "", // features (could add "+bulk-memory,+sign-ext" for optimization)
-        llvm_c.LLVMCodeGenLevelDefault,
+        opt.codeGenLevel(),
         llvm_c.LLVMRelocStatic, // Static relocation for WASM
         llvm_c.LLVMCodeModelDefault,
     );
@@ -382,6 +462,35 @@ pub fn createWasmTargetMachine() TargetError!TargetMachine {
     if (machine == null) return error.TargetMachineCreationFailed;
 
     return machine;
+}
+
+/// Run the LLVM mid-level optimiser on `module` at the requested level.
+///
+/// Uses the new pass manager via `LLVMRunPasses` (LLVM ≥ 13), invoking
+/// the canonical `default<O...>` pipeline.  For `-O0` this is a no-op:
+/// we skip the call entirely so we don't pay for pass-builder setup.
+///
+/// Errors from the pass pipeline are surfaced as `PassPipelineFailed`
+/// with a stderr message; this is appropriate because a failing
+/// optimisation pipeline indicates a compiler bug, not user error.
+pub fn runOptimizationPasses(
+    module: Module,
+    machine: TargetMachine,
+    opt: OptLevel,
+) TargetError!void {
+    if (opt == .O0) return;
+
+    const options = llvm_c.LLVMCreatePassBuilderOptions();
+    defer llvm_c.LLVMDisposePassBuilderOptions(options);
+
+    const pipeline = opt.pipelineString();
+    const err = llvm_c.LLVMRunPasses(module, pipeline.ptr, machine, options);
+    if (err != null) {
+        const msg = llvm_c.LLVMGetErrorMessage(err);
+        defer llvm_c.LLVMDisposeErrorMessage(msg);
+        std.log.err("LLVM pass pipeline '{s}' failed: {s}", .{ pipeline, msg });
+        return error.PassPipelineFailed;
+    }
 }
 
 /// Set a custom target triple on a module (for cross-compilation).
@@ -540,6 +649,38 @@ pub fn linkModules(dest: Module, src: Module) TargetError!void {
     if (llvm_c.LLVMLinkModules2(dest, src) != 0) {
         return error.EmitFailed;
     }
+}
+
+test "OptLevel.parse: accepts the six Clang-style levels" {
+    try std.testing.expectEqual(OptLevel.O0, OptLevel.parse("0").?);
+    try std.testing.expectEqual(OptLevel.O1, OptLevel.parse("1").?);
+    try std.testing.expectEqual(OptLevel.O2, OptLevel.parse("2").?);
+    try std.testing.expectEqual(OptLevel.O3, OptLevel.parse("3").?);
+    try std.testing.expectEqual(OptLevel.Os, OptLevel.parse("s").?);
+    try std.testing.expectEqual(OptLevel.Oz, OptLevel.parse("z").?);
+}
+
+test "OptLevel.parse: rejects malformed and unknown levels" {
+    try std.testing.expect(OptLevel.parse("") == null);
+    try std.testing.expect(OptLevel.parse("4") == null);
+    try std.testing.expect(OptLevel.parse("S") == null); // case-sensitive: only lowercase
+    try std.testing.expect(OptLevel.parse("O2") == null); // user supplies just "2"
+    try std.testing.expect(OptLevel.parse("fast") == null);
+}
+
+test "OptLevel.shortName: round-trips parse" {
+    inline for ([_]OptLevel{ .O0, .O1, .O2, .O3, .Os, .Oz }) |lvl| {
+        try std.testing.expectEqual(lvl, OptLevel.parse(lvl.shortName()).?);
+    }
+}
+
+test "OptLevel.pipelineString: well-formed for every level" {
+    try std.testing.expectEqualStrings("default<O0>", OptLevel.O0.pipelineString());
+    try std.testing.expectEqualStrings("default<O1>", OptLevel.O1.pipelineString());
+    try std.testing.expectEqualStrings("default<O2>", OptLevel.O2.pipelineString());
+    try std.testing.expectEqualStrings("default<O3>", OptLevel.O3.pipelineString());
+    try std.testing.expectEqualStrings("default<Os>", OptLevel.Os.pipelineString());
+    try std.testing.expectEqualStrings("default<Oz>", OptLevel.Oz.pipelineString());
 }
 
 // Note: LLVM tests require C headers and libc, which are not available
