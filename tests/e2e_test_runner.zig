@@ -252,6 +252,10 @@ test "e2e: e2e_536_foreign_ccall (#536)" {
     try testE2e(std.testing.allocator, "e2e_536_foreign_ccall");
 }
 
+test "e2e: e2e_386_constructor_values (#386, #764)" {
+    try testE2e(std.testing.allocator, "e2e_386_constructor_values");
+}
+
 // ── Optimisation-level smoke tests (#755) ────────────────────────────────────
 //
 // These verify that the `-O<level>` flag actually flows through `rhc build`

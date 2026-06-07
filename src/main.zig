@@ -1061,6 +1061,15 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     var cross_module_con_map = std.AutoHashMapUnmanaged(u64, u32){};
     defer cross_module_con_map.deinit(arena_alloc);
 
+    // Build a cross-module arity map so that each module's GRIN translation
+    // knows the arity of functions defined in prior modules (e.g. Prelude's
+    // `foldl`, `odd`).  Without this, a user module that partially applies
+    // `foldl f z` emits a direct 2-argument App instead of a P-tag node,
+    // and a bare `odd` value reference never becomes a P-tag wrapper —
+    // both crash at runtime (#386, #764).
+    var cross_module_arities = std.AutoHashMapUnmanaged(u64, u32){};
+    defer cross_module_arities.deinit(arena_alloc);
+
     var per_module_grin = std.ArrayListUnmanaged(rusholme.grin.ast.Program).empty;
     // Thread the lifted-function name counter across modules so that each
     // module's lifted functions get globally unique LLVM symbol names.
@@ -1069,8 +1078,15 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
         const core_prog = session.programs.get(mod_name) orelse continue;
         const lift_result = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog, cross_module_scope, next_lift_id);
         next_lift_id = lift_result.next_lifted_id;
-        const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, lift_result.program, null, &cross_module_con_map);
+        const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, lift_result.program, &cross_module_arities, &cross_module_con_map);
         try per_module_grin.append(arena_alloc, grin_prog);
+
+        // Accumulate this module's function arities for subsequent modules
+        // (mirrors the constructor-map accumulation below).
+        var arity_it = grin_prog.arities.iterator();
+        while (arity_it.next()) |entry| {
+            try cross_module_arities.put(arena_alloc, entry.key_ptr.*, entry.value_ptr.*);
+        }
 
         // After translating this module, accumulate its constructor field
         // counts so that subsequent modules can use them as cross-module

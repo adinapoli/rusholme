@@ -9,6 +9,7 @@ module Prelude
     , map, filter, (++), head, tail, null, length
     , foldr, foldl, concat, take, drop
     , maybe, fromMaybe, either
+    , reverse
     , putChar, putStr, putStrLn, print
     , error
     , intToChar, charToInt
@@ -541,6 +542,10 @@ replicate n x = case n <= 0 of
     True  -> []
     False -> x : replicate (n - 1) x
 
+-- Uses (:) as a higher-order value — relies on constructor wrappers (#386).
+reverse :: [a] -> [a]
+reverse = foldl (flip (:)) []
+
 -- ========================================================================
 -- Show typeclass
 -- ========================================================================
@@ -674,7 +679,6 @@ either f g (Right y) = g y
 
 -- ========================================================================
 -- Polymorphic functions still blocked:
---   - reverse: uses (:) as higher-order value, needs constructor closures (#386)
 --   - zip, unzip: needs tuple codegen (#571)
 --   - fst, snd: needs tuple codegen (#571)
 --   - read: needs parser integration (no issue filed yet)
