@@ -446,16 +446,30 @@ pub const RDecl = union(enum) {
     InstanceDecl: RInstanceDecl,
     /// Data declaration (algebraic data type).
     DataDecl: RDataDecl,
-    /// Foreign primitive import: `foreign import prim "op_name" binding :: Type`.
+    /// Foreign import: `foreign import <conv> "name" binding :: Type`,
+    /// where `<conv>` is `prim` (GRIN PrimOp) or `ccall` (C call to an
+    /// RTS function, #536).
     ForeignPrim: struct {
         /// The renamed Haskell binding name (with unique ID).
         name: Name,
-        /// The raw PrimOp string name (e.g., "add_Int").
+        /// The raw imported name: a PrimOp string (e.g., "add_Int") for
+        /// `prim`, or a C symbol (e.g., "rts_putStrLn") for `ccall`.
         primop_name: []const u8,
         /// The declared type signature (AST-level, not yet elaborated).
         type: ast.Type,
+        /// Which foreign calling convention the declaration used.
+        convention: ForeignConvention,
         span: SourceSpan,
     },
+};
+
+/// Foreign import calling conventions accepted by the renamer (#536).
+pub const ForeignConvention = enum {
+    /// GRIN PrimOp — lowered to LLVM instructions or RTS libcalls via
+    /// PrimOp alias normalisation.
+    prim,
+    /// Direct C-calling-convention call to an RTS symbol.
+    ccall,
 };
 
 /// A renamed data constructor declaration.
@@ -915,11 +929,16 @@ fn renameDecl(
             } };
         },
         .Foreign => |fd| blk: {
-            // Only `prim` calling convention is supported; others are deferred.
-            if (!std.mem.eql(u8, fd.calling_convention, "prim")) {
+            // `prim` (GRIN PrimOps) and `ccall` (RTS C calls, #536) are
+            // supported; other conventions (capi, stdcall, …) are deferred.
+            const convention: ForeignConvention = if (std.mem.eql(u8, fd.calling_convention, "prim"))
+                .prim
+            else if (std.mem.eql(u8, fd.calling_convention, "ccall"))
+                .ccall
+            else {
                 const msg = try std.fmt.allocPrint(
                     env.alloc,
-                    "unsupported foreign calling convention: `{s}` (only `prim` is supported)",
+                    "unsupported foreign calling convention: `{s}` (only `prim` and `ccall` are supported)",
                     .{fd.calling_convention},
                 );
                 try env.diags.emit(env.alloc, .{
@@ -929,12 +948,13 @@ fn renameDecl(
                     .message = msg,
                 });
                 break :blk null;
-            }
+            };
             const name = env.scope.lookup(fd.binding_name) orelse env.freshName(fd.binding_name);
             break :blk RDecl{ .ForeignPrim = .{
                 .name = name,
                 .primop_name = fd.foreign_name,
                 .type = fd.type,
+                .convention = convention,
                 .span = fd.span,
             } };
         },

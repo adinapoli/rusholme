@@ -222,3 +222,7 @@ test "should_fail_compile: sfc001_unknown_primop" {
 test "should_fail_compile: sfc002_unbound_variable" {
     try testShouldFailCompile(std.testing.allocator, "sfc002_unbound_variable");
 }
+
+test "should_fail_compile: sfc003_unsupported_ccall_symbol (#536)" {
+    try testShouldFailCompile(std.testing.allocator, "sfc003_unsupported_ccall_symbol");
+}
