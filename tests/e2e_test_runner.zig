@@ -335,6 +335,10 @@ test "e2e: ghc_011_listcomp_let (#734)" {
     try testE2e(std.testing.allocator, "ghc_011_listcomp_let");
 }
 
+test "e2e: ghc_012_let_multi_binding (#747)" {
+    try testE2e(std.testing.allocator, "ghc_012_let_multi_binding");
+}
+
 test "e2e: e2e_006_peano" {
     try testE2e(std.testing.allocator, "e2e_006_peano");
 }
