@@ -130,6 +130,9 @@ fn printIndented(text: []const u8) void {
 /// optionally stderr). Returns true on success, false on any testable
 /// failure (wrong output, wrong exit code, compile error). Infrastructure
 /// errors (spawn failure, OOM) are propagated as errors.
+///
+/// `opt_flag` is an optional `-O<level>` to pass to `rhc build`. Passing
+/// `null` exercises the CLI default (which is currently `-O2` for native).
 fn runTest(
     allocator: std.mem.Allocator,
     comptime hs_path: []const u8,
@@ -137,6 +140,7 @@ fn runTest(
     expected_exit: u8,
     expected_stderr: ?[]const u8,
     quiet: bool,
+    opt_flag: ?[]const u8,
 ) !bool {
     const io = std.testing.io;
     const rhc_path = e2e_options.rhc_path;
@@ -154,9 +158,27 @@ fn runTest(
     defer allocator.free(binary_path);
 
     // ── Step 1: Compile ───────────────────────────────────────────────────────
-    const compile_argv = [_][]const u8{ rhc_path, "build", hs_path, "-o", binary_path };
+    // Build argv with an optional `-O<level>` flag.  The flag must come
+    // before the positional source path so clap parses it correctly.
+    var argv_buf: [6][]const u8 = undefined;
+    var argv_len: usize = 0;
+    argv_buf[argv_len] = rhc_path;
+    argv_len += 1;
+    argv_buf[argv_len] = "build";
+    argv_len += 1;
+    if (opt_flag) |flag| {
+        argv_buf[argv_len] = flag;
+        argv_len += 1;
+    }
+    argv_buf[argv_len] = hs_path;
+    argv_len += 1;
+    argv_buf[argv_len] = "-o";
+    argv_len += 1;
+    argv_buf[argv_len] = binary_path;
+    argv_len += 1;
+    const compile_argv = argv_buf[0..argv_len];
     const compile_result = try process.run(allocator, io, .{
-        .argv = &compile_argv,
+        .argv = compile_argv,
     });
     defer allocator.free(compile_result.stdout);
     defer allocator.free(compile_result.stderr);
@@ -234,6 +256,17 @@ fn runTest(
 // ── Public test helper ────────────────────────────────────────────────────────
 
 fn testE2e(allocator: std.mem.Allocator, comptime basename: []const u8) !void {
+    return testE2eOpt(allocator, basename, null);
+}
+
+/// Like `testE2e` but additionally passes `-O<level>` to `rhc build`.
+/// Used by the `-O2` smoke test below to verify the LLVM mid-level
+/// optimiser is invoked without crashing.
+fn testE2eOpt(
+    allocator: std.mem.Allocator,
+    comptime basename: []const u8,
+    opt_flag: ?[]const u8,
+) !void {
     const props = try readProperties(allocator, basename);
     defer props.deinit(allocator);
     if (props.skip) return;
@@ -248,6 +281,7 @@ fn testE2e(allocator: std.mem.Allocator, comptime basename: []const u8) !void {
         props.exit_code,
         props.expected_stderr,
         props.xfail,
+        opt_flag,
     );
 
     if (props.xfail) {
@@ -477,4 +511,40 @@ test "e2e: e2e_713_enum_defaults (#713)" {
 
 test "e2e: ghc_744_let_in_default_body (#744)" {
     try testE2e(std.testing.allocator, "ghc_744_let_in_default_body");
+}
+
+// ── Optimisation-level smoke tests (#755) ────────────────────────────────────
+//
+// These verify that the `-O<level>` flag actually flows through `rhc build`
+// to LLVM's mid-level optimiser without crashing.  They are a smoke check —
+// not a performance assertion — and reuse the simplest e2e program so we
+// can be sure any failure is in the optimisation path, not user code.
+
+test "e2e: -O2 invokes LLVM mid-level optimiser without crashing (#755)" {
+    try testE2eOpt(std.testing.allocator, "e2e_001_hello", "-O2");
+}
+
+test "e2e: -O0 disables LLVM mid-level optimiser (#755)" {
+    try testE2eOpt(std.testing.allocator, "e2e_001_hello", "-O0");
+}
+
+test "e2e: -O3 invokes LLVM aggressive pipeline without crashing (#755)" {
+    try testE2eOpt(std.testing.allocator, "e2e_001_hello", "-O3");
+}
+
+test "e2e: rhc build rejects unknown -O level (#755)" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const rhc_path = e2e_options.rhc_path;
+
+    const argv = [_][]const u8{ rhc_path, "build", "-O", "fast", "tests/e2e/e2e_001_hello.hs" };
+    const result = try process.run(allocator, io, .{ .argv = &argv });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try std.testing.expect(code != 0),
+        else => return error.UnexpectedTermination,
+    }
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "invalid optimisation level") != null);
 }

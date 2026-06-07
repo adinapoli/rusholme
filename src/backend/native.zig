@@ -26,8 +26,13 @@ const emit = struct {
 
         const llvm_module = try translator.translateProgramToModule(context.grin_program.*);
 
-        // Emit object file using LLVM target machine
-        const machine = llvm.createNativeTargetMachine() catch |err| {
+        // Emit object file using LLVM target machine.
+        //
+        // This Backend-interface path is not used by `rhc build` today —
+        // that goes through `emitNative` in main.zig, which threads an
+        // explicit `-O<level>` flag.  Keep the legacy behaviour (no
+        // mid-level passes) here by selecting `.O0`.
+        const machine = llvm.createNativeTargetMachine(.O0) catch |err| {
             std.log.err("Failed to create target machine: {}", .{err});
             return error.TargetMachineFailed;
         };

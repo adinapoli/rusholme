@@ -224,6 +224,7 @@ pub fn main(init: std.process.Init) !void {
             const build_params = comptime clap.parseParamsComptime(
                 \\-h, --help                   Display this help and exit.
                 \\-o, --output <str>           Output file name (default: stem of first input).
+                \\-O, --opt-level <str>        Optimisation level: 0|1|2|3|s|z (default: 2 for native, 0 otherwise).
                 \\    --backend <str>          Backend: native (default), jit, wasm, c.
                 \\    --package-db <str>...    Package database path (may be repeated).
                 \\    --repl                   Compile for REPL use (internal).
@@ -237,6 +238,7 @@ pub fn main(init: std.process.Init) !void {
             const build_params_help = comptime clap.parseParamsComptime(
                 \\-h, --help                   Display this help and exit.
                 \\-o, --output <str>           Output file name (default: stem of first input).
+                \\-O, --opt-level <str>        Optimisation level: 0|1|2|3|s|z (default: 2 for native, 0 otherwise).
                 \\    --backend <str>          Backend: native (default), jit, wasm, c.
                 \\    --package-db <str>...    Package database path (may be repeated).
                 \\<str>...
@@ -283,6 +285,27 @@ pub fn main(init: std.process.Init) !void {
             const out = build_res.args.output orelse
                 std.fs.path.stem(std.fs.path.basename(file_paths[0]));
 
+            // Parse `-O <level>` if supplied; otherwise pick the per-backend
+            // default. Native binaries default to `-O2` so that compute-bound
+            // microbenchmarks aren't sandbagged by the unoptimised mid-level
+            // pipeline (epic #754, Track A1).  Other backends keep `-O0` for
+            // fast iteration / debug builds.
+            const opt_level: rusholme.backend.llvm.OptLevel = if (build_res.args.@"opt-level") |level_str|
+                rusholme.backend.llvm.OptLevel.parse(level_str) orelse {
+                    var buf: [512]u8 = undefined;
+                    var fw: File.Writer = .init(.stderr(), io, &buf);
+                    try fw.interface.print(
+                        "rhc build: invalid optimisation level '{s}'\nValid levels: 0, 1, 2, 3, s, z\n",
+                        .{level_str},
+                    );
+                    try fw.interface.flush();
+                    std.process.exit(1);
+                }
+            else switch (backend_kind) {
+                .native => rusholme.backend.llvm.OptLevel.O2,
+                .jit, .wasm, .c => rusholme.backend.llvm.OptLevel.O0,
+            };
+
             return cmdBuild(
                 allocator,
                 io,
@@ -291,6 +314,7 @@ pub fn main(init: std.process.Init) !void {
                 backend_kind,
                 build_res.args.repl != 0,
                 build_res.args.@"package-db",
+                opt_level,
             );
         },
 
@@ -920,7 +944,7 @@ fn loadPrelude(
 /// - native: compiles to native executable via LLVM
 /// - wasm: compiles to WebAssembly binary (.wasm)
 /// - jit, c: not yet implemented
-fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8, output_name: []const u8, backend_kind: rusholme.backend.backend_mod.BackendKind, is_repl: bool, package_dbs: []const []const u8) !void {
+fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8, output_name: []const u8, backend_kind: rusholme.backend.backend_mod.BackendKind, is_repl: bool, package_dbs: []const []const u8, opt_level: rusholme.backend.llvm.OptLevel) !void {
     // REPL mode placeholder - for WASM backend compiles stateful REPL
     _ = is_repl;
 
@@ -1078,9 +1102,9 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
 
     // ── Dispatch to backend-specific emission ─────────────────────────────
     switch (backend_kind) {
-        .native => try emitNative(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name),
-        .jit => try emitJit(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name),
-        .wasm => try emitWasm(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name),
+        .native => try emitNative(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name, opt_level),
+        .jit => try emitJit(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name, opt_level),
+        .wasm => try emitWasm(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name, opt_level),
         .c => {
             var stderr_buf: [4096]u8 = undefined;
             var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
@@ -1103,6 +1127,7 @@ fn emitNative(
     per_module_grin: []const rusholme.grin.ast.Program,
     all_grin: rusholme.grin.ast.Program,
     output_name: []const u8,
+    opt_level: rusholme.backend.llvm.OptLevel,
 ) !void {
     const llvm = rusholme.backend.llvm;
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -1200,8 +1225,8 @@ fn emitNative(
         break :blk dest;
     };
 
-    // ── Emit object file ───────────────────────────────────────────────
-    const machine = llvm.createNativeTargetMachine() catch |err| {
+    // ── Create target machine at the requested optimisation level ──────
+    const machine = llvm.createNativeTargetMachine(opt_level) catch |err| {
         var stderr_buf: [4096]u8 = undefined;
         var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
         const stderr = &stderr_fw.interface;
@@ -1213,6 +1238,21 @@ fn emitNative(
 
     llvm.setModuleDataLayout(linked_mod, machine);
     llvm.setModuleTriple(linked_mod);
+
+    // ── Run the LLVM mid-level optimiser (no-op at -O0) ────────────────
+    // Without this, the back-end's `LLVMCodeGenOptLevel` setting alone
+    // produces essentially unoptimised code, because the front-end IR
+    // emitted by `grin_to_llvm` is highly redundant (every Bind becomes
+    // a fresh alloca + load/store). Running the new pass manager here
+    // is the difference between O0 and O2 output (epic #754, Track A1).
+    llvm.runOptimizationPasses(linked_mod, machine, opt_level) catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: LLVM optimisation pipeline failed: {}\n", .{err});
+        try stderr.flush();
+        std.process.exit(1);
+    };
 
     const obj_path = try std.fmt.allocPrint(arena_alloc, "{s}.o", .{output_name});
 
@@ -1270,6 +1310,7 @@ fn emitJit(
     per_module_grin: []const rusholme.grin.ast.Program,
     all_grin: rusholme.grin.ast.Program,
     output_name: []const u8,
+    opt_level: rusholme.backend.llvm.OptLevel,
 ) !void {
     _ = session;
     const llvm = rusholme.backend.llvm;
@@ -1345,7 +1386,7 @@ fn emitJit(
 
     // ── Set native target layout ────────────────────────────────────────
     // lli accepts bitcode/IR compiled for the host architecture.
-    const machine = llvm.createNativeTargetMachine() catch |err| {
+    const machine = llvm.createNativeTargetMachine(opt_level) catch |err| {
         var stderr_buf: [4096]u8 = undefined;
         var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
         const stderr = &stderr_fw.interface;
@@ -1409,6 +1450,18 @@ fn emitJit(
     // attributes are unnecessary — strip them before emitting the IR.
     llvm.stripTargetAttributes(linked_mod);
 
+    // ── Run the LLVM mid-level optimiser (no-op at -O0) ────────────────
+    // The default for the JIT backend is `-O0` so this is normally a
+    // no-op, but if the user passed `-O<n>` we honour it.
+    llvm.runOptimizationPasses(linked_mod, machine, opt_level) catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: LLVM optimisation pipeline failed: {}\n", .{err});
+        try stderr.flush();
+        std.process.exit(1);
+    };
+
     // ── Write final LLVM IR ────────────────────────────────────────────
     // We emit textual IR (.ll) rather than bitcode (.bc) because Zig
     // embeds its own LLVM build whose bitcode format may be incompatible
@@ -1434,6 +1487,7 @@ fn emitWasm(
     per_module_grin: []const rusholme.grin.ast.Program,
     all_grin: rusholme.grin.ast.Program,
     output_name: []const u8,
+    opt_level: rusholme.backend.llvm.OptLevel,
 ) !void {
     _ = session; // Unused for WASM backend
     const llvm = rusholme.backend.llvm;
@@ -1511,7 +1565,7 @@ fn emitWasm(
     };
 
     // ── Create target machine for WebAssembly ───────────────────────────
-    const machine = llvm.createWasmTargetMachine() catch |err| {
+    const machine = llvm.createWasmTargetMachine(opt_level) catch |err| {
         var stderr_buf: [4096]u8 = undefined;
         var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
         const stderr = &stderr_fw.interface;
@@ -1524,6 +1578,16 @@ fn emitWasm(
     // Set module target triple and data layout for WASM
     llvm.setModuleTargetTriple(linked_mod, "wasm32-wasi");
     llvm.setModuleDataLayout(linked_mod, machine);
+
+    // ── Run the LLVM mid-level optimiser (no-op at -O0) ────────────────
+    llvm.runOptimizationPasses(linked_mod, machine, opt_level) catch |err| {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc: LLVM optimisation pipeline failed: {}\n", .{err});
+        try stderr.flush();
+        std.process.exit(1);
+    };
 
     // ── Emit bitcode and link with wasm-ld ─────────────────────────────────
     // We use wasm-ld instead of direct emission to get proper WASI-compliant

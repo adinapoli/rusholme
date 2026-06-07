@@ -35,8 +35,12 @@ const emit = struct {
 
         const llvm_module = try translator.translateProgramToModule(context.grin_program.*);
 
-        // Create target machine for WebAssembly (wasm32-wasi)
-        const machine = llvm.createWasmTargetMachine() catch |err| {
+        // Create target machine for WebAssembly (wasm32-wasi).
+        //
+        // This Backend-interface path is not used by `rhc build` today —
+        // that goes through `emitWasm` in main.zig, which threads an
+        // explicit `-O<level>` flag.  Keep the legacy behaviour here.
+        const machine = llvm.createWasmTargetMachine(.O0) catch |err| {
             std.log.err("Failed to create WebAssembly target machine: {}", .{err});
             return error.TargetMachineFailed;
         };
