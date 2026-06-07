@@ -62,6 +62,7 @@ pub const core = struct {
     pub const desugar = @import("core/desugar.zig");
     pub const lint = @import("core/lint.zig");
     pub const lift = @import("core/lift.zig");
+    pub const match_check = @import("core/match_check.zig");
 };
 
 pub const grin = struct {
