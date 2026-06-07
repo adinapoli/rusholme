@@ -384,7 +384,7 @@
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#280](https://github.com/adinapoli/rusholme/issues/280) | Epic: Rusholme Run-Time System (RTS) | — | :white_circle: |
-| [#284](https://github.com/adinapoli/rusholme/issues/284) | Research: Study zig-gc as reference for Immix GC implementation | — | :white_circle: |
+| [#284](https://github.com/adinapoli/rusholme/issues/284) | Research: Study zig-gc as reference for Immix GC implementation | — | :yellow_circle: |
 | [#294](https://github.com/adinapoli/rusholme/issues/294) | Research: Evaluate libvaxis TUI library for future REPL | — | :white_circle: |
 
 ### Epic [#8](https://github.com/adinapoli/rusholme/issues/8): Tree-Walking Interpreter
