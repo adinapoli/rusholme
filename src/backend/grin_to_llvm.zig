@@ -152,6 +152,53 @@ const PrimOpMapping = struct {
             };
         }
 
+        // ── Direct RTS symbols via `foreign import ccall` (#536) ─────
+        //
+        // The desugarer passes ccall symbol names through unchanged, so
+        // they arrive here as the literal RTS symbol. This set must stay
+        // in sync with `PrimOp.isSupportedCCallSymbol` (src/grin/primop.zig),
+        // which gates what the desugarer accepts.
+        if (std.mem.eql(u8, name.base, "rts_putStrLn")) {
+            return .{
+                .libcall = .{
+                    .name = "rts_putStrLn",
+                    .return_kind = .i32,
+                    .param_kinds = &.{.ptr},
+                    .arg_strategy = .string_to_global_ptr,
+                },
+            };
+        }
+        if (std.mem.eql(u8, name.base, "rts_putStr")) {
+            return .{
+                .libcall = .{
+                    .name = "rts_putStr",
+                    .return_kind = .i32,
+                    .param_kinds = &.{.ptr},
+                    .arg_strategy = .string_to_global_ptr,
+                },
+            };
+        }
+        if (std.mem.eql(u8, name.base, "rts_putChar")) {
+            return .{
+                .libcall = .{
+                    .name = "rts_putChar",
+                    .return_kind = .i32,
+                    .param_kinds = &.{.i64},
+                    .arg_strategy = .value_passthrough,
+                },
+            };
+        }
+        if (std.mem.eql(u8, name.base, "rts_error")) {
+            return .{
+                .libcall = .{
+                    .name = "rts_error",
+                    .return_kind = .i32,
+                    .param_kinds = &.{.ptr},
+                    .arg_strategy = .string_to_global_ptr,
+                },
+            };
+        }
+
         // Arithmetic PrimOp mappings
         if (std.mem.eql(u8, name.base, "add_Int")) return .{ .instruction = .{ .add = {} } };
         if (std.mem.eql(u8, name.base, "sub_Int")) return .{ .instruction = .{ .sub = {} } };
@@ -3426,6 +3473,26 @@ test "PrimOpMapping: error maps to rts_error" {
     });
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("rts_error", std.mem.span(result.?.libcall.name));
+}
+
+test "PrimOpMapping: ccall rts_ symbols map directly (#536)" {
+    // ccall names pass through desugar unchanged, so the mapping must
+    // match the literal RTS symbol regardless of unique.
+    const cases = [_]struct { sym: []const u8, param: ParamKind }{
+        .{ .sym = "rts_putStrLn", .param = .ptr },
+        .{ .sym = "rts_putStr", .param = .ptr },
+        .{ .sym = "rts_putChar", .param = .i64 },
+        .{ .sym = "rts_error", .param = .ptr },
+    };
+    for (cases) |case| {
+        const result = PrimOpMapping.lookup(.{
+            .base = case.sym,
+            .unique = .{ .value = 4242 },
+        });
+        try std.testing.expect(result != null);
+        try std.testing.expectEqualStrings(case.sym, std.mem.span(result.?.libcall.name));
+        try std.testing.expectEqual(case.param, result.?.libcall.param_kinds[0]);
+    }
 }
 
 test "PrimOpMapping: unknown function returns null" {

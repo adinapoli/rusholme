@@ -378,6 +378,21 @@ pub const PrimOp = enum(u16) {
             std.mem.eql(u8, str, "quot#") or
             std.mem.eql(u8, str, "rem#");
     }
+
+    /// RTS symbols reachable via `foreign import ccall` (#536).
+    ///
+    /// The LLVM backend holds a signature descriptor for each of these
+    /// (grin_to_llvm.zig `PrimOpMapping.lookup`, direct-symbol matches),
+    /// so this set must stay in sync with the backend. Symbols outside
+    /// the set are rejected at desugar time with a structured
+    /// diagnostic; generic signature plumbing for arbitrary C symbols
+    /// is follow-up work alongside the ccall PrimOp bridge (#344).
+    pub fn isSupportedCCallSymbol(str: []const u8) bool {
+        return std.mem.eql(u8, str, "rts_putStrLn") or
+            std.mem.eql(u8, str, "rts_putStr") or
+            std.mem.eql(u8, str, "rts_putChar") or
+            std.mem.eql(u8, str, "rts_error");
+    }
 };
 
 /// Categories of PrimOps for documentation and organization.

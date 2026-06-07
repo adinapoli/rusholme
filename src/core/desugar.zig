@@ -368,22 +368,36 @@ pub fn desugarModule(
                 });
             },
             .ForeignPrim => |fp| {
-                // Validate the PrimOp name at compile time.
-                // Accept:
+                // Validate the imported name at compile time.
+                //
+                // `prim` convention accepts:
                 //   1. raw PrimOp enum names (e.g. "add_Int") via fromString
                 //   2. Prelude-level aliases (e.g. "putStrLn" → putStrLn_)
                 //   3. backend-only names recognised directly by the LLVM
                 //      backend's `PrimOpMapping` but with no PrimOp enum
                 //      variant (e.g. ">>=", "div#"). See #534.
-                const is_known = primop_mod.PrimOp.fromString(fp.primop_name) != null or
-                    primop_mod.PrimOp.fromPreludeName(fp.primop_name) != null or
-                    primop_mod.PrimOp.isBackendOnlyName(fp.primop_name);
+                //
+                // `ccall` convention (#536) accepts the RTS symbols the
+                // LLVM backend has signature descriptors for.
+                const is_known = switch (fp.convention) {
+                    .prim => primop_mod.PrimOp.fromString(fp.primop_name) != null or
+                        primop_mod.PrimOp.fromPreludeName(fp.primop_name) != null or
+                        primop_mod.PrimOp.isBackendOnlyName(fp.primop_name),
+                    .ccall => primop_mod.PrimOp.isSupportedCCallSymbol(fp.primop_name),
+                };
                 if (!is_known) {
-                    const msg = try std.fmt.allocPrint(
-                        alloc,
-                        "unknown primitive operation: `{s}`",
-                        .{fp.primop_name},
-                    );
+                    const msg = switch (fp.convention) {
+                        .prim => try std.fmt.allocPrint(
+                            alloc,
+                            "unknown primitive operation: `{s}`",
+                            .{fp.primop_name},
+                        ),
+                        .ccall => try std.fmt.allocPrint(
+                            alloc,
+                            "unsupported ccall symbol: `{s}` (supported RTS symbols: rts_putStrLn, rts_putStr, rts_putChar, rts_error)",
+                            .{fp.primop_name},
+                        ),
+                    };
                     try diags.emit(alloc, .{
                         .severity = .@"error",
                         .code = .unknown_primop,
@@ -406,7 +420,12 @@ pub fn desugarModule(
                 // so the LLVM backend's PrimOpMapping only needs to match
                 // canonical names.  Raw enum names (e.g. "add_Int") pass
                 // through unchanged via fromString.
-                const canonical_base = if (primop_mod.PrimOp.fromString(fp.primop_name)) |_|
+                //
+                // ccall symbols (#536) pass through unchanged: the backend
+                // matches the RTS symbol name directly.
+                const canonical_base = if (fp.convention == .ccall)
+                    fp.primop_name
+                else if (primop_mod.PrimOp.fromString(fp.primop_name)) |_|
                     fp.primop_name
                 else if (primop_mod.PrimOp.fromPreludeName(fp.primop_name)) |op|
                     op.name()
