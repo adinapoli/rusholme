@@ -92,6 +92,19 @@ fn inferFieldTypeFromCoreType(ty: core.CoreType) ?FieldType {
 
 // ── Translation Context ─────────────────────────────────────────────────
 
+/// A pending eta-expanded constructor wrapper (#386).
+/// `mkCon$<Con> x1 … xn = store (C<Con> x1 … xn)` — emitted as an
+/// ordinary GRIN def so constructors-as-values ride the existing
+/// P-tag/apply machinery.
+const ConWrapper = struct {
+    /// The constructor's Core name (stable unique — used for the C-tag).
+    con_name: GrinName,
+    /// Number of constructor fields (== wrapper arity).
+    n_fields: u32,
+    /// The generated wrapper function name.
+    wrapper: GrinName,
+};
+
 /// Context for the Core to GRIN translation.
 const TranslateCtx = struct {
     alloc: std.mem.Allocator,
@@ -114,6 +127,14 @@ const TranslateCtx = struct {
     // Non-App complex expressions in constructor arguments are lifted into
     // helper functions so they can be suspended as F-tagged thunks (issue #518).
     lifted_defs: std.ArrayListUnmanaged(GrinDef) = .empty,
+    // Constructor wrapper functions (#386): one eta-expanded GRIN def per
+    // data constructor that is used as a value (`foldr (:) []`) or
+    // partially applied (`map (Pair 1) xs`).  The wrapper is an ordinary
+    // GRIN function `mkCon$<Con> x1 … xn = store (C<Con> x1 … xn)`, so
+    // the existing P-tag/apply machinery handles application — no code
+    // pointers, in keeping with GRIN's static-dispatch model.
+    // Keyed by constructor unique; insertion order drives def emission.
+    con_wrappers: std.AutoArrayHashMapUnmanaged(u64, ConWrapper) = .empty,
     // Cache for translated Core expressions, preserving pointer sharing.
     // The sequential pattern-match desugarer creates shared fallback nodes
     // (a DAG).  Without this cache, each shared node produces a separate
@@ -136,6 +157,7 @@ const TranslateCtx = struct {
         // arity_map ownership is transferred to GrinProgram - do not deinit
         self.con_map.deinit(self.alloc);
         self.lifted_defs.deinit(self.alloc);
+        self.con_wrappers.deinit(self.alloc);
         self.expr_cache.deinit(self.alloc);
 
         // Note: con_field_types and arities ownership transferred to GrinProgram in translateProgram
@@ -145,6 +167,27 @@ const TranslateCtx = struct {
     /// Return true if the given unique belongs to a known data constructor.
     fn isConstructor(self: TranslateCtx, unique: u64) bool {
         return self.con_map.contains(unique);
+    }
+
+    /// Get (or register) the eta-expanded wrapper function for a data
+    /// constructor used as a value or partially applied (#386).
+    /// The wrapper def itself is emitted by translateProgram after all
+    /// bindings have been translated.
+    fn ensureConWrapper(self: *TranslateCtx, con_name: GrinName, n_fields: u32) !GrinName {
+        const gop = try self.con_wrappers.getOrPut(self.alloc, con_name.unique.value);
+        if (gop.found_existing) return gop.value_ptr.wrapper;
+
+        const base = try std.fmt.allocPrint(self.alloc, "mkCon${s}", .{con_name.base});
+        const wrapper = try self.freshName(base);
+        gop.value_ptr.* = .{
+            .con_name = con_name,
+            .n_fields = n_fields,
+            .wrapper = wrapper,
+        };
+        // Register the wrapper's arity so apply/eval treat it like any
+        // other top-level function.
+        try self.arity_map.put(self.alloc, wrapper.unique.value, n_fields);
+        return wrapper;
     }
 
     /// Return the field count for a constructor, or null if unknown.
@@ -599,6 +642,15 @@ pub fn translateProgram(
         try defs.append(alloc, lifted);
     }
 
+    // Append eta-expanded constructor wrappers (#386):
+    //   mkCon$<Con> x1 … xn = store (C<Con> x1 … xn)
+    // Registered lazily whenever a constructor was used as a value or
+    // partially applied during translation above.
+    for (ctx.con_wrappers.values()) |cw| {
+        const wrapper_def = try buildConWrapperDef(&ctx, cw);
+        try defs.append(alloc, wrapper_def);
+    }
+
     const defs_slice = try defs.toOwnedSlice(alloc);
     // Move field type map from context to program
     const field_types = ctx.con_field_types;
@@ -609,6 +661,42 @@ pub fn translateProgram(
         .defs = defs_slice,
         .field_types = field_types,
         .arities = arities,
+    };
+}
+
+/// Build the eta-expanded wrapper def for a data constructor (#386):
+///   mkCon$<Con> x1 … xn = store (C<Con> x1 … xn) >>= \p -> return p
+/// The C-tag carries the constructor's original Core name (stable
+/// unique), so case dispatch on the resulting node is unaffected.
+fn buildConWrapperDef(ctx: *TranslateCtx, cw: ConWrapper) !GrinDef {
+    const params = try ctx.alloc.alloc(GrinName, cw.n_fields);
+    const fields = try ctx.alloc.alloc(GrinVal, cw.n_fields);
+    for (0..cw.n_fields) |i| {
+        params[i] = try ctx.freshName("cw");
+        fields[i] = .{ .Var = params[i] };
+    }
+
+    const store_expr = try ctx.alloc.create(GrinExpr);
+    store_expr.* = .{ .Store = .{ .ConstTagNode = .{
+        .tag = .{ .tag_type = .Con, .name = cw.con_name },
+        .fields = fields,
+    } } };
+
+    const ptr_var = try ctx.freshName("cwp");
+    const return_expr = try ctx.alloc.create(GrinExpr);
+    return_expr.* = .{ .Return = .{ .Var = ptr_var } };
+
+    const body = try ctx.alloc.create(GrinExpr);
+    body.* = .{ .Bind = .{
+        .lhs = store_expr,
+        .pat = .{ .Var = ptr_var },
+        .rhs = return_expr,
+    } };
+
+    return GrinDef{
+        .name = cw.wrapper,
+        .params = params,
+        .body = body,
     };
 }
 
@@ -709,11 +797,26 @@ fn translateExpr(ctx: *TranslateCtx, expr: *const CoreExpr) !*GrinExpr {
                     const tag = GrinTag{ .tag_type = .Con, .name = v.name };
                     new_expr.* = .{ .Return = .{ .ValTag = tag } };
                 } else {
-                    // Non-nullary constructor used as a value (e.g. partially applied).
-                    // Fall back to a variable reference; proper closure support is tracked in:
-                    // https://github.com/adinapoli/rusholme/issues/386
-                    const grin_name = try ctx.getCoreVar(v.name);
-                    new_expr.* = .{ .Return = .{ .Var = grin_name } };
+                    // Non-nullary constructor used as a value (#386):
+                    //   `foldr (:) [] xs`
+                    // Allocate a zero-field partial-application node over the
+                    // constructor's eta-expanded wrapper. The existing apply
+                    // machinery then saturates it one argument at a time and
+                    // finally calls the wrapper, which stores the C-tag node.
+                    const wrapper = try ctx.ensureConWrapper(v.name, n_fields);
+                    const store_expr = try ctx.alloc.create(GrinExpr);
+                    store_expr.* = .{ .Store = .{ .ConstTagNode = .{
+                        .tag = partialTag(wrapper.base, wrapper.unique.value, n_fields),
+                        .fields = &.{},
+                    } } };
+                    const ptr_var = try ctx.freshName("con_val");
+                    const return_expr = try ctx.alloc.create(GrinExpr);
+                    return_expr.* = .{ .Return = .{ .Var = ptr_var } };
+                    new_expr.* = .{ .Bind = .{
+                        .lhs = store_expr,
+                        .pat = .{ .Var = ptr_var },
+                        .rhs = return_expr,
+                    } };
                 }
             } else {
                 const grin_name = try ctx.getCoreVar(v.name);
@@ -933,8 +1036,14 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
         else => null,
     };
 
-    // Translate the function head.
-    const translated_fn = try translateExpr(ctx, fn_expr);
+    // Translate the function head — except for constructor heads, which
+    // never need a function value here: the constructor-application branch
+    // below reads the Core name directly. (Translating a constructor head
+    // as an expression would allocate a P-tag wrapper node, #386.)
+    const translated_fn: *GrinExpr = if (core_con_unique == null)
+        try translateExpr(ctx, fn_expr)
+    else
+        undefined;
 
     const FnNameAndArity = struct {
         name: ?GrinName,
@@ -942,6 +1051,7 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
     };
 
     const fn_name_and_arity = blk: {
+        if (core_con_unique != null) break :blk FnNameAndArity{ .name = null, .arity = null };
         switch (translated_fn.*) {
             .Return => |v| {
                 switch (v) {
@@ -954,6 +1064,20 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
                     },
                     else => break :blk FnNameAndArity{ .name = null, .arity = null },
                 }
+            },
+            .App => |app| {
+                // A zero-arity (CAF) head: translateExpr lowered the bare
+                // Var into a call (`rev []`). Recover the name so the
+                // over-application path can chain `apply` calls onto the
+                // CAF's result instead of emitting an unresolvable
+                // placeholder (exposed by #386's constructor wrappers).
+                if (app.args.len == 0) {
+                    break :blk FnNameAndArity{
+                        .name = app.name,
+                        .arity = ctx.getFunctionArity(app.name),
+                    };
+                }
+                break :blk FnNameAndArity{ .name = null, .arity = null };
             },
             else => break :blk FnNameAndArity{ .name = null, .arity = null },
         }
@@ -1008,16 +1132,16 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
     // constructors (tracked in https://github.com/adinapoli/rusholme/issues/386)
     // falls through to the general partial-application path below.
     if (core_con_unique) |con_unique| {
-        if (fn_name_and_arity.name) |fn_name| {
+        {
             const n_fields = ctx.conFieldCount(con_unique).?;
             const arg_count = @as(u32, @intCast(args.items.len));
+            // core_con_unique is only ever set for a Var head, so the
+            // original Core name (with its stable unique) is always
+            // available for the tag.
+            const core_name = fn_expr.Var.name;
             if (arg_count == n_fields) {
                 // Saturated constructor application → Store (ConstTagNode).
                 // Use the original Core name so the tag carries the stable unique.
-                const core_name = switch (fn_expr.*) {
-                    .Var => |v| v.name,
-                    else => fn_name,
-                };
                 const tag = GrinTag{ .tag_type = .Con, .name = core_name };
                 const store_expr = try ctx.alloc.create(GrinExpr);
                 store_expr.* = .{ .Store = .{ .ConstTagNode = .{
@@ -1034,8 +1158,35 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
                     .rhs = return_expr,
                 } };
                 return try wrapWithLazyBindsForCon(ctx, bind_expr, pending_binds.items);
+            } else if (arg_count < n_fields) {
+                // Under-saturated constructor application (#386):
+                //   `map (Pair 1) xs`
+                // Build a P-tag node over the constructor's eta-expanded
+                // wrapper, capturing the supplied arguments. The apply
+                // machinery saturates it and calls the wrapper.
+                const wrapper = try ctx.ensureConWrapper(core_name, n_fields);
+                const missing = n_fields - arg_count;
+
+                const store_expr = try ctx.alloc.create(GrinExpr);
+                store_expr.* = .{ .Store = .{ .ConstTagNode = .{
+                    .tag = partialTag(wrapper.base, wrapper.unique.value, missing),
+                    .fields = grin_args,
+                } } };
+
+                const ptr_var = try ctx.freshName("con_partial");
+                const return_expr = try ctx.alloc.create(GrinExpr);
+                return_expr.* = .{ .Return = .{ .Var = ptr_var } };
+                const bind_expr = try ctx.alloc.create(GrinExpr);
+                bind_expr.* = .{ .Bind = .{
+                    .lhs = store_expr,
+                    .pat = .{ .Var = ptr_var },
+                    .rhs = return_expr,
+                } };
+                return try wrapWithLazyBindsForCon(ctx, bind_expr, pending_binds.items);
             }
-            // Under-saturated constructor: fall through to partial-application path.
+            // Over-saturated constructor applications are impossible in
+            // type-correct programs (a constructor's result is not a
+            // function); fall through to the general path defensively.
         }
     }
 
@@ -1093,14 +1244,17 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
                     const result_var = try ctx.freshName("res");
 
                     // Create apply expr: apply current_result [excess_arg]
+                    // The args slice must be heap-allocated: an inline
+                    // `&[_]GrinVal{...}` literal with runtime values lives
+                    // on the stack and dangles once this function returns.
+                    const apply_args = try ctx.alloc.alloc(GrinVal, 2);
+                    apply_args[0] = .{ .Var = result_var }; // bound from previous step
+                    apply_args[1] = excess_arg;
                     const apply_expr = try ctx.alloc.create(GrinExpr);
                     apply_expr.* = .{
                         .App = .{
                             .name = .{ .base = "apply", .unique = .{ .value = 9998 } },
-                            .args = &[_]GrinVal{
-                                .{ .Var = result_var }, // This will be bound from previous step
-                                excess_arg,
-                            },
+                            .args = apply_args,
                         },
                     };
 

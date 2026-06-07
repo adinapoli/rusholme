@@ -1264,11 +1264,12 @@ pub const GrinTranslator = struct {
             break :blk name_buf[0..result_name.len :0];
         } else "";
 
-        // For single-argument calls through case-bound variables (e.g. method
-        // selectors extracting `fn` from a dictionary), route through __rhc_apply
-        // when Partial application nodes exist.  Dictionary fields for constrained
-        // instances (e.g. Show [a]) store P-tagged heap nodes, not direct function
-        // pointers; __rhc_apply dispatches correctly for both.
+        // For single-argument calls through case/param-bound variables (e.g.
+        // method selectors extracting `fn` from a dictionary), route through
+        // __rhc_apply when Partial application nodes exist.  Dictionary fields
+        // for constrained instances (e.g. Show [a]) store P-tagged heap nodes,
+        // not direct function pointers; __rhc_apply dispatches correctly for
+        // both.
         // tracked in: https://github.com/adinapoli/rusholme/issues/629
         if (callee_from_params and arg_count == 1 and
             self.registry.partial_tags.count() > 0)
@@ -1289,6 +1290,18 @@ pub const GrinTranslator = struct {
             );
         }
 
+        // Multi-argument calls through param-bound variables (#386): the
+        // value is either a P-tagged node (constructor/function partial
+        // application — must chain __rhc_apply per argument) or a raw
+        // function pointer (monomorphic dictionary field — must be called
+        // directly at full arity).  Statically indistinguishable, so emit
+        // an inline tag dispatch.
+        if (callee_from_params and arg_count >= 2 and
+            self.registry.partial_tags.count() > 0)
+        {
+            return try self.emitParamApplyDispatch(func, llvm_args[0..arg_count], fn_type, res_z);
+        }
+
         return c.LLVMBuildCall2(
             self.builder,
             fn_type,
@@ -1297,6 +1310,102 @@ pub const GrinTranslator = struct {
             @intCast(arg_count),
             res_z,
         );
+    }
+
+    /// Emit an inline runtime dispatch for a multi-argument call through a
+    /// param-bound function value (#386):
+    ///
+    /// ```
+    ///   tag = load i64, f
+    ///   switch tag [each P-tag discriminant] → bb_apply, else → bb_direct
+    /// bb_apply:                 ; P-node: chain one __rhc_apply per arg
+    ///   r = __rhc_apply(f, x1) ; r = __rhc_apply(r, x2) ; …
+    /// bb_direct:                ; raw function pointer: full-arity call
+    ///   d = call f(x1, …, xn)
+    /// merge:
+    ///   phi [r, bb_apply], [d, bb_direct]
+    /// ```
+    ///
+    /// Loading the first word of a raw function pointer reads code bytes —
+    /// readable on every supported target — and cannot collide with a P-tag
+    /// discriminant assigned by the TagTable only to heap nodes... except by
+    /// astronomical coincidence; the same assumption underpins __rhc_apply's
+    /// own default branch.
+    fn emitParamApplyDispatch(
+        self: *GrinTranslator,
+        func: llvm.Value,
+        args: []const llvm.Value,
+        fn_type: llvm.Type,
+        res_z: [*:0]const u8,
+    ) TranslationError!llvm.Value {
+        const i64_ty = llvm.i64Type();
+        const i32_ty = llvm.i32Type();
+        const header_ty = nodeHeaderType();
+        const cur_func = self.current_func orelse return error.UnsupportedGrinVal;
+
+        const apply_fn = c.LLVMGetNamedFunction(self.module, "__rhc_apply") orelse blk: {
+            var ap = [_]llvm.Type{ ptrType(), ptrType() };
+            const at = llvm.functionType(ptrType(), &ap, false);
+            break :blk llvm.addFunction(self.module, "__rhc_apply", at);
+        };
+
+        const bb_apply = llvm.appendBasicBlock(cur_func, "pap_apply");
+        const bb_direct = llvm.appendBasicBlock(cur_func, "pap_direct");
+        const bb_merge = llvm.appendBasicBlock(cur_func, "pap_merge");
+
+        // entry: load the tag word and switch on P-tag discriminants.
+        var tag_idx = [_]llvm.Value{
+            c.LLVMConstInt(i32_ty, 0, 0),
+            c.LLVMConstInt(i32_ty, 0, 0),
+        };
+        const tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, func, &tag_idx, 2, "pap_tag_gep");
+        const tag_val = c.LLVMBuildLoad2(self.builder, i64_ty, tag_gep, "pap_tag");
+        const sw = c.LLVMBuildSwitch(self.builder, tag_val, bb_direct, @intCast(self.registry.partial_tags.count()));
+        var ptag_iter = self.registry.partial_tags.iterator();
+        while (ptag_iter.next()) |entry| {
+            const disc = self.registry.discriminants.get(entry.key_ptr.*) orelse continue;
+            c.LLVMAddCase(sw, c.LLVMConstInt(i64_ty, @bitCast(disc), 0), bb_apply);
+        }
+
+        // bb_apply: chain __rhc_apply per argument.
+        llvm.positionBuilderAtEnd(self.builder, bb_apply);
+        var chained: llvm.Value = func;
+        for (args) |arg| {
+            var apply_args = [_]llvm.Value{ chained, arg };
+            chained = c.LLVMBuildCall2(
+                self.builder,
+                llvm.getFunctionType(apply_fn),
+                apply_fn,
+                &apply_args,
+                2,
+                "ap_chain",
+            );
+        }
+        _ = c.LLVMBuildBr(self.builder, bb_merge);
+        const bb_apply_end = c.LLVMGetInsertBlock(self.builder);
+
+        // bb_direct: full-arity call through the raw function pointer.
+        llvm.positionBuilderAtEnd(self.builder, bb_direct);
+        var direct_args: [8]llvm.Value = undefined;
+        @memcpy(direct_args[0..args.len], args);
+        const direct = c.LLVMBuildCall2(
+            self.builder,
+            fn_type,
+            func,
+            @ptrCast(&direct_args),
+            @intCast(args.len),
+            "pap_direct_call",
+        );
+        _ = c.LLVMBuildBr(self.builder, bb_merge);
+        const bb_direct_end = c.LLVMGetInsertBlock(self.builder);
+
+        // merge: phi over both results.
+        llvm.positionBuilderAtEnd(self.builder, bb_merge);
+        const phi = c.LLVMBuildPhi(self.builder, ptrType(), res_z);
+        var incoming_vals = [_]llvm.Value{ chained, direct };
+        var incoming_bbs = [_]llvm.BasicBlock{ bb_apply_end, bb_direct_end };
+        c.LLVMAddIncoming(phi, &incoming_vals, &incoming_bbs, 2);
+        return phi;
     }
 
     fn translateApp(self: *GrinTranslator, name: grin.Name, args: []const grin.Val) TranslationError!void {
@@ -1402,6 +1511,15 @@ pub const GrinTranslator = struct {
                 2,
                 "",
             );
+            return;
+        }
+
+        // Multi-argument calls through param-bound variables (#386): emit
+        // the P-node vs raw-function-pointer dispatch (result discarded).
+        if (callee_from_params_app and arg_count >= 2 and
+            self.registry.partial_tags.count() > 0)
+        {
+            _ = try self.emitParamApplyDispatch(func, llvm_args[0..arg_count], fn_type, "");
             return;
         }
 
