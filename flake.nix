@@ -54,6 +54,7 @@
               wasmtime
               graalvmPackages.graalvm-ce  # Provides lli for the JIT backend
               replxx                      # C API line editor for the native REPL
+              hyperfine                   # Benchmark harness backend (scripts/bench.sh)
             ]) ++ pkgs.lib.optionals (!isDarwin) [
               pkgs.valgrind
             ];
