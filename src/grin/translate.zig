@@ -1568,6 +1568,109 @@ fn wrapWithLazyBindsForCon(
     return try wrapWithPendingBinds(ctx, result, eager_binds.items);
 }
 
+/// Walk a Core expression and record which binders of the enclosing
+/// `Rec` group it references (#753).
+///
+/// `uniq_to_idx` maps each group binder's unique to its index in the
+/// group; `deps[j]` is set when binder `j` is referenced. Uniques are
+/// globally unique after the renamer, so no scope tracking is needed —
+/// an occurrence of a group binder's unique always denotes that binder.
+fn collectRecDeps(
+    expr: *const CoreExpr,
+    uniq_to_idx: *const std.AutoHashMapUnmanaged(u64, usize),
+    deps: []bool,
+) void {
+    switch (expr.*) {
+        .Var => |v| {
+            if (uniq_to_idx.get(v.name.unique.value)) |j| deps[j] = true;
+        },
+        .Lit, .Type, .Coercion => {},
+        .App => |a| {
+            collectRecDeps(a.fn_expr, uniq_to_idx, deps);
+            collectRecDeps(a.arg, uniq_to_idx, deps);
+        },
+        .Lam => |l| collectRecDeps(l.body, uniq_to_idx, deps),
+        .Let => |l| {
+            switch (l.bind) {
+                .NonRec => |p| collectRecDeps(p.rhs, uniq_to_idx, deps),
+                .Rec => |ps| for (ps) |p| collectRecDeps(p.rhs, uniq_to_idx, deps),
+            }
+            collectRecDeps(l.body, uniq_to_idx, deps);
+        },
+        .Case => |c| {
+            collectRecDeps(c.scrutinee, uniq_to_idx, deps);
+            for (c.alts) |alt| collectRecDeps(alt.body, uniq_to_idx, deps);
+        },
+    }
+}
+
+/// Compute the order in which a `Rec` group's bindings must be
+/// backpatched so that every binding's RHS reads only already-patched
+/// placeholders (#753).
+///
+/// Topological sort (Kahn-style, O(n²) — Rec groups are tiny) over the
+/// "RHS of i references binder j" edge relation, stable by source
+/// index. Bindings in a dependency cycle (true mutual recursion) are
+/// emitted in source order: a cycle can only be productive through
+/// lazily-stored thunks, where patch order is immaterial. Self
+/// references are ignored for the same reason.
+///
+/// Returns indices into `pairs`; caller owns the slice.
+fn recBackpatchOrder(alloc: std.mem.Allocator, pairs: []const CoreBindPair) ![]usize {
+    const n = pairs.len;
+
+    var uniq_to_idx: std.AutoHashMapUnmanaged(u64, usize) = .empty;
+    defer uniq_to_idx.deinit(alloc);
+    for (pairs, 0..) |pair, i| {
+        try uniq_to_idx.put(alloc, pair.binder.name.unique.value, i);
+    }
+
+    // deps[i * n + j] == true ⇒ binding i's RHS references binder j.
+    const deps = try alloc.alloc(bool, n * n);
+    defer alloc.free(deps);
+    @memset(deps, false);
+    for (pairs, 0..) |pair, i| {
+        collectRecDeps(pair.rhs, &uniq_to_idx, deps[i * n .. (i + 1) * n]);
+        deps[i * n + i] = false; // self reference: ignore
+    }
+
+    const order = try alloc.alloc(usize, n);
+    errdefer alloc.free(order);
+    const emitted = try alloc.alloc(bool, n);
+    defer alloc.free(emitted);
+    @memset(emitted, false);
+
+    var filled: usize = 0;
+    while (filled < n) {
+        // Pick the first (source order) unemitted binding whose deps
+        // are all emitted.
+        var picked: ?usize = null;
+        outer: for (0..n) |i| {
+            if (emitted[i]) continue;
+            for (0..n) |j| {
+                if (deps[i * n + j] and !emitted[j]) continue :outer;
+            }
+            picked = i;
+            break;
+        }
+        // Cycle: fall back to the first unemitted binding.
+        if (picked == null) {
+            for (0..n) |i| {
+                if (!emitted[i]) {
+                    picked = i;
+                    break;
+                }
+            }
+        }
+        const i = picked.?;
+        emitted[i] = true;
+        order[filled] = i;
+        filled += 1;
+    }
+
+    return order;
+}
+
 /// Chain a store and update into: `store_expr >>= \bind_var -> update_expr`.
 /// Used by the Rec let path to store a thunk then update a placeholder.
 fn chainStoreUpdate(
@@ -1759,7 +1862,16 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
             // to it. For simple Return values, we update directly.
             // For other complex expressions, we evaluate into a temp var
             // first, then update.
-            for (pairs, 0..) |pair, i| {
+            //
+            // The chain runs in DEPENDENCY order, not source order (#753):
+            // an eagerly-evaluated RHS (the Return / complex paths below)
+            // reads its dependencies' placeholders at backpatch time, so
+            // `c = a + b; a = 10; b = 20` must patch `a` and `b` before
+            // evaluating `c`'s RHS.
+            const patch_order = try recBackpatchOrder(ctx.alloc, pairs);
+            defer ctx.alloc.free(patch_order);
+            for (patch_order) |i| {
+                const pair = pairs[i];
                 const rhs_expr = try translateExpr(ctx, pair.rhs);
 
                 switch (rhs_expr.*) {
@@ -3328,4 +3440,118 @@ test "translateExpr: multi-binding Rec let emits one Update per binder (#747)" {
     // One Update per binder in the Rec group.  Bug 2 of #747 caused the
     // first binding's Update to be silently dropped, yielding 1 here.
     try testing.expectEqual(@as(usize, 2), updates);
+}
+
+/// Collect `Update` target pointers in chain (evaluation) order.
+/// Used to assert backpatch ordering (#753).
+fn collectUpdatePtrs(expr: *const GrinExpr, out: *std.ArrayListUnmanaged(GrinName), alloc: std.mem.Allocator) !void {
+    switch (expr.*) {
+        .Update => |u| try out.append(alloc, u.ptr),
+        .Bind => |b| {
+            try collectUpdatePtrs(b.lhs, out, alloc);
+            try collectUpdatePtrs(b.rhs, out, alloc);
+        },
+        .Block => |inner| try collectUpdatePtrs(inner, out, alloc),
+        .Case => |cs| for (cs.alts) |alt| try collectUpdatePtrs(alt.body, out, alloc),
+        else => {},
+    }
+}
+
+test "translateExpr: Rec backpatch chain follows dependency order (#753)" {
+    // Regression test for #753: the backpatch chain used to run in source
+    // order, so a binding listed before its dependencies read their Unit
+    // placeholders.  Group: `c = a; a = 42` — `a` must be patched first.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const c_id = core.Id{
+        .name = grin.Name{ .base = "c", .unique = .{ .value = 1 } },
+        .ty = undefined,
+        .span = undefined,
+    };
+    const a_id = core.Id{
+        .name = grin.Name{ .base = "a", .unique = .{ .value = 2 } },
+        .ty = undefined,
+        .span = undefined,
+    };
+
+    // c's RHS references a; a's RHS is a literal.
+    const var_a = try alloc.create(CoreExpr);
+    var_a.* = .{ .Var = a_id };
+    const lit42 = try alloc.create(CoreExpr);
+    lit42.* = .{ .Lit = .{ .val = .{ .Int = 42 }, .span = undefined } };
+
+    var pairs = [_]CoreBindPair{
+        .{ .binder = c_id, .rhs = var_a }, // depends on a — listed FIRST
+        .{ .binder = a_id, .rhs = lit42 },
+    };
+
+    const body = try alloc.create(CoreExpr);
+    body.* = .{ .Var = c_id };
+
+    const let_expr = try alloc.create(CoreExpr);
+    let_expr.* = .{ .Let = .{
+        .bind = .{ .Rec = pairs[0..] },
+        .body = body,
+        .span = undefined,
+    } };
+
+    const main_binder = core.Id{
+        .name = grin.Name{ .base = "main", .unique = .{ .value = 0 } },
+        .ty = undefined,
+        .span = undefined,
+    };
+    const main_pair = CoreBindPair{ .binder = main_binder, .rhs = let_expr };
+
+    const core_prog = CoreProgram{
+        .data_decls = &.{},
+        .binds = &[_]CoreBind{.{ .NonRec = main_pair }},
+    };
+
+    const grin_prog = try translateProgram(alloc, core_prog, null, null);
+    try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
+
+    var ptrs: std.ArrayListUnmanaged(GrinName) = .empty;
+    defer ptrs.deinit(alloc);
+    try collectUpdatePtrs(grin_prog.defs[0].body, &ptrs, alloc);
+
+    // Both placeholders are patched, and `a` (dependency) strictly
+    // before `c` (dependent), despite `c` appearing first in source.
+    try testing.expectEqual(@as(usize, 2), ptrs.items.len);
+    try testing.expectEqualStrings("a", ptrs.items[0].base);
+    try testing.expectEqualStrings("c", ptrs.items[1].base);
+}
+
+test "recBackpatchOrder: cycle falls back to source order (#753)" {
+    // Mutual recursion `x = y; y = x` has no topological order — the
+    // sort must not loop and must emit source order.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const x_id = core.Id{
+        .name = grin.Name{ .base = "x", .unique = .{ .value = 1 } },
+        .ty = undefined,
+        .span = undefined,
+    };
+    const y_id = core.Id{
+        .name = grin.Name{ .base = "y", .unique = .{ .value = 2 } },
+        .ty = undefined,
+        .span = undefined,
+    };
+
+    const var_y = try alloc.create(CoreExpr);
+    var_y.* = .{ .Var = y_id };
+    const var_x = try alloc.create(CoreExpr);
+    var_x.* = .{ .Var = x_id };
+
+    const pairs = [_]CoreBindPair{
+        .{ .binder = x_id, .rhs = var_y },
+        .{ .binder = y_id, .rhs = var_x },
+    };
+
+    const order = try recBackpatchOrder(alloc, pairs[0..]);
+    defer alloc.free(order);
+    try testing.expectEqualSlices(usize, &.{ 0, 1 }, order);
 }
