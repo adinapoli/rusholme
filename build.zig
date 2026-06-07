@@ -514,6 +514,21 @@ pub fn build(b: *std.Build) void {
     e2e_tests.step.dependOn(b.getInstallStep());
     const run_e2e_tests = b.addRunArtifact(e2e_tests);
 
+    // Prelude regression suite (#759) — same harness as the e2e runner,
+    // but over tests/prelude/, which exercises every exported Prelude
+    // binding (see tests/prelude/README.md).
+    const prelude_test_module = b.createModule(.{
+        .root_source_file = b.path("tests/prelude_test_runner.zig"),
+        .target = target,
+    });
+    prelude_test_module.addOptions("e2e_options", e2e_opts);
+    const prelude_tests = b.addTest(.{
+        .name = "prelude-tests",
+        .root_module = prelude_test_module,
+    });
+    prelude_tests.step.dependOn(b.getInstallStep());
+    const run_prelude_tests = b.addRunArtifact(prelude_tests);
+
     // REPL test runner - TDD tests for REPL behavior
     const repl_test_module = b.createModule(.{
         .root_source_file = b.path("tests/repl/repl_tests.zig"),
@@ -605,6 +620,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_compile_fail_tests.step);
     test_step.dependOn(&run_runtime_tests.step);
     test_step.dependOn(&run_e2e_tests.step);
+    test_step.dependOn(&run_prelude_tests.step);
     test_step.dependOn(&run_repl_tests.step);
     test_step.dependOn(&run_cli_e2e_tests.step);
     test_step.dependOn(&run_wasm_e2e_tests.step);
