@@ -14,6 +14,7 @@ const SourceSpan = ast_mod.SourceSpan;
 const SourcePos = ast_mod.SourcePos;
 const diag_mod = @import("../diagnostics/diagnostic.zig");
 const DiagnosticCollector = diag_mod.DiagnosticCollector;
+const match_check = @import("match_check.zig");
 
 pub const DesugarCtx = struct {
     alloc: std.mem.Allocator,
@@ -51,6 +52,12 @@ pub const DesugarCtx = struct {
     /// `case cond of { True -> rhs ; _ -> fallback }`.
     /// Falls back to `Known.Con.True` if no `data Bool` is in scope.
     true_name: Name = Known.Con.True,
+
+    /// Constructor signature environment for pattern-match
+    /// exhaustiveness/redundancy warnings (#378). Built per module by
+    /// `desugarModule`; null in unit tests that bypass it (checks are
+    /// then skipped).
+    sig_env: ?*const match_check.SigEnv = null,
 
     /// Compound key for `dict_param_names`.
     pub const DictParamKey = struct {
@@ -196,6 +203,35 @@ pub fn desugarModule(
             try ctx.dict_names.put(alloc, key, val);
         }
     }
+
+    // Build the constructor signature environment for pattern-match
+    // exhaustiveness/redundancy warnings (#378): the wired-in
+    // list/unit/tuple constructors plus this module's data declarations.
+    // Constructors from other modules are absent — their types stay
+    // "open" and the checker never claims completeness for them
+    // (cross-module signatures are a tracked follow-up).
+    var sig_env = match_check.SigEnv{};
+    defer sig_env.deinit(alloc);
+    try sig_env.addBuiltins(alloc);
+    for (module.declarations) |decl| {
+        switch (decl) {
+            .DataDecl => |dd| {
+                if (dd.constructors.len == 0) continue;
+                const refs = try alloc.alloc(match_check.SigEnv.ConRef, dd.constructors.len);
+                defer alloc.free(refs);
+                for (dd.constructors, 0..) |con, i| {
+                    refs[i] = .{
+                        .unique = con.name.unique.value,
+                        .base = con.name.base,
+                        .arity = @intCast(con.fields.len),
+                    };
+                }
+                try sig_env.addType(alloc, refs);
+            },
+            else => {},
+        }
+    }
+    ctx.sig_env = &sig_env;
 
     // Build evidence map from solved constraints so the expression desugarer
     // can look up dictionary evidence for each variable use site.
@@ -2093,6 +2129,27 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
 
             const scrut_core = try desugarExpr(ctx, c.scrutinee.*);
 
+            // #378: exhaustiveness/redundancy warnings for the alternatives.
+            if (c.alts.len > 0) {
+                const rows = try alloc.alloc([]const renamer_mod.RPat, c.alts.len);
+                defer alloc.free(rows);
+                // One-pattern row per alternative; the cells must outlive
+                // the loop iteration, so they live in their own slice.
+                const pat_cells = try alloc.alloc(renamer_mod.RPat, c.alts.len);
+                defer alloc.free(pat_cells);
+                const guarded = try alloc.alloc(bool, c.alts.len);
+                defer alloc.free(guarded);
+                const spans = try alloc.alloc(SourceSpan, c.alts.len);
+                defer alloc.free(spans);
+                for (c.alts, 0..) |alt, i| {
+                    pat_cells[i] = alt.pattern;
+                    rows[i] = pat_cells[i .. i + 1];
+                    guarded[i] = alt.rhs == .Guarded;
+                    spans[i] = alt.span;
+                }
+                warnMatchGroup(ctx, rows, guarded, spans, c.alts[0].span, "case alternatives");
+            }
+
             // Synthetic binder for the scrutinee value.
             const scrut_id = ast_mod.Id{
                 .name = .{ .base = "_case_scrut", .unique = ctx.u_supply.fresh() },
@@ -2584,6 +2641,56 @@ fn getArgTypes(alloc: std.mem.Allocator, ty: ast_mod.CoreType, num_args: usize) 
     return types;
 }
 
+/// Run exhaustiveness/redundancy checking (#378) on one match group and
+/// emit warnings. Diagnostics only — never affects compilation, and any
+/// internal failure (OOM in the scratch arena) silently skips the check.
+fn warnMatchGroup(
+    ctx: *DesugarCtx,
+    rows: []const []const renamer_mod.RPat,
+    guarded: []const bool,
+    row_spans: []const SourceSpan,
+    group_span: SourceSpan,
+    context_word: []const u8,
+) void {
+    const sig = ctx.sig_env orelse return;
+
+    var arena = std.heap.ArenaAllocator.init(ctx.alloc);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    const maybe = match_check.checkMatch(aa, sig, rows, guarded) catch return;
+    const result = maybe orelse return;
+
+    if (result.missing) |witness| {
+        const wtxt = match_check.formatWitness(aa, witness) catch return;
+        const msg = std.fmt.allocPrint(
+            ctx.alloc,
+            "non-exhaustive patterns in {s}: not matched: {s}",
+            .{ context_word, wtxt },
+        ) catch return;
+        ctx.diags.emit(ctx.alloc, .{
+            .severity = .warning,
+            .code = .non_exhaustive_patterns,
+            .span = group_span,
+            .message = msg,
+        }) catch return;
+    }
+
+    for (result.redundant) |i| {
+        const msg = std.fmt.allocPrint(
+            ctx.alloc,
+            "redundant pattern in {s}: this clause is unreachable",
+            .{context_word},
+        ) catch return;
+        ctx.diags.emit(ctx.alloc, .{
+            .severity = .warning,
+            .code = .redundant_pattern,
+            .span = row_spans[i],
+            .message = msg,
+        }) catch return;
+    }
+}
+
 /// Pattern Match Compiler (Tier 2: nested patterns, as-patterns, tuples, infix cons).
 ///
 /// Translates multi-equation `FunBind`s or single equations with non-Var patterns
@@ -2615,6 +2722,22 @@ fn desugarMatch(
         const rhs_expr = try ctx.alloc.create(ast_mod.Expr);
         rhs_expr.* = try desugarRhs(ctx, equations[0].rhs);
         return rhs_expr;
+    }
+
+    // #378: exhaustiveness/redundancy warnings for this equation group.
+    {
+        const rows = try ctx.alloc.alloc([]const renamer_mod.RPat, equations.len);
+        defer ctx.alloc.free(rows);
+        const guarded = try ctx.alloc.alloc(bool, equations.len);
+        defer ctx.alloc.free(guarded);
+        const spans = try ctx.alloc.alloc(SourceSpan, equations.len);
+        defer ctx.alloc.free(spans);
+        for (equations, 0..) |eq, i| {
+            rows[i] = eq.patterns;
+            guarded[i] = eq.rhs == .Guarded;
+            spans[i] = eq.span;
+        }
+        warnMatchGroup(ctx, rows, guarded, spans, equations[0].span, "function equations");
     }
 
     const arg_tys = try getArgTypes(ctx.alloc, core_ty, num_args);

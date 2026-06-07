@@ -1026,6 +1026,13 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
         std.process.exit(1);
     }
 
+    // Render warnings (e.g. non-exhaustive patterns, #378) even when the
+    // build succeeds. Errors were handled above, so anything left in the
+    // collector is warning-severity only.
+    if (session.diags.diagnostics.items.len > 0) {
+        try renderMultiFileDiagnostics(allocator, io, &session.diags);
+    }
+
     const module_order = session_result.result.module_order;
 
     // ── Per-module lambda lift + GRIN translation ───────────────────────

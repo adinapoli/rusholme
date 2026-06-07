@@ -489,9 +489,11 @@ filter p (x:xs) = case p x of
 
 head :: [a] -> a
 head (x:xs) = x
+head []     = error "Prelude.head: empty list"
 
 tail :: [a] -> [a]
 tail (x:xs) = xs
+tail []     = error "Prelude.tail: empty list"
 
 null :: [a] -> Bool
 null []    = True

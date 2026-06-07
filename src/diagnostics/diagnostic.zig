@@ -49,8 +49,11 @@ pub const DiagnosticCode = enum {
     deriving_unsupported_class,
     deriving_shape_mismatch,
     deriving_empty_bounded,
+    non_exhaustive_patterns,
+    redundant_pattern,
 
-    /// Returns a stable string code like "E001" for programmatic use.
+    /// Returns a stable string code like "E001" (errors) or "W001"
+    /// (warnings) for programmatic use.
     pub fn code(self: DiagnosticCode) []const u8 {
         return switch (self) {
             .parse_error => "E001",
@@ -67,6 +70,8 @@ pub const DiagnosticCode = enum {
             .deriving_unsupported_class => "E012",
             .deriving_shape_mismatch => "E013",
             .deriving_empty_bounded => "E014",
+            .non_exhaustive_patterns => "W001",
+            .redundant_pattern => "W002",
         };
     }
 
