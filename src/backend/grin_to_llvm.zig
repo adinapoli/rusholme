@@ -511,7 +511,7 @@ pub const GrinTranslator = struct {
         return self.isEntryPoint(func_name);
     }
 
-    /// Allocate a Unit heap node and return its address as an i64.
+    /// Allocate a 0-field Unit heap node and return its address as an i64.
     ///
     /// Used by entry-point functions that need to return a
     /// distinguishable "no value" result (as opposed to integer 0,
@@ -522,7 +522,7 @@ pub const GrinTranslator = struct {
         const unit_disc = c.LLVMConstInt(llvm.i64Type(), unit_tag, 0);
         var alloc_args = [_]llvm.Value{
             unit_disc,
-            c.LLVMConstInt(llvm.i32Type(), 0, 0), // n_fields = 0
+            c.LLVMConstInt(llvm.i32Type(), 0, 0),
         };
         return c.LLVMBuildCall2(
             self.builder,
@@ -1872,7 +1872,34 @@ pub const GrinTranslator = struct {
 
                 return node_ptr;
             },
-            .Unit => return @as(?llvm.Value, c.LLVMGetUndef(llvm.i32Type())),
+            .Unit => {
+                // Allocate a 1-field Unit heap cell that the GRIN `Rec`-let
+                // lowering will subsequently mutate via `update` (i.e.
+                // `rts_store_field(p, 0, …)`).  A 0-field cell would trip
+                // the `index < n_fields` assertion in `rts_store_field`
+                // (see src/rts/node.zig:~272).
+                //
+                // This is the placeholder allocation in the multi-binding
+                // `Rec` backpatch chain; the single-binding `NonRec` path
+                // never reaches this arm because the desugarer dodges it
+                // via the NonRec workaround.
+                // See: https://github.com/adinapoli/rusholme/issues/747
+                const rts_alloc_fn = declareRtsAlloc(self.module);
+                const unit_tag = @intFromEnum(rts_node.Tag.Unit);
+                var alloc_args = [_]llvm.Value{
+                    c.LLVMConstInt(llvm.i64Type(), unit_tag, 0),
+                    c.LLVMConstInt(llvm.i32Type(), 1, 0),
+                };
+                const unit_ptr = c.LLVMBuildCall2(
+                    self.builder,
+                    llvm.getFunctionType(rts_alloc_fn),
+                    rts_alloc_fn,
+                    &alloc_args,
+                    2,
+                    nullTerminate(result_name).ptr,
+                );
+                return @as(?llvm.Value, unit_ptr);
+            },
             .Var => |name| return @as(?llvm.Value, try self.translateValToLlvm(.{ .Var = name })),
             else => return @as(?llvm.Value, try self.translateValToLlvm(val)),
         }

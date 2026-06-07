@@ -1801,6 +1801,16 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
                     },
                     .Return => {
                         // Simple value: update placeholder directly.
+                        // NOTE: every binding in the Rec group must emit its
+                        // own update; previously this branch only chained a
+                        // new update onto a non-null `current_expr` and then
+                        // `continue`d, silently DROPPING the update for the
+                        // first binding when it was a simple `Return`.  The
+                        // first binding's placeholder was left pointing at
+                        // the unit sentinel allocated in Step 1, and any
+                        // later forcing of that binding read a wrong value
+                        // (or segfaulted, see #747).  We now always assign
+                        // `current_expr` so the placeholder is backpatched.
                         const rhs_val = try exprToVal(rhs_expr);
                         const update_expr = try ctx.alloc.create(GrinExpr);
                         update_expr.* = .{ .Update = .{
@@ -1816,6 +1826,8 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
                                 .rhs = update_expr,
                             } };
                             current_expr = bind_update;
+                        } else {
+                            current_expr = update_expr;
                         }
                         continue;
                     },
@@ -3236,4 +3248,84 @@ test "exprInvolvesComputation: distinguishes values from computation (#518)" {
         .rhs = case_expr,
     } };
     try testing.expect(exprInvolvesComputation(bind_case));
+}
+
+/// Recursively count `Update` nodes in a GRIN expression tree.
+/// Used by translator unit tests to assert backpatch correctness.
+fn countUpdateNodes(expr: *const GrinExpr) usize {
+    return switch (expr.*) {
+        .Update => 1,
+        .Bind => |b| countUpdateNodes(b.lhs) + countUpdateNodes(b.rhs),
+        .Block => |inner| countUpdateNodes(inner),
+        .Case => |cs| blk: {
+            var total: usize = 0;
+            for (cs.alts) |alt| total += countUpdateNodes(alt.body);
+            break :blk total;
+        },
+        else => 0,
+    };
+}
+
+test "translateExpr: multi-binding Rec let emits one Update per binder (#747)" {
+    // Regression test for #747: the `Rec` lowering's `Return` arm used to
+    // drop the first binding's `update` when `current_expr` was null,
+    // silently breaking call-by-need for multi-binding lets.  Asserting at
+    // the GRIN level keeps the invariant testable without going through
+    // LLVM and the runtime.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const a_id = core.Id{
+        .name = grin.Name{ .base = "a", .unique = .{ .value = 1 } },
+        .ty = undefined,
+        .span = undefined,
+    };
+    const b_id = core.Id{
+        .name = grin.Name{ .base = "b", .unique = .{ .value = 2 } },
+        .ty = undefined,
+        .span = undefined,
+    };
+
+    const lit1 = try alloc.create(CoreExpr);
+    lit1.* = .{ .Lit = .{ .val = .{ .Int = 1 }, .span = undefined } };
+    const lit2 = try alloc.create(CoreExpr);
+    lit2.* = .{ .Lit = .{ .val = .{ .Int = 2 }, .span = undefined } };
+
+    var pairs = [_]CoreBindPair{
+        .{ .binder = a_id, .rhs = lit1 },
+        .{ .binder = b_id, .rhs = lit2 },
+    };
+
+    // body = a  (the body itself does not matter for the assertion).
+    const body = try alloc.create(CoreExpr);
+    body.* = .{ .Var = a_id };
+
+    const let_expr = try alloc.create(CoreExpr);
+    let_expr.* = .{ .Let = .{
+        .bind = .{ .Rec = pairs[0..] },
+        .body = body,
+        .span = undefined,
+    } };
+
+    const main_binder = core.Id{
+        .name = grin.Name{ .base = "main", .unique = .{ .value = 0 } },
+        .ty = undefined,
+        .span = undefined,
+    };
+    const main_pair = CoreBindPair{ .binder = main_binder, .rhs = let_expr };
+
+    const core_prog = CoreProgram{
+        .data_decls = &.{},
+        .binds = &[_]CoreBind{.{ .NonRec = main_pair }},
+    };
+
+    const grin_prog = try translateProgram(alloc, core_prog, null, null);
+    try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
+
+    const main_body = grin_prog.defs[0].body;
+    const updates = countUpdateNodes(main_body);
+    // One Update per binder in the Rec group.  Bug 2 of #747 caused the
+    // first binding's Update to be silently dropped, yielding 1 here.
+    try testing.expectEqual(@as(usize, 2), updates);
 }
