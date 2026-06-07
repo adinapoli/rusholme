@@ -474,3 +474,7 @@ test "e2e: e2e_708_bounded_enum (#708)" {
 test "e2e: e2e_713_enum_defaults (#713)" {
     try testE2e(std.testing.allocator, "e2e_713_enum_defaults");
 }
+
+test "e2e: ghc_744_let_in_default_body (#744)" {
+    try testE2e(std.testing.allocator, "ghc_744_let_in_default_body");
+}

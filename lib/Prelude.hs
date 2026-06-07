@@ -305,9 +305,6 @@ instance Bounded Ordering where
 enumFromInt :: Int -> [Int]
 enumFromInt i = i : enumFromInt (primAddInt i 1)
 
-enumFromThenInt :: Int -> Int -> [Int]
-enumFromThenInt i j = enumFromStepInt i (primSubInt j i)
-
 enumFromStepInt :: Int -> Int -> [Int]
 enumFromStepInt i step = i : enumFromStepInt (primAddInt i step) step
 
@@ -330,10 +327,6 @@ enumIntFromThenToStep i step limit =
        then []
        else i : enumIntFromThenToStep (primAddInt i step) step limit
 
-enumIntFromThenTo :: Int -> Int -> Int -> [Int]
-enumIntFromThenTo i j limit =
-  enumIntFromThenToStep i (primSubInt j i) limit
-
 class Enum a where
   succ :: a -> a
   pred :: a -> a
@@ -353,7 +346,11 @@ class Enum a where
   --   enumFromThenTo x y z = map toEnum [fromEnum x, fromEnum y .. fromEnum z]
   --
   -- We follow that formulation exactly, using the monomorphic Int helpers
-  -- (enumIntFromTo / enumIntFromThenTo) for the bounded sequences.  Because
+  -- (enumIntFromTo / enumIntFromThenToStep / enumFromStepInt) for the
+  -- bounded sequences.  The `step` of the stepped enumerations is bound by
+  -- a `let` in the default body so it is computed ONCE per call rather than
+  -- recomputed at each recursive step (a regression test exercises this:
+  -- see tests/e2e/ghc_744_let_in_default_body.hs).  Because
   -- the upper/lower bound passed to those helpers is itself a valid value of
   -- the enum, every index they emit is in range, so `map toEnum` never applies
   -- `toEnum` to an out-of-range index.  enumFromTo and enumFromThenTo are thus
@@ -371,10 +368,12 @@ class Enum a where
   -- renamer resolves all top-level names before processing bodies.)
   enumFrom n = map toEnum (enumFromInt (fromEnum n))
   enumFromThen n n2 =
-    map toEnum (enumFromThenInt (fromEnum n) (fromEnum n2))
+    let step = primSubInt (fromEnum n2) (fromEnum n)
+    in map toEnum (enumFromStepInt (fromEnum n) step)
   enumFromTo n m = map toEnum (enumIntFromTo (fromEnum n) (fromEnum m))
   enumFromThenTo n n2 m =
-    map toEnum (enumIntFromThenTo (fromEnum n) (fromEnum n2) (fromEnum m))
+    let step = primSubInt (fromEnum n2) (fromEnum n)
+    in map toEnum (enumIntFromThenToStep (fromEnum n) step (fromEnum m))
 
 instance Enum Int where
   succ n = n + 1
