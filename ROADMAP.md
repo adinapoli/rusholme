@@ -508,7 +508,10 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | [#71](https://github.com/adinapoli/rusholme/issues/71) | Implement Immix block and line allocator | [#70](https://github.com/adinapoli/rusholme/issues/70) | :yellow_circle: |
 | [#776](https://github.com/adinapoli/rusholme/issues/776) | rts: wire ImmixGc behind --rts=arena\|immix backend selector | [#71](https://github.com/adinapoli/rusholme/issues/71) | :white_circle: |
 | [#777](https://github.com/adinapoli/rusholme/issues/777) | rts: split Immix allocator into small + overflow cursors | [#71](https://github.com/adinapoli/rusholme/issues/71) | :white_circle: |
-| [#72](https://github.com/adinapoli/rusholme/issues/72) | Implement Immix mark-and-sweep collection | [#71](https://github.com/adinapoli/rusholme/issues/71) | :white_circle: |
+| [#72](https://github.com/adinapoli/rusholme/issues/72) | Implement Immix mark-and-sweep collection | [#71](https://github.com/adinapoli/rusholme/issues/71) | :yellow_circle: |
+| [#779](https://github.com/adinapoli/rusholme/issues/779) | rts: per-constructor pointer-mask tables for precise GC tracing | [#72](https://github.com/adinapoli/rusholme/issues/72) | :white_circle: |
+| [#780](https://github.com/adinapoli/rusholme/issues/780) | backend: shadow-stack ABI for precise GC roots | [#72](https://github.com/adinapoli/rusholme/issues/72) | :white_circle: |
+| [#781](https://github.com/adinapoli/rusholme/issues/781) | rts: auto-trigger collection from the allocator based on a heap budget | [#72](https://github.com/adinapoli/rusholme/issues/72) | :white_circle: |
 | [#73](https://github.com/adinapoli/rusholme/issues/73) | Implement Immix opportunistic defragmentation | [#72](https://github.com/adinapoli/rusholme/issues/72) | :white_circle: |
 | [#74](https://github.com/adinapoli/rusholme/issues/74) | Research: ASAP-style static deallocation via GRIN analysis | [#44](https://github.com/adinapoli/rusholme/issues/44) | :white_circle: |
 

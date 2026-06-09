@@ -18,11 +18,19 @@
 //!
 //! ## Layout
 //!
-//!   ┌──────────────┬────────────────┬───────────────────────────────────────┐
-//!   │  tag (u64)   │ n_fields (u32) │ _pad (u32) │ field[0] … field[N-1]   │
-//!   └──────────────┴────────────────┴───────────────────────────────────────┘
+//!   ┌──────────────┬────────────────┬─────────────────┬───────────────────────┐
+//!   │  tag (u64)   │ n_fields (u32) │ gc_flags (u32)  │ field[0] … field[N-1] │
+//!   └──────────────┴────────────────┴─────────────────┴───────────────────────┘
 //!
 //! The header is 16 bytes; each field is 8 bytes (u64).
+//!
+//! `gc_flags` holds garbage-collector metadata. For the Immix collector
+//! (#72) it stores the *cycle id* at which this node was last marked
+//! live — comparing it against the heap's current cycle id distinguishes
+//! marked from unmarked objects without a separate reset pass. The
+//! LLVM-generated allocation path leaves this field zero; the value is
+//! only meaningful once collection runs (until then it is read as
+//! "never marked", which is exactly what we want for a phase-1 arena).
 //! Nodes are allocated via `rts_alloc(tag, n_fields)` which uses the heap
 //! arena to allocate exactly `@sizeOf(Node) + n_fields * 8` bytes.
 //!
@@ -112,8 +120,15 @@ pub const Node = extern struct {
     /// Number of field slots that follow the header in memory.
     n_fields: u32,
 
-    /// Explicit padding to make the header 16 bytes on all targets.
-    _pad: u32 = 0,
+    /// Garbage-collector flags. Repurposes what used to be padding into
+    /// metadata: the Immix collector stores the cycle id at which this
+    /// node was last marked live. Zero means "never marked" — which is
+    /// the value freshly-allocated nodes carry, and which is treated
+    /// as dead by `collect`. Newly-allocated objects that must survive
+    /// the next collection should be reachable from a root by the time
+    /// `collect` runs, so the field can stay zero until the collector
+    /// touches it. Backend layout (`{i64, i32, i32}`) is unchanged.
+    gc_flags: u32 = 0,
 };
 
 // ═══════════════════════════════════════════════════════════════════════
