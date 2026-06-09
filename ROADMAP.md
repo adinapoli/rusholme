@@ -257,7 +257,7 @@
 | [#539](https://github.com/adinapoli/rusholme/issues/539) | Parser cannot handle infix operator definitions with parenthesized patterns | [#29](https://github.com/adinapoli/rusholme/issues/29), [#31](https://github.com/adinapoli/rusholme/issues/31) | :green_circle: |
 | [#540](https://github.com/adinapoli/rusholme/issues/540) | Parser cannot handle multiple consecutive parenthesized cons patterns | [#31](https://github.com/adinapoli/rusholme/issues/31) | :green_circle: |
 | [#543](https://github.com/adinapoli/rusholme/issues/543) | Layout processor injects virtual tokens inside parenthesized contexts | [#26](https://github.com/adinapoli/rusholme/issues/26) | :green_circle: |
-| [#736](https://github.com/adinapoli/rusholme/issues/736) | desugar: LeftSection / RightSection / Negate still emit placeholder Vars | [#149](https://github.com/adinapoli/rusholme/issues/149) | :yellow_circle: |
+| [#736](https://github.com/adinapoli/rusholme/issues/736) | desugar: LeftSection / RightSection / Negate still emit placeholder Vars | [#149](https://github.com/adinapoli/rusholme/issues/149) | :green_circle: |
 | [#737](https://github.com/adinapoli/rusholme/issues/737) | typechecker: remove dead LeftSection/RightSection/Negate arms after #736 | [#736](https://github.com/adinapoli/rusholme/issues/736) | :white_circle: |
 
 
@@ -336,10 +336,10 @@
 | [#377](https://github.com/adinapoli/rusholme/issues/377) | Tier 2: Match compiler for nested/complex patterns (nested constructors, as-patterns, tuples, infix cons) | [#376](https://github.com/adinapoli/rusholme/issues/376) | :green_circle: |
 | [#417](https://github.com/adinapoli/rusholme/issues/417) | Desugar guarded equations in pattern match compiler | [#377](https://github.com/adinapoli/rusholme/issues/377) | :green_circle: |
 | [#418](https://github.com/adinapoli/rusholme/issues/418) | Desugar list patterns in match compiler | [#377](https://github.com/adinapoli/rusholme/issues/377) | :green_circle: |
-| [#378](https://github.com/adinapoli/rusholme/issues/378) | Tier 3: Optimal decision trees with exhaustiveness/redundancy checking | [#377](https://github.com/adinapoli/rusholme/issues/377) | :white_circle: |
+| [#378](https://github.com/adinapoli/rusholme/issues/378) | Tier 3: Optimal decision trees with exhaustiveness/redundancy checking | [#377](https://github.com/adinapoli/rusholme/issues/377) | :green_circle: |
 | [#297](https://github.com/adinapoli/rusholme/issues/297) | Compare Core IR emitted by GHC vs Rusholme | [#38](https://github.com/adinapoli/rusholme/issues/38) | :white_circle: |
-| [#309](https://github.com/adinapoli/rusholme/issues/309) | Implement list comprehension (ListComp) support | [#38](https://github.com/adinapoli/rusholme/issues/38) | :yellow_circle: |
-| [#679](https://github.com/adinapoli/rusholme/issues/679) | Implement `deriving` mechanism for stock classes (`Eq`, `Ord`, `Show`, `Bounded`, `Enum`) and newtype strategy | [#33](https://github.com/adinapoli/rusholme/issues/33), [#530](https://github.com/adinapoli/rusholme/issues/530) | :yellow_circle: |
+| [#309](https://github.com/adinapoli/rusholme/issues/309) | Implement list comprehension (ListComp) support | [#38](https://github.com/adinapoli/rusholme/issues/38) | :green_circle: |
+| [#679](https://github.com/adinapoli/rusholme/issues/679) | Implement `deriving` mechanism for stock classes (`Eq`, `Ord`, `Show`, `Bounded`, `Enum`) and newtype strategy | [#33](https://github.com/adinapoli/rusholme/issues/33), [#530](https://github.com/adinapoli/rusholme/issues/530) | :green_circle: |
 | [#680](https://github.com/adinapoli/rusholme/issues/680) | Implement `deriving Generic` / `Generic1` and `GHC.Generics` compatibility module | [#679](https://github.com/adinapoli/rusholme/issues/679), [#655](https://github.com/adinapoli/rusholme/issues/655) | :white_circle: |
 
 ### Epic [#6](https://github.com/adinapoli/rusholme/issues/6): GRIN IR and Core→GRIN Translation
@@ -355,8 +355,8 @@
 | [#315](https://github.com/adinapoli/rusholme/issues/315) | Generate whole-program eval and apply functions for GRIN | [#314](https://github.com/adinapoli/rusholme/issues/314) | :green_circle: |
 | [#317](https://github.com/adinapoli/rusholme/issues/317) | Handle partial application and over-application in Core→GRIN | [#314](https://github.com/adinapoli/rusholme/issues/314), [#315](https://github.com/adinapoli/rusholme/issues/315) | :green_circle: |
 | [#347](https://github.com/adinapoli/rusholme/issues/347) | Implement proper backpatching for recursive let bindings in GRIN translator | [#314](https://github.com/adinapoli/rusholme/issues/314) | :green_circle: |
-| [#747](https://github.com/adinapoli/rusholme/issues/747) | Multi-binding `let` (incl. let-qualifier) miscompiles/segfaults | [#149](https://github.com/adinapoli/rusholme/issues/149), [#347](https://github.com/adinapoli/rusholme/issues/347) | :yellow_circle: |
-| [#753](https://github.com/adinapoli/rusholme/issues/753) | Rec lowering: backpatch chain runs in source order, not dependency order | [#347](https://github.com/adinapoli/rusholme/issues/347), [#747](https://github.com/adinapoli/rusholme/issues/747) | :yellow_circle: |
+| [#747](https://github.com/adinapoli/rusholme/issues/747) | Multi-binding `let` (incl. let-qualifier) miscompiles/segfaults | [#149](https://github.com/adinapoli/rusholme/issues/149), [#347](https://github.com/adinapoli/rusholme/issues/347) | :green_circle: |
+| [#753](https://github.com/adinapoli/rusholme/issues/753) | Rec lowering: backpatch chain runs in source order, not dependency order | [#347](https://github.com/adinapoli/rusholme/issues/347), [#747](https://github.com/adinapoli/rusholme/issues/747) | :green_circle: |
 
 ### Epic: PrimOps and Runtime System (Decision #0001)
 
@@ -384,7 +384,7 @@
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#280](https://github.com/adinapoli/rusholme/issues/280) | Epic: Rusholme Run-Time System (RTS) | — | :white_circle: |
-| [#284](https://github.com/adinapoli/rusholme/issues/284) | Research: Study zig-gc as reference for Immix GC implementation | — | :yellow_circle: |
+| [#284](https://github.com/adinapoli/rusholme/issues/284) | Research: Study zig-gc as reference for Immix GC implementation | — | :green_circle: |
 | [#294](https://github.com/adinapoli/rusholme/issues/294) | Research: Evaluate libvaxis TUI library for future REPL | — | :white_circle: |
 
 ### Epic [#8](https://github.com/adinapoli/rusholme/issues/8): Tree-Walking Interpreter
@@ -410,7 +410,7 @@
 | [#384](https://github.com/adinapoli/rusholme/issues/384) | Implement rts_eval Ind-following for GRIN runtime | [#56](https://github.com/adinapoli/rusholme/issues/56) | :green_circle: |
 | [#385](https://github.com/adinapoli/rusholme/issues/385) | Implement proper heap node field storage for GRIN values | [#56](https://github.com/adinapoli/rusholme/issues/56) | :green_circle: |
 | [#422](https://github.com/adinapoli/rusholme/issues/422) | rts: unify LLVM codegen node layout with Zig RTS node layout | [#385](https://github.com/adinapoli/rusholme/issues/385) | :green_circle: |
-| [#386](https://github.com/adinapoli/rusholme/issues/386) | Implement runtime closure support | [#56](https://github.com/adinapoli/rusholme/issues/56) | :white_circle: |
+| [#386](https://github.com/adinapoli/rusholme/issues/386) | Implement runtime closure support | [#56](https://github.com/adinapoli/rusholme/issues/56) | :green_circle: |
 | [#390](https://github.com/adinapoli/rusholme/issues/390) | LLVM codegen: translate remaining GRIN expression types (Bind, Case, Store, Fetch, Update, Return) | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
 | [#391](https://github.com/adinapoli/rusholme/issues/391) | LLVM codegen: expand PrimOpMapping and support multi-arg calls | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
 | [#392](https://github.com/adinapoli/rusholme/issues/392) | LLVM codegen: translate function parameters in GRIN defs | [#55](https://github.com/adinapoli/rusholme/issues/55) | :green_circle: |
@@ -419,13 +419,17 @@
 | [#447](https://github.com/adinapoli/rusholme/issues/447) | LLVM backend: undefined reference to RTS functions during linking | [#57](https://github.com/adinapoli/rusholme/issues/57) | :green_circle: |
 | [#381](https://github.com/adinapoli/rusholme/issues/381) | Epic: GRIN to LLVM Translation - Compiler Path to M1 | [#55](https://github.com/adinapoli/rusholme/issues/55) | :white_circle: |
 | [#396](https://github.com/adinapoli/rusholme/issues/396) | Research: Zig LLVM bitcode compatibility with llvm-link | [#57](https://github.com/adinapoli/rusholme/issues/57) | :white_circle: |
-| [#572](https://github.com/adinapoli/rusholme/issues/572) | Implement tuple codegen in GRIN-to-LLVM backend | [#381](https://github.com/adinapoli/rusholme/issues/381) | :white_circle: |
-| [#846](https://github.com/adinapoli/rusholme/issues/846) | Wire tuples of arity 3..7 end-to-end (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#572](https://github.com/adinapoli/rusholme/issues/572) | :yellow_circle: |
-| [#850](https://github.com/adinapoli/rusholme/issues/850) | Renamer drops newtype declarations — lower to single-constructor data (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :yellow_circle: |
-| [#853](https://github.com/adinapoli/rusholme/issues/853) | Synthesise record field selector function bodies (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :yellow_circle: |
+| [#572](https://github.com/adinapoli/rusholme/issues/572) | Implement tuple codegen in GRIN-to-LLVM backend | [#381](https://github.com/adinapoli/rusholme/issues/381) | :green_circle: |
+| [#520](https://github.com/adinapoli/rusholme/issues/520) | Reconcile GRIN-level eval with LLVM backend inline eval | [#381](https://github.com/adinapoli/rusholme/issues/381) | :green_circle: |
+| [#846](https://github.com/adinapoli/rusholme/issues/846) | Wire tuples of arity 3..7 end-to-end (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#572](https://github.com/adinapoli/rusholme/issues/572) | :green_circle: |
+| [#848](https://github.com/adinapoli/rusholme/issues/848) | Support (or cleanly reject) tuples of arity > 7 (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#846](https://github.com/adinapoli/rusholme/issues/846) | :white_circle: |
+| [#850](https://github.com/adinapoli/rusholme/issues/850) | Renamer drops newtype declarations — lower to single-constructor data (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :green_circle: |
+| [#851](https://github.com/adinapoli/rusholme/issues/851) | Derived Eq/Show for single-field constructors crashes at runtime (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#850](https://github.com/adinapoli/rusholme/issues/850) | :white_circle: |
+| [#853](https://github.com/adinapoli/rusholme/issues/853) | Synthesise record field selector function bodies (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :green_circle: |
 | [#855](https://github.com/adinapoli/rusholme/issues/855) | Desugar record construction into positional constructor application (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :yellow_circle: |
 | [#857](https://github.com/adinapoli/rusholme/issues/857) | Desugar record patterns into positional constructor patterns (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#855](https://github.com/adinapoli/rusholme/issues/855) | :yellow_circle: |
 | [#859](https://github.com/adinapoli/rusholme/issues/859) | Desugar record update into a field-copying case (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#855](https://github.com/adinapoli/rusholme/issues/855) | :yellow_circle: |
+| [#847](https://github.com/adinapoli/rusholme/issues/847) | Lazy let/where pattern bindings produce undefined references (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#846](https://github.com/adinapoli/rusholme/issues/846) | :white_circle: |
 | [#573](https://github.com/adinapoli/rusholme/issues/573) | GRIN backend: polymorphic Prelude functions produce broken codegen | [#529](https://github.com/adinapoli/rusholme/issues/529) | :green_circle: |
 | [#569](https://github.com/adinapoli/rusholme/issues/569) | GRIN/LLVM backend: support dictionary-passing in codegen | [#556](https://github.com/adinapoli/rusholme/issues/556) | :green_circle: |
 | [#583](https://github.com/adinapoli/rusholme/issues/583) | Implement VarTagNode handling in LLVM backend for partial applications | — | :green_circle: |
@@ -510,14 +514,14 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
-| [#70](https://github.com/adinapoli/rusholme/issues/70) | Define runtime allocator interface for GC-swappable heap | [#56](https://github.com/adinapoli/rusholme/issues/56) | :yellow_circle: |
-| [#71](https://github.com/adinapoli/rusholme/issues/71) | Implement Immix block and line allocator | [#70](https://github.com/adinapoli/rusholme/issues/70) | :yellow_circle: |
-| [#776](https://github.com/adinapoli/rusholme/issues/776) | rts: wire ImmixGc behind --rts=arena\|immix backend selector | [#71](https://github.com/adinapoli/rusholme/issues/71) | :white_circle: |
+| [#70](https://github.com/adinapoli/rusholme/issues/70) | Define runtime allocator interface for GC-swappable heap | [#56](https://github.com/adinapoli/rusholme/issues/56) | :green_circle: |
+| [#71](https://github.com/adinapoli/rusholme/issues/71) | Implement Immix block and line allocator | [#70](https://github.com/adinapoli/rusholme/issues/70) | :green_circle: |
+| [#776](https://github.com/adinapoli/rusholme/issues/776) | rts: wire ImmixGc behind --rts=arena\|immix backend selector | [#71](https://github.com/adinapoli/rusholme/issues/71) | :green_circle: |
 | [#777](https://github.com/adinapoli/rusholme/issues/777) | rts: split Immix allocator into small + overflow cursors | [#71](https://github.com/adinapoli/rusholme/issues/71) | :white_circle: |
-| [#72](https://github.com/adinapoli/rusholme/issues/72) | Implement Immix mark-and-sweep collection | [#71](https://github.com/adinapoli/rusholme/issues/71) | :yellow_circle: |
+| [#72](https://github.com/adinapoli/rusholme/issues/72) | Implement Immix mark-and-sweep collection | [#71](https://github.com/adinapoli/rusholme/issues/71) | :green_circle: |
 | [#779](https://github.com/adinapoli/rusholme/issues/779) | rts: per-constructor pointer-mask tables for precise GC tracing | [#72](https://github.com/adinapoli/rusholme/issues/72) | :white_circle: |
-| [#780](https://github.com/adinapoli/rusholme/issues/780) | backend: shadow-stack ABI for precise GC roots | [#72](https://github.com/adinapoli/rusholme/issues/72) | :yellow_circle: |
-| [#781](https://github.com/adinapoli/rusholme/issues/781) | rts: auto-trigger collection from the allocator based on a heap budget | [#72](https://github.com/adinapoli/rusholme/issues/72) | :white_circle: |
+| [#780](https://github.com/adinapoli/rusholme/issues/780) | backend: shadow-stack ABI for precise GC roots | [#72](https://github.com/adinapoli/rusholme/issues/72) | :green_circle: |
+| [#781](https://github.com/adinapoli/rusholme/issues/781) | rts: auto-trigger collection from the allocator based on a heap budget | [#72](https://github.com/adinapoli/rusholme/issues/72) | :green_circle: |
 | [#73](https://github.com/adinapoli/rusholme/issues/73) | Implement Immix opportunistic defragmentation | [#72](https://github.com/adinapoli/rusholme/issues/72) | :white_circle: |
 | [#74](https://github.com/adinapoli/rusholme/issues/74) | Research: ASAP-style static deallocation via GRIN analysis | [#44](https://github.com/adinapoli/rusholme/issues/44) | :white_circle: |
 
