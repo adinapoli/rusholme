@@ -1,10 +1,10 @@
-//! GC-swappable heap for the Rusholme runtime (issues #56, #70).
+//! GC-swappable heap for the Rusholme runtime (issues #56, #70, #776).
 //!
 //! All runtime heap operations go through the `GcAllocator` interface so
 //! that the GC strategy can be swapped without touching the rest of the
 //! RTS ("Phase 1 → Phase 2 is a swap, not a rewrite" — DESIGN.md):
 //!
-//!   - Phase 1 (current): `ArenaGc` — `std.heap.ArenaAllocator`-backed,
+//!   - Phase 1: `ArenaGc` — `std.heap.ArenaAllocator`-backed,
 //!     `free`/`collect` are no-ops, memory grows until program exit.
 //!   - Phase 2: Immix mark-region GC (#71, #72, #73) implementing the
 //!     same interface.
@@ -14,8 +14,17 @@
 //! additionally exposes `collect`, `stats`, and root registration —
 //! the hooks a tracing collector needs but a plain allocator does not.
 //! See docs/decisions/284-zig-gc-immix-reference.md for the design study.
+//!
+//! ## Backend selection (#776)
+//!
+//! The active backend is selected at startup via `rts_set_backend`,
+//! which generated `main()` calls before any allocation. The call is
+//! emitted by the GRIN→LLVM backend driven by the `rhc build --rts=…`
+//! flag — `arena` is the implicit default (no call emitted), so any
+//! pre-#776 binary continues to use the arena.
 
 const std = @import("std");
+const immix = @import("immix.zig");
 
 // ═══════════════════════════════════════════════════════════════════════
 // Allocation Statistics
@@ -205,45 +214,98 @@ pub const ArenaGc = struct {
 // Global Heap State
 // ═══════════════════════════════════════════════════════════════════════
 
+/// Backend identity. The numeric values are part of the
+/// `rts_set_backend` C ABI — keep them stable; new backends append.
+pub const RtsBackend = enum(u32) {
+    arena = 0,
+    immix = 1,
+};
+
 /// Global heap state for the running program.
 ///
-/// The concrete implementation is selected here at startup; everything
-/// else in the RTS sees only `GcAllocator` / `std.mem.Allocator`.
+/// The concrete backend is selected lazily on first allocation. The
+/// LLVM-generated `main()` calls `rts_set_backend` (when built with a
+/// non-default `--rts`) before any allocation so the desired backend
+/// is recorded before `State.ensureInit` runs.
 const State = struct {
-    var arena_gc: ArenaGc = undefined;
+    var selected: RtsBackend = .arena;
     var initialized: bool = false;
+    var arena_gc: ArenaGc = undefined;
+    var immix_gc: immix.ImmixGc = undefined;
 
-    fn get() *ArenaGc {
-        if (!initialized) {
-            arena_gc = ArenaGc.init(std.heap.page_allocator);
-            initialized = true;
+    fn ensureInit() void {
+        if (initialized) return;
+        switch (selected) {
+            .arena => arena_gc = ArenaGc.init(std.heap.page_allocator),
+            .immix => immix_gc = immix.ImmixGc.init(std.heap.page_allocator),
         }
-        return &arena_gc;
+        initialized = true;
+    }
+
+    fn deinitImpl() void {
+        if (!initialized) return;
+        switch (selected) {
+            .arena => arena_gc.deinit(),
+            .immix => immix_gc.deinit(),
+        }
+        initialized = false;
     }
 };
 
-/// Initialize the heap allocator.
+/// Select the runtime backend before the first allocation. Called by
+/// LLVM-generated `main()` when the program was built with a non-
+/// default `--rts`. Calling this after the heap has already been
+/// initialised is a no-op for the matching backend and a fatal error
+/// for a different backend (no live-swap support).
+pub export fn rts_set_backend(value: u32) callconv(.c) void {
+    const requested: RtsBackend = switch (value) {
+        @intFromEnum(RtsBackend.arena) => .arena,
+        @intFromEnum(RtsBackend.immix) => .immix,
+        else => @panic("rts_set_backend: unknown backend id"),
+    };
+    if (State.initialized) {
+        if (State.selected != requested) {
+            @panic("rts_set_backend called after heap was initialised");
+        }
+        return;
+    }
+    State.selected = requested;
+}
+
+/// Initialize the heap allocator. Optional — the heap initialises
+/// itself on first allocation. Provided so callers (tests, the WASM
+/// reactor entry) can pre-warm the heap.
 pub fn init() void {
-    _ = State.get();
+    State.ensureInit();
 }
 
 /// Cleanup the heap allocator.
 pub fn deinit() void {
-    if (State.initialized) {
-        State.arena_gc.deinit();
-        State.initialized = false;
-    }
+    State.deinitImpl();
 }
 
 /// Get the global heap as a generic allocator (routed through the
 /// GC-swappable interface's accounting).
 pub fn allocator() std.mem.Allocator {
-    return State.get().allocator();
+    State.ensureInit();
+    return switch (State.selected) {
+        .arena => State.arena_gc.allocator(),
+        .immix => State.immix_gc.allocator(),
+    };
 }
 
 /// Get the global heap through the GC-swappable interface.
 pub fn gcAllocator() GcAllocator {
-    return State.get().gcAllocator();
+    State.ensureInit();
+    return switch (State.selected) {
+        .arena => State.arena_gc.gcAllocator(),
+        .immix => State.immix_gc.gcAllocator(),
+    };
+}
+
+/// Currently-selected backend. Useful for diagnostics and tests.
+pub fn currentBackend() RtsBackend {
+    return State.selected;
 }
 
 // ═══════════════════════════════════════════════════════════════════════

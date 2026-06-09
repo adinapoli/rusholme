@@ -226,6 +226,7 @@ pub fn main(init: std.process.Init) !void {
                 \\-o, --output <str>           Output file name (default: stem of first input).
                 \\-O, --opt-level <str>        Optimisation level: 0|1|2|3|s|z (default: 2 for native, 0 otherwise).
                 \\    --backend <str>          Backend: native (default), jit, wasm, c.
+                \\    --rts <str>              RTS heap backend: arena (default) or immix.
                 \\    --package-db <str>...    Package database path (may be repeated).
                 \\    --repl                   Compile for REPL use (internal).
                 \\<str>...
@@ -240,6 +241,7 @@ pub fn main(init: std.process.Init) !void {
                 \\-o, --output <str>           Output file name (default: stem of first input).
                 \\-O, --opt-level <str>        Optimisation level: 0|1|2|3|s|z (default: 2 for native, 0 otherwise).
                 \\    --backend <str>          Backend: native (default), jit, wasm, c.
+                \\    --rts <str>              RTS heap backend: arena (default) or immix.
                 \\    --package-db <str>...    Package database path (may be repeated).
                 \\<str>...
                 \\
@@ -306,6 +308,20 @@ pub fn main(init: std.process.Init) !void {
                 .jit, .wasm, .c => rusholme.backend.llvm.OptLevel.O0,
             };
 
+            const rts_backend: rusholme.backend.grin_to_llvm.RtsBackend = if (build_res.args.rts) |rts_str|
+                rusholme.backend.grin_to_llvm.RtsBackend.parse(rts_str) orelse {
+                    var buf: [512]u8 = undefined;
+                    var fw: File.Writer = .init(.stderr(), io, &buf);
+                    try fw.interface.print(
+                        "rhc build: unknown RTS backend '{s}'\nValid backends: arena, immix\n",
+                        .{rts_str},
+                    );
+                    try fw.interface.flush();
+                    std.process.exit(1);
+                }
+            else
+                rusholme.backend.grin_to_llvm.RtsBackend.arena;
+
             return cmdBuild(
                 allocator,
                 io,
@@ -315,6 +331,7 @@ pub fn main(init: std.process.Init) !void {
                 build_res.args.repl != 0,
                 build_res.args.@"package-db",
                 opt_level,
+                rts_backend,
             );
         },
 
@@ -944,7 +961,7 @@ fn loadPrelude(
 /// - native: compiles to native executable via LLVM
 /// - wasm: compiles to WebAssembly binary (.wasm)
 /// - jit, c: not yet implemented
-fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8, output_name: []const u8, backend_kind: rusholme.backend.backend_mod.BackendKind, is_repl: bool, package_dbs: []const []const u8, opt_level: rusholme.backend.llvm.OptLevel) !void {
+fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8, output_name: []const u8, backend_kind: rusholme.backend.backend_mod.BackendKind, is_repl: bool, package_dbs: []const []const u8, opt_level: rusholme.backend.llvm.OptLevel, rts_backend: rusholme.backend.grin_to_llvm.RtsBackend) !void {
     // REPL mode placeholder - for WASM backend compiles stateful REPL
     _ = is_repl;
 
@@ -1125,9 +1142,9 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
 
     // ── Dispatch to backend-specific emission ─────────────────────────────
     switch (backend_kind) {
-        .native => try emitNative(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name, opt_level),
-        .jit => try emitJit(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name, opt_level),
-        .wasm => try emitWasm(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name, opt_level),
+        .native => try emitNative(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name, opt_level, rts_backend),
+        .jit => try emitJit(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name, opt_level, rts_backend),
+        .wasm => try emitWasm(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name, opt_level, rts_backend),
         .c => {
             var stderr_buf: [4096]u8 = undefined;
             var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
@@ -1151,6 +1168,7 @@ fn emitNative(
     all_grin: rusholme.grin.ast.Program,
     output_name: []const u8,
     opt_level: rusholme.backend.llvm.OptLevel,
+    rts_backend: rusholme.backend.grin_to_llvm.RtsBackend,
 ) !void {
     const llvm = rusholme.backend.llvm;
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -1176,6 +1194,7 @@ fn emitNative(
         std.process.exit(1);
     };
     var translator = rusholme.backend.grin_to_llvm.GrinTranslator.init(arena_alloc, &registry);
+    translator.rts_backend = rts_backend;
     defer translator.deinit();
 
     // Translate each module to a separate LLVM module and emit its bitcode.
@@ -1334,6 +1353,7 @@ fn emitJit(
     all_grin: rusholme.grin.ast.Program,
     output_name: []const u8,
     opt_level: rusholme.backend.llvm.OptLevel,
+    rts_backend: rusholme.backend.grin_to_llvm.RtsBackend,
 ) !void {
     _ = session;
     const llvm = rusholme.backend.llvm;
@@ -1360,6 +1380,7 @@ fn emitJit(
         std.process.exit(1);
     };
     var translator = rusholme.backend.grin_to_llvm.GrinTranslator.init(arena_alloc, &registry);
+    translator.rts_backend = rts_backend;
     defer translator.deinit();
 
     // ── Per-module LLVM translation ───────────────────────────────────────
@@ -1511,6 +1532,7 @@ fn emitWasm(
     all_grin: rusholme.grin.ast.Program,
     output_name: []const u8,
     opt_level: rusholme.backend.llvm.OptLevel,
+    rts_backend: rusholme.backend.grin_to_llvm.RtsBackend,
 ) !void {
     _ = session; // Unused for WASM backend
     const llvm = rusholme.backend.llvm;
@@ -1537,6 +1559,7 @@ fn emitWasm(
         std.process.exit(1);
     };
     var translator = rusholme.backend.grin_to_llvm.GrinTranslator.init(arena_alloc, &registry);
+    translator.rts_backend = rts_backend;
     defer translator.deinit();
 
     // ── Per-module LLVM translation ───────────────────────────────────────
