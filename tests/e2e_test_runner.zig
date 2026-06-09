@@ -275,6 +275,54 @@ test "e2e: -O3 invokes LLVM aggressive pipeline without crashing (#755)" {
     try testE2eOpt(std.testing.allocator, "e2e_001_hello", "-O3");
 }
 
+// ── Immix backend smoke tests (#776) ────────────────────────────────────
+//
+// Run a representative subset of programs under `--rts=immix` and
+// assert that they produce the same output as the default arena
+// backend. Once #781 lands (auto-trigger from the allocator), these
+// will start exercising collection on every run; until then they
+// verify the wiring (rts_set_backend → ImmixGc init → allocation
+// goes through the new backend) is correct.
+
+fn testE2eImmix(allocator: std.mem.Allocator, comptime basename: []const u8) !void {
+    return harness.testProgramWithFlags(
+        allocator,
+        e2e_dir,
+        basename,
+        null,
+        &.{ "--rts", "immix" },
+    );
+}
+
+test "e2e: --rts=immix runs hello world (#776)" {
+    try testE2eImmix(std.testing.allocator, "e2e_001_hello");
+}
+
+test "e2e: --rts=immix runs multi-putStrLn (#776)" {
+    try testE2eImmix(std.testing.allocator, "e2e_003_multi_putStrLn");
+}
+
+test "e2e: --rts=immix runs nested datatypes (#776)" {
+    try testE2eImmix(std.testing.allocator, "e2e_005_nested_datatypes");
+}
+
+test "e2e: rhc build rejects unknown --rts backend (#776)" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const rhc_path = e2e_options.rhc_path;
+
+    const argv = [_][]const u8{ rhc_path, "build", "--rts", "bogus", "tests/e2e/e2e_001_hello.hs" };
+    const result = try process.run(allocator, io, .{ .argv = &argv });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try std.testing.expect(code != 0),
+        else => return error.UnexpectedTermination,
+    }
+    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "unknown RTS backend") != null);
+}
+
 test "e2e: rhc build rejects unknown -O level (#755)" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;

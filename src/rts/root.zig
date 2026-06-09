@@ -34,6 +34,7 @@ comptime {
     _ = &heap.init;
     _ = &heap.deinit;
     _ = &heap.allocator;
+    _ = &heap.rts_set_backend;
     
     // For WASM targets, also force compilation of the _start entry point
     // to allow automatic execution when the module is instantiated

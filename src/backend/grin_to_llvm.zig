@@ -378,6 +378,18 @@ fn declareRtsAlloc(module: llvm.Module) llvm.Value {
     return c.LLVMAddFunction(module, name, fn_ty);
 }
 
+/// Declare `rts_set_backend(value: i32) -> void`. The RTS reads this
+/// once on the first allocation to choose between `ArenaGc` and
+/// `ImmixGc`; subsequent calls with the same value are no-ops. See
+/// `src/rts/heap.zig`.
+fn declareRtsSetBackend(module: llvm.Module) llvm.Value {
+    const name = "rts_set_backend";
+    if (c.LLVMGetNamedFunction(module, name)) |existing| return existing;
+    var params = [_]llvm.Type{llvm.i32Type()};
+    const fn_ty = c.LLVMFunctionType(llvm.voidType(), &params, 1, 0);
+    return c.LLVMAddFunction(module, name, fn_ty);
+}
+
 /// Declare `rts_store_field(node: ptr, index: i32, value: i64) -> void`.
 fn declareRtsStoreField(module: llvm.Module) llvm.Value {
     const name = "rts_store_field";
@@ -475,6 +487,20 @@ const TypeEnv = struct {
     }
 };
 
+/// Selects which RTS heap backend the generated `main` initialises
+/// before user code runs. Mirrors `RtsBackend` in `src/rts/heap.zig`
+/// — keep the numeric values in sync (they cross the C ABI).
+pub const RtsBackend = enum(u32) {
+    arena = 0,
+    immix = 1,
+
+    pub fn parse(s: []const u8) ?RtsBackend {
+        if (std.mem.eql(u8, s, "arena")) return .arena;
+        if (std.mem.eql(u8, s, "immix")) return .immix;
+        return null;
+    }
+};
+
 pub const GrinTranslator = struct {
     ctx: llvm.Context,
     module: llvm.Module,
@@ -512,6 +538,14 @@ pub const GrinTranslator = struct {
     /// Function arity map for correct forward declarations (issue #595).
     /// Maps function unique IDs to their parameter counts.
     arity_map: ?*const std.AutoHashMapUnmanaged(u64, u32) = null,
+
+    /// RTS backend selected by `rhc build --rts=…`. When non-`.arena`
+    /// the translator emits a `call void @rts_set_backend(i32 N)` at
+    /// the very start of `main`'s entry block, before any other
+    /// instruction. `.arena` matches the default lazy-init behaviour
+    /// in `src/rts/heap.zig` and is therefore a no-op for codegen.
+    /// See issue #776.
+    rts_backend: RtsBackend = .arena,
 
     pub fn init(allocator: std.mem.Allocator, registry: *TagRegistry) GrinTranslator {
         llvm.initialize();
@@ -565,6 +599,22 @@ pub const GrinTranslator = struct {
     /// Used by entry-point functions that need to return a
     /// distinguishable "no value" result (as opposed to integer 0,
     /// which is boolean False).
+    /// Emit `rts_set_backend(value)` at the current builder position.
+    /// Generated as the first instruction of native `main` whenever
+    /// the user picks a non-default backend (see #776).
+    fn emitSetRtsBackendCall(self: *GrinTranslator, value: u32) void {
+        const fn_val = declareRtsSetBackend(self.module);
+        var args = [_]llvm.Value{c.LLVMConstInt(llvm.i32Type(), value, 0)};
+        _ = c.LLVMBuildCall2(
+            self.builder,
+            llvm.getFunctionType(fn_val),
+            fn_val,
+            &args,
+            1,
+            "",
+        );
+    }
+
     fn buildUnitNode(self: *GrinTranslator) llvm.Value {
         const rts_alloc_fn = declareRtsAlloc(self.module);
         const unit_tag = @intFromEnum(rts_node.Tag.Unit);
@@ -796,6 +846,15 @@ pub const GrinTranslator = struct {
         self.current_func = func;
         const entry_bb = llvm.appendBasicBlock(func, "entry");
         llvm.positionBuilderAtEnd(self.builder, entry_bb);
+
+        // For native `main`, if the user selected a non-default RTS
+        // backend (#776), emit `call void @rts_set_backend(i32 N)` as
+        // the very first instruction so the heap picks up the
+        // selection before any allocation. Arena is the default, so
+        // codegen omits the call (it matches lazy init).
+        if (is_entry and !is_repl_entry and self.rts_backend != .arena) {
+            self.emitSetRtsBackendCall(@intFromEnum(self.rts_backend));
+        }
 
         // Clear previous function's parameter mapping and set up current one.
         self.params.deinit();

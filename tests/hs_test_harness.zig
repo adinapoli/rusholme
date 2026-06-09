@@ -134,6 +134,7 @@ fn runTest(
     expected_stderr: ?[]const u8,
     quiet: bool,
     opt_flag: ?[]const u8,
+    extra_build_args: []const []const u8,
 ) !bool {
     const io = std.testing.io;
     const rhc_path = e2e_options.rhc_path;
@@ -151,9 +152,9 @@ fn runTest(
     defer allocator.free(binary_path);
 
     // ── Step 1: Compile ───────────────────────────────────────────────────────
-    // Build argv with an optional `-O<level>` flag.  The flag must come
-    // before the positional source path so clap parses it correctly.
-    var argv_buf: [6][]const u8 = undefined;
+    // Build argv with optional extra `rhc build` flags.  Flags must come
+    // before the positional source path so clap parses them correctly.
+    var argv_buf: [12][]const u8 = undefined;
     var argv_len: usize = 0;
     argv_buf[argv_len] = rhc_path;
     argv_len += 1;
@@ -161,6 +162,10 @@ fn runTest(
     argv_len += 1;
     if (opt_flag) |flag| {
         argv_buf[argv_len] = flag;
+        argv_len += 1;
+    }
+    for (extra_build_args) |a| {
+        argv_buf[argv_len] = a;
         argv_len += 1;
     }
     argv_buf[argv_len] = hs_path;
@@ -257,6 +262,20 @@ pub fn testProgram(
     comptime basename: []const u8,
     opt_flag: ?[]const u8,
 ) !void {
+    return testProgramWithFlags(allocator, dir, basename, opt_flag, &.{});
+}
+
+/// Like `testProgram` but additionally forwards `extra_build_args`
+/// (e.g. `--rts=immix`) to `rhc build`. Used by the Immix end-to-end
+/// smoke tests in `e2e_test_runner.zig` to verify the same programs
+/// produce identical output under both heap backends.
+pub fn testProgramWithFlags(
+    allocator: std.mem.Allocator,
+    comptime dir: []const u8,
+    comptime basename: []const u8,
+    opt_flag: ?[]const u8,
+    extra_build_args: []const []const u8,
+) !void {
     const props = try readProperties(allocator, dir, basename);
     defer props.deinit(allocator);
     if (props.skip) return;
@@ -272,6 +291,7 @@ pub fn testProgram(
         props.expected_stderr,
         props.xfail,
         opt_flag,
+        extra_build_args,
     );
 
     if (props.xfail) {
