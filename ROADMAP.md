@@ -505,7 +505,9 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#70](https://github.com/adinapoli/rusholme/issues/70) | Define runtime allocator interface for GC-swappable heap | [#56](https://github.com/adinapoli/rusholme/issues/56) | :yellow_circle: |
-| [#71](https://github.com/adinapoli/rusholme/issues/71) | Implement Immix block and line allocator | [#70](https://github.com/adinapoli/rusholme/issues/70) | :white_circle: |
+| [#71](https://github.com/adinapoli/rusholme/issues/71) | Implement Immix block and line allocator | [#70](https://github.com/adinapoli/rusholme/issues/70) | :yellow_circle: |
+| [#776](https://github.com/adinapoli/rusholme/issues/776) | rts: wire ImmixGc behind --rts=arena\|immix backend selector | [#71](https://github.com/adinapoli/rusholme/issues/71) | :white_circle: |
+| [#777](https://github.com/adinapoli/rusholme/issues/777) | rts: split Immix allocator into small + overflow cursors | [#71](https://github.com/adinapoli/rusholme/issues/71) | :white_circle: |
 | [#72](https://github.com/adinapoli/rusholme/issues/72) | Implement Immix mark-and-sweep collection | [#71](https://github.com/adinapoli/rusholme/issues/71) | :white_circle: |
 | [#73](https://github.com/adinapoli/rusholme/issues/73) | Implement Immix opportunistic defragmentation | [#72](https://github.com/adinapoli/rusholme/issues/72) | :white_circle: |
 | [#74](https://github.com/adinapoli/rusholme/issues/74) | Research: ASAP-style static deallocation via GRIN analysis | [#44](https://github.com/adinapoli/rusholme/issues/44) | :white_circle: |

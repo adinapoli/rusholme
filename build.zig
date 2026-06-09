@@ -483,7 +483,8 @@ pub fn build(b: *std.Build) void {
     });
     const run_compile_fail_tests = b.addRunArtifact(compile_fail_tests);
 
-    // Runtime test runner - tests LLVM-based runtime (src/rts/)
+    // Runtime test runner - integration-style tests for the LLVM-based
+    // runtime (src/rts/), exercising the public RTS API surface.
     const runtime_test_module = b.createModule(.{
         .root_source_file = b.path("tests/runtime_test_runner.zig"),
         .target = target,
@@ -494,6 +495,18 @@ pub fn build(b: *std.Build) void {
         .root_module = runtime_test_module,
     });
     const run_runtime_tests = b.addRunArtifact(runtime_tests);
+
+    // Unit-test executable rooted at src/rts/root.zig so that `test`
+    // blocks defined inside the RTS submodules themselves (heap.zig,
+    // immix.zig, node.zig, …) actually run. The runtime_test_runner
+    // above imports the RTS as a *separate* module, and Zig's test
+    // discovery only walks the test executable's own module — so
+    // submodule tests would otherwise be silently skipped.
+    const rts_unit_tests = b.addTest(.{
+        .name = "rts-unit-tests",
+        .root_module = runtime_mod,
+    });
+    const run_rts_unit_tests = b.addRunArtifact(rts_unit_tests);
 
     // End-to-end test runner — compiles .hs files with `rhc build`, runs the
     // resulting binaries, and asserts stdout against .stdout sidecar files.
@@ -619,6 +632,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_parser_tests.step);
     test_step.dependOn(&run_compile_fail_tests.step);
     test_step.dependOn(&run_runtime_tests.step);
+    test_step.dependOn(&run_rts_unit_tests.step);
     test_step.dependOn(&run_e2e_tests.step);
     test_step.dependOn(&run_prelude_tests.step);
     test_step.dependOn(&run_repl_tests.step);
