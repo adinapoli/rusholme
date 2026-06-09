@@ -8,9 +8,9 @@
 //! Every constructor node is allocated via `rts_alloc(tag, n_fields)` and
 //! uses the Zig RTS `Node` layout:
 //!
-//!   ┌─────────────┬──────────────┬────────────┬────────────────────────┐
-//!   │  tag (u64)  │ n_fields(u32)│  _pad(u32) │ field[0] … field[N-1] │
-//!   └─────────────┴──────────────┴────────────┴────────────────────────┘
+//!   ┌─────────────┬──────────────┬─────────────────┬────────────────────────┐
+//!   │  tag (u64)  │ n_fields(u32)│  gc_flags (u32) │ field[0] … field[N-1] │
+//!   └─────────────┴──────────────┴─────────────────┴────────────────────────┘
 //!
 //! The header is 16 bytes; each field slot is 8 bytes (u64).  Field values
 //! are stored as raw u64 — either a pointer cast to uintptr (for *Node
@@ -353,16 +353,18 @@ fn untagInt(builder: llvm.Builder, val: llvm.Value) llvm.Value {
 }
 
 /// Return the LLVM struct type for the unified node header:
-///   { i64 tag, i32 n_fields, i32 _pad }   (16 bytes)
+///   { i64 tag, i32 n_fields, i32 gc_flags }   (16 bytes)
 ///
 /// Used only for GEP into the tag word when loading the discriminant
 /// in Case expressions.  Field I/O uses the rts_load_field / rts_store_field
-/// RTS helpers instead of direct GEP.
+/// RTS helpers instead of direct GEP. The third word stores Immix
+/// collector metadata (see `src/rts/node.zig::Node.gc_flags`) and is
+/// never read by generated code.
 fn nodeHeaderType() llvm.Type {
     var members = [_]llvm.Type{
         llvm.i64Type(), // tag
         llvm.i32Type(), // n_fields
-        llvm.i32Type(), // _pad
+        llvm.i32Type(), // gc_flags
     };
     return c.LLVMStructType(@ptrCast(&members), 3, 0);
 }
