@@ -9,6 +9,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub const heap = @import("heap.zig");
+pub const immix = @import("immix.zig");
 pub const io_module = @import("io.zig");
 pub const eval = @import("eval.zig");
 pub const node = @import("node.zig");
@@ -39,4 +40,17 @@ comptime {
     if (builtin.target.os.tag == .wasi) {
         _ = &entry._start;
     }
+}
+
+// Pull in `test` blocks from every submodule so an `addTest` target
+// rooted at this file discovers them. Without these `refAllDecls`
+// calls Zig's test discovery only walks decls it deems live, which
+// can miss `test` blocks in modules that are imported but whose
+// public decls are not exercised by the executable itself.
+test {
+    std.testing.refAllDecls(heap);
+    std.testing.refAllDecls(immix);
+    std.testing.refAllDecls(io_module);
+    std.testing.refAllDecls(eval);
+    std.testing.refAllDecls(node);
 }
