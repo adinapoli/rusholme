@@ -2484,14 +2484,40 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
             // so these variants must never reach the Core desugarer.
             std.debug.panic("desugar: unexpected RExpr variant {s} (renamer desugaring failed)", .{@tagName(expr)});
         },
-        .Tuple => {
-            // Tuple expressions
-            // tracked in: https://github.com/adinapoli/rusholme/issues/361
-            node.* = .{ .Var = .{
-                .name = Name{ .base = "todo_tuple", .unique = .{ .value = 0 } },
-                .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
-                .span = syntheticSpan(),
-            } };
+        .Tuple => |elems| {
+            // (e1, e2, …, en) desugars to (,) e1 e2 … en — i.e. an
+            // App-chain of the appropriate tuple constructor (see
+            // `Known.Con.Tuple{2..5}`). Arity 1 is just a parenthesised
+            // expression and never reaches the renamer as a Tuple;
+            // arity 0 is the Unit constructor and is parsed separately;
+            // arities > 5 are not yet wired into the typechecker
+            // (`Known.Con.Tuple{2..5}` is the registered set).
+            // See issue #572.
+            const tuple_name = switch (elems.len) {
+                2 => Known.Con.Tuple2,
+                3 => Known.Con.Tuple3,
+                4 => Known.Con.Tuple4,
+                5 => Known.Con.Tuple5,
+                else => std.debug.panic(
+                    "desugar: tuple of arity {} is not supported (only 2..5)",
+                    .{elems.len},
+                ),
+            };
+            const tuple_ty = blk: {
+                const scheme = ctx.types.schemes.get(tuple_name.unique) orelse
+                    std.debug.panic("Missing type scheme for tuple constructor {s}", .{tuple_name.base});
+                break :blk try schemeToCore(alloc, scheme);
+            };
+            // Start from the constructor applied left-to-right.
+            var result = try alloc.create(ast_mod.Expr);
+            result.* = .{ .Var = .{ .name = tuple_name, .ty = tuple_ty, .span = syntheticSpan() } };
+            for (elems) |elem_rexpr| {
+                const elem = try desugarExpr(ctx, elem_rexpr);
+                const app = try alloc.create(ast_mod.Expr);
+                app.* = .{ .App = .{ .fn_expr = result, .arg = elem, .span = syntheticSpan() } };
+                result = app;
+            }
+            node.* = result.*;
         },
         .EnumFrom => |enum_from| {
             // [n..] → enumFrom n
