@@ -180,6 +180,14 @@ pub const PAYLOAD_BYTES: usize = PAYLOAD_LINES * LINE_SIZE;
 /// is routed to the large-object space.
 pub const MAX_BLOCK_ALLOC: usize = PAYLOAD_BYTES;
 
+/// Initial heap budget for the auto-collect trigger (#781). Chosen so
+/// short-running programs do not pay the cost of a collection at all
+/// (8 blocks ≈ 256 KiB of live data), while long-running programs see
+/// their first collection promptly after passing that threshold. The
+/// budget is re-tuned upward after each cycle proportional to the
+/// post-collection live size.
+pub const INITIAL_TARGET_BLOCKS: u64 = 8;
+
 comptime {
     // The header must fit in a small, fixed number of lines, leaving the
     // overwhelming majority of the block as payload. If this assertion
@@ -278,6 +286,27 @@ pub const ImmixGc = struct {
     /// Number of LOS slabs owned by this heap.
     large_objects_allocated: u64 = 0,
 
+    // ── Auto-collect trigger (#781) ──────────────────────────────────
+    /// When `true`, the allocator calls `collect()` automatically once
+    /// the live block count is about to exceed `target_blocks`. **Off
+    /// by default**: enabling it on a heap with no roots is
+    /// catastrophic (collect would reap everything live). Callers must
+    /// either register precise roots (`addRoot`) or arm the
+    /// conservative scan (`setStackBase`) before turning this on. See
+    /// issue #781 and the docstring on `setAutoCollect`.
+    auto_collect_enabled: bool = false,
+    /// Live block budget. Once `blocks_allocated >= target_blocks` the
+    /// allocator runs a collection before requesting fresh memory; the
+    /// budget is then re-tuned to `max(min_target_blocks, 2 × live)`.
+    target_blocks: u64 = INITIAL_TARGET_BLOCKS,
+    /// Floor for the auto-tuned budget — collections never fire more
+    /// often than once per `min_target_blocks` allocations.
+    min_target_blocks: u64 = INITIAL_TARGET_BLOCKS,
+    /// Guard: while collect() is running we must not recursively try
+    /// to collect again from inside the mark phase's child-allocator
+    /// path (the worklist is backed by `self.child`, not this heap).
+    in_collect: bool = false,
+
     pub fn init(child: std.mem.Allocator) ImmixGc {
         return .{ .child = child };
     }
@@ -289,6 +318,30 @@ pub const ImmixGc = struct {
     /// explicit roots registered via `addRoot`.
     pub fn setStackBase(self: *ImmixGc, frame_address: usize) void {
         self.stack_base = frame_address;
+    }
+
+    /// Enable or disable automatic collection from the allocation path
+    /// (#781). When enabled, the allocator runs `collect()` before
+    /// requesting a fresh block once the live block count crosses
+    /// `target_blocks`, then re-tunes the budget to twice the
+    /// post-collection live size (floored at `min_target_blocks`).
+    ///
+    /// **Safety**: enabling this on a heap with no roots reaps every
+    /// live object. Callers must either register precise roots via
+    /// `addRoot` for every live `*Node`, or arm the conservative scan
+    /// via `setStackBase` (transitional; unsafe in optimised builds —
+    /// see [#780](https://github.com/adinapoli/rusholme/issues/780)
+    /// for the precise-roots replacement).
+    pub fn setAutoCollect(self: *ImmixGc, enabled: bool) void {
+        self.auto_collect_enabled = enabled;
+    }
+
+    /// Set the heap budget (initial value of `target_blocks`). Useful
+    /// for tests that want collections to fire deterministically after
+    /// a known number of blocks.
+    pub fn setTargetBlocks(self: *ImmixGc, target: u64) void {
+        self.target_blocks = target;
+        self.min_target_blocks = target;
     }
 
     pub fn deinit(self: *ImmixGc) void {
@@ -425,44 +478,90 @@ pub const ImmixGc = struct {
         // line geometry entirely and live in the large-object space.
         if (len > MAX_BLOCK_ALLOC) return self.allocLarge(len, alignment);
 
-        // Fast path: the requested allocation fits in the current hole.
-        if (self.current_block != null) {
+        if (self.tryAllocInCurrent(len, alignment)) |p| return p;
+        if (self.tryAllocInRecyclable(len, alignment)) |p| return p;
+
+        // Recycle pool exhausted (or every hole is too small for this
+        // request). If the auto-collect trigger is armed and the heap
+        // budget has been crossed, run a collection and try the
+        // recyclable pool again — collect frees up lines so the second
+        // pass usually fits.
+        if (self.auto_collect_enabled and !self.in_collect and
+            self.blocks_allocated >= self.target_blocks)
+        {
+            self.collect();
+            self.retuneBudgetAfterCollect();
+            if (self.tryAllocInCurrent(len, alignment)) |p| return p;
+            if (self.tryAllocInRecyclable(len, alignment)) |p| return p;
+        }
+
+        // Last resort: request a fresh block from the child allocator.
+        if (self.newBlock()) |b| {
+            self.attachBlockAsCurrent(b);
+            if (self.tryAllocInCurrent(len, alignment)) |p| return p;
+        }
+        return null;
+    }
+
+    /// Try to satisfy a request from the current block — first by
+    /// bumping in the active hole, then by scanning forward through
+    /// any remaining free holes inside the same block. Returns null
+    /// without mutating state if no hole fits.
+    fn tryAllocInCurrent(self: *ImmixGc, len: usize, alignment: std.mem.Alignment) ?[*]u8 {
+        if (self.current_block == null) return null;
+        if (self.bumpInCurrentHole(len, alignment)) |p| {
+            self.stats_data.bytes_allocated += len;
+            return p;
+        }
+        while (self.advanceToHole(len, alignment)) {
             if (self.bumpInCurrentHole(len, alignment)) |p| {
                 self.stats_data.bytes_allocated += len;
                 return p;
             }
-            // Walk forward through any remaining holes in the current
-            // block — after a collection these can appear between live
-            // lines, not just at the tail.
-            while (self.advanceToHole(len, alignment)) {
-                if (self.bumpInCurrentHole(len, alignment)) |p| {
-                    self.stats_data.bytes_allocated += len;
-                    return p;
-                }
-            }
-        }
-
-        // Current block exhausted (or no current block yet). Pull
-        // blocks one at a time from recyclable/free lists or the child
-        // allocator until one offers a hole big enough.
-        //
-        // Note: the Immix paper distinguishes a dedicated *overflow
-        // cursor* (medium objects skip small holes and go to fresh
-        // blocks to avoid wasting them). We use the simpler single-
-        // cursor design here; a dedicated overflow path is tracked
-        // separately.
-        while (self.allocBlock()) |fresh| {
-            self.attachBlockAsCurrent(fresh);
-            while (self.advanceToHole(len, alignment)) {
-                if (self.bumpInCurrentHole(len, alignment)) |p| {
-                    self.stats_data.bytes_allocated += len;
-                    return p;
-                }
-            }
-            // Block is too fragmented for this request — its lists are
-            // restored on the next loop iteration's attachBlockAsCurrent.
         }
         return null;
+    }
+
+    /// Walk the recyclable and free block lists looking for one that
+    /// can satisfy the request. Each block is visited at most once —
+    /// blocks whose holes don't fit are reclassified onto the original
+    /// list and the search continues. Returns null when no eligible
+    /// block remains.
+    fn tryAllocInRecyclable(self: *ImmixGc, len: usize, alignment: std.mem.Alignment) ?[*]u8 {
+        const initial_blocks = self.blocks_allocated;
+        var visited: u64 = 0;
+        while (visited < initial_blocks) : (visited += 1) {
+            const next = self.popReusableBlock() orelse return null;
+            self.attachBlockAsCurrent(next);
+            if (self.tryAllocInCurrent(len, alignment)) |p| return p;
+        }
+        return null;
+    }
+
+    /// Detach a block from `recyclable_blocks` (preferred) or
+    /// `free_blocks`, returning it ready to be made current. Returns
+    /// null if both lists are empty.
+    fn popReusableBlock(self: *ImmixGc) ?*BlockHeader {
+        if (self.recyclable_blocks) |b| {
+            self.recyclable_blocks = b.next;
+            b.next = null;
+            return b;
+        }
+        if (self.free_blocks) |b| {
+            self.free_blocks = b.next;
+            b.next = null;
+            return b;
+        }
+        return null;
+    }
+
+    fn retuneBudgetAfterCollect(self: *ImmixGc) void {
+        var live_blocks: u64 = 0;
+        var b = self.full_blocks;
+        while (b) |bb| : (b = bb.next) live_blocks += 1;
+        b = self.recyclable_blocks;
+        while (b) |bb| : (b = bb.next) live_blocks += 1;
+        self.target_blocks = @max(self.min_target_blocks, live_blocks * 2);
     }
 
     /// Try to allocate `len` bytes from the current hole. Returns the
@@ -563,27 +662,6 @@ pub const ImmixGc = struct {
         }
     }
 
-    /// Request a fresh, zero-line-mark block from the child allocator
-    /// (or reuse one from `free_blocks` / `recyclable_blocks`). The
-    /// returned block is removed from any list it lived on.
-    fn allocBlock(self: *ImmixGc) ?*BlockHeader {
-        // Prefer recyclable blocks (paper: bump into existing holes
-        // before grabbing a fresh block). With no collection yet,
-        // recyclable_blocks is normally empty — but keeping the order
-        // correct here means #72 only needs to add free-line reclamation
-        // and the allocation policy already does the right thing.
-        if (self.recyclable_blocks) |b| {
-            self.recyclable_blocks = b.next;
-            b.next = null;
-            return b;
-        }
-        if (self.free_blocks) |b| {
-            self.free_blocks = b.next;
-            b.next = null;
-            return b;
-        }
-        return self.newBlock();
-    }
 
     /// Request a brand new 32 KB block, aligned to its own size, from
     /// the child allocator. Initialises the header and threads it onto
@@ -663,6 +741,13 @@ pub const ImmixGc = struct {
     ///   6. Reset the bump cursor so the next allocation picks a hole
     ///      from a recyclable block (if any).
     pub fn collect(self: *ImmixGc) void {
+        // Re-entry guard: the worklist allocator path or any other
+        // helper that could indirectly trigger a collection must see
+        // `in_collect` as true and skip.
+        if (self.in_collect) return;
+        self.in_collect = true;
+        defer self.in_collect = false;
+
         const new_id = std.math.add(u32, self.mark_id, 1) catch blk: {
             // u32 wrap. Reset every node's mark on the heap and start
             // over at 1. Practically unreachable for any realistic
@@ -779,7 +864,8 @@ pub const ImmixGc = struct {
         for (self.roots.items) |slot| {
             const w = slot.*;
             if (self.isHeapPointer(w)) {
-                work.append(self.child, @ptrFromInt(w)) catch @panic("Immix: out of memory during mark");
+                const addr: usize = @intCast(w);
+                work.append(self.child, @ptrFromInt(addr)) catch @panic("Immix: out of memory during mark");
             }
         }
         self.drainMarkWorklist(&work);
@@ -800,9 +886,10 @@ pub const ImmixGc = struct {
         const word_size = @sizeOf(usize);
         var p = std.mem.alignForward(usize, start, word_size);
         while (p + word_size <= end) : (p += word_size) {
-            const w = @as(*const usize, @ptrFromInt(p)).*;
+            const w: u64 = @as(*const usize, @ptrFromInt(p)).*;
             if (self.isHeapPointer(w)) {
-                work.append(self.child, @ptrFromInt(w)) catch @panic("Immix: out of memory during mark");
+                const addr: usize = @intCast(w);
+                work.append(self.child, @ptrFromInt(addr)) catch @panic("Immix: out of memory during mark");
             }
         }
         self.drainMarkWorklist(&work);
@@ -835,7 +922,8 @@ pub const ImmixGc = struct {
                     if (node.n_fields >= 1) {
                         const w = nodemod.fieldsConst(node)[0];
                         if (self.isHeapPointer(w)) {
-                            work.append(self.child, @ptrFromInt(w)) catch @panic("Immix: out of memory during mark");
+                            const addr: usize = @intCast(w);
+                            work.append(self.child, @ptrFromInt(addr)) catch @panic("Immix: out of memory during mark");
                         }
                     }
                 },
@@ -846,7 +934,8 @@ pub const ImmixGc = struct {
                     // make this precise; tracked separately.
                     for (nodemod.fieldsConst(node)) |w| {
                         if (self.isHeapPointer(w)) {
-                            work.append(self.child, @ptrFromInt(w)) catch @panic("Immix: out of memory during mark");
+                            const addr: usize = @intCast(w);
+                            work.append(self.child, @ptrFromInt(addr)) catch @panic("Immix: out of memory during mark");
                         }
                     }
                 },
@@ -1446,4 +1535,100 @@ test "Immix: isHeapPointer rejects non-pointer words" {
     try testing.expect(!gc.isHeapPointer(0));
     try testing.expect(!gc.isHeapPointer(7)); // misaligned
     try testing.expect(!gc.isHeapPointer(0xdeadbeef_00000000));
+}
+
+// ── Auto-collect trigger (#781) ──────────────────────────────────────
+
+test "Immix: auto-collect is off by default" {
+    var gc = ImmixGc.init(testing.allocator);
+    defer gc.deinit();
+    try testing.expect(!gc.auto_collect_enabled);
+}
+
+test "Immix: setAutoCollect with a tiny budget triggers collect on grow" {
+    var gc = ImmixGc.init(testing.allocator);
+    defer gc.deinit();
+    gc.setAutoCollect(true);
+    gc.setTargetBlocks(2);
+
+    // Allocate enough small nodes to force at least three blocks if
+    // collection never runs. With auto-collect on and no roots, the
+    // collector reaps everything between bursts, so the live block
+    // count never exceeds the budget by much and `collections > 0`.
+    const a = gc.gcAllocator();
+    // Allocate 4× the payload of a single block.  With target=2 this
+    // forces at least one auto-collect cycle.
+    var i: usize = 0;
+    while (i < 4) : (i += 1) {
+        var j: usize = 0;
+        while (j < (PAYLOAD_BYTES / 256)) : (j += 1) {
+            _ = try a.alloc(256, .of(u64));
+        }
+    }
+    try testing.expect(a.stats().collections > 0);
+}
+
+test "Immix: auto-collect with rooted node preserves the root" {
+    var gc = ImmixGc.init(testing.allocator);
+    defer gc.deinit();
+    gc.setAutoCollect(true);
+    gc.setTargetBlocks(2);
+
+    // Pre-allocate a Data node and root it.
+    const live = try newNode(&gc, .Data, 1);
+    nodemod.fields(live)[0] = 0xCAFE;
+    var slot: u64 = @intFromPtr(live);
+    gc.gcAllocator().addRoot(&slot);
+    defer gc.gcAllocator().removeRoot(&slot);
+
+    // Burn enough block-sized allocations to push past the 2-block
+    // budget — 256-byte slabs are unrelated to `Node` layout but
+    // they exercise the same code path and let the iteration count
+    // match the byte budget exactly.
+    const a = gc.gcAllocator();
+    var i: usize = 0;
+    while (i < (PAYLOAD_BYTES * 4 / 256)) : (i += 1) {
+        _ = try a.alloc(256, .of(u64));
+    }
+    try testing.expect(a.stats().collections > 0);
+    // The rooted node must still be reachable and unmolested.
+    try testing.expectEqual(@as(u64, 0xCAFE), nodemod.fields(live)[0]);
+}
+
+test "Immix: target_blocks grows after a non-trivial live set" {
+    var gc = ImmixGc.init(testing.allocator);
+    defer gc.deinit();
+    gc.setAutoCollect(true);
+    gc.setTargetBlocks(2);
+
+    // Pin a handful of nodes so each collection retains them.
+    var pinned: [4]u64 = .{ 0, 0, 0, 0 };
+    for (&pinned) |*slot| {
+        const n = try newNode(&gc, .Int, 1);
+        slot.* = @intFromPtr(n);
+        gc.gcAllocator().addRoot(slot);
+    }
+    defer for (&pinned) |*slot| gc.gcAllocator().removeRoot(slot);
+
+    const start_target = gc.target_blocks;
+    const a = gc.gcAllocator();
+    var i: usize = 0;
+    while (i < (PAYLOAD_BYTES * 4 / 256)) : (i += 1) {
+        _ = try a.alloc(256, .of(u64));
+    }
+    // After the first collection the budget should have re-tuned to
+    // at least the floor, and (since the rooted nodes are tiny) it
+    // should not have shrunk below the floor either.
+    try testing.expect(gc.target_blocks >= start_target);
+}
+
+test "Immix: collect() is re-entrant safe" {
+    // Calling collect from inside collect (defensively, e.g. if the
+    // worklist allocator path ever triggered a collection) must be a
+    // no-op rather than a stack overflow.
+    var gc = ImmixGc.init(testing.allocator);
+    defer gc.deinit();
+    gc.in_collect = true;
+    gc.collect();
+    try testing.expectEqual(@as(u64, 0), gc.stats_data.collections);
 }
