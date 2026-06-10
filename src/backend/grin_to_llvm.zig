@@ -378,6 +378,51 @@ fn declareRtsAlloc(module: llvm.Module) llvm.Value {
     return c.LLVMAddFunction(module, name, fn_ty);
 }
 
+// ── Inline alloc fast path (issue #798) ──────────────────────────────────
+//
+// Constants mirroring `src/rts/immix.zig`. Kept in sync with the RTS
+// side; bump both together if either changes.
+const IMMIX_BLOCK_SIZE: u64 = 32 * 1024;
+const IMMIX_LINE_SIZE: u64 = 128;
+const IMMIX_LINE_LOG2: u64 = 7; // log2(IMMIX_LINE_SIZE)
+// Maximum node size that can take the inline fast path. Multi-line
+// allocations would require marking more than one line byte; defer
+// those to the slow path (the RTS handles them correctly).
+const INLINE_ALLOC_MAX_SIZE: u64 = IMMIX_LINE_SIZE;
+// Maximum number of payload fields the inline fast path zero-inits.
+// Larger allocations defer to the slow path to keep the inline IR
+// small. The vast majority of Haskell heap nodes are well below this.
+// **Inline emission gated off pending #798 debug.** The inline IR is
+// kept in the codebase for review and a future flip, but every
+// allocation currently routes through the slow path. Programs that
+// exceed the block budget under `--rts=immix` segfault intermittently
+// with the inline path enabled (see issue #808). Until that's
+// understood the kill-switch is `0`; the rest of the infrastructure
+// (RTS cursor mirror, `publishCursor`, `reconcileCursorFromMirror`,
+// `emitAlloc` dispatch) lands as foundation.
+const INLINE_ALLOC_MAX_FIELDS: u32 = 0;
+
+/// Declare `extern usize @rts_immix_cursor`. Updated by both the RTS
+/// and by generated code's inline fast path.
+fn declareImmixCursor(module: llvm.Module) llvm.Value {
+    const name = "rts_immix_cursor";
+    if (c.LLVMGetNamedGlobal(module, name)) |existing| return existing;
+    const g = c.LLVMAddGlobal(module, llvm.i64Type(), name);
+    c.LLVMSetLinkage(g, c.LLVMExternalLinkage);
+    return g;
+}
+
+/// Declare `extern usize @rts_immix_limit`. Read-only from generated
+/// code's perspective; written by the RTS when it advances to a new
+/// hole or block.
+fn declareImmixLimit(module: llvm.Module) llvm.Value {
+    const name = "rts_immix_limit";
+    if (c.LLVMGetNamedGlobal(module, name)) |existing| return existing;
+    const g = c.LLVMAddGlobal(module, llvm.i64Type(), name);
+    c.LLVMSetLinkage(g, c.LLVMExternalLinkage);
+    return g;
+}
+
 /// Declare `rts_set_backend(value: i32) -> void`. The RTS reads this
 /// once on the first allocation to choose between `ArenaGc` and
 /// `ImmixGc`; subsequent calls with the same value are no-ops. See
@@ -852,21 +897,172 @@ pub const GrinTranslator = struct {
     }
 
     fn buildUnitNode(self: *GrinTranslator) llvm.Value {
+        const unit_tag: i64 = @intFromEnum(rts_node.Tag.Unit);
+        return self.emitAllocConst(unit_tag, 0, "unit");
+    }
+
+    /// Allocate a `Node` with the given tag and field count. Under
+    /// `--rts=immix` this emits the inline bump path (#798): load the
+    /// cursor, branch on whether the padded size fits before the
+    /// limit, take the slow path through `rts_alloc` on overflow,
+    /// otherwise commit the header (tag + n_fields + zero gc_flags),
+    /// mark the line used, and bump the cursor. Under any other
+    /// backend it falls back to the plain `rts_alloc` C call.
+    ///
+    /// `n_fields` is a compile-time constant — every call site already
+    /// has it as a Zig value, and the fast path needs it constant to
+    /// fold the padded size + per-field zero stores. `tag` is an LLVM
+    /// `i64` value, which may be a constant or a runtime select (e.g.
+    /// the boolean-boxing path emits the tag via `LLVMBuildSelect`).
+    /// The header write is just `store i64 %tag` — works for both.
+    ///
+    /// Two convenience constructors are provided below for the common
+    /// constant-tag and unit-tag cases.
+    fn emitAlloc(self: *GrinTranslator, tag_val: llvm.Value, n_fields: u32, result_name: []const u8) llvm.Value {
+        const i32_ty = llvm.i32Type();
+        const nf_val = c.LLVMConstInt(i32_ty, n_fields, 0);
+
+        // Slow-path-only conditions: arena backend (no inline cursor
+        // exists), or the allocation does not fit the inline shape
+        // (line-spanning sizes, very wide nodes).
+        const padded_size: u64 = 16 + @as(u64, n_fields) * 8;
+        const inline_eligible =
+            self.rts_backend == .immix and
+            padded_size <= INLINE_ALLOC_MAX_SIZE and
+            n_fields <= INLINE_ALLOC_MAX_FIELDS and
+            // Master kill-switch for the inline path; flip to disable
+            // emission entirely while still routing through emitAlloc.
+            INLINE_ALLOC_MAX_FIELDS > 0;
+        if (!inline_eligible) {
+            return self.emitAllocSlow(tag_val, nf_val, result_name);
+        }
+        return self.emitAllocInline(n_fields, tag_val, nf_val, padded_size, result_name);
+    }
+
+    /// Convenience wrapper for the (overwhelmingly common) case where
+    /// the tag is a Zig-side compile-time constant.
+    fn emitAllocConst(self: *GrinTranslator, tag: i64, n_fields: u32, result_name: []const u8) llvm.Value {
+        const tag_val = c.LLVMConstInt(llvm.i64Type(), @bitCast(tag), 0);
+        return self.emitAlloc(tag_val, n_fields, result_name);
+    }
+
+    /// Slow-path allocation: plain `rts_alloc` C call. Same shape the
+    /// backend used before #798.
+    fn emitAllocSlow(self: *GrinTranslator, tag_val: llvm.Value, nf_val: llvm.Value, result_name: []const u8) llvm.Value {
         const rts_alloc_fn = declareRtsAlloc(self.module);
-        const unit_tag = @intFromEnum(rts_node.Tag.Unit);
-        const unit_disc = c.LLVMConstInt(llvm.i64Type(), unit_tag, 0);
-        var alloc_args = [_]llvm.Value{
-            unit_disc,
-            c.LLVMConstInt(llvm.i32Type(), 0, 0),
-        };
+        var args = [_]llvm.Value{ tag_val, nf_val };
         return c.LLVMBuildCall2(
             self.builder,
             llvm.getFunctionType(rts_alloc_fn),
             rts_alloc_fn,
-            &alloc_args,
+            &args,
             2,
-            "unit",
+            nullTerminate(result_name).ptr,
         );
+    }
+
+    /// Inline fast path. Emits a three-block diamond at the current
+    /// builder position:
+    ///
+    ///   entry:  load cursor; add padded size; load limit; cmp.
+    ///   fast:   commit header + line mark + cursor update.
+    ///   slow:   delegate to rts_alloc.
+    ///   done:   phi the resulting node pointer.
+    ///
+    /// After the call the builder is positioned at the `done` block.
+    fn emitAllocInline(
+        self: *GrinTranslator,
+        n_fields: u32,
+        tag_val: llvm.Value,
+        nf_val: llvm.Value,
+        padded_size: u64,
+        result_name: []const u8,
+    ) llvm.Value {
+        const i8_ty = llvm.i8Type();
+        const i32_ty = llvm.i32Type();
+        const i64_ty = llvm.i64Type();
+        const ptr_ty = ptrType();
+
+        const cursor_g = declareImmixCursor(self.module);
+        const limit_g = declareImmixLimit(self.module);
+
+        // ── entry: probe cursor + limit ───────────────────────────────
+        const top = c.LLVMBuildLoad2(self.builder, i64_ty, cursor_g, "alloc.top");
+        const size_const = c.LLVMConstInt(i64_ty, padded_size, 0);
+        const end_v = c.LLVMBuildAdd(self.builder, top, size_const, "alloc.end");
+        const limit_v = c.LLVMBuildLoad2(self.builder, i64_ty, limit_g, "alloc.limit");
+        const fits = c.LLVMBuildICmp(self.builder, c.LLVMIntULE, end_v, limit_v, "alloc.fits");
+
+        const cur_func = self.current_func;
+        const fast_bb = c.LLVMAppendBasicBlock(cur_func, "alloc.fast");
+        const slow_bb = c.LLVMAppendBasicBlock(cur_func, "alloc.slow");
+        const done_bb = c.LLVMAppendBasicBlock(cur_func, "alloc.done");
+        _ = c.LLVMBuildCondBr(self.builder, fits, fast_bb, slow_bb);
+
+        // ── fast: commit ─────────────────────────────────────────────
+        llvm.positionBuilderAtEnd(self.builder, fast_bb);
+        const p_fast = c.LLVMBuildIntToPtr(self.builder, top, ptr_ty, "alloc.p_fast");
+        // tag at offset 0 (i64)
+        _ = c.LLVMBuildStore(self.builder, tag_val, p_fast);
+        // n_fields (i32) + gc_flags (i32) at offset 8 — pack into one
+        // i64 store: low 32 = n_fields, high 32 = 0 (gc_flags).
+        const header_pair: u64 = @as(u64, n_fields);
+        const header_pair_val = c.LLVMConstInt(i64_ty, header_pair, 0);
+        const hdr_addr = c.LLVMBuildAdd(self.builder, top, c.LLVMConstInt(i64_ty, 8, 0), "alloc.hdr_addr");
+        const hdr_ptr = c.LLVMBuildIntToPtr(self.builder, hdr_addr, ptr_ty, "alloc.hdr_ptr");
+        _ = c.LLVMBuildStore(self.builder, header_pair_val, hdr_ptr);
+        // Zero the field slots (offset 16 ..= 16+8*(n_fields-1)). Skip
+        // the suppressor here — callers immediately overwrite fields
+        // for ConstTagNode allocations, but partial-application call
+        // sites rely on zero-initialised tail slots. Cheaper than a
+        // memset for the n_fields ≤ INLINE_ALLOC_MAX_FIELDS case.
+        var fi: u32 = 0;
+        while (fi < n_fields) : (fi += 1) {
+            const off: u64 = 16 + @as(u64, fi) * 8;
+            const slot_addr = c.LLVMBuildAdd(self.builder, top, c.LLVMConstInt(i64_ty, off, 0), "alloc.slot_addr");
+            const slot_ptr = c.LLVMBuildIntToPtr(self.builder, slot_addr, ptr_ty, "alloc.slot_ptr");
+            _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(i64_ty, 0, 0), slot_ptr);
+        }
+        // Mark every line the allocation spans as used. Since
+        // `padded_size <= LINE_SIZE` (#798 ceiling) the allocation
+        // covers at most two lines — mark both unconditionally; a
+        // duplicate store on the same byte is harmless. `line_marks`
+        // sits at offset 0 of `BlockHeader`, so the byte address for
+        // line `i` is `block_base + i`.
+        const block_mask = c.LLVMConstInt(i64_ty, ~@as(u64, IMMIX_BLOCK_SIZE - 1), 0);
+        const block_base = c.LLVMBuildAnd(self.builder, top, block_mask, "alloc.block_base");
+        const offset_first = c.LLVMBuildSub(self.builder, top, block_base, "alloc.off_first");
+        const line_first = c.LLVMBuildLShr(self.builder, offset_first, c.LLVMConstInt(i64_ty, IMMIX_LINE_LOG2, 0), "alloc.line_first");
+        const lm_first_addr = c.LLVMBuildAdd(self.builder, block_base, line_first, "alloc.lm_first_addr");
+        const lm_first_ptr = c.LLVMBuildIntToPtr(self.builder, lm_first_addr, ptr_ty, "alloc.lm_first_ptr");
+        _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(i8_ty, 1, 0), lm_first_ptr);
+        // Second line (only different from the first when the alloc
+        // straddles a boundary). Compute via `(end - 1) >> 7`.
+        const end_inclusive = c.LLVMBuildAdd(self.builder, top, c.LLVMConstInt(i64_ty, padded_size - 1, 0), "alloc.end_inclusive");
+        const offset_last = c.LLVMBuildSub(self.builder, end_inclusive, block_base, "alloc.off_last");
+        const line_last = c.LLVMBuildLShr(self.builder, offset_last, c.LLVMConstInt(i64_ty, IMMIX_LINE_LOG2, 0), "alloc.line_last");
+        const lm_last_addr = c.LLVMBuildAdd(self.builder, block_base, line_last, "alloc.lm_last_addr");
+        const lm_last_ptr = c.LLVMBuildIntToPtr(self.builder, lm_last_addr, ptr_ty, "alloc.lm_last_ptr");
+        _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(i8_ty, 1, 0), lm_last_ptr);
+        // Publish the new cursor.
+        _ = c.LLVMBuildStore(self.builder, end_v, cursor_g);
+        _ = c.LLVMBuildBr(self.builder, done_bb);
+
+        // ── slow: defer to rts_alloc ────────────────────────────────
+        llvm.positionBuilderAtEnd(self.builder, slow_bb);
+        // Re-locate nf_val in this BB — it's already an SSA constant,
+        // LLVM tolerates cross-block constant references.
+        _ = i32_ty;
+        const p_slow = self.emitAllocSlow(tag_val, nf_val, "alloc.p_slow");
+        _ = c.LLVMBuildBr(self.builder, done_bb);
+
+        // ── done: phi ───────────────────────────────────────────────
+        llvm.positionBuilderAtEnd(self.builder, done_bb);
+        const phi = c.LLVMBuildPhi(self.builder, ptr_ty, nullTerminate(result_name).ptr);
+        var inc_vals = [_]llvm.Value{ p_fast, p_slow };
+        var inc_bbs = [_]llvm.BasicBlock{ fast_bb, slow_bb };
+        c.LLVMAddIncoming(phi, &inc_vals, &inc_bbs, 2);
+        return phi;
     }
 
     /// Translate the entire GRIN program into the LLVM module.
@@ -1528,20 +1724,8 @@ pub const GrinTranslator = struct {
                     // Nullary constructors (e.g. MkA, True, False) are
                     // translated as i64 discriminants but the callee
                     // expects a heap-allocated node it can pattern-match
-                    // on. Box into rts_alloc(tag, 0).
-                    const rts_alloc_fn = declareRtsAlloc(self.module);
-                    var alloc_args = [_]llvm.Value{
-                        llvm_args[i], // tag discriminant
-                        c.LLVMConstInt(llvm.i32Type(), 0, 0), // n_fields = 0
-                    };
-                    llvm_args[i] = c.LLVMBuildCall2(
-                        self.builder,
-                        llvm.getFunctionType(rts_alloc_fn),
-                        rts_alloc_fn,
-                        &alloc_args,
-                        2,
-                        "boxed_tag",
-                    );
+                    // on. Box via the inline-alloc fast path.
+                    llvm_args[i] = self.emitAlloc(llvm_args[i], 0, "boxed_tag");
                 } else {
                     // Plain integer literal — tag and pass through.
                     llvm_args[i] = tagInt(self.builder, llvm_args[i]);
@@ -1770,19 +1954,7 @@ pub const GrinTranslator = struct {
             const arg_kind = c.LLVMGetTypeKind(arg_ty);
             if (arg_kind == c.LLVMIntegerTypeKind) {
                 if (args[i] == .ValTag) {
-                    const rts_alloc_fn = declareRtsAlloc(self.module);
-                    var alloc_args = [_]llvm.Value{
-                        llvm_args[i],
-                        c.LLVMConstInt(llvm.i32Type(), 0, 0),
-                    };
-                    llvm_args[i] = c.LLVMBuildCall2(
-                        self.builder,
-                        llvm.getFunctionType(rts_alloc_fn),
-                        rts_alloc_fn,
-                        &alloc_args,
-                        2,
-                        "boxed_tag",
-                    );
+                    llvm_args[i] = self.emitAlloc(llvm_args[i], 0, "boxed_tag");
                 } else {
                     llvm_args[i] = tagInt(self.builder, llvm_args[i]);
                 }
@@ -2111,19 +2283,7 @@ pub const GrinTranslator = struct {
         const false_i64 = c.LLVMConstInt(llvm.i64Type(), @bitCast(false_disc), 0);
         const tag = c.LLVMBuildSelect(self.builder, cmp_i1, true_i64, false_i64, "bool_tag");
 
-        const rts_alloc_fn = declareRtsAlloc(self.module);
-        var alloc_args = [_]llvm.Value{
-            tag,
-            c.LLVMConstInt(llvm.i32Type(), 0, 0), // 0 fields
-        };
-        return c.LLVMBuildCall2(
-            self.builder,
-            llvm.getFunctionType(rts_alloc_fn),
-            rts_alloc_fn,
-            &alloc_args,
-            2,
-            "bool_node",
-        );
+        return self.emitAlloc(tag, 0, "bool_node");
     }
 
     /// Translate a GRIN string literal to an LLVM global string pointer.
@@ -2289,20 +2449,10 @@ pub const GrinTranslator = struct {
                     n_fields = 1;
                 }
 
-                // Allocate a node via rts_alloc(tag, n_fields).
-                const rts_alloc_fn = declareRtsAlloc(self.module);
-                var alloc_args = [_]llvm.Value{
-                    c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0),
-                    c.LLVMConstInt(llvm.i32Type(), n_fields, 0),
-                };
-                const node_ptr = c.LLVMBuildCall2(
-                    self.builder,
-                    llvm.getFunctionType(rts_alloc_fn),
-                    rts_alloc_fn,
-                    &alloc_args,
-                    2,
-                    nullTerminate(result_name).ptr,
-                );
+                // Allocate a node via the inline-alloc fast path (#798),
+                // falling back to `rts_alloc` for oversized / dynamic
+                // shapes.
+                const node_ptr = self.emitAllocConst(disc, n_fields, result_name);
 
                 // Write each field via rts_store_field(node, index, value_as_u64).
                 // Pointer values are cast to i64 via ptrtoint; integer values are
@@ -2357,20 +2507,8 @@ pub const GrinTranslator = struct {
                 // never reaches this arm because the desugarer dodges it
                 // via the NonRec workaround.
                 // See: https://github.com/adinapoli/rusholme/issues/747
-                const rts_alloc_fn = declareRtsAlloc(self.module);
-                const unit_tag = @intFromEnum(rts_node.Tag.Unit);
-                var alloc_args = [_]llvm.Value{
-                    c.LLVMConstInt(llvm.i64Type(), unit_tag, 0),
-                    c.LLVMConstInt(llvm.i32Type(), 1, 0),
-                };
-                const unit_ptr = c.LLVMBuildCall2(
-                    self.builder,
-                    llvm.getFunctionType(rts_alloc_fn),
-                    rts_alloc_fn,
-                    &alloc_args,
-                    2,
-                    nullTerminate(result_name).ptr,
-                );
+                const unit_tag: i64 = @intFromEnum(rts_node.Tag.Unit);
+                const unit_ptr = self.emitAllocConst(unit_tag, 1, result_name);
                 return @as(?llvm.Value, unit_ptr);
             },
             .Var => |name| return @as(?llvm.Value, try self.translateValToLlvm(.{ .Var = name })),

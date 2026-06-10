@@ -541,6 +541,10 @@ pub const ImmixGc = struct {
         self.evac_block = null;
         self.evac_cursor = 0;
         self.evac_limit = 0;
+        // Reset the inline-alloc mirror so generated code falls
+        // straight to the slow path on the next allocation (#798).
+        heap.rts_immix_cursor = 0;
+        heap.rts_immix_limit = 0;
 
         var l = self.large_objects;
         while (l) |lo| {
@@ -649,6 +653,12 @@ pub const ImmixGc = struct {
 
     fn alloc(self: *ImmixGc, len: usize, alignment: std.mem.Alignment) ?[*]u8 {
         if (len == 0) return null;
+
+        // The inline fast path (#798) bumps `heap.rts_immix_cursor`
+        // directly without telling us. Reconcile before any slow-path
+        // decision so `bumpInCurrentHole` and `advanceToHole` see the
+        // true cursor and the line marks reflect what's been bumped.
+        self.reconcileCursorFromMirror();
 
         // Objects larger than what a single block can hold bypass the
         // line geometry entirely and live in the large-object space.
@@ -803,7 +813,40 @@ pub const ImmixGc = struct {
         if (end > self.limit) return null;
         self.cursor = end;
         markLinesUsed(self.current_block.?, aligned, end);
+        self.publishCursor();
         return @ptrFromInt(aligned);
+    }
+
+    /// Mirror the in-memory cursor / limit pair to the C-ABI globals
+    /// `heap.rts_immix_cursor` / `heap.rts_immix_limit` (#798).
+    /// Generated code reads these directly to take the bump path
+    /// inline without going through `rts_alloc`.
+    inline fn publishCursor(self: *const ImmixGc) void {
+        heap.rts_immix_cursor = self.cursor;
+        heap.rts_immix_limit = self.limit;
+    }
+
+    /// Reconcile the in-memory cursor with the mirror in case the
+    /// inline fast path bumped past our last-known position since the
+    /// last slow-path entry. Called at the start of `alloc`.
+    /// Marks the lines newly occupied by the inline bumps as used so
+    /// the classifier and the next `advanceToHole` don't reclassify
+    /// them as free.
+    fn reconcileCursorFromMirror(self: *ImmixGc) void {
+        // Only safe to pull the cursor in when the limit still
+        // matches — otherwise we're looking at a stale snapshot from a
+        // previous hole. (After `collect`, both globals are reset.)
+        if (heap.rts_immix_limit != self.limit) return;
+        const old = self.cursor;
+        const fresh = heap.rts_immix_cursor;
+        if (fresh <= old) return;
+        // Mark the lines covered by inline allocations as used, so
+        // sweep classifies the block correctly and `advanceToHole`
+        // doesn't reuse this range on the next slow path.
+        if (self.current_block) |block| {
+            markLinesUsed(block, old, fresh);
+        }
+        self.cursor = fresh;
     }
 
     /// Walk forward from the current cursor looking for the next run of
@@ -841,6 +884,7 @@ pub const ImmixGc = struct {
             if (aligned + len <= hole_end) {
                 self.cursor = hole_start;
                 self.limit = hole_end;
+                self.publishCursor();
                 return true;
             }
             // Hole too small (or alignment padding pushed past it); keep
@@ -867,6 +911,7 @@ pub const ImmixGc = struct {
         const base = @intFromPtr(block);
         self.cursor = base + HEADER_BYTES;
         self.limit = base + HEADER_BYTES;
+        self.publishCursor();
     }
 
     /// Bump-allocate `len` bytes out of the overflow region. Unlike
@@ -1084,6 +1129,10 @@ pub const ImmixGc = struct {
         self.overflow_block = null;
         self.overflow_cursor = 0;
         self.overflow_limit = 0;
+        // Reset the inline-alloc mirror so generated code falls back
+        // to the slow path until a new hole is published (#798).
+        heap.rts_immix_cursor = 0;
+        heap.rts_immix_limit = 0;
 
         // Update accounting: the bytes we freed are exactly the lines
         // that were just reclaimed. Re-scan the heap to count free
