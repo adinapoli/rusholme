@@ -250,12 +250,19 @@ const SHADOW_CAP: usize = 1 << 20;
 /// `@intFromPtr(*Node)` or `0` (for slots that have been logically
 /// reserved but not yet stored — the collector treats null entries as
 /// dead roots via `isHeapPointer`).
-pub var rts_shadow_buffer: [SHADOW_CAP]u64 = [_]u64{0} ** SHADOW_CAP;
+///
+/// Exported as a C-visible symbol so the LLVM backend can address the
+/// buffer directly from generated code (#788) instead of routing
+/// every push through the `rts_shadow_push` C ABI call.
+pub export var rts_shadow_buffer: [SHADOW_CAP]u64 = [_]u64{0} ** SHADOW_CAP;
 
 /// Index of the next free slot. Read by the collector during the mark
 /// phase: every slot in `rts_shadow_buffer[0..rts_shadow_top]` is a
 /// candidate root.
-pub var rts_shadow_top: u32 = 0;
+///
+/// Exported (see `rts_shadow_buffer`) so generated code can read and
+/// bump it inline rather than going through a C call.
+pub export var rts_shadow_top: u32 = 0;
 
 /// Push `value` onto the shadow stack. Called at every `*Node` SSA
 /// definition in LLVM-generated code; `value` is `@intFromPtr(*Node)`.

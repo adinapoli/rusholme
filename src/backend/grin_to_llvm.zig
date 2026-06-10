@@ -408,15 +408,33 @@ fn declareRtsLoadField(module: llvm.Module) llvm.Value {
     return c.LLVMAddFunction(module, name, fn_ty);
 }
 
-/// Declare `rts_shadow_push(value: i64) -> void`. Called at every
-/// `*Node` SSA definition in a function that participates in precise
-/// root tracking (issue #780). The argument is `ptrtoint(node, i64)`.
-fn declareRtsShadowPush(module: llvm.Module) llvm.Value {
-    const name = "rts_shadow_push";
-    if (c.LLVMGetNamedFunction(module, name)) |existing| return existing;
-    var params = [_]llvm.Type{llvm.i64Type()};
-    const fn_ty = c.LLVMFunctionType(llvm.voidType(), &params, 1, 0);
-    return c.LLVMAddFunction(module, name, fn_ty);
+/// Capacity (in slots) of the shadow-stack buffer exposed by the RTS.
+/// Must match `SHADOW_CAP` in `src/rts/heap.zig` — keep these two
+/// in sync if either changes.
+const SHADOW_CAP: u64 = 1 << 20;
+
+/// Declare `extern [SHADOW_CAP x i64] @rts_shadow_buffer` in the
+/// module. The global is defined in `src/rts/heap.zig` and linked in
+/// from the RTS static library; here we just declare it so generated
+/// code can address it directly without going through a C call.
+/// Issue #788.
+fn declareRtsShadowBuffer(module: llvm.Module) llvm.Value {
+    const name = "rts_shadow_buffer";
+    if (c.LLVMGetNamedGlobal(module, name)) |existing| return existing;
+    const arr_ty = c.LLVMArrayType(llvm.i64Type(), @intCast(SHADOW_CAP));
+    const g = c.LLVMAddGlobal(module, arr_ty, name);
+    c.LLVMSetLinkage(g, c.LLVMExternalLinkage);
+    return g;
+}
+
+/// Declare `extern i32 @rts_shadow_top` in the module. Companion to
+/// `rts_shadow_buffer`; tracks the next free slot.
+fn declareRtsShadowTop(module: llvm.Module) llvm.Value {
+    const name = "rts_shadow_top";
+    if (c.LLVMGetNamedGlobal(module, name)) |existing| return existing;
+    const g = c.LLVMAddGlobal(module, llvm.i32Type(), name);
+    c.LLVMSetLinkage(g, c.LLVMExternalLinkage);
+    return g;
 }
 
 /// Declare `rts_shadow_save() -> i32`. Called once at the entry of any
@@ -701,21 +719,40 @@ pub const GrinTranslator = struct {
     /// disabled (arena backend, or inside one of the helper functions
     /// like `__rhc_force` that does not participate). Also no-op for
     /// non-pointer-typed values — the shadow stack only tracks `*Node`.
+    /// Emit the equivalent of `rts_shadow_push(ptrtoint(value, i64))`
+    /// inline at the current builder position (issue #788). The push
+    /// itself is five LLVM instructions — load top, GEP, store value,
+    /// add, store new top — and is fully visible to the optimiser:
+    /// SROA / GVN / LICM can hoist redundant loads of `@rts_shadow_top`
+    /// across nearby pushes, and the per-push call-ABI overhead of
+    /// going through `@rts_shadow_push` is eliminated.
+    ///
+    /// The cap check (`top < SHADOW_CAP`) is **not** emitted inline —
+    /// the static cap is 1M slots (8 MB) and any program that hits it
+    /// already has a runaway-recursion bug. Direct C-ABI callers
+    /// (tests, embedders) still go through the exported
+    /// `rts_shadow_push` which enforces the cap.
     fn rootPtr(self: *GrinTranslator, value: llvm.Value) void {
         if (!self.shadow_emit_enabled) return;
         const ty = c.LLVMTypeOf(value);
         if (c.LLVMGetTypeKind(ty) != c.LLVMPointerTypeKind) return;
-        const push_fn = declareRtsShadowPush(self.module);
-        const as_u64 = c.LLVMBuildPtrToInt(self.builder, value, llvm.i64Type(), "shadow.slot");
-        var push_args = [_]llvm.Value{as_u64};
-        _ = c.LLVMBuildCall2(
-            self.builder,
-            llvm.getFunctionType(push_fn),
-            push_fn,
-            &push_args,
-            1,
-            "",
-        );
+
+        const i32_ty = llvm.i32Type();
+        const i64_ty = llvm.i64Type();
+        const buf_ty = c.LLVMArrayType(i64_ty, @intCast(SHADOW_CAP));
+        const buf = declareRtsShadowBuffer(self.module);
+        const top_var = declareRtsShadowTop(self.module);
+
+        const top = c.LLVMBuildLoad2(self.builder, i32_ty, top_var, "shadow.top");
+        var indices = [_]llvm.Value{
+            c.LLVMConstInt(i32_ty, 0, 0),
+            top,
+        };
+        const slot = c.LLVMBuildGEP2(self.builder, buf_ty, buf, &indices, 2, "shadow.slot");
+        const as_u64 = c.LLVMBuildPtrToInt(self.builder, value, i64_ty, "shadow.val");
+        _ = c.LLVMBuildStore(self.builder, as_u64, slot);
+        const new_top = c.LLVMBuildAdd(self.builder, top, c.LLVMConstInt(i32_ty, 1, 0), "shadow.new_top");
+        _ = c.LLVMBuildStore(self.builder, new_top, top_var);
     }
 
     /// Bind `value` to GRIN unique id `uid` in `self.params` and emit a
