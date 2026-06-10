@@ -264,6 +264,26 @@ pub export var rts_shadow_buffer: [SHADOW_CAP]u64 = [_]u64{0} ** SHADOW_CAP;
 /// bump it inline rather than going through a C call.
 pub export var rts_shadow_top: u32 = 0;
 
+// ═══════════════════════════════════════════════════════════════════════
+// Immix Bump-Cursor Mirror (issue #798)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Generated code under `--rts=immix` takes the bump path inline: load
+// the current cursor, add the padded allocation size, compare against
+// the limit, and either branch to a slow-path `rts_alloc` call (hole
+// exhausted) or commit the new cursor and fall through. To make that
+// possible the cursor + limit live as known C-ABI globals.
+//
+// `ImmixGc` still owns the canonical state internally — these globals
+// are a mirror, updated on every mutation of `ImmixGc.cursor` /
+// `.limit`. Successful inline bumps write the new cursor back to the
+// mirror; `ImmixGc` reads the mirror the next time it touches its own
+// state (e.g. when scanning for the next hole). Under `--rts=arena`
+// they stay at zero — every allocation overflows the limit and the
+// slow path (the existing `rts_alloc` export) takes over transparently.
+pub export var rts_immix_cursor: usize = 0;
+pub export var rts_immix_limit: usize = 0;
+
 /// Push `value` onto the shadow stack. Called at every `*Node` SSA
 /// definition in LLVM-generated code; `value` is `@intFromPtr(*Node)`.
 /// Panics on overflow — programs that exhaust the static capacity must
