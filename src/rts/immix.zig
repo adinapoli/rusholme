@@ -245,14 +245,32 @@ pub const ImmixGc = struct {
     /// to iterate the heap regardless of current classification.
     all_blocks: ?*BlockHeader = null,
 
-    // ── Current bump region ───────────────────────────────────────────
-    /// Block currently being bumped into. `null` until the first
-    /// allocation that needs a block.
+    // ── Current bump region (small-object cursor) ─────────────────────
+    /// Block currently being bumped into for small (≤ `LINE_SIZE`)
+    /// allocations. `null` until the first allocation that needs a
+    /// block. Small objects walk through holes — including the
+    /// fragments left after a sweep — via `advanceToHole`.
     current_block: ?*BlockHeader = null,
-    /// Next byte to hand out (absolute pointer as `usize`).
+    /// Next byte to hand out for small allocations (absolute pointer
+    /// as `usize`).
     cursor: usize = 0,
-    /// One past the last byte of the current hole.
+    /// One past the last byte of the current small-cursor hole.
     limit: usize = 0,
+
+    // ── Overflow bump region (medium-object cursor, #777) ─────────────
+    /// Block currently being bumped into for medium (> `LINE_SIZE`,
+    /// ≤ block) allocations. Per Blackburn & McKinley §2 the overflow
+    /// cursor *prefers fresh blocks* — medium objects never scan for
+    /// holes inside a partially-occupied block, so the small fragments
+    /// in recyclable blocks remain available to small allocations
+    /// instead of being wasted by an oversized header. When the
+    /// overflow region is exhausted the block is reclassified
+    /// (recyclable / full) and a fresh one is requested.
+    overflow_block: ?*BlockHeader = null,
+    /// Next byte to hand out for medium allocations.
+    overflow_cursor: usize = 0,
+    /// One past the last byte of the overflow region.
+    overflow_limit: usize = 0,
 
     // ── Large object space ────────────────────────────────────────────
     large_objects: ?*LargeObject = null,
@@ -350,6 +368,9 @@ pub const ImmixGc = struct {
         self.current_block = null;
         self.cursor = 0;
         self.limit = 0;
+        self.overflow_block = null;
+        self.overflow_cursor = 0;
+        self.overflow_limit = 0;
 
         var l = self.large_objects;
         while (l) |lo| {
@@ -463,6 +484,21 @@ pub const ImmixGc = struct {
         // line geometry entirely and live in the large-object space.
         if (len > MAX_BLOCK_ALLOC) return self.allocLarge(len, alignment);
 
+        // Split the bump path by object size (#777). Small objects
+        // (≤ `LINE_SIZE`) walk through every hole, including the
+        // small fragments in recyclable blocks; medium objects bypass
+        // recyclable holes entirely and bump into a dedicated
+        // fresh-block cursor.
+        if (len <= LINE_SIZE) {
+            return self.allocSmall(len, alignment);
+        }
+        return self.allocMedium(len, alignment);
+    }
+
+    /// Small-object bump path (≤ `LINE_SIZE`). Tries the current
+    /// block, then walks the recyclable list, then triggers auto-
+    /// collect, then requests a fresh block.
+    fn allocSmall(self: *ImmixGc, len: usize, alignment: std.mem.Alignment) ?[*]u8 {
         if (self.tryAllocInCurrent(len, alignment)) |p| return p;
         if (self.tryAllocInRecyclable(len, alignment)) |p| return p;
 
@@ -484,6 +520,45 @@ pub const ImmixGc = struct {
         if (self.newBlock()) |b| {
             self.attachBlockAsCurrent(b);
             if (self.tryAllocInCurrent(len, alignment)) |p| return p;
+        }
+        return null;
+    }
+
+    /// Medium-object bump path (> `LINE_SIZE`, ≤ block). Uses a
+    /// dedicated overflow cursor that always bumps into a fresh block
+    /// — recyclable-block holes are left for small allocations even if
+    /// they would technically fit a medium object, so the recycled
+    /// space isn't sacrificed to oversized headers.
+    fn allocMedium(self: *ImmixGc, len: usize, alignment: std.mem.Alignment) ?[*]u8 {
+        if (self.bumpInOverflowHole(len, alignment)) |p| {
+            self.stats_data.bytes_allocated += len;
+            return p;
+        }
+
+        // Overflow region exhausted — file the block (its remaining
+        // small holes are still useful to `allocSmall`) and grab a
+        // fresh one.
+        self.retireOverflowBlock();
+
+        if (self.auto_collect_enabled and !self.in_collect and
+            self.blocks_allocated >= self.target_blocks)
+        {
+            self.collect();
+            self.retuneBudgetAfterCollect();
+            // Collect may have produced fresh blocks via reclassification;
+            // re-try the overflow bump on whatever's queued for us.
+            if (self.bumpInOverflowHole(len, alignment)) |p| {
+                self.stats_data.bytes_allocated += len;
+                return p;
+            }
+        }
+
+        if (self.newBlock()) |b| {
+            self.attachBlockAsOverflow(b);
+            if (self.bumpInOverflowHole(len, alignment)) |p| {
+                self.stats_data.bytes_allocated += len;
+                return p;
+            }
         }
         return null;
     }
@@ -622,6 +697,46 @@ pub const ImmixGc = struct {
         const base = @intFromPtr(block);
         self.cursor = base + HEADER_BYTES;
         self.limit = base + HEADER_BYTES;
+    }
+
+    /// Bump-allocate `len` bytes out of the overflow region. Unlike
+    /// the small cursor this never scans for additional holes inside
+    /// the same block — overflow allocations only ever consume the
+    /// contiguous tail of a fresh block, leaving recycled fragments
+    /// to the small cursor.
+    fn bumpInOverflowHole(self: *ImmixGc, len: usize, alignment: std.mem.Alignment) ?[*]u8 {
+        if (self.overflow_block == null) return null;
+        const aligned = alignment.forward(self.overflow_cursor);
+        const end = aligned + len;
+        if (end > self.overflow_limit) return null;
+        self.overflow_cursor = end;
+        markLinesUsed(self.overflow_block.?, aligned, end);
+        return @ptrFromInt(aligned);
+    }
+
+    /// Install `block` as the overflow bump target. The whole payload
+    /// is fresh, so the overflow region spans the block end-to-end.
+    /// Any previous overflow block is reclassified first so its
+    /// remaining small fragments become visible to `allocSmall`.
+    fn attachBlockAsOverflow(self: *ImmixGc, block: *BlockHeader) void {
+        self.retireOverflowBlock();
+        self.overflow_block = block;
+        const base = @intFromPtr(block);
+        self.overflow_cursor = base + HEADER_BYTES;
+        self.overflow_limit = base + BLOCK_SIZE;
+    }
+
+    /// File the current overflow block back onto a classification list
+    /// (recyclable / full / free) and reset the overflow cursor pair.
+    /// Called when the overflow region is exhausted or before the
+    /// collector rewrites every block's classification.
+    fn retireOverflowBlock(self: *ImmixGc) void {
+        if (self.overflow_block) |old| {
+            self.classifyAndFile(old);
+        }
+        self.overflow_block = null;
+        self.overflow_cursor = 0;
+        self.overflow_limit = 0;
     }
 
     fn classifyAndFile(self: *ImmixGc, block: *BlockHeader) void {
@@ -765,12 +880,17 @@ pub const ImmixGc = struct {
         // Step 5: sweep LOS.
         self.sweepLargeObjects();
 
-        // Step 6: drop the current bump region so the next allocation
-        // picks a (possibly freshly-recycled) block from
-        // `recyclable_blocks`/`free_blocks`.
+        // Step 6: drop both bump regions so the next allocation picks
+        // a (possibly freshly-recycled) block from
+        // `recyclable_blocks`/`free_blocks`. Both the small and the
+        // overflow (#777) cursors need to be reset — their blocks
+        // have just been re-filed by step 4.
         self.current_block = null;
         self.cursor = 0;
         self.limit = 0;
+        self.overflow_block = null;
+        self.overflow_cursor = 0;
+        self.overflow_limit = 0;
 
         // Update accounting: the bytes we freed are exactly the lines
         // that were just reclaimed. Re-scan the heap to count free
@@ -1571,6 +1691,68 @@ test "Immix: isHeapPointer rejects non-pointer words" {
     try testing.expect(!gc.isHeapPointer(0));
     try testing.expect(!gc.isHeapPointer(7)); // misaligned
     try testing.expect(!gc.isHeapPointer(0xdeadbeef_00000000));
+}
+
+// ── Small / overflow cursor split (#777) ─────────────────────────────
+
+test "Immix: medium allocations go to a dedicated overflow block" {
+    var gc = ImmixGc.init(testing.allocator);
+    defer gc.deinit();
+
+    // A small allocation seeds the small cursor in block A.
+    _ = try gc.gcAllocator().alloc(64, .of(u64));
+    const small_block = gc.current_block.?;
+    try testing.expect(gc.overflow_block == null);
+
+    // A medium allocation (> LINE_SIZE) must NOT bump into the
+    // small-cursor block; it grabs a fresh overflow block.
+    _ = try gc.gcAllocator().alloc(LINE_SIZE * 2, .of(u64));
+    try testing.expect(gc.overflow_block != null);
+    try testing.expect(gc.overflow_block.? != small_block);
+    try testing.expectEqual(small_block, gc.current_block.?);
+}
+
+test "Immix: small allocations stay on the small cursor when overflow is active" {
+    var gc = ImmixGc.init(testing.allocator);
+    defer gc.deinit();
+
+    // Force the overflow cursor to be initialised first.
+    _ = try gc.gcAllocator().alloc(LINE_SIZE * 3, .of(u64));
+    const overflow_block = gc.overflow_block.?;
+
+    // A subsequent small allocation must seed (or reuse) the small
+    // cursor, leaving the overflow block untouched.
+    _ = try gc.gcAllocator().alloc(48, .of(u64));
+    try testing.expect(gc.current_block != null);
+    try testing.expect(gc.current_block.? != overflow_block);
+    try testing.expectEqual(overflow_block, gc.overflow_block.?);
+}
+
+test "Immix: overflow block is retired and re-classified when exhausted" {
+    var gc = ImmixGc.init(testing.allocator);
+    defer gc.deinit();
+
+    // Fill the overflow block almost to capacity with one big
+    // allocation, then trigger an overflow that exceeds the remaining
+    // tail — the second medium allocation must request a new block.
+    const big_len = PAYLOAD_BYTES - LINE_SIZE * 2;
+    _ = try gc.gcAllocator().alloc(big_len, .of(u64));
+    const first_overflow = gc.overflow_block.?;
+
+    // Second medium allocation cannot fit in the tail; it grabs a
+    // fresh overflow block and the previous one is filed away.
+    _ = try gc.gcAllocator().alloc(LINE_SIZE * 4, .of(u64));
+    try testing.expect(gc.overflow_block.? != first_overflow);
+
+    // The retired block lives on `full_blocks` (most of its payload is
+    // marked) or `recyclable_blocks`; either way it must not be on the
+    // free list.
+    var on_free: bool = false;
+    var b = gc.free_blocks;
+    while (b) |bb| : (b = bb.next) {
+        if (bb == first_overflow) on_free = true;
+    }
+    try testing.expect(!on_free);
 }
 
 // ── Auto-collect trigger (#781) ──────────────────────────────────────
