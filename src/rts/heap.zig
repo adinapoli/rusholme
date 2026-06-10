@@ -211,6 +211,86 @@ pub const ArenaGc = struct {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
+// Shadow-Stack ABI (issue #780)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Precise root tracking for the Immix collector. The LLVM-generated
+// backend cooperates with the collector by spilling every live `*Node`
+// SSA value into a global shadow-stack buffer at the point of its
+// definition. The mark phase walks the buffer linearly and treats every
+// entry as a candidate heap root. Lifetime of each entry is bounded by a
+// `save`/`restore` pair emitted at function entry / exit, so popping
+// works in O(1) regardless of how many `*Node` values a function
+// produced.
+//
+// Conventions for the codegen contract:
+//
+//   * Each function emits `%saved = call i32 @rts_shadow_save()` as
+//     part of its entry sequence (immediately after `rts_set_backend`,
+//     before any allocation can fire).
+//   * Each `*Node` SSA value is pushed by `call void @rts_shadow_push(i64 ptrtoint(value to i64))`
+//     immediately at its definition site.
+//   * Every return is preceded by `call void @rts_shadow_restore(i32 %saved)`,
+//     which atomically pops all slots the current frame produced.
+//
+// All three entry points are no-ops if the program runs under
+// `--rts=arena`: arena has no collector, so backend codegen omits the
+// emission entirely. The runtime functions are still callable from any
+// backend and remain cheap, but skipping the emission keeps generated
+// IR lean.
+
+/// Maximum number of live `*Node` slots that may be tracked
+/// simultaneously across the entire program. Sized to comfortably hold
+/// deeply nested Haskell call stacks (1M slots × 8 bytes = 8 MB —
+/// matches the default Linux user-stack ceiling). Programs that
+/// exceed this cap need a growable buffer; tracked as a follow-up.
+const SHADOW_CAP: usize = 1 << 20;
+
+/// Backing storage for the shadow stack. Each cell holds either
+/// `@intFromPtr(*Node)` or `0` (for slots that have been logically
+/// reserved but not yet stored — the collector treats null entries as
+/// dead roots via `isHeapPointer`).
+pub var rts_shadow_buffer: [SHADOW_CAP]u64 = [_]u64{0} ** SHADOW_CAP;
+
+/// Index of the next free slot. Read by the collector during the mark
+/// phase: every slot in `rts_shadow_buffer[0..rts_shadow_top]` is a
+/// candidate root.
+pub var rts_shadow_top: u32 = 0;
+
+/// Push `value` onto the shadow stack. Called at every `*Node` SSA
+/// definition in LLVM-generated code; `value` is `@intFromPtr(*Node)`.
+/// Panics on overflow — programs that exhaust the static capacity must
+/// either bump `SHADOW_CAP` or move to a growable buffer (a follow-up
+/// optimisation, since the current capacity is generous in practice).
+pub export fn rts_shadow_push(value: u64) callconv(.c) void {
+    if (rts_shadow_top >= SHADOW_CAP) {
+        @panic("Immix: shadow-stack capacity exceeded");
+    }
+    rts_shadow_buffer[rts_shadow_top] = value;
+    rts_shadow_top += 1;
+}
+
+/// Snapshot the current shadow-stack height. Called at the entry of any
+/// function that produces `*Node` values; the returned value must be
+/// paired with a `rts_shadow_restore` before every return so the slots
+/// pushed during the call are released atomically.
+pub export fn rts_shadow_save() callconv(.c) u32 {
+    return rts_shadow_top;
+}
+
+/// Restore the shadow-stack height to a previously-saved value. All
+/// slots pushed since the matching `rts_shadow_save` become dead
+/// (logically popped). Sets the slots to `0` so the next collection
+/// does not visit stale pointers — this is cheap in practice because
+/// the released range is small (a single function's `*Node` SSAs).
+pub export fn rts_shadow_restore(saved: u32) callconv(.c) void {
+    if (saved <= rts_shadow_top) {
+        @memset(rts_shadow_buffer[saved..rts_shadow_top], 0);
+        rts_shadow_top = saved;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Global Heap State
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -237,7 +317,15 @@ const State = struct {
         if (initialized) return;
         switch (selected) {
             .arena => arena_gc = ArenaGc.init(std.heap.page_allocator),
-            .immix => immix_gc = immix.ImmixGc.init(std.heap.page_allocator),
+            .immix => {
+                immix_gc = immix.ImmixGc.init(std.heap.page_allocator);
+                // Auto-collect is now safe to enable by default: the
+                // backend emits precise shadow-stack roots at every
+                // `*Node` SSA definition (issue #780), so the collector
+                // sees every live root rather than relying on the old
+                // conservative `@frameAddress` scan.
+                immix_gc.setAutoCollect(true);
+            },
         }
         initialized = true;
     }
