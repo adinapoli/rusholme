@@ -113,11 +113,19 @@ pub const BlockState = enum(u8) {
 /// to an integer number of lines so the payload begins on a line
 /// boundary. Lines covering the header are pre-marked `used` and are
 /// never returned to the allocator.
-pub const BlockHeader = struct {
+pub const BlockHeader = extern struct {
     /// Per-line use byte. `0` = free, non-zero = used.
     /// A byte (rather than a bit) keeps the metadata trivial to update;
     /// the small space cost (256 B / 32 KB ≈ 0.78%) is acceptable for a
     /// first implementation and matches the paper's exposition.
+    ///
+    /// `extern struct` is load-bearing: the inline-alloc fast path (#798)
+    /// addresses `line_marks[i]` from LLVM IR via `block_base + i`,
+    /// which assumes this field sits at offset 0. Without `extern`,
+    /// Zig is free to reorder fields and place the `?*BlockHeader`
+    /// pointers first, which lands every inline line-mark store on top
+    /// of `all_next`/`next` and corrupts the block list within a few
+    /// allocations.
     line_marks: [LINES_PER_BLOCK]u8,
 
     /// Number of currently-free lines in this block (header lines
@@ -199,6 +207,15 @@ comptime {
     // ever trips it means the header grew and we need to reconsider the
     // metadata layout.
     std.debug.assert(HEADER_LINES <= 4);
+    // `line_marks` must live at offset 0 of `BlockHeader`. The
+    // inline-alloc fast path (#798) addresses the per-line mark byte
+    // from LLVM IR as `block_base + line_idx`, which assumes the
+    // array sits at the very start of the block. The `extern struct`
+    // declaration above guarantees this; the assertion guarantees a
+    // build failure (instead of memory corruption — see #808) if a
+    // future refactor accidentally re-orders the fields or drops
+    // `extern`.
+    std.debug.assert(@offsetOf(BlockHeader, "line_marks") == 0);
 }
 
 // ═══════════════════════════════════════════════════════════════════════

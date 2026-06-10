@@ -392,15 +392,7 @@ const INLINE_ALLOC_MAX_SIZE: u64 = IMMIX_LINE_SIZE;
 // Maximum number of payload fields the inline fast path zero-inits.
 // Larger allocations defer to the slow path to keep the inline IR
 // small. The vast majority of Haskell heap nodes are well below this.
-// **Inline emission gated off pending #798 debug.** The inline IR is
-// kept in the codebase for review and a future flip, but every
-// allocation currently routes through the slow path. Programs that
-// exceed the block budget under `--rts=immix` segfault intermittently
-// with the inline path enabled (see issue #808). Until that's
-// understood the kill-switch is `0`; the rest of the infrastructure
-// (RTS cursor mirror, `publishCursor`, `reconcileCursorFromMirror`,
-// `emitAlloc` dispatch) lands as foundation.
-const INLINE_ALLOC_MAX_FIELDS: u32 = 0;
+const INLINE_ALLOC_MAX_FIELDS: u32 = 8;
 
 /// Declare `extern usize @rts_immix_cursor`. Updated by both the RTS
 /// and by generated code's inline fast path.
@@ -929,10 +921,7 @@ pub const GrinTranslator = struct {
         const inline_eligible =
             self.rts_backend == .immix and
             padded_size <= INLINE_ALLOC_MAX_SIZE and
-            n_fields <= INLINE_ALLOC_MAX_FIELDS and
-            // Master kill-switch for the inline path; flip to disable
-            // emission entirely while still routing through emitAlloc.
-            INLINE_ALLOC_MAX_FIELDS > 0;
+            n_fields <= INLINE_ALLOC_MAX_FIELDS;
         if (!inline_eligible) {
             return self.emitAllocSlow(tag_val, nf_val, result_name);
         }
