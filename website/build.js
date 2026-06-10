@@ -248,6 +248,146 @@ function generateRecentProgressHTML(issues) {
     </div>`).join('');
 }
 
+// ── Benchmark section ─────────────────────────────────────────────────
+
+/**
+ * Read the checked-in bench/results.json (committed by hand after
+ * `scripts/bench-all.sh` runs locally). Returns null when the file
+ * is missing so build can still complete on branches that pre-date
+ * the bench scaffold.
+ */
+function loadBenchResults() {
+  const benchPath = path.join(__dirname, '../bench/results.json');
+  if (!fs.existsSync(benchPath)) return null;
+  try {
+    const data = JSON.parse(fs.readFileSync(benchPath, 'utf-8'));
+    if (!data.runs || data.runs.length === 0) return null;
+    return data;
+  } catch (err) {
+    console.warn(`   ⚠️  Failed to parse bench/results.json: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Summary cards — one per program — showing the gap to GHC as
+ * measured in the most recent committed run. Colour-coded by how
+ * close to parity we are: green ≤ 5×, amber ≤ 25×, red beyond.
+ */
+function generateBenchSummaryHTML(bench) {
+  const latest = bench.runs[bench.runs.length - 1];
+  const names = Object.keys(latest.programs).sort();
+  return names.map(name => {
+    const p = latest.programs[name];
+    const gap = p.rhc_mean_ms / p.ghc_mean_ms;
+    let badgeColour, gapColour;
+    if (gap <= 5) { badgeColour = 'bg-emerald-500/10 border-emerald-500/30'; gapColour = 'text-emerald-300'; }
+    else if (gap <= 25) { badgeColour = 'bg-amber-500/10 border-amber-500/30'; gapColour = 'text-amber-300'; }
+    else { badgeColour = 'bg-rose-500/10 border-rose-500/30'; gapColour = 'text-rose-300'; }
+    const fmt = (ms) => ms >= 100 ? ms.toFixed(0) : ms.toFixed(2);
+    return `
+    <div class="rounded-2xl border ${badgeColour} p-5 backdrop-blur">
+      <div class="flex items-baseline justify-between gap-2">
+        <h3 class="text-sm font-mono text-gray-300 truncate">${escapeHtml(name)}</h3>
+        <span class="text-xs ${gapColour} font-semibold">${gap.toFixed(1)}× slower</span>
+      </div>
+      <div class="mt-3 flex items-baseline gap-2">
+        <span class="text-2xl font-bold text-white">${fmt(p.rhc_mean_ms)}</span>
+        <span class="text-xs text-gray-400">ms — rhc</span>
+      </div>
+      <div class="mt-1 flex items-baseline gap-2">
+        <span class="text-sm font-medium text-gray-300">${fmt(p.ghc_mean_ms)}</span>
+        <span class="text-xs text-gray-500">ms — ghc</span>
+      </div>
+    </div>`;
+  }).join('\n');
+}
+
+/**
+ * One Vega-Lite chart per program. Each chart plots the rhc and ghc
+ * mean-of-runs over time (x = commit date, y = ms, log scale because
+ * the gap is wide). Spec is emitted inline and rendered client-side
+ * by vega-embed.
+ */
+function generateBenchChartsHTML(bench) {
+  // Collect every (date, program, compiler, ms) tuple across all runs.
+  const records = [];
+  for (const run of bench.runs) {
+    for (const [name, p] of Object.entries(run.programs)) {
+      records.push({ program: name, date: run.date, compiler: 'rhc', mean_ms: p.rhc_mean_ms, stddev_ms: p.rhc_stddev_ms, commit: run.commit });
+      records.push({ program: name, date: run.date, compiler: 'ghc', mean_ms: p.ghc_mean_ms, stddev_ms: p.ghc_stddev_ms, commit: run.commit });
+    }
+  }
+  const names = Array.from(new Set(records.map(r => r.program))).sort();
+
+  // Detect short histories so we can render points (not just lines)
+  // when there's only one or two samples — a single dot is friendlier
+  // than an empty grid.
+  const showPoints = bench.runs.length <= 3;
+
+  let html = '';
+  let scriptInits = '';
+
+  for (const name of names) {
+    const cellId = `bench-chart-${name.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+    const data = records.filter(r => r.program === name);
+    const spec = {
+      $schema: 'https://vega.github.io/schema/vega-lite/v5.json',
+      background: 'transparent',
+      width: 'container',
+      height: 280,
+      padding: 12,
+      data: { values: data },
+      mark: { type: 'line', point: showPoints ? { filled: true, size: 70 } : false, strokeWidth: 2.5, interpolate: 'monotone' },
+      encoding: {
+        x: {
+          field: 'date', type: 'temporal',
+          axis: { title: null, format: '%b %d', labelColor: '#9ca3af', tickColor: '#374151', domainColor: '#374151' },
+        },
+        y: {
+          field: 'mean_ms', type: 'quantitative',
+          scale: { type: 'log' },
+          axis: { title: 'ms (log)', titleColor: '#9ca3af', labelColor: '#9ca3af', tickColor: '#374151', domainColor: '#374151', gridColor: '#1f2937' },
+        },
+        color: {
+          field: 'compiler', type: 'nominal',
+          scale: { domain: ['rhc', 'ghc'], range: ['#34d399', '#f7a41d'] },
+          legend: { labelColor: '#d1d5db', titleColor: '#9ca3af', orient: 'top-right' },
+        },
+        tooltip: [
+          { field: 'compiler', type: 'nominal', title: 'compiler' },
+          { field: 'mean_ms', type: 'quantitative', title: 'mean (ms)', format: '.3f' },
+          { field: 'stddev_ms', type: 'quantitative', title: 'σ (ms)', format: '.3f' },
+          { field: 'date', type: 'temporal', title: 'when' },
+          { field: 'commit', type: 'nominal', title: 'commit' },
+        ],
+      },
+      config: {
+        view: { stroke: 'transparent' },
+        axis: { grid: true, gridColor: '#1f2937' },
+        legend: { titleFontSize: 11, labelFontSize: 11 },
+      },
+    };
+    html += `
+    <div class="bg-gray-900/60 rounded-2xl border border-gray-800 p-5">
+      <h3 class="text-sm font-mono text-gray-300 mb-3">${escapeHtml(name)}.hs</h3>
+      <div id="${cellId}" class="w-full"></div>
+    </div>`;
+    scriptInits += `\n    vegaEmbed('#${cellId}', ${JSON.stringify(spec)}, { actions: false, renderer: 'svg', theme: 'dark' });`;
+  }
+
+  // The Vega-embed calls run after DOMContentLoaded so the chart
+  // divs definitely exist. Wrap in a guard so a CDN miss does not
+  // throw a ReferenceError into other scripts.
+  html += `\n<script>
+document.addEventListener('DOMContentLoaded', function () {
+  if (typeof vegaEmbed !== 'function') return;${scriptInits}
+});
+</script>`;
+
+  return html;
+}
+
 // Main build function
 async function build() {
   console.log('🏗️  Building Rusholme website...\n');
@@ -303,6 +443,28 @@ async function build() {
     console.log('   ⚠️  No placeholder found in template.html');
   }
   
+  // Benchmark section (read bench/results.json checked into the repo).
+  console.log('📊 Generating benchmark charts...');
+  const bench = loadBenchResults();
+  if (bench && bench.runs.length > 0) {
+    const summaryHTML = generateBenchSummaryHTML(bench);
+    const chartsHTML = generateBenchChartsHTML(bench);
+
+    const summaryPlaceholder = '<!-- BENCH_SUMMARY_PLACEHOLDER -->';
+    if (html.includes(summaryPlaceholder)) {
+      html = html.replace(summaryPlaceholder, summaryHTML);
+    }
+
+    const chartsPlaceholder = '<!-- BENCH_CHARTS_PLACEHOLDER -->';
+    if (html.includes(chartsPlaceholder)) {
+      html = html.replace(chartsPlaceholder, chartsHTML);
+    }
+
+    console.log(`   ✓ Rendered ${Object.keys(bench.runs[bench.runs.length - 1].programs).length} bench charts (${bench.runs.length} run${bench.runs.length === 1 ? '' : 's'} of history)`);
+  } else {
+    console.log('   ⚠️  No bench/results.json found — skipping benchmarks section');
+  }
+
   // Write output
   const outputPath = path.join(__dirname, 'index.html');
   fs.writeFileSync(outputPath, html, 'utf-8');

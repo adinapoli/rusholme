@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "runs": [
+    {
+      "commit": "ca462c5a92d1468ffeeee4e1204c07b054c04de3",
+      "date": "2026-06-10T12:14:16Z",
+      "host": {
+        "os": "Linux 7.0.0-1-cachyos",
+        "cpu_model": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M",
+        "ghc_version": "9.10.3"
+      },
+      "opt_level": 2,
+      "runs": 7,
+      "programs": {
+        "build_list": {
+          "rhc_mean_ms": 13.01813142857143,
+          "rhc_stddev_ms": 2.1852584512554314,
+          "ghc_mean_ms": 1.184829142857143,
+          "ghc_stddev_ms": 0.09418465000099285
+        },
+        "fib_rec": {
+          "rhc_mean_ms": 2070.4914804285713,
+          "rhc_stddev_ms": 73.22321273888966,
+          "ghc_mean_ms": 5.965808,
+          "ghc_stddev_ms": 0.29906989041693904
+        },
+        "sum_to": {
+          "rhc_mean_ms": 30.262424428571432,
+          "rhc_stddev_ms": 5.377462249860395,
+          "ghc_mean_ms": 1.0477094285714288,
+          "ghc_stddev_ms": 0.22267424506429204
+        },
+        "tree_sum": {
+          "rhc_mean_ms": 38.53756028571429,
+          "rhc_stddev_ms": 7.6263978916186606,
+          "ghc_mean_ms": 1.9472945714285714,
+          "ghc_stddev_ms": 0.21492086189793763
+        }
+      }
+    }
+  ]
+}
