@@ -279,12 +279,22 @@ function generateBenchSummaryHTML(bench) {
   const names = Object.keys(latest.programs).sort();
   return names.map(name => {
     const p = latest.programs[name];
-    const gap = p.rhc_mean_ms / p.ghc_mean_ms;
+    // Use the fastest rhc backend for the gap-to-GHC summary.
+    const rhc_best_ms = (typeof p.rhc_immix_mean_ms === 'number')
+      ? Math.min(p.rhc_mean_ms, p.rhc_immix_mean_ms)
+      : p.rhc_mean_ms;
+    const gap = rhc_best_ms / p.ghc_mean_ms;
     let badgeColour, gapColour;
     if (gap <= 5) { badgeColour = 'bg-emerald-500/10 border-emerald-500/30'; gapColour = 'text-emerald-300'; }
     else if (gap <= 25) { badgeColour = 'bg-amber-500/10 border-amber-500/30'; gapColour = 'text-amber-300'; }
     else { badgeColour = 'bg-rose-500/10 border-rose-500/30'; gapColour = 'text-rose-300'; }
     const fmt = (ms) => ms >= 100 ? ms.toFixed(0) : ms.toFixed(2);
+    const immixLine = (typeof p.rhc_immix_mean_ms === 'number')
+      ? `<div class="mt-1 flex items-baseline gap-2">
+           <span class="text-sm font-medium text-blue-300">${fmt(p.rhc_immix_mean_ms)}</span>
+           <span class="text-xs text-gray-500">ms — rhc immix</span>
+         </div>`
+      : '';
     return `
     <div class="rounded-2xl border ${badgeColour} p-5 backdrop-blur">
       <div class="flex items-baseline justify-between gap-2">
@@ -293,8 +303,9 @@ function generateBenchSummaryHTML(bench) {
       </div>
       <div class="mt-3 flex items-baseline gap-2">
         <span class="text-2xl font-bold text-white">${fmt(p.rhc_mean_ms)}</span>
-        <span class="text-xs text-gray-400">ms — rhc</span>
+        <span class="text-xs text-gray-400">ms — rhc arena</span>
       </div>
+      ${immixLine}
       <div class="mt-1 flex items-baseline gap-2">
         <span class="text-sm font-medium text-gray-300">${fmt(p.ghc_mean_ms)}</span>
         <span class="text-xs text-gray-500">ms — ghc</span>
@@ -320,12 +331,23 @@ function generateBenchChartsHTML(bench) {
   for (const run of bench.runs) {
     for (const [name, p] of Object.entries(run.programs)) {
       records.push({
-        program: name, date: run.date, compiler: 'rhc',
+        program: name, date: run.date, compiler: 'rhc (arena)',
         mean_ms: p.rhc_mean_ms,
         lo_ms: Math.max(0.001, p.rhc_mean_ms - p.rhc_stddev_ms),
         hi_ms: p.rhc_mean_ms + p.rhc_stddev_ms,
         stddev_ms: p.rhc_stddev_ms, commit: run.commit,
       });
+      // The immix series is only recorded by post-#798 runs. Older
+      // entries skip it; older charts simply lack that line.
+      if (typeof p.rhc_immix_mean_ms === 'number') {
+        records.push({
+          program: name, date: run.date, compiler: 'rhc (immix)',
+          mean_ms: p.rhc_immix_mean_ms,
+          lo_ms: Math.max(0.001, p.rhc_immix_mean_ms - p.rhc_immix_stddev_ms),
+          hi_ms: p.rhc_immix_mean_ms + p.rhc_immix_stddev_ms,
+          stddev_ms: p.rhc_immix_stddev_ms, commit: run.commit,
+        });
+      }
       records.push({
         program: name, date: run.date, compiler: 'ghc',
         mean_ms: p.ghc_mean_ms,
@@ -357,7 +379,10 @@ function generateBenchChartsHTML(bench) {
         },
         color: {
           field: 'compiler', type: 'nominal',
-          scale: { domain: ['rhc', 'ghc'], range: ['#34d399', '#f7a41d'] },
+          scale: {
+            domain: ['rhc (arena)', 'rhc (immix)', 'ghc'],
+            range: ['#34d399', '#60a5fa', '#f7a41d'],
+          },
           legend: { labelColor: '#d1d5db', titleColor: '#9ca3af', orient: 'top-right', symbolType: 'circle' },
         },
       },

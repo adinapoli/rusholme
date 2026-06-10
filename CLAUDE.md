@@ -258,9 +258,12 @@ nix develop --command bash -c '
 
 `bench-all.sh`:
 
-1. Builds every `bench/*.hs` with both `rhc -O2` and `ghc -O2`.
-2. Diff-checks the two binaries' stdouts (aborts on divergence).
-3. Times both under `hyperfine` (7 runs, 3 warmups by default).
+1. Builds every `bench/*.hs` three times: `rhc -O2` (arena RTS),
+   `rhc -O2 --rts=immix` (Immix RTS), and `ghc -O2`.
+2. Diff-checks all three binaries' stdouts against the GHC reference
+   (aborts on divergence — that's a correctness regression, not a
+   perf one, and must be fixed before any timing run is meaningful).
+3. Times all three under `hyperfine` (7 runs, 3 warmups by default).
 4. Appends a new entry to `bench/results.json` with the current
    commit SHA, host CPU model, GHC version, and per-program mean +
    standard deviation in milliseconds.
