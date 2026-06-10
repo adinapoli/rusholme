@@ -222,7 +222,74 @@ The only acceptable reason to skip filing a follow-up issue is if the shortcomin
 is already tracked by an existing open issue. In that case, add a cross-reference
 comment in the code pointing to that issue number.
 
-## 6. Submit for Review
+## 6. Refresh Benchmarks (before opening a PR)
+
+Rusholme tracks its end-to-end performance against GHC over time. The
+benchmark suite lives in `bench/`, the results live in
+`bench/results.json`, and the website at `/bench/` renders the
+JSON as Vega-Lite time-series charts. **Every PR that could plausibly
+move performance** (compiler, GRIN, backend, RTS, Prelude) must
+re-run the suite locally and commit a fresh entry.
+
+### What "plausibly moves performance" means
+
+Run the benchmarks if your change touches any of:
+
+- `src/backend/`, `src/grin/`, `src/core/`, `src/typecheck/`,
+  `src/desugar/`, `src/parser/`
+- `src/rts/`, `lib/Prelude.hs`
+- `bench/` itself (a new bench program counts)
+
+Skip the benchmarks (and explain why in the PR) when your change is
+documentation-only, test-only, or strictly mechanical (renames, comment
+fixes, ROADMAP updates).
+
+### How to run
+
+From the repo root, with the dev shell active and `ghc` on `PATH`:
+
+```bash
+nix develop --command bash -c '
+  export PATH="$HOME/.ghcup/bin:$PATH"
+  zig build
+  ./scripts/bench-all.sh -n 7 -w 3
+'
+```
+
+`bench-all.sh`:
+
+1. Builds every `bench/*.hs` with both `rhc -O2` and `ghc -O2`.
+2. Diff-checks the two binaries' stdouts (aborts on divergence).
+3. Times both under `hyperfine` (7 runs, 3 warmups by default).
+4. Appends a new entry to `bench/results.json` with the current
+   commit SHA, host CPU model, GHC version, and per-program mean +
+   standard deviation in milliseconds.
+
+### Review and commit
+
+- Read the diff of `bench/results.json` before committing. A surprise
+  regression that lines up with your changes is a real signal — chase
+  it before opening the PR.
+- Stage and commit the JSON alongside the rest of the work:
+
+```bash
+git add bench/results.json
+git commit -m "#<NUMBER>: refresh bench results"
+```
+
+- The website re-renders on every push to `main` and picks up the
+  new data points automatically — no extra deploy step.
+
+### Adding a new benchmark
+
+- Drop a `.hs` file into `bench/` whose `main` writes a single line
+  to stdout.
+- Add a row to `bench/README.md` describing the perf surface the
+  program exercises.
+- Re-run `bench-all.sh` so the new program appears in
+  `bench/results.json` from day one.
+
+## 7. Submit for Review
 
 ### Commit and Push
 
@@ -270,7 +337,7 @@ git commit -m "#<NUMBER>: Update roadmap status to in-review"
 git push origin llm-agent/issue-<NUMBER>
 ```
 
-## 7. Status Legend (ROADMAP.md)
+## 8. Status Legend (ROADMAP.md)
 
 | Emoji | Meaning |
 |-------|---------|
@@ -279,7 +346,7 @@ git push origin llm-agent/issue-<NUMBER>
 | :yellow_circle: | In review (PR open) |
 | :green_circle: | Done (PR merged) |
 
-## 8. Research Issues
+## 9. Research Issues
 
 Some issues are `type:research` — their deliverable is a written document, not code.
 
@@ -290,7 +357,7 @@ Some issues are `type:research` — their deliverable is a written document, not
 4. Downstream implementation issues depend on the research decision — they cannot start
    until the research PR is merged.
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 - **Verify that issue deliverables are architecturally coherent before writing
   any code.** GitHub issues are written by humans (and LLMs) and can contain
