@@ -304,26 +304,38 @@ function generateBenchSummaryHTML(bench) {
 }
 
 /**
- * One Vega-Lite chart per program. Each chart plots the rhc and ghc
- * mean-of-runs over time (x = commit date, y = ms, log scale because
- * the gap is wide). Spec is emitted inline and rendered client-side
- * by vega-embed.
+ * One Vega-Lite chart per program. Each chart shows the rhc vs ghc
+ * mean execution time over time, with a shaded ±σ band so a single
+ * run already plots something visible (Vega-Lite renders the band
+ * as a rectangle around the point). When the history grows the
+ * line + band combination becomes a proper trend line.
+ *
+ * Spec is emitted inline and rendered client-side by vega-embed.
  */
 function generateBenchChartsHTML(bench) {
   // Collect every (date, program, compiler, ms) tuple across all runs.
+  // Also pre-compute the stddev band edges so Vega-Lite doesn't need
+  // a calculate transform.
   const records = [];
   for (const run of bench.runs) {
     for (const [name, p] of Object.entries(run.programs)) {
-      records.push({ program: name, date: run.date, compiler: 'rhc', mean_ms: p.rhc_mean_ms, stddev_ms: p.rhc_stddev_ms, commit: run.commit });
-      records.push({ program: name, date: run.date, compiler: 'ghc', mean_ms: p.ghc_mean_ms, stddev_ms: p.ghc_stddev_ms, commit: run.commit });
+      records.push({
+        program: name, date: run.date, compiler: 'rhc',
+        mean_ms: p.rhc_mean_ms,
+        lo_ms: Math.max(0.001, p.rhc_mean_ms - p.rhc_stddev_ms),
+        hi_ms: p.rhc_mean_ms + p.rhc_stddev_ms,
+        stddev_ms: p.rhc_stddev_ms, commit: run.commit,
+      });
+      records.push({
+        program: name, date: run.date, compiler: 'ghc',
+        mean_ms: p.ghc_mean_ms,
+        lo_ms: Math.max(0.001, p.ghc_mean_ms - p.ghc_stddev_ms),
+        hi_ms: p.ghc_mean_ms + p.ghc_stddev_ms,
+        stddev_ms: p.ghc_stddev_ms, commit: run.commit,
+      });
     }
   }
   const names = Array.from(new Set(records.map(r => r.program))).sort();
-
-  // Detect short histories so we can render points (not just lines)
-  // when there's only one or two samples — a single dot is friendlier
-  // than an empty grid.
-  const showPoints = bench.runs.length <= 3;
 
   let html = '';
   let scriptInits = '';
@@ -336,53 +348,84 @@ function generateBenchChartsHTML(bench) {
       background: 'transparent',
       width: 'container',
       height: 280,
-      padding: 12,
+      padding: { left: 12, right: 12, top: 12, bottom: 24 },
       data: { values: data },
-      mark: { type: 'line', point: showPoints ? { filled: true, size: 70 } : false, strokeWidth: 2.5, interpolate: 'monotone' },
       encoding: {
         x: {
           field: 'date', type: 'temporal',
           axis: { title: null, format: '%b %d', labelColor: '#9ca3af', tickColor: '#374151', domainColor: '#374151' },
         },
-        y: {
-          field: 'mean_ms', type: 'quantitative',
-          scale: { type: 'log' },
-          axis: { title: 'ms (log)', titleColor: '#9ca3af', labelColor: '#9ca3af', tickColor: '#374151', domainColor: '#374151', gridColor: '#1f2937' },
-        },
         color: {
           field: 'compiler', type: 'nominal',
           scale: { domain: ['rhc', 'ghc'], range: ['#34d399', '#f7a41d'] },
-          legend: { labelColor: '#d1d5db', titleColor: '#9ca3af', orient: 'top-right' },
+          legend: { labelColor: '#d1d5db', titleColor: '#9ca3af', orient: 'top-right', symbolType: 'circle' },
         },
-        tooltip: [
-          { field: 'compiler', type: 'nominal', title: 'compiler' },
-          { field: 'mean_ms', type: 'quantitative', title: 'mean (ms)', format: '.3f' },
-          { field: 'stddev_ms', type: 'quantitative', title: 'σ (ms)', format: '.3f' },
-          { field: 'date', type: 'temporal', title: 'when' },
-          { field: 'commit', type: 'nominal', title: 'commit' },
-        ],
       },
+      layer: [
+        // ±σ band — Vega-Lite renders this as a vertical rule per
+        // sample, so a single run already shows something useful
+        // (a coloured tick on each compiler's mean).
+        {
+          mark: { type: 'rule', strokeWidth: 6, opacity: 0.18, strokeCap: 'round' },
+          encoding: {
+            y:  { field: 'lo_ms', type: 'quantitative', scale: { type: 'log' }, axis: null },
+            y2: { field: 'hi_ms' },
+          },
+        },
+        // Mean — both the connecting line (for multi-run histories)
+        // and the marker dots (so a 1-sample history is not blank).
+        {
+          mark: { type: 'line', strokeWidth: 2.5, interpolate: 'monotone' },
+          encoding: {
+            y: {
+              field: 'mean_ms', type: 'quantitative',
+              scale: { type: 'log', nice: true, zero: false },
+              axis: { title: 'mean (ms, log)', titleColor: '#9ca3af', labelColor: '#9ca3af', tickColor: '#374151', domainColor: '#374151', gridColor: '#1f2937' },
+            },
+          },
+        },
+        {
+          mark: { type: 'point', filled: true, size: 80, opacity: 1 },
+          encoding: {
+            y: { field: 'mean_ms', type: 'quantitative', scale: { type: 'log' }, axis: null },
+            tooltip: [
+              { field: 'compiler', type: 'nominal', title: 'compiler' },
+              { field: 'mean_ms', type: 'quantitative', title: 'mean (ms)', format: '.3f' },
+              { field: 'stddev_ms', type: 'quantitative', title: 'σ (ms)', format: '.3f' },
+              { field: 'date', type: 'temporal', title: 'when' },
+              { field: 'commit', type: 'nominal', title: 'commit' },
+            ],
+          },
+        },
+      ],
       config: {
         view: { stroke: 'transparent' },
-        axis: { grid: true, gridColor: '#1f2937' },
+        axis: { grid: true, gridColor: '#1f2937', labelFont: 'ui-sans-serif', titleFont: 'ui-sans-serif' },
         legend: { titleFontSize: 11, labelFontSize: 11 },
       },
     };
     html += `
     <div class="bg-gray-900/60 rounded-2xl border border-gray-800 p-5">
       <h3 class="text-sm font-mono text-gray-300 mb-3">${escapeHtml(name)}.hs</h3>
-      <div id="${cellId}" class="w-full"></div>
+      <div id="${cellId}" class="w-full" style="min-height: 280px;"></div>
     </div>`;
-    scriptInits += `\n    vegaEmbed('#${cellId}', ${JSON.stringify(spec)}, { actions: false, renderer: 'svg', theme: 'dark' });`;
+    scriptInits += `\n    vegaEmbed('#${cellId}', ${JSON.stringify(spec)}, { actions: false, renderer: 'svg' }).catch(function (e) { console.error('vega-embed failed for ${cellId}:', e); });`;
   }
 
   // The Vega-embed calls run after DOMContentLoaded so the chart
   // divs definitely exist. Wrap in a guard so a CDN miss does not
   // throw a ReferenceError into other scripts.
   html += `\n<script>
-document.addEventListener('DOMContentLoaded', function () {
-  if (typeof vegaEmbed !== 'function') return;${scriptInits}
-});
+(function () {
+  function init() {
+    if (typeof vegaEmbed !== 'function') { console.error('vega-embed not loaded'); return; }${scriptInits}
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
 </script>`;
 
   return html;
