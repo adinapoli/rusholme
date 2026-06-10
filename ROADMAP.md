@@ -521,6 +521,10 @@ Previous issues #58–#61 (hardcoded Prelude stubs) are closed as superseded —
 | [#72](https://github.com/adinapoli/rusholme/issues/72) | Implement Immix mark-and-sweep collection | [#71](https://github.com/adinapoli/rusholme/issues/71) | :green_circle: |
 | [#779](https://github.com/adinapoli/rusholme/issues/779) | rts: per-constructor pointer-mask tables for precise GC tracing | [#72](https://github.com/adinapoli/rusholme/issues/72) | :white_circle: |
 | [#780](https://github.com/adinapoli/rusholme/issues/780) | backend: shadow-stack ABI for precise GC roots | [#72](https://github.com/adinapoli/rusholme/issues/72) | :green_circle: |
+| [#787](https://github.com/adinapoli/rusholme/issues/787) | rts: growable shadow-stack buffer (replace fixed 8 MB cap) | [#780](https://github.com/adinapoli/rusholme/issues/780) | :white_circle: |
+| [#788](https://github.com/adinapoli/rusholme/issues/788) | backend: inline rts_shadow_push in LLVM IR instead of calling export fn | [#780](https://github.com/adinapoli/rusholme/issues/780) | :white_circle: |
+| [#789](https://github.com/adinapoli/rusholme/issues/789) | backend: emit shadow-stack tracking in __rhc_force and __rhc_apply helpers | [#780](https://github.com/adinapoli/rusholme/issues/780) | :white_circle: |
+| [#790](https://github.com/adinapoli/rusholme/issues/790) | backend: per-*Node liveness analysis to avoid shadow-stack over-rooting | [#780](https://github.com/adinapoli/rusholme/issues/780) | :white_circle: |
 | [#781](https://github.com/adinapoli/rusholme/issues/781) | rts: auto-trigger collection from the allocator based on a heap budget | [#72](https://github.com/adinapoli/rusholme/issues/72) | :green_circle: |
 | [#73](https://github.com/adinapoli/rusholme/issues/73) | Implement Immix opportunistic defragmentation | [#72](https://github.com/adinapoli/rusholme/issues/72) | :white_circle: |
 | [#74](https://github.com/adinapoli/rusholme/issues/74) | Research: ASAP-style static deallocation via GRIN analysis | [#44](https://github.com/adinapoli/rusholme/issues/44) | :white_circle: |
