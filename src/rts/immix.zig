@@ -138,6 +138,15 @@ pub const BlockHeader = struct {
     /// of classification.
     all_next: ?*BlockHeader,
 
+    /// Evacuation-candidate flag for the current collection cycle
+    /// (#73). Set during the pre-mark heuristic and cleared at the
+    /// end of `collect`. When true, every reachable object inside
+    /// this block is copied into a fresh destination block during
+    /// marking and the source slot is rewritten with a forwarding
+    /// pointer (`FORWARDED_BIT` set in `gc_flags`, target in
+    /// `field[0]`).
+    is_evac_candidate: bool = false,
+
     pub fn payloadStart(self: *BlockHeader) [*]u8 {
         const base: [*]u8 = @ptrCast(self);
         return base + HEADER_BYTES;
@@ -190,6 +199,48 @@ comptime {
     // ever trips it means the header grew and we need to reconsider the
     // metadata layout.
     std.debug.assert(HEADER_LINES <= 4);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Forwarding-Pointer Encoding (issue #73)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// When `collect()` evacuates an object out of a fragmented source
+// block, the source slot is rewritten with a forwarding pointer so
+// references to the old address can be patched up before the source
+// block is reclaimed. The encoding reuses `Node.gc_flags`:
+//
+//   * `gc_flags & FORWARDED_BIT` is set iff the object has been
+//     evacuated in the current cycle.
+//   * The new address lives in `field[0]` — `n_fields` is always
+//     ≥ 1 for any evacuable object (the smallest allocations the RTS
+//     emits already carry a padded slot for the same `Ind`-update
+//     trick — see the `0-field F-tag thunk` test in `node.zig`).
+//
+// The cycle counter (`mark_id`) lives in the low 31 bits of
+// `gc_flags`; the forwarded bit is reset at the start of every cycle
+// before any object is touched, so a forwarded node from cycle N + 1
+// cannot be confused with a marked node from cycle N.
+
+/// High bit of `Node.gc_flags`. Set ⇔ the object has been evacuated
+/// during the current collection cycle.
+pub const FORWARDED_BIT: u32 = 0x8000_0000;
+
+inline fn isForwarded(n: *const Node) bool {
+    return (n.gc_flags & FORWARDED_BIT) != 0;
+}
+
+inline fn forwardedTarget(n: *const Node) *Node {
+    std.debug.assert(isForwarded(n));
+    std.debug.assert(n.n_fields >= 1);
+    const addr: usize = @intCast(nodemod.fieldsConst(n)[0]);
+    return @ptrFromInt(addr);
+}
+
+inline fn setForwarded(src: *Node, dest: *Node) void {
+    std.debug.assert(src.n_fields >= 1);
+    src.gc_flags = FORWARDED_BIT;
+    nodemod.fields(src)[0] = @intFromPtr(dest);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -330,6 +381,38 @@ pub const ImmixGc = struct {
     /// One past the last byte of the overflow region.
     overflow_limit: usize = 0,
 
+    // ── Evacuation bump region (#73) ──────────────────────────────────
+    /// Destination block for objects evacuated out of fragmented
+    /// source blocks during a defragmentation cycle. Stays `null`
+    /// outside the mark phase; populated lazily on first evacuation.
+    /// Kept separate from the mutator's small-object cursor so the
+    /// destination region is always known-clean.
+    evac_block: ?*BlockHeader = null,
+    evac_cursor: usize = 0,
+    evac_limit: usize = 0,
+
+    /// Number of objects evacuated in the current cycle. Cleared at
+    /// the start of every `collect()`; observable via `lastEvacCount`
+    /// for tests and future bench stats.
+    evac_count_this_cycle: u32 = 0,
+
+    /// Opportunistic defragmentation toggle (#73). When `true`,
+    /// `collect()` picks the most-fragmented blocks as evacuation
+    /// sources, copies their live objects into fresh destination
+    /// blocks, and rewrites references via a fix-up pass. Off by
+    /// default so unit tests that do not opt in stay deterministic;
+    /// the global heap (`heap.gcAllocator()`) flips it on alongside
+    /// auto-collect once the GC track is fully wired.
+    defrag_enabled: bool = false,
+
+    /// Fragmentation threshold: a block is selected as an evacuation
+    /// source only if its `free_lines` (carried over from the
+    /// previous cycle) is at least this many lines. Defaults to half
+    /// the payload; the Immix paper uses a quarter, but a stricter
+    /// threshold keeps the per-cycle copy cost down until benches
+    /// say otherwise.
+    defrag_min_free_lines: u16 = @intCast(PAYLOAD_LINES / 2),
+
     // ── Large object space ────────────────────────────────────────────
     large_objects: ?*LargeObject = null,
 
@@ -405,6 +488,32 @@ pub const ImmixGc = struct {
         self.min_target_blocks = target;
     }
 
+    /// Enable or disable opportunistic defragmentation (#73). When
+    /// on, every `collect()` picks the most-fragmented blocks as
+    /// evacuation sources, copies their live objects into fresh
+    /// destination blocks, and rewrites references via a fix-up
+    /// pass. Safe by construction only when the per-constructor
+    /// pointer-mask table (#779) is populated — false pointers in
+    /// scalar slots would otherwise be rewritten as if they were
+    /// forwarded targets and corrupt the value.
+    pub fn setOpportunisticDefrag(self: *ImmixGc, enabled: bool) void {
+        self.defrag_enabled = enabled;
+    }
+
+    /// Override the fragmentation threshold (number of free lines a
+    /// block must carry into the cycle before becoming an evacuation
+    /// candidate). Mostly useful for tests; production callers can
+    /// stick with the default.
+    pub fn setDefragMinFreeLines(self: *ImmixGc, lines: u16) void {
+        self.defrag_min_free_lines = lines;
+    }
+
+    /// Number of objects evacuated during the most recent cycle.
+    /// Useful for tests and bench reporting.
+    pub fn lastEvacCount(self: *const ImmixGc) u32 {
+        return self.evac_count_this_cycle;
+    }
+
     pub fn deinit(self: *ImmixGc) void {
         // Walk the master list to return every block, regardless of
         // which classification list it currently lives on. The block
@@ -429,6 +538,9 @@ pub const ImmixGc = struct {
         self.overflow_block = null;
         self.overflow_cursor = 0;
         self.overflow_limit = 0;
+        self.evac_block = null;
+        self.evac_cursor = 0;
+        self.evac_limit = 0;
 
         var l = self.large_objects;
         while (l) |lo| {
@@ -915,14 +1027,36 @@ pub const ImmixGc = struct {
         };
         self.mark_id = new_id;
 
-        // Step 2: clear payload line marks.
+        // Step 2: clear payload line marks and per-cycle evacuation
+        // bookkeeping. The is_evac_candidate flag is reset uniformly
+        // so the heuristic below sees a clean slate every cycle.
+        self.evac_count_this_cycle = 0;
         var b = self.all_blocks;
         while (b) |block| : (b = block.all_next) {
             for (block.line_marks[HEADER_LINES..]) |*m| m.* = 0;
+            block.is_evac_candidate = false;
         }
 
-        // Step 3: mark.
+        // Step 2b: defrag pre-pass (#73). When the opportunistic
+        // defrag toggle is on, mark every block whose
+        // previous-cycle `free_lines` crosses the configured
+        // threshold as an evacuation source. Live objects inside
+        // those blocks get copied during `drainMarkWorklist`.
+        if (self.defrag_enabled) {
+            self.selectEvacuationCandidates();
+        }
+
+        // Step 3: mark (with evacuation if defrag is armed).
         self.markFromRoots();
+
+        // Step 3b: pointer fix-up (#73). Walk every live object's
+        // pointer fields, plus the explicit root list and the
+        // shadow-stack buffer, replacing references to forwarded
+        // source addresses with their evacuated targets.
+        if (self.evac_count_this_cycle > 0) {
+            self.fixupForwardedReferences();
+            self.retireEvacBlock();
+        }
 
         // Step 4: re-classify blocks. We rebuild the lists from
         // scratch to avoid double-filing.
@@ -932,6 +1066,7 @@ pub const ImmixGc = struct {
         b = self.all_blocks;
         while (b) |block| : (b = block.all_next) {
             block.next = null;
+            block.is_evac_candidate = false;
             self.classifyAndFile(block);
         }
 
@@ -1046,7 +1181,14 @@ pub const ImmixGc = struct {
     }
 
     fn drainMarkWorklist(self: *ImmixGc, work: *std.ArrayList(*Node)) void {
-        while (work.pop()) |node| {
+        while (work.pop()) |original| {
+            // Resolve forwarding (#73): a worklist entry that points
+            // at an already-evacuated source jumps to its destination
+            // so the rest of the loop sees the live copy.
+            const node = if (isForwarded(original))
+                forwardedTarget(original)
+            else
+                original;
             if (node.gc_flags == self.mark_id) continue;
             // Sanity-clamp `n_fields` against the block payload bound
             // before recursing. A conservative-scan false positive may
@@ -1055,10 +1197,23 @@ pub const ImmixGc = struct {
             // `n_fields` is garbage. Without this clamp we'd walk off
             // the end of the block during pointer recursion.
             if (!self.nodeLooksValid(node)) continue;
-            node.gc_flags = self.mark_id;
-            self.markNodeLines(node);
 
-            const tag_raw = @intFromEnum(node.tag);
+            // Opportunistic evacuation (#73). If this node lives in a
+            // block flagged as an evacuation candidate, copy it into
+            // a fresh destination block and continue tracing through
+            // the copy. The source slot is rewritten with a
+            // forwarding pointer so the post-mark fix-up pass can
+            // patch up any references that already point at it.
+            const node_for_trace = blk: {
+                if (self.defrag_enabled and self.shouldEvacuate(node)) {
+                    if (self.evacuateNode(node)) |copy| break :blk copy;
+                }
+                break :blk node;
+            };
+            node_for_trace.gc_flags = self.mark_id;
+            self.markNodeLines(node_for_trace);
+
+            const tag_raw = @intFromEnum(node_for_trace.tag);
             switch (tag_raw) {
                 @intFromEnum(nodemod.Tag.Unit),
                 @intFromEnum(nodemod.Tag.Int),
@@ -1069,8 +1224,8 @@ pub const ImmixGc = struct {
                 },
                 @intFromEnum(nodemod.Tag.Ind) => {
                     // Indirection: field[0] is the *Node target.
-                    if (node.n_fields >= 1) {
-                        const w = nodemod.fieldsConst(node)[0];
+                    if (node_for_trace.n_fields >= 1) {
+                        const w = nodemod.fieldsConst(node_for_trace)[0];
                         if (self.isHeapPointer(w)) {
                             const addr: usize = @intCast(w);
                             work.append(self.child, @ptrFromInt(addr)) catch @panic("Immix: out of memory during mark");
@@ -1086,7 +1241,7 @@ pub const ImmixGc = struct {
                     // back to a conservative scan so newly-introduced
                     // tags remain trace-safe.
                     const mask = pointerMaskFor(@as(u64, @intCast(tag_raw)));
-                    const fields_slice = nodemod.fieldsConst(node);
+                    const fields_slice = nodemod.fieldsConst(node_for_trace);
                     if (mask == UNKNOWN_MASK) {
                         for (fields_slice) |w| {
                             if (self.isHeapPointer(w)) {
@@ -1109,6 +1264,224 @@ pub const ImmixGc = struct {
                 },
             }
         }
+    }
+
+    // ── Evacuation / defragmentation (#73) ───────────────────────────
+
+    /// Mark every block that should act as an evacuation source in
+    /// the current cycle. Decision is based on the previous cycle's
+    /// `free_lines` carried over on each `BlockHeader` — blocks with
+    /// at least `defrag_min_free_lines` free lines (i.e. plenty of
+    /// holes punctuating their live data) are picked.
+    fn selectEvacuationCandidates(self: *ImmixGc) void {
+        var b = self.all_blocks;
+        while (b) |block| : (b = block.all_next) {
+            // Pure-free blocks have nothing to evacuate; full blocks
+            // have nothing to gain from being a source.
+            if (block.free_lines == 0) continue;
+            if (block.free_lines >= PAYLOAD_LINES) continue;
+            if (block.free_lines >= self.defrag_min_free_lines) {
+                block.is_evac_candidate = true;
+            }
+        }
+    }
+
+    /// True iff `node` lives in a block currently flagged as an
+    /// evacuation candidate. LOS objects are never evacuated — their
+    /// slab geometry makes copying expensive and the fragmentation
+    /// reduction negligible.
+    fn shouldEvacuate(self: *const ImmixGc, node: *Node) bool {
+        if (isForwarded(node)) return false;
+        const block = self.blockOf(node) orelse return false;
+        return block.is_evac_candidate;
+    }
+
+    /// Reserve `len` bytes of evacuation destination space. Carves
+    /// out of `evac_block` if it has room, otherwise pulls a fresh
+    /// block from the free list (or the child allocator) and uses
+    /// that. Returns `null` when no block can be acquired — the
+    /// caller falls back to in-place marking.
+    fn reserveEvacSpace(self: *ImmixGc, len: usize) ?[*]u8 {
+        const alignment = std.mem.Alignment.fromByteUnits(@alignOf(Node));
+        if (self.evac_block != null) {
+            const aligned = alignment.forward(self.evac_cursor);
+            if (aligned + len <= self.evac_limit) {
+                self.evac_cursor = aligned + len;
+                return @ptrFromInt(aligned);
+            }
+        }
+        // Either no destination yet or the current one is exhausted.
+        // Retire the old block (file it back) and grab a fresh one.
+        self.retireEvacBlock();
+        // Prefer a free block from the existing pool before asking
+        // the child allocator for a new mapping.
+        const block: *BlockHeader = if (self.free_blocks) |fb| blk: {
+            self.free_blocks = fb.next;
+            fb.next = null;
+            break :blk fb;
+        } else self.newBlock() orelse return null;
+        self.evac_block = block;
+        const base = @intFromPtr(block);
+        self.evac_cursor = base + HEADER_BYTES;
+        self.evac_limit = base + BLOCK_SIZE;
+        const aligned = alignment.forward(self.evac_cursor);
+        if (aligned + len > self.evac_limit) return null;
+        self.evac_cursor = aligned + len;
+        return @ptrFromInt(aligned);
+    }
+
+    /// Copy `src` into the evacuation destination region and stamp
+    /// the source slot with a forwarding pointer. Returns the copy
+    /// on success; `null` if evacuation could not be satisfied (the
+    /// caller then marks the source in place).
+    fn evacuateNode(self: *ImmixGc, src: *Node) ?*Node {
+        // Bail out when n_fields is zero: with no field[0] there is
+        // no room for a forwarding pointer, and the source has no
+        // payload worth moving in any case.
+        if (src.n_fields == 0) return null;
+        const size = @sizeOf(Node) + @as(usize, src.n_fields) * @sizeOf(u64);
+        const raw = self.reserveEvacSpace(size) orelse return null;
+        const dest: *Node = @ptrCast(@alignCast(raw));
+        // Byte-wise copy preserves tag, n_fields, and every field
+        // (including any field[0] payload that the caller will
+        // expect via `nodeFields`).
+        const src_bytes: [*]const u8 = @ptrCast(src);
+        const dest_bytes: [*]u8 = @ptrCast(dest);
+        @memcpy(dest_bytes[0..size], src_bytes[0..size]);
+        // Reset the destination's gc_flags so the mark phase can
+        // stamp it cleanly (the source's flags were copied as-is).
+        dest.gc_flags = 0;
+        // Stamp the forwarding pointer onto the source. From now on
+        // any reference to `src` resolves to `dest` via
+        // `forwardedTarget`.
+        setForwarded(src, dest);
+        self.evac_count_this_cycle += 1;
+        return dest;
+    }
+
+    /// Push the current evacuation destination block onto its
+    /// classification list and reset the evac cursor pair. Called at
+    /// the end of every cycle in which evacuation actually happened.
+    fn retireEvacBlock(self: *ImmixGc) void {
+        if (self.evac_block) |b| {
+            // Mark every line in the destination range as used so
+            // the classifier doesn't think the block is empty when
+            // it walks `line_marks` (the bump path didn't touch any
+            // lines beyond the cursor).
+            const base = @intFromPtr(b);
+            const used_end = self.evac_cursor;
+            if (used_end > base + HEADER_BYTES) {
+                markLinesUsed(b, base + HEADER_BYTES, used_end);
+            }
+        }
+        self.evac_block = null;
+        self.evac_cursor = 0;
+        self.evac_limit = 0;
+    }
+
+    /// Pointer fix-up pass (#73): rewrite every reference to a
+    /// forwarded source with its evacuated target. Walks the
+    /// explicit root list, the shadow-stack buffer, and every live
+    /// (marked, non-forwarded) object's pointer-typed fields.
+    fn fixupForwardedReferences(self: *ImmixGc) void {
+        // Roots.
+        for (self.roots.items) |slot| {
+            slot.* = self.rewriteIfForwarded(slot.*);
+        }
+        // Shadow stack.
+        const top = heap.rts_shadow_top;
+        var i: u32 = 0;
+        while (i < top) : (i += 1) {
+            heap.rts_shadow_buffer[i] = self.rewriteIfForwarded(heap.rts_shadow_buffer[i]);
+        }
+        // Heap: every block, every live node.
+        var b = self.all_blocks;
+        while (b) |block| : (b = block.all_next) {
+            self.fixupBlock(block);
+        }
+        // Heap: LOS payloads (one node each).
+        var l = self.large_objects;
+        while (l) |lo| : (l = lo.next) {
+            const n: *Node = @ptrCast(@alignCast(lo.payload));
+            if (n.gc_flags != self.mark_id) continue;
+            self.fixupNode(n);
+        }
+    }
+
+    /// Rewrite every pointer field inside a single block's live
+    /// objects. Walks bumped objects linearly; if a node header has
+    /// the forwarded bit set it is part of an evacuated source slot
+    /// (skipped — the source body is dead). Otherwise the node is
+    /// passed through the pointer-mask-driven rewriter.
+    fn fixupBlock(self: *ImmixGc, block: *BlockHeader) void {
+        const base = @intFromPtr(block);
+        var p = base + HEADER_BYTES;
+        const end = base + BLOCK_SIZE;
+        while (p + @sizeOf(Node) <= end) {
+            const n: *Node = @ptrFromInt(p);
+            const size = @sizeOf(Node) + @as(usize, n.n_fields) * @sizeOf(u64);
+            if (p + size > end) break;
+            // Live objects (marked in this cycle) get their pointer
+            // fields rewritten. Forwarded source slots and unmarked
+            // garbage are skipped; the latter is about to be
+            // reclaimed by the line classifier.
+            if (n.gc_flags == self.mark_id) {
+                self.fixupNode(n);
+            }
+            p += std.mem.alignForward(usize, size, @alignOf(Node));
+        }
+    }
+
+    /// Walk a single node's fields and replace any reference to a
+    /// forwarded source with its evacuated target. Uses the
+    /// per-tag pointer mask (#779) when available, falls back to a
+    /// conservative scan otherwise.
+    fn fixupNode(self: *const ImmixGc, n: *Node) void {
+        const tag_raw = @intFromEnum(n.tag);
+        switch (tag_raw) {
+            @intFromEnum(nodemod.Tag.Unit),
+            @intFromEnum(nodemod.Tag.Int),
+            @intFromEnum(nodemod.Tag.Char),
+            @intFromEnum(nodemod.Tag.String),
+            => {},
+            @intFromEnum(nodemod.Tag.Ind) => {
+                if (n.n_fields >= 1) {
+                    const slot = &nodemod.fields(n)[0];
+                    slot.* = self.rewriteIfForwarded(slot.*);
+                }
+            },
+            else => {
+                const mask = pointerMaskFor(@as(u64, @intCast(tag_raw)));
+                const fields_slice = nodemod.fields(n);
+                if (mask == UNKNOWN_MASK) {
+                    // Without a registered mask we cannot
+                    // distinguish a scalar that looks like a
+                    // forwarded pointer from a real one — skip
+                    // fix-up here to stay safe. Any stale reference
+                    // will surface on the next collection once the
+                    // mask has been registered.
+                    return;
+                }
+                const lim = @min(fields_slice.len, 64);
+                var i: usize = 0;
+                while (i < lim) : (i += 1) {
+                    if ((mask >> @intCast(i)) & 1 == 0) continue;
+                    fields_slice[i] = self.rewriteIfForwarded(fields_slice[i]);
+                }
+            },
+        }
+    }
+
+    /// If `word` encodes a pointer to a forwarded source slot, return
+    /// the encoded destination address. Otherwise return `word`
+    /// unchanged. Non-pointer-looking words and pointers to live
+    /// (non-forwarded) objects pass through.
+    fn rewriteIfForwarded(self: *const ImmixGc, word: u64) u64 {
+        if (!self.isHeapPointer(word)) return word;
+        const addr: usize = @intCast(word);
+        const target: *Node = @ptrFromInt(addr);
+        if (!isForwarded(target)) return word;
+        return @intFromPtr(forwardedTarget(target));
     }
 
     /// Bound-check a node candidate before treating it as live.
@@ -1913,6 +2286,94 @@ test "Immix: pointer-mask all-zero treats every field as scalar" {
     gc.collect();
     try testing.expectEqual(gc.mark_id, root_node.gc_flags);
     try testing.expect(unreachable_node.gc_flags != gc.mark_id);
+}
+
+// ── Opportunistic defragmentation (#73) ──────────────────────────────
+
+test "Immix: defrag disabled never evacuates" {
+    resetPointerMasks();
+    defer resetPointerMasks();
+
+    var gc = ImmixGc.init(testing.allocator);
+    defer gc.deinit();
+
+    const n = try newNode(&gc, .Int, 1);
+    nodemod.fields(n)[0] = 1;
+
+    var slot: u64 = @intFromPtr(n);
+    gc.gcAllocator().addRoot(&slot);
+    defer gc.gcAllocator().removeRoot(&slot);
+
+    gc.collect();
+    try testing.expectEqual(@as(u32, 0), gc.lastEvacCount());
+    try testing.expect(!isForwarded(n));
+}
+
+test "Immix: defrag evacuates objects out of fragmented blocks" {
+    resetPointerMasks();
+    defer resetPointerMasks();
+
+    var gc = ImmixGc.init(testing.allocator);
+    defer gc.deinit();
+    gc.setOpportunisticDefrag(true);
+    gc.setDefragMinFreeLines(1); // be aggressive in the test
+
+    // Allocate a Data node with a known mask so the fix-up pass can
+    // safely rewrite its pointer field.
+    rts_set_pointer_mask(@intFromEnum(nodemod.Tag.Data), 0b01);
+
+    const child = try newNode(&gc, .Int, 1);
+    nodemod.fields(child)[0] = 0xC0DE;
+    const root_node = try newNode(&gc, .Data, 1);
+    nodemod.fields(root_node)[0] = @intFromPtr(child);
+    const root_block = gc.blockOf(root_node).?;
+    const child_block = gc.blockOf(child).?;
+
+    var slot: u64 = @intFromPtr(root_node);
+    gc.gcAllocator().addRoot(&slot);
+    defer gc.gcAllocator().removeRoot(&slot);
+
+    // Pre-stage: pretend the previous cycle left these blocks
+    // fragmented enough to qualify as evacuation candidates.
+    root_block.free_lines = @intCast(PAYLOAD_LINES - 1);
+    child_block.free_lines = @intCast(PAYLOAD_LINES - 1);
+
+    gc.collect();
+
+    try testing.expect(gc.lastEvacCount() >= 1);
+    // The root's stack slot must point at the evacuated copy now —
+    // the source slot is dead memory.
+    const new_root_addr: usize = @intCast(slot);
+    try testing.expect(new_root_addr != @intFromPtr(root_node));
+    const new_root: *Node = @ptrFromInt(new_root_addr);
+    try testing.expectEqual(gc.mark_id, new_root.gc_flags);
+    // The pointer-mask-driven fix-up must have rewritten field[0] of
+    // the copy so it references the (possibly also evacuated) child
+    // — not the stale source slot.
+    const child_field: u64 = nodemod.fieldsConst(new_root)[0];
+    try testing.expect(child_field != 0);
+    const child_addr: usize = @intCast(child_field);
+    const child_node: *Node = @ptrFromInt(child_addr);
+    try testing.expectEqual(gc.mark_id, child_node.gc_flags);
+    try testing.expectEqual(@as(u64, 0xC0DE), nodemod.fieldsConst(child_node)[0]);
+}
+
+test "Immix: defrag is a no-op when no blocks meet the threshold" {
+    resetPointerMasks();
+    defer resetPointerMasks();
+
+    var gc = ImmixGc.init(testing.allocator);
+    defer gc.deinit();
+    gc.setOpportunisticDefrag(true);
+    gc.setDefragMinFreeLines(@intCast(PAYLOAD_LINES));
+
+    const n = try newNode(&gc, .Int, 1);
+    var slot: u64 = @intFromPtr(n);
+    gc.gcAllocator().addRoot(&slot);
+    defer gc.gcAllocator().removeRoot(&slot);
+
+    gc.collect();
+    try testing.expectEqual(@as(u32, 0), gc.lastEvacCount());
 }
 
 // ── Auto-collect trigger (#781) ──────────────────────────────────────
