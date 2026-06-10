@@ -97,8 +97,11 @@ for src in "${progs[@]}"; do
     ghc_bin="$tmpdir/$base-ghc"
     ghc_outdir="$tmpdir/ghc-out-$base"
 
+    rhc_immix_bin="$tmpdir/$base-rhc-immix"
+
     echo "bench-all.sh: building $base"
     ./zig-out/bin/rhc build "-O$opt_level" -o "$rhc_bin" "$src" 2>&1 | grep -vE "warning|deprecat|^$" || true
+    ./zig-out/bin/rhc build "-O$opt_level" --rts=immix -o "$rhc_immix_bin" "$src" 2>&1 | grep -vE "warning|deprecat|^$" || true
     # GHC's linker needs libgmp. Inside the Nix dev shell `-lgmp` is
     # not on the default search path; outside it usually is. Probe a
     # few common locations and prepend whichever holds libgmp.so.10.
@@ -116,6 +119,7 @@ for src in "${progs[@]}"; do
     ghc -O2 -outputdir "$ghc_outdir" -o "$ghc_bin" "${ghc_link_args[@]}" "$src" > /dev/null
 
     rhc_out="$("$rhc_bin")"
+    rhc_immix_out="$("$rhc_immix_bin")"
     ghc_out="$("$ghc_bin")"
     if [ "$rhc_out" != "$ghc_out" ]; then
         echo "bench-all.sh: SANITY $base: rhc vs ghc output differ" >&2
@@ -123,24 +127,35 @@ for src in "${progs[@]}"; do
         echo "ghc: $ghc_out" >&2
         exit 2
     fi
+    if [ "$rhc_immix_out" != "$ghc_out" ]; then
+        echo "bench-all.sh: SANITY $base: rhc --rts=immix output differs" >&2
+        echo "rhc:immix: $rhc_immix_out" >&2
+        echo "ghc:       $ghc_out" >&2
+        exit 2
+    fi
 
     echo "bench-all.sh: timing $base"
     hyperfine --shell=none --warmup "$warmups" --runs "$runs" \
         --export-json "$tmpdir/$base.json" \
         --command-name "rhc -O$opt_level" "$rhc_bin" \
+        --command-name "rhc -O$opt_level --rts=immix" "$rhc_immix_bin" \
         --command-name "ghc -O2" "$ghc_bin" > /dev/null
 
     # hyperfine JSON gives mean/stddev in seconds — convert to ms.
     rhc_mean_ms=$(jq '.results[0].mean * 1000'   "$tmpdir/$base.json")
     rhc_std_ms=$(jq  '.results[0].stddev * 1000' "$tmpdir/$base.json")
-    ghc_mean_ms=$(jq '.results[1].mean * 1000'   "$tmpdir/$base.json")
-    ghc_std_ms=$(jq  '.results[1].stddev * 1000' "$tmpdir/$base.json")
+    rhc_immix_mean_ms=$(jq '.results[1].mean * 1000'   "$tmpdir/$base.json")
+    rhc_immix_std_ms=$(jq  '.results[1].stddev * 1000' "$tmpdir/$base.json")
+    ghc_mean_ms=$(jq '.results[2].mean * 1000'   "$tmpdir/$base.json")
+    ghc_std_ms=$(jq  '.results[2].stddev * 1000' "$tmpdir/$base.json")
 
     programs_json_new="$tmpdir/programs.next.json"
     jq --arg name "$base" \
        --argjson rm "$rhc_mean_ms" --argjson rs "$rhc_std_ms" \
+       --argjson rim "$rhc_immix_mean_ms" --argjson ris "$rhc_immix_std_ms" \
        --argjson gm "$ghc_mean_ms" --argjson gs "$ghc_std_ms" \
        '. + { ($name): { rhc_mean_ms: $rm, rhc_stddev_ms: $rs,
+                         rhc_immix_mean_ms: $rim, rhc_immix_stddev_ms: $ris,
                          ghc_mean_ms: $gm, ghc_stddev_ms: $gs } }' \
        "$programs_json" > "$programs_json_new"
     mv "$programs_json_new" "$programs_json"
