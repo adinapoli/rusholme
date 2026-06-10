@@ -45,10 +45,15 @@
     <!-- Marked for markdown rendering -->
     <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
 
-    <!-- Vega-Lite for benchmark charts (loads Vega + vega-embed). -->
-    <script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
-    <script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
-    <script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+    <!-- Vega-Lite for benchmark charts (loads Vega + vega-embed).
+         Use the explicit `/build/*.min.js` paths — the bare
+         `vega@5` URL resolves to Vega's Node entry point, which
+         leaves the browser global `vega` undefined and crashes
+         vega-lite with "Cannot read properties of undefined
+         (reading 'logger')". -->
+    <script src="https://cdn.jsdelivr.net/npm/vega@5/build/vega.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/vega-lite@5/build/vega-lite.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/vega-embed@6/build/vega-embed.min.js"></script>
 
     <!-- Lucide icons -->
     <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
