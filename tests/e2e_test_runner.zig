@@ -315,6 +315,15 @@ test "e2e: --rts=immix collects across allocation sites (#780)" {
     try testE2eImmix(std.testing.allocator, "e2e_780_immix_collection");
 }
 
+test "e2e: --rts=immix PrimOp/GC integration (#327)" {
+    // Walks a 1500-element list through `mod n 2`. Forces auto-collect
+    // to fire mid-PrimOp under `--rts=immix` and verifies that the
+    // boxed Bool returned by the comparison PrimOp and the partial-
+    // list `*Node` arguments stay alive across the safepoint. See
+    // `docs/decisions/0327-primops-and-gc.md`.
+    try testE2eImmix(std.testing.allocator, "e2e_327_primop_gc");
+}
+
 test "e2e: rhc build rejects unknown --rts backend (#776)" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
