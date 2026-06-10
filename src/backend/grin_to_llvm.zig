@@ -460,6 +460,17 @@ fn declareRtsShadowRestore(module: llvm.Module) llvm.Value {
     return c.LLVMAddFunction(module, name, fn_ty);
 }
 
+/// Declare `rts_set_pointer_mask(tag: i64, mask: i64) -> void`.
+/// Called once per user-defined constructor at program start to
+/// register the constructor's pointer-mask with the collector (#779).
+fn declareRtsSetPointerMask(module: llvm.Module) llvm.Value {
+    const name = "rts_set_pointer_mask";
+    if (c.LLVMGetNamedFunction(module, name)) |existing| return existing;
+    var params = [_]llvm.Type{ llvm.i64Type(), llvm.i64Type() };
+    const fn_ty = c.LLVMFunctionType(llvm.voidType(), &params, 2, 0);
+    return c.LLVMAddFunction(module, name, fn_ty);
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // GRIN-to-LLVM Translator
 // ═══════════════════════════════════════════════════════════════════════
@@ -683,6 +694,48 @@ pub const GrinTranslator = struct {
             1,
             "",
         );
+    }
+
+    /// Emit one `rts_set_pointer_mask(tag, mask)` call per
+    /// constructor the registry knows about (issue #779). Run at the
+    /// very start of `main`'s entry block, before any user code can
+    /// allocate, so the collector sees the precise per-tag layout
+    /// from the first allocation onwards. No-op under `--rts=arena`
+    /// (no collector). Tags whose mask the registry does not know
+    /// stay at `UNKNOWN_MASK` and the collector falls back to a
+    /// conservative scan for them.
+    fn emitPointerMaskInit(self: *GrinTranslator) void {
+        if (self.rts_backend == .arena) return;
+        const set_mask_fn = declareRtsSetPointerMask(self.module);
+        const i64_ty = llvm.i64Type();
+        var iter = self.registry.field_types.iterator();
+        while (iter.next()) |entry| {
+            const tag_key = entry.key_ptr.*;
+            const types = entry.value_ptr.*;
+            const disc = self.registry.discriminants.get(tag_key) orelse continue;
+            // Compute the pointer-mask: bit i = 1 ⇔ field i is a
+            // `*Node`. Function pointers (`fn_ptr`) and scalars are
+            // not heap roots and stay 0 in the mask.
+            var mask: u64 = 0;
+            for (types, 0..) |ft, i| {
+                if (i >= 64) break;
+                if (ft == .ptr) {
+                    mask |= @as(u64, 1) << @intCast(i);
+                }
+            }
+            var args = [_]llvm.Value{
+                c.LLVMConstInt(i64_ty, @bitCast(disc), 0),
+                c.LLVMConstInt(i64_ty, mask, 0),
+            };
+            _ = c.LLVMBuildCall2(
+                self.builder,
+                llvm.getFunctionType(set_mask_fn),
+                set_mask_fn,
+                &args,
+                2,
+                "",
+            );
+        }
     }
 
     /// Emit `%saved = call i32 @rts_shadow_save()` at the current
@@ -1037,6 +1090,9 @@ pub const GrinTranslator = struct {
         // codegen omits the call (it matches lazy init).
         if (is_entry and !is_repl_entry and self.rts_backend != .arena) {
             self.emitSetRtsBackendCall(@intFromEnum(self.rts_backend));
+            // Register every constructor's pointer-mask with the
+            // collector (#779) before any allocation can fire.
+            self.emitPointerMaskInit();
         }
 
         // Precise GC root tracking (#780): snapshot the shadow-stack

@@ -193,6 +193,64 @@ comptime {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Per-Constructor Pointer-Mask Table (issue #779)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Backend-emitted side table mapping each constructor's tag
+// discriminant to a 64-bit bitmask over its field slots: bit `i` set
+// ⇔ field `i` holds a `*Node` (the only thing the collector needs to
+// trace). The backend calls `rts_set_pointer_mask(tag, mask)` once per
+// known constructor at program start; the collector consults the
+// table to replace the conservative scan over `Thunk`/`Closure`/
+// `Data` field arrays with precise tracing.
+//
+// Built-in tags (`Unit`/`Int`/`Char`/`String`/`Ind`) have hard-coded
+// semantics in `drainMarkWorklist` and are not driven by this table.
+// Tags whose mask has never been set carry the sentinel `UNKNOWN_MASK`
+// and the collector falls back to the legacy conservative scan — this
+// keeps the heap safe in the presence of newly-introduced tags whose
+// backend code has not yet been updated.
+
+/// Maximum supported tag discriminant. User-defined constructor
+/// discriminants start at `0x1000` (4096) and grow sequentially, so the
+/// table must be large enough to cover the program's entire registry.
+/// Sized at 16K slots × 8 bytes = 128 KB resident — covers ~12K user
+/// constructors above the built-in range, more than any realistic
+/// Haskell program; bump if a real program ever hits it.
+pub const MAX_TAG_ID: usize = 16 * 1024;
+
+/// Sentinel mask written into a slot the backend never explicitly
+/// registered. The collector reads this as "unknown layout → fall
+/// back to the conservative scan." Any constructor whose 64 fields
+/// are all genuine pointers would collide with this sentinel; that
+/// is well beyond the field-count limit (Node header packs n_fields
+/// as u32, but constructors with > 64 pointer fields are unheard of
+/// in real Haskell).
+pub const UNKNOWN_MASK: u64 = ~@as(u64, 0);
+
+/// The mask table itself. Exported as a C-visible symbol so the
+/// generated code (and future inline emission, mirroring #788) can
+/// address it directly.
+pub export var rts_pointer_masks: [MAX_TAG_ID]u64 = [_]u64{UNKNOWN_MASK} ** MAX_TAG_ID;
+
+/// Backend-callable setter for a single tag's mask. Called once per
+/// constructor from the LLVM-generated `main` (or REPL entry) before
+/// any user code runs.
+pub export fn rts_set_pointer_mask(tag: u64, mask: u64) callconv(.c) void {
+    if (tag < MAX_TAG_ID) {
+        rts_pointer_masks[@intCast(tag)] = mask;
+    }
+}
+
+/// Look up the mask for `tag`. Returns `UNKNOWN_MASK` for tags the
+/// backend hasn't registered (built-ins included — they go through
+/// the special-case dispatch instead).
+pub fn pointerMaskFor(tag: u64) u64 {
+    if (tag < MAX_TAG_ID) return rts_pointer_masks[@intCast(tag)];
+    return UNKNOWN_MASK;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Large Object Space
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -1021,13 +1079,31 @@ pub const ImmixGc = struct {
                 },
                 else => {
                     // Thunks, closures, Data constructors, user-defined
-                    // tags: conservatively scan every field slot. A
-                    // tag→pointer-mask table from the backend would
-                    // make this precise; tracked separately.
-                    for (nodemod.fieldsConst(node)) |w| {
-                        if (self.isHeapPointer(w)) {
-                            const addr: usize = @intCast(w);
-                            work.append(self.child, @ptrFromInt(addr)) catch @panic("Immix: out of memory during mark");
+                    // tags: consult the per-tag pointer-mask table (#779)
+                    // populated by the backend at program start. Bit `i`
+                    // set ⇔ field `i` holds a `*Node`. Tags the backend
+                    // hasn't registered carry `UNKNOWN_MASK` and fall
+                    // back to a conservative scan so newly-introduced
+                    // tags remain trace-safe.
+                    const mask = pointerMaskFor(@as(u64, @intCast(tag_raw)));
+                    const fields_slice = nodemod.fieldsConst(node);
+                    if (mask == UNKNOWN_MASK) {
+                        for (fields_slice) |w| {
+                            if (self.isHeapPointer(w)) {
+                                const addr: usize = @intCast(w);
+                                work.append(self.child, @ptrFromInt(addr)) catch @panic("Immix: out of memory during mark");
+                            }
+                        }
+                    } else {
+                        const n = @min(fields_slice.len, 64);
+                        var i: usize = 0;
+                        while (i < n) : (i += 1) {
+                            if ((mask >> @intCast(i)) & 1 == 0) continue;
+                            const w = fields_slice[i];
+                            if (self.isHeapPointer(w)) {
+                                const addr: usize = @intCast(w);
+                                work.append(self.child, @ptrFromInt(addr)) catch @panic("Immix: out of memory during mark");
+                            }
                         }
                     }
                 },
@@ -1753,6 +1829,90 @@ test "Immix: overflow block is retired and re-classified when exhausted" {
         if (bb == first_overflow) on_free = true;
     }
     try testing.expect(!on_free);
+}
+
+// ── Per-constructor pointer-mask table (#779) ────────────────────────
+
+/// Reset the pointer-mask table to its default `UNKNOWN_MASK` state so
+/// tests that mutate it don't leak into other tests. Tests share the
+/// global `rts_pointer_masks` array since it's the production storage.
+fn resetPointerMasks() void {
+    for (&rts_pointer_masks) |*m| m.* = UNKNOWN_MASK;
+}
+
+test "Immix: pointer-mask scalar fields are not followed" {
+    resetPointerMasks();
+    defer resetPointerMasks();
+
+    var gc = ImmixGc.init(testing.allocator);
+    defer gc.deinit();
+
+    // Two heap nodes; one referenced through a marked pointer field,
+    // the other through a slot the mask declares scalar. The scalar
+    // slot is forced to hold a value that *looks* like a heap pointer
+    // — without the mask the conservative scan would mark its target.
+    const live_via_ptr = try newNode(&gc, .Int, 1);
+    nodemod.fields(live_via_ptr)[0] = 0xC0FFEE;
+    const masked_target = try newNode(&gc, .Int, 1);
+    nodemod.fields(masked_target)[0] = 0xFACADE;
+
+    const data_tag: u64 = @intFromEnum(nodemod.Tag.Data);
+    rts_set_pointer_mask(data_tag, 0b01); // only field[0] is a ptr
+
+    const root_node = try newNode(&gc, .Data, 2);
+    nodemod.fields(root_node)[0] = @intFromPtr(live_via_ptr);
+    nodemod.fields(root_node)[1] = @intFromPtr(masked_target);
+
+    var slot: u64 = @intFromPtr(root_node);
+    gc.gcAllocator().addRoot(&slot);
+    defer gc.gcAllocator().removeRoot(&slot);
+
+    gc.collect();
+    try testing.expectEqual(gc.mark_id, root_node.gc_flags);
+    try testing.expectEqual(gc.mark_id, live_via_ptr.gc_flags);
+    try testing.expect(masked_target.gc_flags != gc.mark_id);
+}
+
+test "Immix: pointer-mask UNKNOWN_MASK falls back to conservative scan" {
+    resetPointerMasks();
+    defer resetPointerMasks();
+
+    var gc = ImmixGc.init(testing.allocator);
+    defer gc.deinit();
+
+    const reachable = try newNode(&gc, .Int, 1);
+    nodemod.fields(reachable)[0] = 7;
+    const root_node = try newNode(&gc, .Data, 1);
+    nodemod.fields(root_node)[0] = @intFromPtr(reachable);
+
+    var slot: u64 = @intFromPtr(root_node);
+    gc.gcAllocator().addRoot(&slot);
+    defer gc.gcAllocator().removeRoot(&slot);
+
+    gc.collect();
+    try testing.expectEqual(gc.mark_id, reachable.gc_flags);
+}
+
+test "Immix: pointer-mask all-zero treats every field as scalar" {
+    resetPointerMasks();
+    defer resetPointerMasks();
+
+    var gc = ImmixGc.init(testing.allocator);
+    defer gc.deinit();
+
+    rts_set_pointer_mask(@intFromEnum(nodemod.Tag.Data), 0);
+
+    const unreachable_node = try newNode(&gc, .Int, 1);
+    const root_node = try newNode(&gc, .Data, 1);
+    nodemod.fields(root_node)[0] = @intFromPtr(unreachable_node);
+
+    var slot: u64 = @intFromPtr(root_node);
+    gc.gcAllocator().addRoot(&slot);
+    defer gc.gcAllocator().removeRoot(&slot);
+
+    gc.collect();
+    try testing.expectEqual(gc.mark_id, root_node.gc_flags);
+    try testing.expect(unreachable_node.gc_flags != gc.mark_id);
 }
 
 // ── Auto-collect trigger (#781) ──────────────────────────────────────
