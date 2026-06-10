@@ -306,6 +306,15 @@ test "e2e: --rts=immix runs nested datatypes (#776)" {
     try testE2eImmix(std.testing.allocator, "e2e_005_nested_datatypes");
 }
 
+test "e2e: --rts=immix collects across allocation sites (#780)" {
+    // Exercises precise shadow-stack rooting: building a 2000-element
+    // list overflows the default Immix block budget (8 blocks) and
+    // triggers auto-collection while the recursive build is still on
+    // the stack. The list must survive — every Cons cell is held alive
+    // only via the LLVM-backend-emitted `rts_shadow_push` slots.
+    try testE2eImmix(std.testing.allocator, "e2e_780_immix_collection");
+}
+
 test "e2e: rhc build rejects unknown --rts backend (#776)" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;

@@ -408,6 +408,40 @@ fn declareRtsLoadField(module: llvm.Module) llvm.Value {
     return c.LLVMAddFunction(module, name, fn_ty);
 }
 
+/// Declare `rts_shadow_push(value: i64) -> void`. Called at every
+/// `*Node` SSA definition in a function that participates in precise
+/// root tracking (issue #780). The argument is `ptrtoint(node, i64)`.
+fn declareRtsShadowPush(module: llvm.Module) llvm.Value {
+    const name = "rts_shadow_push";
+    if (c.LLVMGetNamedFunction(module, name)) |existing| return existing;
+    var params = [_]llvm.Type{llvm.i64Type()};
+    const fn_ty = c.LLVMFunctionType(llvm.voidType(), &params, 1, 0);
+    return c.LLVMAddFunction(module, name, fn_ty);
+}
+
+/// Declare `rts_shadow_save() -> i32`. Called once at the entry of any
+/// function that produces `*Node` SSA values; the returned value names
+/// the shadow-stack height that the matching `rts_shadow_restore` must
+/// restore before every return.
+fn declareRtsShadowSave(module: llvm.Module) llvm.Value {
+    const name = "rts_shadow_save";
+    if (c.LLVMGetNamedFunction(module, name)) |existing| return existing;
+    const fn_ty = c.LLVMFunctionType(llvm.i32Type(), null, 0, 0);
+    return c.LLVMAddFunction(module, name, fn_ty);
+}
+
+/// Declare `rts_shadow_restore(saved: i32) -> void`. Called immediately
+/// before each return in a function that participates in precise root
+/// tracking; pops every shadow-stack slot pushed since the matching
+/// `rts_shadow_save`.
+fn declareRtsShadowRestore(module: llvm.Module) llvm.Value {
+    const name = "rts_shadow_restore";
+    if (c.LLVMGetNamedFunction(module, name)) |existing| return existing;
+    var params = [_]llvm.Type{llvm.i32Type()};
+    const fn_ty = c.LLVMFunctionType(llvm.voidType(), &params, 1, 0);
+    return c.LLVMAddFunction(module, name, fn_ty);
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // GRIN-to-LLVM Translator
 // ═══════════════════════════════════════════════════════════════════════
@@ -547,6 +581,24 @@ pub const GrinTranslator = struct {
     /// See issue #776.
     rts_backend: RtsBackend = .arena,
 
+    /// When set, the translator emits precise GC root tracking (issue
+    /// #780): a `rts_shadow_save` call at function entry, a
+    /// `rts_shadow_push` call at every `*Node` SSA definition, and a
+    /// `rts_shadow_restore` call before every return. The flag is
+    /// armed only inside the body of a GRIN-translated function whose
+    /// active backend has a tracing collector — i.e. `rts_backend !=
+    /// .arena`. Helper functions emitted directly into the module
+    /// (`__rhc_force`, `__rhc_apply`, the unit-node builder) disarm it
+    /// for the duration of their own emission and re-arm it on exit.
+    shadow_emit_enabled: bool = false,
+
+    /// The `i32` SSA value returned by `rts_shadow_save` at the entry
+    /// of the function currently being translated. `null` outside of a
+    /// shadow-stack-tracked function (or before entry has emitted the
+    /// save). Each return in the current function calls
+    /// `rts_shadow_restore` with this exact value.
+    shadow_saved_top: ?llvm.Value = null,
+
     pub fn init(allocator: std.mem.Allocator, registry: *TagRegistry) GrinTranslator {
         llvm.initialize();
         const ctx = llvm.createContext();
@@ -609,6 +661,100 @@ pub const GrinTranslator = struct {
             self.builder,
             llvm.getFunctionType(fn_val),
             fn_val,
+            &args,
+            1,
+            "",
+        );
+    }
+
+    /// Emit `%saved = call i32 @rts_shadow_save()` at the current
+    /// builder position and arm the precise-root emission state for the
+    /// rest of the current function. Called once at function entry when
+    /// the selected backend uses a tracing collector (#780). Must be
+    /// paired with a `rts_shadow_restore` before every return in the
+    /// same function — `buildRetWithShadowRestore` handles that.
+    fn enableShadowStackForCurrentFunction(self: *GrinTranslator) void {
+        if (self.rts_backend == .arena) return;
+        const save_fn = declareRtsShadowSave(self.module);
+        const saved = c.LLVMBuildCall2(
+            self.builder,
+            llvm.getFunctionType(save_fn),
+            save_fn,
+            null,
+            0,
+            "shadow.saved",
+        );
+        self.shadow_saved_top = saved;
+        self.shadow_emit_enabled = true;
+    }
+
+    /// Disarm precise-root emission and forget the saved-top SSA value.
+    /// Called when leaving a GRIN-translated function so subsequent
+    /// helper emissions do not pick up stale shadow-stack state.
+    fn disableShadowStackForCurrentFunction(self: *GrinTranslator) void {
+        self.shadow_emit_enabled = false;
+        self.shadow_saved_top = null;
+    }
+
+    /// Emit `call void @rts_shadow_push(ptrtoint(value to i64))` at the
+    /// current builder position. No-op when precise root emission is
+    /// disabled (arena backend, or inside one of the helper functions
+    /// like `__rhc_force` that does not participate). Also no-op for
+    /// non-pointer-typed values — the shadow stack only tracks `*Node`.
+    fn rootPtr(self: *GrinTranslator, value: llvm.Value) void {
+        if (!self.shadow_emit_enabled) return;
+        const ty = c.LLVMTypeOf(value);
+        if (c.LLVMGetTypeKind(ty) != c.LLVMPointerTypeKind) return;
+        const push_fn = declareRtsShadowPush(self.module);
+        const as_u64 = c.LLVMBuildPtrToInt(self.builder, value, llvm.i64Type(), "shadow.slot");
+        var push_args = [_]llvm.Value{as_u64};
+        _ = c.LLVMBuildCall2(
+            self.builder,
+            llvm.getFunctionType(push_fn),
+            push_fn,
+            &push_args,
+            1,
+            "",
+        );
+    }
+
+    /// Bind `value` to GRIN unique id `uid` in `self.params` and emit a
+    /// shadow-stack push if precise root tracking is active. Replaces
+    /// the bare `self.params.put(uid, value)` pattern at every site
+    /// where a GRIN-named SSA is introduced.
+    fn bindAndRoot(self: *GrinTranslator, uid: u64, value: llvm.Value) !void {
+        try self.params.put(uid, value);
+        self.rootPtr(value);
+    }
+
+    /// Emit a `rts_shadow_restore` call if precise root tracking is
+    /// active, then build the return instruction. Use this in place of
+    /// `llvm.buildRet` for every return in a GRIN-translated function
+    /// so the shadow stack is unwound on every exit path.
+    fn buildRetWithShadowRestore(self: *GrinTranslator, value: llvm.Value) void {
+        self.emitShadowRestoreIfActive();
+        _ = llvm.buildRet(self.builder, value);
+    }
+
+    /// Variant of `buildRetWithShadowRestore` for `ret void`.
+    fn buildRetVoidWithShadowRestore(self: *GrinTranslator) void {
+        self.emitShadowRestoreIfActive();
+        _ = llvm.buildRetVoid(self.builder);
+    }
+
+    /// Emit the `rts_shadow_restore` call if shadow-stack tracking is
+    /// active for the current function. Safe to call multiple times per
+    /// return path (each call shrinks the stack to the saved height —
+    /// a second call is a no-op on the buffer).
+    fn emitShadowRestoreIfActive(self: *GrinTranslator) void {
+        if (!self.shadow_emit_enabled) return;
+        const saved = self.shadow_saved_top orelse return;
+        const restore_fn = declareRtsShadowRestore(self.module);
+        var args = [_]llvm.Value{saved};
+        _ = c.LLVMBuildCall2(
+            self.builder,
+            llvm.getFunctionType(restore_fn),
+            restore_fn,
             &args,
             1,
             "",
@@ -856,6 +1002,12 @@ pub const GrinTranslator = struct {
             self.emitSetRtsBackendCall(@intFromEnum(self.rts_backend));
         }
 
+        // Precise GC root tracking (#780): snapshot the shadow-stack
+        // height so every return in this function can restore it.
+        // Emits nothing under `--rts=arena`.
+        self.enableShadowStackForCurrentFunction();
+        defer self.disableShadowStackForCurrentFunction();
+
         // Clear previous function's parameter mapping and set up current one.
         self.params.deinit();
         self.params = std.AutoHashMap(u64, llvm.Value).init(self.allocator);
@@ -865,11 +1017,13 @@ pub const GrinTranslator = struct {
         // sequential pattern-match compiler.
         self.case_entry_cache.clearRetainingCapacity();
 
-        // Store each parameter as a named value in the params map.
+        // Store each parameter as a named value in the params map. For
+        // pointer-typed params, also push them onto the shadow stack so
+        // the collector sees them as live across this function's body.
         for (def.params, 0..) |param_name, i| {
             const param_val = c.LLVMGetParam(func, @intCast(i));
             if (param_val == null) return error.OutOfMemory;
-            try self.params.put(param_name.unique.value, param_val);
+            try self.bindAndRoot(param_name.unique.value, param_val);
         }
 
         // Translate the body and capture its value for return.
@@ -904,7 +1058,7 @@ pub const GrinTranslator = struct {
                             // (see translateAppToValue). Treat as Unit.
                             if (c.LLVMIsAConstantPointerNull(val) != null) {
                                 const unit_ptr = self.buildUnitNode();
-                                _ = llvm.buildRet(self.builder, c.LLVMBuildPtrToInt(self.builder, unit_ptr, llvm.i64Type(), "unit_i64"));
+                                self.buildRetWithShadowRestore(c.LLVMBuildPtrToInt(self.builder, unit_ptr, llvm.i64Type(), "unit_i64"));
                             } else {
                                 // Force any F-tagged thunks to WHNF before
                                 // returning. The user expects REPL results
@@ -914,7 +1068,7 @@ pub const GrinTranslator = struct {
                                 else
                                     val;
                                 const as_i64 = c.LLVMBuildPtrToInt(self.builder, forced, llvm.i64Type(), "ret_i64");
-                                _ = llvm.buildRet(self.builder, as_i64);
+                                self.buildRetWithShadowRestore(as_i64);
                             }
                         } else {
                             // Non-pointer body value (raw i64 from a literal
@@ -930,9 +1084,9 @@ pub const GrinTranslator = struct {
                                 } else val;
                                 const tagged = tagInt(self.builder, val_to_tag);
                                 const as_i64 = c.LLVMBuildPtrToInt(self.builder, tagged, llvm.i64Type(), "tagged_i64_body");
-                                _ = llvm.buildRet(self.builder, as_i64);
+                                self.buildRetWithShadowRestore(as_i64);
                             } else {
-                                _ = llvm.buildRet(self.builder, val);
+                                self.buildRetWithShadowRestore(val);
                             }
                         }
                     } else {
@@ -946,7 +1100,7 @@ pub const GrinTranslator = struct {
                             tagInt(self.builder, val)
                         else
                             val;
-                        _ = llvm.buildRet(self.builder, coerced);
+                        self.buildRetWithShadowRestore(coerced);
                     }
                 } else {
                     if (is_repl_entry) {
@@ -954,9 +1108,9 @@ pub const GrinTranslator = struct {
                         // return a Unit heap node so the REPL displays
                         // nothing rather than a random integer.
                         const unit_ptr2 = self.buildUnitNode();
-                        _ = llvm.buildRet(self.builder, c.LLVMBuildPtrToInt(self.builder, unit_ptr2, llvm.i64Type(), "unit_i64"));
+                        self.buildRetWithShadowRestore(c.LLVMBuildPtrToInt(self.builder, unit_ptr2, llvm.i64Type(), "unit_i64"));
                     } else {
-                        _ = llvm.buildRet(self.builder, c.LLVMConstPointerNull(value_type));
+                        self.buildRetWithShadowRestore(c.LLVMConstPointerNull(value_type));
                     }
                 }
             }
@@ -970,12 +1124,12 @@ pub const GrinTranslator = struct {
                     // REPL entry point: return a Unit heap node so
                     // formatJitResult can distinguish unit from boolean False.
                     const unit_ptr3 = self.buildUnitNode();
-                    _ = llvm.buildRet(self.builder, c.LLVMBuildPtrToInt(self.builder, unit_ptr3, llvm.i64Type(), "unit_i64"));
+                    self.buildRetWithShadowRestore(c.LLVMBuildPtrToInt(self.builder, unit_ptr3, llvm.i64Type(), "unit_i64"));
                 } else if (is_entry) {
                     // Native main: return 0 (success exit code, C ABI).
-                    _ = llvm.buildRet(self.builder, c.LLVMConstInt(llvm.i32Type(), 0, 0));
+                    self.buildRetWithShadowRestore(c.LLVMConstInt(llvm.i32Type(), 0, 0));
                 } else {
-                    _ = llvm.buildRetVoid(self.builder);
+                    self.buildRetVoidWithShadowRestore();
                 }
             }
         }
@@ -1034,7 +1188,7 @@ pub const GrinTranslator = struct {
                 // which calls translateCaseToValue to generate phi nodes.
                 const result = try self.translateExprToValue(lhs, v.base);
                 if (result) |val| {
-                    try self.params.put(v.unique.value, val);
+                    try self.bindAndRoot(v.unique.value, val);
                 }
                 try self.translateExpr(rhs);
             },
@@ -1060,7 +1214,7 @@ pub const GrinTranslator = struct {
                         2,
                         nullTerminate(field_var.base).ptr,
                     );
-                    try self.params.put(field_var.unique.value, loaded);
+                    try self.bindAndRoot(field_var.unique.value, loaded);
                 }
                 try self.translateExpr(rhs);
             },
@@ -1093,7 +1247,7 @@ pub const GrinTranslator = struct {
                 const inner_result = try self.translateExprToValue(b.lhs, inner_name);
                 switch (b.pat) {
                     .Var => |v| {
-                        if (inner_result) |val| try self.params.put(v.unique.value, val);
+                        if (inner_result) |val| try self.bindAndRoot(v.unique.value, val);
                     },
                     .Unit => {},
                     .ConstTagNode => |ctn| {
@@ -1114,7 +1268,7 @@ pub const GrinTranslator = struct {
                                     2,
                                     nullTerminate(fv.base).ptr,
                                 );
-                                try self.params.put(fv.unique.value, loaded);
+                                try self.bindAndRoot(fv.unique.value, loaded);
                             }
                         }
                     },
@@ -2539,7 +2693,7 @@ pub const GrinTranslator = struct {
                         .fn_ptr => c.LLVMBuildIntToPtr(self.builder, loaded_i64, ptrType(), "as_fn_ptr"),
                     };
 
-                    try self.params.put(field_name.unique.value, final_val);
+                    try self.bindAndRoot(field_name.unique.value, final_val);
 
                     // Record the type in TypeEnv for downstream use.
                     try self.type_env.setVarType(self.allocator, field_name, field_type);
@@ -2833,7 +2987,7 @@ pub const GrinTranslator = struct {
                         .fn_ptr => c.LLVMBuildIntToPtr(self.builder, loaded_i64, ptrType(), "as_fn_ptr"),
                     };
 
-                    try self.params.put(field_name.unique.value, final_val);
+                    try self.bindAndRoot(field_name.unique.value, final_val);
                     try self.type_env.setVarType(self.allocator, field_name, field_type);
                 }
             }
@@ -2974,7 +3128,7 @@ pub const GrinTranslator = struct {
                         else
                             llvm_val;
                         const converted = c.LLVMBuildPtrToInt(self.builder, forced, llvm.i64Type(), "ptr_to_i64");
-                        _ = llvm.buildRet(self.builder, converted);
+                        self.buildRetWithShadowRestore(converted);
                         return;
                     } else if (is_int) {
                         const val_width = c.LLVMGetIntTypeWidth(val_ty);
@@ -2982,7 +3136,7 @@ pub const GrinTranslator = struct {
                             const widened = c.LLVMBuildZExt(self.builder, llvm_val, llvm.i64Type(), "i32_to_i64");
                             const tagged = tagInt(self.builder, widened);
                             const as_i64 = c.LLVMBuildPtrToInt(self.builder, tagged, llvm.i64Type(), "tagged_i64");
-                            _ = llvm.buildRet(self.builder, as_i64);
+                            self.buildRetWithShadowRestore(as_i64);
                             return;
                         }
                         // Tag the integer so that `formatJitResult` can
@@ -2994,7 +3148,7 @@ pub const GrinTranslator = struct {
                         // See: https://github.com/adinapoli/rusholme/issues/621
                         const tagged = tagInt(self.builder, llvm_val);
                         const as_i64 = c.LLVMBuildPtrToInt(self.builder, tagged, llvm.i64Type(), "tagged_i64");
-                        _ = llvm.buildRet(self.builder, as_i64);
+                        self.buildRetWithShadowRestore(as_i64);
                         return;
                     }
                 } else if (!is_native_main) {
@@ -3003,7 +3157,7 @@ pub const GrinTranslator = struct {
                     // so that callers always receive evaluated values.
                     if (is_ptr) {
                         const forced = self.callForceIfNeeded(llvm_val);
-                        _ = llvm.buildRet(self.builder, forced);
+                        self.buildRetWithShadowRestore(forced);
                         return;
                     }
                     // Main returns i32 so no conversion needed — it falls
@@ -3012,7 +3166,7 @@ pub const GrinTranslator = struct {
                         // Integer values (e.g. primop results) need inttoptr
                         // to match the ptr return type of non-entry functions.
                         const converted = tagInt(self.builder, llvm_val);
-                        _ = llvm.buildRet(self.builder, converted);
+                        self.buildRetWithShadowRestore(converted);
                         return;
                     }
                 }
@@ -3020,7 +3174,7 @@ pub const GrinTranslator = struct {
             }
         }
 
-        _ = llvm.buildRet(self.builder, llvm_val);
+        self.buildRetWithShadowRestore(llvm_val);
     }
 
     /// Format a GRIN Name as a null-terminated C string using the translator's buffer.
@@ -3233,7 +3387,7 @@ pub const GrinTranslator = struct {
 
         // ── done: return WHNF value ────────────────────────────────────
         llvm.positionBuilderAtEnd(self.builder, done_bb);
-        _ = llvm.buildRet(self.builder, phi);
+        self.buildRetWithShadowRestore(phi);
     }
 
     /// Emit a call to `__rhc_force` if the module contains F-tags.
@@ -3487,7 +3641,7 @@ pub const GrinTranslator = struct {
             1,
             "direct_call",
         );
-        _ = llvm.buildRet(self.builder, default_result);
+        self.buildRetWithShadowRestore(default_result);
 
         // ── P-tag cases ────────────────────────────────────────────────
         var ptag_iter = self.registry.partial_tags.iterator();
@@ -3569,7 +3723,7 @@ pub const GrinTranslator = struct {
                     "",
                 );
 
-                _ = llvm.buildRet(self.builder, new_node);
+                self.buildRetWithShadowRestore(new_node);
             } else {
                 // ── Saturated (missing == 1): call func(captured_args..., x) ──
                 const total_args = ptag_info.n_fields + 1; // captured + x
@@ -3610,7 +3764,7 @@ pub const GrinTranslator = struct {
                     n_call_args,
                     "sat_result",
                 );
-                _ = llvm.buildRet(self.builder, result);
+                self.buildRetWithShadowRestore(result);
             }
         }
     }

@@ -46,22 +46,18 @@
 //! collection bumps `mark_id`, and stale ids automatically read as
 //! unmarked.
 //!
-//! Roots are pulled from two sources:
+//! Roots come from two precise sources:
 //!
-//!   * Explicitly-registered slots via `addRoot`/`removeRoot` — precise.
-//!     This is the long-term root mechanism (LLVM backend will spill
-//!     live `*Node` values into shadow-stack frames; the GC walks them
-//!     exactly).
-//!   * Optional **conservative stack scan** between `stack_base` (set
-//!     once via `setStackBase`) and the current frame address — every
-//!     aligned word in that range that *looks* like a heap pointer is
-//!     treated as a root. This is the zig-gc-style bring-up path so
-//!     the collector works before the backend emits precise roots.
-//!     If `stack_base` is `null` the scan is skipped entirely (the
-//!     mode unit tests use, since their roots are explicit). The
-//!     conservative scan does **not** cover register-resident values,
-//!     so production use will need a `setjmp`-style register spill or
-//!     precise shadow-stack roots before it can be trusted.
+//!   * Explicitly-registered slots via `addRoot`/`removeRoot` — used
+//!     by the RTS itself and by unit tests that want deterministic
+//!     control over the root set.
+//!   * The **shadow stack** populated by the LLVM backend (#780): the
+//!     generated code calls `rts_shadow_push` at every `*Node` SSA
+//!     definition, brackets each function body with
+//!     `rts_shadow_save`/`rts_shadow_restore`, and the collector walks
+//!     the global slot buffer via `markFromShadowStack`. This is the
+//!     long-term precise root mechanism — every live `*Node` reachable
+//!     from generated code is rooted by construction.
 //!
 //! Object-body tracing is **precise** for built-in tags whose layout
 //! the RTS knows (`Unit`/`Int`/`Char`/`String` carry no pointers;
@@ -274,9 +270,6 @@ pub const ImmixGc = struct {
     /// `collect` walks this list precisely; any non-null slot is
     /// followed unconditionally regardless of `isHeapPointer`.
     roots: std.ArrayList(*u64) = .empty,
-    /// Optional high-water frame address for the conservative stack
-    /// scan. If `null`, only explicit roots are used.
-    stack_base: ?usize = null,
 
     // ── Stats ─────────────────────────────────────────────────────────
     stats_data: heap.AllocStats = .{},
@@ -288,11 +281,12 @@ pub const ImmixGc = struct {
 
     // ── Auto-collect trigger (#781) ──────────────────────────────────
     /// When `true`, the allocator calls `collect()` automatically once
-    /// the live block count is about to exceed `target_blocks`. **Off
-    /// by default**: enabling it on a heap with no roots is
-    /// catastrophic (collect would reap everything live). Callers must
-    /// either register precise roots (`addRoot`) or arm the
-    /// conservative scan (`setStackBase`) before turning this on. See
+    /// the live block count is about to exceed `target_blocks`. Off by
+    /// default for the in-process tests that go through this struct
+    /// directly; the global heap (`heap.gcAllocator()`) flips it on at
+    /// init time because generated code emits shadow-stack roots at
+    /// every `*Node` SSA definition (#780), so collection from inside
+    /// the allocator path always sees the full live root set. See
     /// issue #781 and the docstring on `setAutoCollect`.
     auto_collect_enabled: bool = false,
     /// Live block budget. Once `blocks_allocated >= target_blocks` the
@@ -311,15 +305,6 @@ pub const ImmixGc = struct {
         return .{ .child = child };
     }
 
-    /// Record the calling frame as the boundary for the conservative
-    /// stack scanner. Call this once, as high in the program's
-    /// lifetime as possible (typically from `main`). Until called, the
-    /// conservative scan is disabled and the collector only sees
-    /// explicit roots registered via `addRoot`.
-    pub fn setStackBase(self: *ImmixGc, frame_address: usize) void {
-        self.stack_base = frame_address;
-    }
-
     /// Enable or disable automatic collection from the allocation path
     /// (#781). When enabled, the allocator runs `collect()` before
     /// requesting a fresh block once the live block count crosses
@@ -327,11 +312,11 @@ pub const ImmixGc = struct {
     /// post-collection live size (floored at `min_target_blocks`).
     ///
     /// **Safety**: enabling this on a heap with no roots reaps every
-    /// live object. Callers must either register precise roots via
-    /// `addRoot` for every live `*Node`, or arm the conservative scan
-    /// via `setStackBase` (transitional; unsafe in optimised builds —
-    /// see [#780](https://github.com/adinapoli/rusholme/issues/780)
-    /// for the precise-roots replacement).
+    /// live object. Compiled programs are safe by construction — the
+    /// LLVM backend emits precise shadow-stack roots at every `*Node`
+    /// SSA definition (#780). In-process callers (tests, embedders)
+    /// must register their roots via `addRoot` (or push them onto the
+    /// shadow stack via `heap.rts_shadow_push`) before enabling.
     pub fn setAutoCollect(self: *ImmixGc, enabled: bool) void {
         self.auto_collect_enabled = enabled;
     }
@@ -730,11 +715,11 @@ pub const ImmixGc = struct {
     ///   1. Bump `mark_id` so stale per-node marks read as unmarked.
     ///   2. Reset every block's payload line marks to free; header
     ///      lines stay used.
-    ///   3. Trace from every registered root (precise) and, if a
-    ///      `stack_base` was set, every aligned word in the
-    ///      conservative stack range. Each reachable node has its
-    ///      `gc_flags` set to `mark_id` and the lines it spans set to
-    ///      used.
+    ///   3. Trace from every precise root: explicit
+    ///      `addRoot`-registered slots and the shadow-stack buffer
+    ///      populated by `rts_shadow_push` from generated code (#780).
+    ///      Each reachable node has its `gc_flags` set to `mark_id` and
+    ///      the lines it spans set to used.
     ///   4. Re-classify every block based on the freshly-computed
     ///      line counts and rebuild the free/recyclable/full lists.
     ///   5. Drop large objects whose payload node was not marked.
@@ -765,12 +750,6 @@ pub const ImmixGc = struct {
 
         // Step 3: mark.
         self.markFromRoots();
-        // Pass the current frame as the low-water mark for the
-        // conservative scan. Capture it here so the scan covers every
-        // frame younger than `stack_base`.
-        if (self.stack_base) |sb| {
-            self.markFromStackRange(@frameAddress(), sb);
-        }
 
         // Step 4: re-classify blocks. We rebuild the lists from
         // scratch to avoid double-filing.
@@ -868,31 +847,24 @@ pub const ImmixGc = struct {
                 work.append(self.child, @ptrFromInt(addr)) catch @panic("Immix: out of memory during mark");
             }
         }
+        self.markFromShadowStack(&work);
         self.drainMarkWorklist(&work);
     }
 
-    fn markFromStackRange(self: *ImmixGc, lo_addr: usize, hi_addr: usize) void {
-        var work: std.ArrayList(*Node) = .empty;
-        defer work.deinit(self.child);
-        var start: usize = undefined;
-        var end: usize = undefined;
-        if (lo_addr < hi_addr) {
-            start = lo_addr;
-            end = hi_addr;
-        } else {
-            start = hi_addr;
-            end = lo_addr;
-        }
-        const word_size = @sizeOf(usize);
-        var p = std.mem.alignForward(usize, start, word_size);
-        while (p + word_size <= end) : (p += word_size) {
-            const w: u64 = @as(*const usize, @ptrFromInt(p)).*;
+    /// Walk the shadow-stack buffer (issue #780) and queue every slot
+    /// that looks like a heap pointer. Slots are written by the
+    /// LLVM-generated code via `rts_shadow_push` at every `*Node` SSA
+    /// definition; the live region is `rts_shadow_buffer[0..top]`.
+    fn markFromShadowStack(self: *ImmixGc, work: *std.ArrayList(*Node)) void {
+        const top = heap.rts_shadow_top;
+        var i: u32 = 0;
+        while (i < top) : (i += 1) {
+            const w = heap.rts_shadow_buffer[i];
             if (self.isHeapPointer(w)) {
                 const addr: usize = @intCast(w);
                 work.append(self.child, @ptrFromInt(addr)) catch @panic("Immix: out of memory during mark");
             }
         }
-        self.drainMarkWorklist(&work);
     }
 
     fn drainMarkWorklist(self: *ImmixGc, work: *std.ArrayList(*Node)) void {
@@ -1289,6 +1261,103 @@ test "Immix: addRoot / removeRoot maintain the root list" {
     try testing.expectEqual(@as(usize, 0), gc.roots.items.len);
 }
 
+// ── Shadow-stack ABI (#780) ──────────────────────────────────────────
+
+/// Reset the shadow-stack buffer to a known-empty state so tests can
+/// run independently. Other tests that don't touch the shadow stack
+/// don't need this because they go through the explicit `addRoot`
+/// path; tests in this section share the global buffer.
+fn resetShadowStack() void {
+    heap.rts_shadow_top = 0;
+    @memset(&heap.rts_shadow_buffer, 0);
+}
+
+test "Immix: collect walks the shadow stack and keeps pushed nodes" {
+    resetShadowStack();
+    defer resetShadowStack();
+
+    var gc = ImmixGc.init(testing.allocator);
+    defer gc.deinit();
+
+    const live = try newNode(&gc, .Int, 1);
+    nodemod.fields(live)[0] = 7;
+    const dead = try newNode(&gc, .Int, 1);
+    nodemod.fields(dead)[0] = 99;
+
+    heap.rts_shadow_push(@intFromPtr(live));
+
+    gc.collect();
+    try testing.expectEqual(gc.mark_id, live.gc_flags);
+    try testing.expect(dead.gc_flags != gc.mark_id);
+}
+
+test "Immix: rts_shadow_save / rts_shadow_restore brackets a region" {
+    resetShadowStack();
+    defer resetShadowStack();
+
+    var gc = ImmixGc.init(testing.allocator);
+    defer gc.deinit();
+
+    const outer = try newNode(&gc, .Int, 1);
+    nodemod.fields(outer)[0] = 1;
+    const inner = try newNode(&gc, .Int, 1);
+    nodemod.fields(inner)[0] = 2;
+
+    heap.rts_shadow_push(@intFromPtr(outer));
+    const saved = heap.rts_shadow_save();
+    heap.rts_shadow_push(@intFromPtr(inner));
+
+    // Both roots are visible to a collection that fires inside the
+    // nested region.
+    gc.collect();
+    try testing.expectEqual(gc.mark_id, outer.gc_flags);
+    try testing.expectEqual(gc.mark_id, inner.gc_flags);
+
+    // After restore the inner root is released; a later collection
+    // sees only the outer one.
+    heap.rts_shadow_restore(saved);
+    const inner2 = try newNode(&gc, .Int, 1);
+    nodemod.fields(inner2)[0] = 3;
+
+    gc.collect();
+    try testing.expectEqual(gc.mark_id, outer.gc_flags);
+    // inner2 was never pushed, so it should not survive.
+    try testing.expect(inner2.gc_flags != gc.mark_id);
+}
+
+test "Immix: shadow-stack slots holding null are skipped" {
+    resetShadowStack();
+    defer resetShadowStack();
+
+    var gc = ImmixGc.init(testing.allocator);
+    defer gc.deinit();
+
+    const live = try newNode(&gc, .Int, 1);
+    nodemod.fields(live)[0] = 42;
+
+    heap.rts_shadow_push(0);
+    heap.rts_shadow_push(@intFromPtr(live));
+    heap.rts_shadow_push(0);
+
+    gc.collect();
+    try testing.expectEqual(gc.mark_id, live.gc_flags);
+}
+
+test "Immix: rts_shadow_restore truncates the buffer and zeroes released slots" {
+    resetShadowStack();
+    defer resetShadowStack();
+
+    const saved = heap.rts_shadow_save();
+    try testing.expectEqual(@as(u32, 0), saved);
+    heap.rts_shadow_push(0xCAFE0001);
+    heap.rts_shadow_push(0xCAFE0002);
+    try testing.expectEqual(@as(u32, 2), heap.rts_shadow_top);
+    heap.rts_shadow_restore(saved);
+    try testing.expectEqual(@as(u32, 0), heap.rts_shadow_top);
+    try testing.expectEqual(@as(u64, 0), heap.rts_shadow_buffer[0]);
+    try testing.expectEqual(@as(u64, 0), heap.rts_shadow_buffer[1]);
+}
+
 test "Immix: std.mem.Allocator adapter routes through the same heap" {
     var gc = ImmixGc.init(testing.allocator);
     defer gc.deinit();
@@ -1493,39 +1562,6 @@ test "Immix: collect monotonically increments mark_id" {
     const mid = gc.mark_id;
     gc.collect();
     try testing.expect(gc.mark_id > mid);
-}
-
-test "Immix: markFromStackRange follows pointers in a synthetic buffer" {
-    // Bypasses the real stack so the test doesn't depend on compiler
-    // frame-pointer choices. Exercises the conservative scan logic
-    // directly against a known byte range.
-    var gc = ImmixGc.init(testing.allocator);
-    defer gc.deinit();
-    const live = try newNode(&gc, .Int, 1);
-
-    // Pretend this buffer is a stack window: one entry is the heap
-    // pointer to `live`; the others are noise. The scan should pick
-    // out the heap pointer and mark its target.
-    var buf: [4]usize align(@alignOf(usize)) = .{
-        0xdead,
-        @intFromPtr(live),
-        0,
-        0xbeef,
-    };
-
-    // Set up collector state as if collect() had just bumped mark_id
-    // and cleared payload line marks.
-    gc.mark_id = 1;
-    var b = gc.all_blocks;
-    while (b) |block| : (b = block.all_next) {
-        for (block.line_marks[HEADER_LINES..]) |*m| m.* = 0;
-    }
-    gc.markFromStackRange(
-        @intFromPtr(&buf),
-        @intFromPtr(&buf) + @sizeOf(@TypeOf(buf)),
-    );
-
-    try testing.expectEqual(@as(u32, 1), live.gc_flags);
 }
 
 test "Immix: isHeapPointer rejects non-pointer words" {
