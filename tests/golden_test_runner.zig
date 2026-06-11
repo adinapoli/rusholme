@@ -371,7 +371,7 @@ fn pipelineToGrin(allocator: std.mem.Allocator, source: []const u8) ![]const u8 
     const lift_result = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog, null, 0);
 
     // ── Core → GRIN ──────────────────────────────────────────────────────
-    const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, lift_result.program, null, null);
+    const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, lift_result.program, null, null, null);
 
     // ── Pretty-print GRIN to a heap string ───────────────────────────────
     var out: std.Io.Writer.Allocating = .init(allocator);

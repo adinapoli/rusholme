@@ -716,7 +716,7 @@ fn cmdGrin(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     }
 
     // ── Translate to GRIN ───────────────────────────────────────────────
-    const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted, null, null);
+    const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted, null, null, null);
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
@@ -835,7 +835,7 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     }
 
     // ── Translate to GRIN ───────────────────────────────────────────────
-    const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted, null, null);
+    const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted, null, null, null);
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
@@ -1071,6 +1071,22 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
         }
     }
 
+    // ── Whole-program demand (strictness) analysis (#802) ───────────────
+    // Runs after specialisation so class-method calls are already direct
+    // calls to instance methods (better strictness). The resulting
+    // strict-parameter masks let GRIN translation pass strict arguments
+    // eagerly instead of allocating F-tag thunks.
+    const strict_params: ?*const std.AutoHashMapUnmanaged(u64, u64) = blk: {
+        var all_progs = std.ArrayListUnmanaged(rusholme.core.ast.CoreProgram).empty;
+        for (module_order) |mod_name| {
+            const core_prog = session.programs.get(mod_name) orelse continue;
+            try all_progs.append(arena_alloc, core_prog);
+        }
+        const masks = try arena_alloc.create(rusholme.core.demand.StrictnessMap);
+        masks.* = try rusholme.core.demand.analyse(arena_alloc, all_progs.items);
+        break :blk masks;
+    };
+
     // ── Per-module lambda lift + GRIN translation ───────────────────────
     // Each Haskell module is lambda-lifted and GRIN-translated independently.
     // The per-module GRIN programs are collected for global tag table
@@ -1121,7 +1137,7 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
         const core_prog = session.programs.get(mod_name) orelse continue;
         const lift_result = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog, cross_module_scope, next_lift_id);
         next_lift_id = lift_result.next_lifted_id;
-        const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, lift_result.program, &cross_module_arities, &cross_module_con_map);
+        const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, lift_result.program, &cross_module_arities, &cross_module_con_map, strict_params);
         try per_module_grin.append(arena_alloc, grin_prog);
 
         // Accumulate this module's function arities for subsequent modules
