@@ -164,10 +164,58 @@ fn collectFn(
         params.deinit(alloc);
         return; // CAF — nothing to analyse.
     }
+    try collectVarAliases(alloc, cur, aliases);
     try fns.put(alloc, unique, .{
         .params = try params.toOwnedSlice(alloc),
         .body = cur,
     });
+}
+
+/// Record `let x = y` variable aliases from a function body. The pattern
+/// compiler re-binds parameters under fresh names in every alternative
+/// (`let acc' = arg_0 in ...`); without resolving these, demand on the
+/// original parameter is invisible. Uniques are globally unique after
+/// renaming, so one flat map is safe (no shadowing).
+fn collectVarAliases(
+    alloc: std.mem.Allocator,
+    e: *const Expr,
+    aliases: *std.AutoHashMapUnmanaged(u64, u64),
+) std.mem.Allocator.Error!void {
+    switch (e.*) {
+        .Var, .Lit, .Type, .Coercion => {},
+        .Lam => |l| try collectVarAliases(alloc, l.body, aliases),
+        .App => |a| {
+            try collectVarAliases(alloc, a.fn_expr, aliases);
+            try collectVarAliases(alloc, a.arg, aliases);
+        },
+        .Case => |case_expr| {
+            try collectVarAliases(alloc, case_expr.scrutinee, aliases);
+            for (case_expr.alts) |alt| try collectVarAliases(alloc, alt.body, aliases);
+        },
+        .Let => |l| {
+            switch (l.bind) {
+                .NonRec => |pair| {
+                    if (pair.rhs.* == .Var) {
+                        try aliases.put(alloc, pair.binder.name.unique.value, pair.rhs.Var.name.unique.value);
+                    }
+                    try collectVarAliases(alloc, pair.rhs, aliases);
+                },
+                .Rec => |pairs| for (pairs) |pair| try collectVarAliases(alloc, pair.rhs, aliases),
+            }
+            try collectVarAliases(alloc, l.body, aliases);
+        },
+    }
+}
+
+/// Follow the alias chain to the representative unique.
+fn resolveAlias(aliases: *const std.AutoHashMapUnmanaged(u64, u64), unique: u64) u64 {
+    var cur = unique;
+    var hops: u8 = 0;
+    while (aliases.get(cur)) |next| : (hops += 1) {
+        if (hops > 8) break;
+        cur = next;
+    }
+    return cur;
 }
 
 /// Does evaluating `e` to WHNF force the variable `p`?
@@ -179,7 +227,7 @@ fn demands(
     masks: *const StrictnessMap,
 ) bool {
     switch (e.*) {
-        .Var => |id| return id.name.unique.value == p,
+        .Var => |id| return resolveAlias(aliases, id.name.unique.value) == p,
         .Lit, .Lam, .Type, .Coercion => return false,
 
         .App => {
