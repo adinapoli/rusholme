@@ -754,14 +754,12 @@
                 </a>
             </div>
 
-            <!-- Summary cards: current gap-to-GHC per program. -->
-            <div id="bench-summary" class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-12">
-                <!-- BENCH_SUMMARY_PLACEHOLDER -->
-            </div>
-
-            <!-- Per-program time-series charts (Vega-Lite). -->
-            <div id="bench-charts" class="grid lg:grid-cols-2 gap-6">
-                <!-- BENCH_CHARTS_PLACEHOLDER -->
+            <!-- Interactive bench explorer: program list on the left,
+                 the selected program's time-series chart on the right.
+                 Rows are tinted by the latest run's verdict — green when
+                 the best rhc backend beats GHC, red-ish otherwise. -->
+            <div id="bench-explorer">
+                <!-- BENCH_EXPLORER_PLACEHOLDER -->
             </div>
 
             <p class="text-gray-500 text-xs mt-8 text-center">

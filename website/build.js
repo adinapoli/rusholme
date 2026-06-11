@@ -270,60 +270,17 @@ function loadBenchResults() {
 }
 
 /**
- * Summary cards — one per program — showing the gap to GHC as
- * measured in the most recent committed run. Colour-coded by how
- * close to parity we are: green ≤ 5×, amber ≤ 25×, red beyond.
- */
-function generateBenchSummaryHTML(bench) {
-  const latest = bench.runs[bench.runs.length - 1];
-  const names = Object.keys(latest.programs).sort();
-  return names.map(name => {
-    const p = latest.programs[name];
-    // Use the fastest rhc backend for the gap-to-GHC summary.
-    const rhc_best_ms = (typeof p.rhc_immix_mean_ms === 'number')
-      ? Math.min(p.rhc_mean_ms, p.rhc_immix_mean_ms)
-      : p.rhc_mean_ms;
-    const gap = rhc_best_ms / p.ghc_mean_ms;
-    let badgeColour, gapColour;
-    if (gap <= 5) { badgeColour = 'bg-emerald-500/10 border-emerald-500/30'; gapColour = 'text-emerald-300'; }
-    else if (gap <= 25) { badgeColour = 'bg-amber-500/10 border-amber-500/30'; gapColour = 'text-amber-300'; }
-    else { badgeColour = 'bg-rose-500/10 border-rose-500/30'; gapColour = 'text-rose-300'; }
-    const fmt = (ms) => ms >= 100 ? ms.toFixed(0) : ms.toFixed(2);
-    const immixLine = (typeof p.rhc_immix_mean_ms === 'number')
-      ? `<div class="mt-1 flex items-baseline gap-2">
-           <span class="text-sm font-medium text-blue-300">${fmt(p.rhc_immix_mean_ms)}</span>
-           <span class="text-xs text-gray-500">ms — rhc immix</span>
-         </div>`
-      : '';
-    return `
-    <div class="rounded-2xl border ${badgeColour} p-5 backdrop-blur">
-      <div class="flex items-baseline justify-between gap-2">
-        <h3 class="text-sm font-mono text-gray-300 truncate">${escapeHtml(name)}</h3>
-        <span class="text-xs ${gapColour} font-semibold">${gap.toFixed(1)}× slower</span>
-      </div>
-      <div class="mt-3 flex items-baseline gap-2">
-        <span class="text-2xl font-bold text-white">${fmt(p.rhc_mean_ms)}</span>
-        <span class="text-xs text-gray-400">ms — rhc arena</span>
-      </div>
-      ${immixLine}
-      <div class="mt-1 flex items-baseline gap-2">
-        <span class="text-sm font-medium text-gray-300">${fmt(p.ghc_mean_ms)}</span>
-        <span class="text-xs text-gray-500">ms — ghc</span>
-      </div>
-    </div>`;
-  }).join('\n');
-}
-
-/**
- * One Vega-Lite chart per program. Each chart shows the rhc vs ghc
- * mean execution time over time, with a shaded ±σ band so a single
- * run already plots something visible (Vega-Lite renders the band
- * as a rectangle around the point). When the history grows the
- * line + band combination becomes a proper trend line.
+ * One Vega-Lite chart per program, wrapped in an interactive
+ * explorer: a program list on the left (one row per benchmark,
+ * tinted green when the best rhc backend beats GHC in the latest
+ * run, red-ish when it trails), and the selected program's
+ * time-series chart on the right. Charts show rhc vs ghc mean
+ * execution time over time with a shaded ±σ band; they are
+ * rendered lazily by vega-embed on first selection and cached.
  *
- * Spec is emitted inline and rendered client-side by vega-embed.
+ * Specs are emitted inline and rendered client-side by vega-embed.
  */
-function generateBenchChartsHTML(bench) {
+function generateBenchExplorerHTML(bench) {
   // Collect every (date, program, compiler, ms) tuple across all runs.
   // Also pre-compute the stddev band edges so Vega-Lite doesn't need
   // a calculate transform.
@@ -359,11 +316,23 @@ function generateBenchChartsHTML(bench) {
   }
   const names = Array.from(new Set(records.map(r => r.program))).sort();
 
-  let html = '';
-  let scriptInits = '';
+  const latest = bench.runs[bench.runs.length - 1];
+  const previous = bench.runs.length > 1 ? bench.runs[bench.runs.length - 2] : null;
+  const specs = {};
+  const rowsMeta = [];
+
+  // Gap = best rhc backend / ghc, both from the same run. < 1 means
+  // rusholme wins.
+  const gapIn = (run, name) => {
+    const p = run && run.programs[name];
+    if (!p) return null;
+    const rhcBest = (typeof p.rhc_immix_mean_ms === 'number')
+      ? Math.min(p.rhc_mean_ms, p.rhc_immix_mean_ms)
+      : p.rhc_mean_ms;
+    return rhcBest / p.ghc_mean_ms;
+  };
 
   for (const name of names) {
-    const cellId = `bench-chart-${name.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
     const data = records.filter(r => r.program === name);
     const spec = {
       $schema: 'https://vega.github.io/schema/vega-lite/v5.json',
@@ -375,7 +344,7 @@ function generateBenchChartsHTML(bench) {
       encoding: {
         x: {
           field: 'date', type: 'temporal',
-          axis: { title: null, format: '%b %d', labelColor: '#9ca3af', tickColor: '#374151', domainColor: '#374151' },
+          axis: { title: null, format: '%b %d', tickCount: 6, labelColor: '#9ca3af', tickColor: '#374151', domainColor: '#374151' },
         },
         color: {
           field: 'compiler', type: 'nominal',
@@ -429,21 +398,224 @@ function generateBenchChartsHTML(bench) {
         legend: { titleFontSize: 11, labelFontSize: 11 },
       },
     };
-    html += `
-    <div class="bg-gray-900/60 rounded-2xl border border-gray-800 p-5">
-      <h3 class="text-sm font-mono text-gray-300 mb-3">${escapeHtml(name)}.hs</h3>
-      <div id="${cellId}" class="w-full" style="min-height: 280px;"></div>
-    </div>`;
-    scriptInits += `\n    vegaEmbed('#${cellId}', ${JSON.stringify(spec)}, { actions: false, renderer: 'svg' }).catch(function (e) { console.error('vega-embed failed for ${cellId}:', e); });`;
+    specs[name] = spec;
+
+    // Verdict for the row tint: compare the best rhc backend against
+    // ghc in the latest run. A program absent from the latest run
+    // (renamed/retired bench) is shown neutral. The trend compares
+    // the latest gap against the previous run's gap so each row can
+    // show whether the program is improving or regressing.
+    const p = latest.programs[name];
+    const gap = gapIn(latest, name);
+    const prevGap = gapIn(previous, name);
+    let trend = null;
+    if (gap !== null && prevGap !== null) {
+      if (gap < prevGap * 0.98) trend = 'up';        // faster than last run
+      else if (gap > prevGap * 1.02) trend = 'down'; // slower than last run
+      else trend = 'flat';
+    }
+    rowsMeta.push({
+      name,
+      gap,
+      trend,
+      rhc_ms: p ? p.rhc_mean_ms : null,
+      rhc_immix_ms: (p && typeof p.rhc_immix_mean_ms === 'number') ? p.rhc_immix_mean_ms : null,
+      ghc_ms: p ? p.ghc_mean_ms : null,
+    });
   }
 
-  // The Vega-embed calls run after DOMContentLoaded so the chart
-  // divs definitely exist. Wrap in a guard so a CDN miss does not
-  // throw a ReferenceError into other scripts.
-  html += `\n<script>
+  // Headline numbers for the strip above the explorer: how many
+  // programs rusholme currently wins, and the geometric mean of the
+  // gap across the latest run (the honest single-number summary for
+  // ratios — an arithmetic mean would let one outlier dominate).
+  const scored = rowsMeta.filter(m => m.gap !== null);
+  const wins = scored.filter(m => m.gap <= 1.0).length;
+  const losses = scored.length - wins;
+  const geomean = scored.length
+    ? Math.exp(scored.reduce((acc, m) => acc + Math.log(m.gap), 0) / scored.length)
+    : null;
+  const geomeanColour = geomean === null ? 'text-gray-400'
+    : geomean <= 1.0 ? 'text-emerald-300'
+    : geomean <= 1.5 ? 'text-amber-300'
+    : 'text-rose-300';
+
+  // One row per benchmark. Tint encodes the latest verdict: emerald
+  // when rhc (best backend) matches or beats GHC, soft rose when it
+  // trails by up to 50%, stronger rose beyond that. The arrow shows
+  // the direction of travel since the previous committed run.
+  const trendGlyph = (trend) =>
+    trend === 'up' ? '<span class="text-emerald-400" title="faster than previous run">▴</span>'
+    : trend === 'down' ? '<span class="text-rose-400" title="slower than previous run">▾</span>'
+    : trend === 'flat' ? '<span class="text-gray-600" title="unchanged since previous run">▸</span>'
+    : '';
+
+  const rowsHTML = rowsMeta.map(({ name, gap, trend }) => {
+    let tint, badge, badgeText;
+    if (gap === null) {
+      tint = 'border-gray-800 hover:bg-gray-800/60';
+      badge = 'text-gray-500';
+      badgeText = 'n/a';
+    } else if (gap <= 1.0) {
+      tint = 'border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20';
+      badge = 'text-emerald-300';
+      badgeText = `${(1 / gap).toFixed(2)}× faster`;
+    } else if (gap <= 1.5) {
+      tint = 'border-rose-500/20 bg-rose-500/5 hover:bg-rose-500/15';
+      badge = 'text-rose-300/80';
+      badgeText = `${gap.toFixed(2)}× slower`;
+    } else {
+      tint = 'border-rose-500/40 bg-rose-500/15 hover:bg-rose-500/25';
+      badge = 'text-rose-300';
+      badgeText = `${gap.toFixed(2)}× slower`;
+    }
+    return `
+        <button type="button" data-bench="${escapeHtml(name)}" data-gap="${gap === null ? '' : gap}"
+            class="bench-row w-full flex items-center justify-between gap-3 px-4 py-2.5 rounded-xl border ${tint} transition-all duration-150 text-left">
+          <span class="flex items-center gap-2 min-w-0">
+            ${trendGlyph(trend)}
+            <span class="text-sm font-mono text-gray-200 truncate">${escapeHtml(name)}</span>
+          </span>
+          <span class="text-xs font-semibold whitespace-nowrap ${badge}">${badgeText}</span>
+        </button>`;
+  }).join('\n');
+
+  const html = `
+    <div class="flex flex-wrap items-center gap-3 mb-6">
+      <div class="flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-4 py-1.5">
+        <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+        <span class="text-sm text-emerald-300 font-semibold">${wins}</span>
+        <span class="text-xs text-gray-400">rusholme wins</span>
+      </div>
+      <div class="flex items-center gap-2 rounded-full border border-rose-500/30 bg-rose-500/10 px-4 py-1.5">
+        <span class="w-2 h-2 rounded-full bg-rose-400"></span>
+        <span class="text-sm text-rose-300 font-semibold">${losses}</span>
+        <span class="text-xs text-gray-400">ghc wins</span>
+      </div>
+      ${geomean !== null ? `
+      <div class="flex items-center gap-2 rounded-full border border-gray-700 bg-gray-800/60 px-4 py-1.5">
+        <span class="text-sm font-semibold ${geomeanColour}">${geomean.toFixed(2)}×</span>
+        <span class="text-xs text-gray-400">geometric-mean gap vs GHC</span>
+      </div>` : ''}
+    </div>
+    <div class="flex flex-col lg:flex-row gap-6">
+      <div class="lg:w-80 shrink-0 flex flex-col gap-3">
+        <div class="flex gap-2">
+          <input type="search" id="bench-filter" placeholder="Filter benchmarks…"
+              class="flex-1 min-w-0 bg-gray-900/80 border border-gray-700 rounded-xl px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-emerald-500/50" />
+          <button type="button" id="bench-sort"
+              class="shrink-0 bg-gray-900/80 border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-400 hover:text-gray-200 hover:border-gray-500 transition-colors"
+              title="Toggle sort: name / gap">A–Z</button>
+        </div>
+        <div class="flex flex-col gap-1.5 max-h-[36rem] overflow-y-auto pr-1" id="bench-nav">
+${rowsHTML}
+        </div>
+      </div>
+      <div class="flex-1 min-w-0 bg-gray-900/60 rounded-2xl border border-gray-800 p-5 self-start w-full lg:sticky lg:top-24">
+        <div class="flex flex-wrap items-baseline justify-between gap-3 mb-1">
+          <h3 class="text-base font-mono text-white" id="bench-detail-title"></h3>
+          <span class="text-sm font-semibold" id="bench-detail-verdict"></span>
+        </div>
+        <div class="flex flex-wrap gap-2 mb-4" id="bench-detail-chips"></div>
+        <div id="bench-detail-chart" class="w-full" style="min-height: 300px;"></div>
+        <p class="text-gray-500 text-xs mt-3">Mean wall-clock per committed run, log scale. Shaded band is ±σ. Hover points for the exact numbers and commit.</p>
+      </div>
+    </div>
+<script>
 (function () {
+  var SPECS = ${JSON.stringify(specs)};
+  var META = ${JSON.stringify(Object.fromEntries(rowsMeta.map(m => [m.name, m])))};
+  var selected = null;
+  function fmtMs(ms) { return ms >= 100 ? ms.toFixed(0) : ms.toFixed(2); }
+  function chip(label, value, colour) {
+    return '<span class="inline-flex items-baseline gap-1.5 rounded-lg border border-gray-700/80 bg-gray-800/60 px-2.5 py-1">'
+      + '<span class="w-1.5 h-1.5 rounded-full self-center" style="background:' + colour + '"></span>'
+      + '<span class="text-xs text-gray-400">' + label + '</span>'
+      + '<span class="text-sm font-semibold text-gray-100">' + fmtMs(value) + '</span>'
+      + '<span class="text-[10px] text-gray-500">ms</span></span>';
+  }
+  function select(name) {
+    if (!SPECS[name]) return;
+    selected = name;
+    document.querySelectorAll('#bench-nav .bench-row').forEach(function (row) {
+      var active = row.dataset.bench === name;
+      row.classList.toggle('ring-2', active);
+      row.classList.toggle('ring-emerald-400/40', active);
+    });
+    document.getElementById('bench-detail-title').textContent = name + '.hs';
+    var m = META[name];
+    var verdictEl = document.getElementById('bench-detail-verdict');
+    var chipsEl = document.getElementById('bench-detail-chips');
+    if (m && m.gap !== null) {
+      if (m.gap <= 1.0) {
+        verdictEl.textContent = (1 / m.gap).toFixed(2) + '× faster than GHC';
+        verdictEl.className = 'text-sm font-semibold text-emerald-300';
+      } else {
+        verdictEl.textContent = m.gap.toFixed(2) + '× slower than GHC';
+        verdictEl.className = 'text-sm font-semibold ' + (m.gap <= 1.5 ? 'text-rose-300/80' : 'text-rose-300');
+      }
+      var chips = [chip('rhc arena', m.rhc_ms, '#34d399')];
+      if (m.rhc_immix_ms !== null) chips.push(chip('rhc immix', m.rhc_immix_ms, '#60a5fa'));
+      chips.push(chip('ghc', m.ghc_ms, '#f7a41d'));
+      chipsEl.innerHTML = chips.join('');
+    } else {
+      verdictEl.textContent = '';
+      chipsEl.innerHTML = '';
+    }
+    vegaEmbed('#bench-detail-chart', SPECS[name], { actions: false, renderer: 'svg' })
+      .catch(function (e) { console.error('vega-embed failed for ' + name + ':', e); });
+  }
+  function visibleRows() {
+    return Array.prototype.filter.call(
+      document.querySelectorAll('#bench-nav .bench-row'),
+      function (r) { return r.style.display !== 'none'; });
+  }
   function init() {
-    if (typeof vegaEmbed !== 'function') { console.error('vega-embed not loaded'); return; }${scriptInits}
+    if (typeof vegaEmbed !== 'function') { console.error('vega-embed not loaded'); return; }
+    var nav = document.getElementById('bench-nav');
+    if (!nav) return;
+    nav.addEventListener('click', function (ev) {
+      var row = ev.target.closest('.bench-row');
+      if (row) select(row.dataset.bench);
+    });
+    // Arrow keys walk the (visible) list once a row has focus or a
+    // selection exists.
+    nav.addEventListener('keydown', function (ev) {
+      if (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp') return;
+      ev.preventDefault();
+      var rows = visibleRows();
+      if (!rows.length) return;
+      var idx = rows.findIndex(function (r) { return r.dataset.bench === selected; });
+      idx = ev.key === 'ArrowDown' ? Math.min(idx + 1, rows.length - 1) : Math.max(idx - 1, 0);
+      select(rows[idx].dataset.bench);
+      rows[idx].focus();
+      rows[idx].scrollIntoView({ block: 'nearest' });
+    });
+    var filter = document.getElementById('bench-filter');
+    filter.addEventListener('input', function () {
+      var q = filter.value.trim().toLowerCase();
+      document.querySelectorAll('#bench-nav .bench-row').forEach(function (row) {
+        row.style.display = row.dataset.bench.toLowerCase().indexOf(q) === -1 ? 'none' : '';
+      });
+    });
+    // Sort toggle: alphabetical ↔ worst-gap-first. Re-appending the
+    // buttons reorders them in place; listeners are delegated so
+    // nothing needs rebinding.
+    var sortBtn = document.getElementById('bench-sort');
+    var byGap = false;
+    sortBtn.addEventListener('click', function () {
+      byGap = !byGap;
+      sortBtn.textContent = byGap ? 'gap' : 'A–Z';
+      var rows = Array.prototype.slice.call(document.querySelectorAll('#bench-nav .bench-row'));
+      rows.sort(function (a, b) {
+        if (!byGap) return a.dataset.bench.localeCompare(b.dataset.bench);
+        var ga = a.dataset.gap === '' ? -Infinity : parseFloat(a.dataset.gap);
+        var gb = b.dataset.gap === '' ? -Infinity : parseFloat(b.dataset.gap);
+        return gb - ga;
+      });
+      rows.forEach(function (r) { nav.appendChild(r); });
+    });
+    var first = nav.querySelector('.bench-row');
+    if (first) select(first.dataset.bench);
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
@@ -515,17 +687,13 @@ async function build() {
   console.log('📊 Generating benchmark charts...');
   const bench = loadBenchResults();
   if (bench && bench.runs.length > 0) {
-    const summaryHTML = generateBenchSummaryHTML(bench);
-    const chartsHTML = generateBenchChartsHTML(bench);
+    const explorerHTML = generateBenchExplorerHTML(bench);
 
-    const summaryPlaceholder = '<!-- BENCH_SUMMARY_PLACEHOLDER -->';
-    if (html.includes(summaryPlaceholder)) {
-      html = html.replace(summaryPlaceholder, summaryHTML);
-    }
-
-    const chartsPlaceholder = '<!-- BENCH_CHARTS_PLACEHOLDER -->';
-    if (html.includes(chartsPlaceholder)) {
-      html = html.replace(chartsPlaceholder, chartsHTML);
+    const explorerPlaceholder = '<!-- BENCH_EXPLORER_PLACEHOLDER -->';
+    if (html.includes(explorerPlaceholder)) {
+      html = html.replace(explorerPlaceholder, explorerHTML);
+    } else {
+      console.log('   ⚠️  No bench explorer placeholder found in template.html');
     }
 
     console.log(`   ✓ Rendered ${Object.keys(bench.runs[bench.runs.length - 1].programs).length} bench charts (${bench.runs.length} run${bench.runs.length === 1 ? '' : 's'} of history)`);
