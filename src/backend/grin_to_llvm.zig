@@ -672,6 +672,11 @@ pub const GrinTranslator = struct {
     /// immediates). Case sites consult this to elide the `__rhc_force`
     /// pre-force call (#800). Cleared at the start of each translateDef.
     whnf_vars: std.AutoHashMap(u64, void),
+    /// Strict-parameter masks from the Core demand analysis (#802),
+    /// keyed by function unique. Strict parameters are forced once at
+    /// function entry and tracked as WHNF, eliding every per-use force
+    /// in the body. Null when no analysis ran (REPL, debug commands).
+    strict_params: ?*const std.AutoHashMapUnmanaged(u64, u64) = null,
     /// Per-function cache for translated GRIN Case expressions.  The
     /// sequential pattern-match desugarer creates shared fallback nodes
     /// (a DAG) that would be re-translated exponentially without caching.
@@ -1373,9 +1378,24 @@ pub const GrinTranslator = struct {
         // Store each parameter as a named value in the params map. For
         // pointer-typed params, also push them onto the shadow stack so
         // the collector sees them as live across this function's body.
+        //
+        // Strict parameters (#802) are forced once here and tracked as
+        // WHNF: the demand analysis proved every execution path forces
+        // them, so a single entry force replaces every per-use force in
+        // the body (a worker/wrapper-lite that keeps the boxed ABI).
+        const entry_strict_mask: u64 = blk: {
+            const sp = self.strict_params orelse break :blk 0;
+            break :blk sp.get(def.name.unique.value) orelse 0;
+        };
         for (def.params, 0..) |param_name, i| {
-            const param_val = c.LLVMGetParam(func, @intCast(i));
+            var param_val = c.LLVMGetParam(func, @intCast(i));
             if (param_val == null) return error.OutOfMemory;
+            if (i < 64 and (entry_strict_mask >> @intCast(i)) & 1 == 1 and
+                c.LLVMGetTypeKind(c.LLVMTypeOf(param_val)) == c.LLVMPointerTypeKind)
+            {
+                param_val = self.callForceIfNeeded(param_val);
+                self.whnf_vars.put(param_name.unique.value, {}) catch return error.OutOfMemory;
+            }
             try self.bindAndRoot(param_name.unique.value, param_val);
         }
 
@@ -2276,7 +2296,7 @@ pub const GrinTranslator = struct {
             const operand_raw = try self.translateValToLlvm(args[0]);
             if (c.LLVMGetTypeKind(c.LLVMTypeOf(operand_raw)) == c.LLVMPointerTypeKind) {
                 // Already a pointer — force thunks and return as-is.
-                return self.callForceIfNeeded(operand_raw);
+                return self.forceOperandIfNeeded(operand_raw, args[0]);
             }
             // Raw i64 — tag as ptr to avoid mis-boxing downstream.
             return tagInt(self.builder, operand_raw);
@@ -2290,7 +2310,7 @@ pub const GrinTranslator = struct {
             // thunk (e.g. F:div).  Without forcing, ptrtoint would give the
             // heap address instead of the Haskell integer value.
             const operand_forced = if (c.LLVMGetTypeKind(c.LLVMTypeOf(operand_raw)) == c.LLVMPointerTypeKind)
-                self.callForceIfNeeded(operand_raw)
+                self.forceOperandIfNeeded(operand_raw, args[0])
             else
                 operand_raw;
             const operand = if (c.LLVMGetTypeKind(c.LLVMTypeOf(operand_forced)) == c.LLVMPointerTypeKind)
@@ -2327,11 +2347,11 @@ pub const GrinTranslator = struct {
         // thunks (e.g. F:div).  Without forcing, ptrtoint would give the
         // heap address instead of the Haskell integer value.
         const lhs_forced = if (c.LLVMGetTypeKind(c.LLVMTypeOf(lhs_raw)) == c.LLVMPointerTypeKind)
-            self.callForceIfNeeded(lhs_raw)
+            self.forceOperandIfNeeded(lhs_raw, args[0])
         else
             lhs_raw;
         const rhs_forced = if (c.LLVMGetTypeKind(c.LLVMTypeOf(rhs_raw)) == c.LLVMPointerTypeKind)
-            self.callForceIfNeeded(rhs_raw)
+            self.forceOperandIfNeeded(rhs_raw, args[1])
         else
             rhs_raw;
 
@@ -3482,18 +3502,75 @@ pub const GrinTranslator = struct {
     /// Emit a call to `__rhc_force` if the module contains F-tags.
     /// Returns the forced pointer value, or the original value unchanged
     /// if no F-tags exist (i.e. `__rhc_force` was never emitted).
+    /// Force a translated operand unless its GRIN value is statically
+    /// WHNF (strict-forced parameter, primop result, immediate).
+    fn forceOperandIfNeeded(self: *GrinTranslator, raw: llvm.Value, val: grin.Val) llvm.Value {
+        if (self.valYieldsWhnf(val)) return raw;
+        return self.callForceIfNeeded(raw);
+    }
+
     fn callForceIfNeeded(self: *GrinTranslator, val: llvm.Value) llvm.Value {
         if (self.registry.fun_tags.count() == 0 and self.registry.partial_tags.count() == 0) return val;
-        const force_fn = c.LLVMGetNamedFunction(self.module, "__rhc_force") orelse return val;
+        if (c.LLVMGetNamedFunction(self.module, "__rhc_force") == null) return val;
+        const guard = self.getOrDefineForceFastGuard();
         var args = [_]llvm.Value{val};
         return c.LLVMBuildCall2(
             self.builder,
-            llvm.getFunctionType(force_fn),
-            force_fn,
+            llvm.getFunctionType(guard),
+            guard,
             &args,
             1,
             "forced",
         );
+    }
+
+    /// Get-or-define the module-internal `__rhc_force_fast(ptr) -> ptr`:
+    /// an always-inline guard that returns tagged immediates (and null)
+    /// without a call, and defers heap pointers to the full `__rhc_force`.
+    /// After LLVM inlining, forcing a value that is statically a tagged
+    /// immediate folds away entirely, and runtime forces of immediates
+    /// cost two bit tests instead of a function call.
+    fn getOrDefineForceFastGuard(self: *GrinTranslator) llvm.Value {
+        const name = "__rhc_force_fast";
+        if (c.LLVMGetNamedFunction(self.module, name)) |existing| return existing;
+
+        const ptr_ty = ptrType();
+        const i64_ty = llvm.i64Type();
+        var param_types = [_]llvm.Type{ptr_ty};
+        const fn_ty = llvm.functionType(ptr_ty, &param_types, false);
+        const func = llvm.addFunction(self.module, name, fn_ty);
+        c.LLVMSetLinkage(func, c.LLVMInternalLinkage);
+        const ctx = c.LLVMGetModuleContext(self.module);
+        const kind_id = c.LLVMGetEnumAttributeKindForName("alwaysinline", "alwaysinline".len);
+        const attr = c.LLVMCreateEnumAttribute(ctx, kind_id, 0);
+        const fn_index: c_uint = @bitCast(@as(c_int, c.LLVMAttributeFunctionIndex));
+        c.LLVMAddAttributeAtIndex(func, fn_index, attr);
+
+        const saved_bb = c.LLVMGetInsertBlock(self.builder);
+        defer if (saved_bb != null) llvm.positionBuilderAtEnd(self.builder, saved_bb);
+
+        const entry_bb = llvm.appendBasicBlock(func, "entry");
+        const slow_bb = c.LLVMAppendBasicBlock(func, "slow");
+        const done_bb = c.LLVMAppendBasicBlock(func, "done");
+        llvm.positionBuilderAtEnd(self.builder, entry_bb);
+        const param = c.LLVMGetParam(func, 0);
+        const raw = c.LLVMBuildPtrToInt(self.builder, param, i64_ty, "raw");
+        const low = c.LLVMBuildAnd(self.builder, raw, c.LLVMConstInt(i64_ty, 1, 0), "low");
+        const is_imm = c.LLVMBuildICmp(self.builder, c.LLVMIntNE, low, c.LLVMConstInt(i64_ty, 0, 0), "is_imm");
+        const is_null = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, raw, c.LLVMConstInt(i64_ty, 0, 0), "is_null");
+        const skip = c.LLVMBuildOr(self.builder, is_imm, is_null, "skip");
+        _ = c.LLVMBuildCondBr(self.builder, skip, done_bb, slow_bb);
+
+        llvm.positionBuilderAtEnd(self.builder, slow_bb);
+        const heavy = c.LLVMGetNamedFunction(self.module, "__rhc_force").?;
+        var slow_args = [_]llvm.Value{param};
+        const forced = c.LLVMBuildCall2(self.builder, llvm.getFunctionType(heavy), heavy, &slow_args, 1, "forced.slow");
+        _ = c.LLVMBuildRet(self.builder, forced);
+
+        llvm.positionBuilderAtEnd(self.builder, done_bb);
+        _ = c.LLVMBuildRet(self.builder, param);
+
+        return func;
     }
 
     /// Force a heap pointer to WHNF by following indirections and forcing
