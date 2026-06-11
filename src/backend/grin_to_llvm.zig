@@ -531,29 +531,6 @@ fn declareRtsShadowTop(module: llvm.Module) llvm.Value {
     return g;
 }
 
-/// Declare `rts_shadow_save() -> i32`. Called once at the entry of any
-/// function that produces `*Node` SSA values; the returned value names
-/// the shadow-stack height that the matching `rts_shadow_restore` must
-/// restore before every return.
-fn declareRtsShadowSave(module: llvm.Module) llvm.Value {
-    const name = "rts_shadow_save";
-    if (c.LLVMGetNamedFunction(module, name)) |existing| return existing;
-    const fn_ty = c.LLVMFunctionType(llvm.i32Type(), null, 0, 0);
-    return c.LLVMAddFunction(module, name, fn_ty);
-}
-
-/// Declare `rts_shadow_restore(saved: i32) -> void`. Called immediately
-/// before each return in a function that participates in precise root
-/// tracking; pops every shadow-stack slot pushed since the matching
-/// `rts_shadow_save`.
-fn declareRtsShadowRestore(module: llvm.Module) llvm.Value {
-    const name = "rts_shadow_restore";
-    if (c.LLVMGetNamedFunction(module, name)) |existing| return existing;
-    var params = [_]llvm.Type{llvm.i32Type()};
-    const fn_ty = c.LLVMFunctionType(llvm.voidType(), &params, 1, 0);
-    return c.LLVMAddFunction(module, name, fn_ty);
-}
-
 /// Declare `rts_set_pointer_mask(tag: i64, mask: i64) -> void`.
 /// Called once per user-defined constructor at program start to
 /// register the constructor's pointer-mask with the collector (#779).
@@ -852,15 +829,13 @@ pub const GrinTranslator = struct {
     /// same function — `buildRetWithShadowRestore` handles that.
     fn enableShadowStackForCurrentFunction(self: *GrinTranslator) void {
         if (self.rts_backend == .arena) return;
-        const save_fn = declareRtsShadowSave(self.module);
-        const saved = c.LLVMBuildCall2(
-            self.builder,
-            llvm.getFunctionType(save_fn),
-            save_fn,
-            null,
-            0,
-            "shadow.saved",
-        );
+        // Inline `rts_shadow_save()`: a single load of the top counter.
+        // The save/restore pair brackets every GRIN function; emitting
+        // them as calls cost ~2 calls per function invocation (and 2 per
+        // *inlined wrapper* after LLVM inlining) — the dominant Immix
+        // overhead on call-heavy benches.
+        const top_var = declareRtsShadowTop(self.module);
+        const saved = c.LLVMBuildLoad2(self.builder, llvm.i32Type(), top_var, "shadow.saved");
         self.shadow_saved_top = saved;
         self.shadow_emit_enabled = true;
     }
@@ -918,6 +893,26 @@ pub const GrinTranslator = struct {
     /// shadow-stack push if precise root tracking is active. Replaces
     /// the bare `self.params.put(uid, value)` pattern at every site
     /// where a GRIN-named SSA is introduced.
+    /// Whether a GRIN expression's result is statically a *tagged
+    /// immediate* (never a heap pointer): primop instruction results,
+    /// Int/Char literals, nullary constructors. Such values need no
+    /// shadow-stack root — the collector skips bit-0 values anyway.
+    /// Strictly stronger than exprYieldsWhnf (a fresh Con store is WHNF
+    /// but lives on the heap and must be rooted).
+    fn exprYieldsImmediate(self: *const GrinTranslator, expr: *const grin.Expr) bool {
+        return switch (expr.*) {
+            .Return => |v| switch (v) {
+                .ValTag => true,
+                .Lit => |lit| lit == .Int or lit == .Char or lit == .Bool,
+                else => false,
+            },
+            .App => |app| if (PrimOpMapping.lookup(app.name)) |m| m == .instruction else false,
+            .Block => |inner| self.exprYieldsImmediate(inner),
+            .Bind => |b| self.exprYieldsImmediate(b.rhs),
+            else => false,
+        };
+    }
+
     fn bindAndRoot(self: *GrinTranslator, uid: u64, value: llvm.Value) !void {
         try self.params.put(uid, value);
         self.rootPtr(value);
@@ -945,16 +940,12 @@ pub const GrinTranslator = struct {
     fn emitShadowRestoreIfActive(self: *GrinTranslator) void {
         if (!self.shadow_emit_enabled) return;
         const saved = self.shadow_saved_top orelse return;
-        const restore_fn = declareRtsShadowRestore(self.module);
-        var args = [_]llvm.Value{saved};
-        _ = c.LLVMBuildCall2(
-            self.builder,
-            llvm.getFunctionType(restore_fn),
-            restore_fn,
-            &args,
-            1,
-            "",
-        );
+        // Inline `rts_shadow_restore(saved)`: a single store of the top
+        // counter. Slots above `top` are never read by the collector
+        // (it scans `rts_shadow_buffer[0..top]`), so no zeroing is
+        // needed — popping is just lowering the counter.
+        const top_var = declareRtsShadowTop(self.module);
+        _ = c.LLVMBuildStore(self.builder, saved, top_var);
     }
 
     fn buildUnitNode(self: *GrinTranslator) llvm.Value {
@@ -1612,7 +1603,12 @@ pub const GrinTranslator = struct {
                 // which calls translateCaseToValue to generate phi nodes.
                 const result = try self.translateExprToValue(lhs, v.base);
                 if (result) |val| {
-                    try self.bindAndRoot(v.unique.value, val);
+                    if (self.exprYieldsImmediate(lhs)) {
+                        // Tagged immediate — no heap pointer, no root.
+                        try self.params.put(v.unique.value, val);
+                    } else {
+                        try self.bindAndRoot(v.unique.value, val);
+                    }
                     if (self.exprYieldsWhnf(lhs)) {
                         self.whnf_vars.put(v.unique.value, {}) catch return error.OutOfMemory;
                     }
@@ -1675,7 +1671,12 @@ pub const GrinTranslator = struct {
                 switch (b.pat) {
                     .Var => |v| {
                         if (inner_result) |val| {
-                            try self.bindAndRoot(v.unique.value, val);
+                            if (self.exprYieldsImmediate(b.lhs)) {
+                                // Tagged immediate — no heap pointer, no root.
+                                try self.params.put(v.unique.value, val);
+                            } else {
+                                try self.bindAndRoot(v.unique.value, val);
+                            }
                             if (self.exprYieldsWhnf(b.lhs)) {
                                 self.whnf_vars.put(v.unique.value, {}) catch return error.OutOfMemory;
                             }

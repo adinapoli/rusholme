@@ -195,11 +195,14 @@ pub const MAX_BLOCK_ALLOC: usize = PAYLOAD_BYTES;
 
 /// Initial heap budget for the auto-collect trigger (#781). Chosen so
 /// short-running programs do not pay the cost of a collection at all
-/// (8 blocks ≈ 256 KiB of live data), while long-running programs see
-/// their first collection promptly after passing that threshold. The
-/// budget is re-tuned upward after each cycle proportional to the
-/// post-collection live size.
-pub const INITIAL_TARGET_BLOCKS: u64 = 8;
+/// (128 blocks ≈ 4 MiB of allocation, matching the scale of GHC's
+/// default allocation area), while long-running programs see their
+/// first collection promptly after passing that threshold. The budget
+/// is re-tuned upward after each cycle proportional to the
+/// post-collection live size. The previous 8-block (256 KiB) budget
+/// made allocation-heavy microbenches collect several times over a
+/// fully-live heap — pure overhead, since nothing was reclaimable.
+pub const INITIAL_TARGET_BLOCKS: u64 = 128;
 
 comptime {
     // The header must fit in a small, fixed number of lines, leaving the
