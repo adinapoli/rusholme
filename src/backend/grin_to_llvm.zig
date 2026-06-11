@@ -314,7 +314,6 @@ const PrimOpResult = union(enum) {
     instruction: LLVMInstruction,
 };
 
-
 // ═══════════════════════════════════════════════════════════════════════
 // Heap node helpers
 // ═══════════════════════════════════════════════════════════════════════
@@ -983,8 +982,12 @@ pub const GrinTranslator = struct {
         // exists), or the allocation does not fit the inline shape
         // (line-spanning sizes, very wide nodes).
         const padded_size: u64 = 16 + @as(u64, n_fields) * 8;
+        // Both backends bump through the shared cursor/limit globals;
+        // the arena fast path just skips the Immix line-mark stores.
+        // REPL (ORC JIT) modules cannot resolve the cursor globals
+        // against the bitcode-loaded RTS, so they keep the call path.
         const inline_eligible =
-            self.rts_backend == .immix and
+            self.repl_entry_point == null and
             padded_size <= INLINE_ALLOC_MAX_SIZE and
             n_fields <= INLINE_ALLOC_MAX_FIELDS;
         if (!inline_eligible) {
@@ -1077,27 +1080,31 @@ pub const GrinTranslator = struct {
             const slot_ptr = c.LLVMBuildIntToPtr(self.builder, slot_addr, ptr_ty, "alloc.slot_ptr");
             _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(i64_ty, 0, 0), slot_ptr);
         }
-        // Mark every line the allocation spans as used. Since
+        // Mark every line the allocation spans as used (Immix only:
+        // arena chunks have no block headers, and the line-mark store
+        // would scribble over unrelated memory). Since
         // `padded_size <= LINE_SIZE` (#798 ceiling) the allocation
         // covers at most two lines — mark both unconditionally; a
         // duplicate store on the same byte is harmless. `line_marks`
         // sits at offset 0 of `BlockHeader`, so the byte address for
         // line `i` is `block_base + i`.
-        const block_mask = c.LLVMConstInt(i64_ty, ~@as(u64, IMMIX_BLOCK_SIZE - 1), 0);
-        const block_base = c.LLVMBuildAnd(self.builder, top, block_mask, "alloc.block_base");
-        const offset_first = c.LLVMBuildSub(self.builder, top, block_base, "alloc.off_first");
-        const line_first = c.LLVMBuildLShr(self.builder, offset_first, c.LLVMConstInt(i64_ty, IMMIX_LINE_LOG2, 0), "alloc.line_first");
-        const lm_first_addr = c.LLVMBuildAdd(self.builder, block_base, line_first, "alloc.lm_first_addr");
-        const lm_first_ptr = c.LLVMBuildIntToPtr(self.builder, lm_first_addr, ptr_ty, "alloc.lm_first_ptr");
-        _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(i8_ty, 1, 0), lm_first_ptr);
-        // Second line (only different from the first when the alloc
-        // straddles a boundary). Compute via `(end - 1) >> 7`.
-        const end_inclusive = c.LLVMBuildAdd(self.builder, top, c.LLVMConstInt(i64_ty, padded_size - 1, 0), "alloc.end_inclusive");
-        const offset_last = c.LLVMBuildSub(self.builder, end_inclusive, block_base, "alloc.off_last");
-        const line_last = c.LLVMBuildLShr(self.builder, offset_last, c.LLVMConstInt(i64_ty, IMMIX_LINE_LOG2, 0), "alloc.line_last");
-        const lm_last_addr = c.LLVMBuildAdd(self.builder, block_base, line_last, "alloc.lm_last_addr");
-        const lm_last_ptr = c.LLVMBuildIntToPtr(self.builder, lm_last_addr, ptr_ty, "alloc.lm_last_ptr");
-        _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(i8_ty, 1, 0), lm_last_ptr);
+        if (self.rts_backend == .immix) {
+            const block_mask = c.LLVMConstInt(i64_ty, ~@as(u64, IMMIX_BLOCK_SIZE - 1), 0);
+            const block_base = c.LLVMBuildAnd(self.builder, top, block_mask, "alloc.block_base");
+            const offset_first = c.LLVMBuildSub(self.builder, top, block_base, "alloc.off_first");
+            const line_first = c.LLVMBuildLShr(self.builder, offset_first, c.LLVMConstInt(i64_ty, IMMIX_LINE_LOG2, 0), "alloc.line_first");
+            const lm_first_addr = c.LLVMBuildAdd(self.builder, block_base, line_first, "alloc.lm_first_addr");
+            const lm_first_ptr = c.LLVMBuildIntToPtr(self.builder, lm_first_addr, ptr_ty, "alloc.lm_first_ptr");
+            _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(i8_ty, 1, 0), lm_first_ptr);
+            // Second line (only different from the first when the alloc
+            // straddles a boundary). Compute via `(end - 1) >> 7`.
+            const end_inclusive = c.LLVMBuildAdd(self.builder, top, c.LLVMConstInt(i64_ty, padded_size - 1, 0), "alloc.end_inclusive");
+            const offset_last = c.LLVMBuildSub(self.builder, end_inclusive, block_base, "alloc.off_last");
+            const line_last = c.LLVMBuildLShr(self.builder, offset_last, c.LLVMConstInt(i64_ty, IMMIX_LINE_LOG2, 0), "alloc.line_last");
+            const lm_last_addr = c.LLVMBuildAdd(self.builder, block_base, line_last, "alloc.lm_last_addr");
+            const lm_last_ptr = c.LLVMBuildIntToPtr(self.builder, lm_last_addr, ptr_ty, "alloc.lm_last_ptr");
+            _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(i8_ty, 1, 0), lm_last_ptr);
+        }
         // Publish the new cursor.
         _ = c.LLVMBuildStore(self.builder, end_v, cursor_g);
         _ = c.LLVMBuildBr(self.builder, done_bb);
@@ -3009,7 +3016,7 @@ pub const GrinTranslator = struct {
 
             // Translate the alternative body as a value (not with ret)
             const alt_value = try self.translateExprToValue(alt.body, result_name);
-            
+
             // Every alternative must produce a value in bind context
             if (alt_value) |val| {
                 // Normalize value type: box i64 nullary constructors into heap nodes
@@ -3023,7 +3030,7 @@ pub const GrinTranslator = struct {
                     tagInt(self.builder, val)
                 else
                     val;
-                
+
                 try phi_values.append(self.allocator, normalized_val);
                 const cur_bb = c.LLVMGetInsertBlock(self.builder);
                 try phi_blocks.append(self.allocator, cur_bb);
@@ -3036,12 +3043,12 @@ pub const GrinTranslator = struct {
 
         // ── 5. Create phi node in merge block ──────────────────────────────
         llvm.positionBuilderAtEnd(self.builder, merge_bb);
-        
+
         if (phi_values.items.len == 0) return null;
-        
+
         // All values have been normalized to ptr type, so phi is always ptr
         const phi = c.LLVMBuildPhi(self.builder, ptrType(), nullTerminate(result_name).ptr);
-        
+
         c.LLVMAddIncoming(
             phi,
             @ptrCast(phi_values.items.ptr),
@@ -3052,7 +3059,7 @@ pub const GrinTranslator = struct {
         // ── 6. Emit unreachable in default block (for non-exhaustive matches) ──
         llvm.positionBuilderAtEnd(self.builder, unreachable_bb);
         _ = c.LLVMBuildUnreachable(self.builder);
-        
+
         // Reposition at merge for continuation
         llvm.positionBuilderAtEnd(self.builder, merge_bb);
 
