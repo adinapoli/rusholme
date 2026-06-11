@@ -42,6 +42,7 @@
 const std = @import("std");
 
 const grin = @import("../grin/ast.zig");
+const core_demand = @import("../core/demand.zig");
 const rts_node = @import("../rts/node.zig");
 
 const llvm = @import("llvm.zig");
@@ -653,7 +654,7 @@ pub const GrinTranslator = struct {
     /// keyed by function unique. Strict parameters are forced once at
     /// function entry and tracked as WHNF, eliding every per-use force
     /// in the body. Null when no analysis ran (REPL, debug commands).
-    strict_params: ?*const std.AutoHashMapUnmanaged(u64, u64) = null,
+    strict_params: ?*const core_demand.StrictnessMap = null,
     /// Per-function cache for translated GRIN Case expressions.  The
     /// sequential pattern-match desugarer creates shared fallback nodes
     /// (a DAG) that would be re-translated exponentially without caching.
@@ -1300,6 +1301,39 @@ pub const GrinTranslator = struct {
             return error.OutOfMemory;
     }
 
+    /// The unbox mask for a worker/wrapper split (#803) of the named
+    /// function, or 0 when no worker applies. Conditions kept in sync
+    /// between the def site (translateDef) and call sites
+    /// (translateAppToValue): demand analysis ran, the function has
+    /// 1..8 parameters, and at least one strict parameter has an
+    /// immediate-representation type (Int/Char).
+    fn workerUnboxMask(self: *const GrinTranslator, fn_unique: u64, arity: usize) u64 {
+        if (arity == 0 or arity > 8) return 0;
+        const sp = self.strict_params orelse return 0;
+        const dm = sp.get(fn_unique) orelse return 0;
+        const arity_bits: u64 = (@as(u64, 1) << @intCast(arity)) - 1;
+        return dm.unbox & arity_bits;
+    }
+
+    /// Symbol name of the unboxed worker for `name`: `"w$" ++ base_unique`.
+    /// Written into `buf`; the caller owns the storage.
+    fn workerSymbol(self: *GrinTranslator, name: grin.Name, buf: []u8) [:0]const u8 {
+        const inner = self.formatName(name);
+        const written = std.fmt.bufPrintZ(buf, "w${s}", .{inner}) catch return "w$overflow";
+        return written;
+    }
+
+    /// LLVM function type of a worker: raw i64 at unboxed positions,
+    /// ptr elsewhere; always returns ptr.
+    fn workerFnType(unbox_mask: u64, arity: usize) llvm.Type {
+        var param_types: [8]llvm.Type = undefined;
+        for (0..arity) |i| {
+            const unboxed = (unbox_mask >> @as(u6, @intCast(i))) & 1 == 1;
+            param_types[i] = if (unboxed) llvm.i64Type() else ptrType();
+        }
+        return llvm.functionType(ptrType(), param_types[0..arity], false);
+    }
+
     fn translateDef(self: *GrinTranslator, def: grin.Def) TranslationError!void {
         // Entry-point functions ("main" or REPL entry points like "repl_expr_0")
         // use a specific return type: native `main` returns i32 (C ABI),
@@ -1334,8 +1368,54 @@ pub const GrinTranslator = struct {
         const existing_fn = c.LLVMGetNamedFunction(self.module, fn_name_z);
         const func = existing_fn orelse
             llvm.addFunction(self.module, fn_name_z, fn_type);
-        self.current_func = func;
-        const entry_bb = llvm.appendBasicBlock(func, "entry");
+
+        // ── Worker/wrapper split (#803) ───────────────────────────────
+        // When the demand analysis proved some Int/Char parameters
+        // strict, the function body is emitted into a worker `w$f` that
+        // takes those parameters as raw i64 machine words. The original
+        // symbol becomes a thin wrapper (force + untag + call worker) so
+        // every boxed entry path — thunk forcing, partial application,
+        // higher-order use — keeps working unchanged. Saturated direct
+        // calls go straight to the worker (translateAppToValue).
+        const unbox_mask = if (is_entry) 0 else self.workerUnboxMask(def.name.unique.value, def.params.len);
+        const body_func = if (unbox_mask == 0) func else blk: {
+            var wsym_buf: [300]u8 = undefined;
+            const wsym = self.workerSymbol(def.name, &wsym_buf);
+            const w_type = workerFnType(unbox_mask, def.params.len);
+            const worker = c.LLVMGetNamedFunction(self.module, wsym.ptr) orelse
+                llvm.addFunction(self.module, wsym, w_type);
+
+            // Wrapper body: force + untag the unboxed positions, call
+            // the worker, return its result. Allocates nothing itself,
+            // and the worker roots its own pointer parameters, so no
+            // shadow-stack bracketing is needed here.
+            self.current_func = func;
+            const wrap_entry = llvm.appendBasicBlock(func, "entry");
+            llvm.positionBuilderAtEnd(self.builder, wrap_entry);
+            var call_args: [8]llvm.Value = undefined;
+            for (0..def.params.len) |i| {
+                const p = c.LLVMGetParam(func, @intCast(i));
+                if ((unbox_mask >> @as(u6, @intCast(i))) & 1 == 1) {
+                    const forced = self.callForceIfNeeded(p);
+                    call_args[i] = untagInt(self.builder, forced);
+                } else {
+                    call_args[i] = p;
+                }
+            }
+            const r = c.LLVMBuildCall2(
+                self.builder,
+                w_type,
+                worker,
+                @ptrCast(&call_args),
+                @intCast(def.params.len),
+                "worker.result",
+            );
+            _ = llvm.buildRet(self.builder, r);
+            break :blk worker;
+        };
+
+        self.current_func = body_func;
+        const entry_bb = llvm.appendBasicBlock(body_func, "entry");
         llvm.positionBuilderAtEnd(self.builder, entry_bb);
 
         // For native `main`, if the user selected a non-default RTS
@@ -1376,15 +1456,19 @@ pub const GrinTranslator = struct {
         // the body (a worker/wrapper-lite that keeps the boxed ABI).
         const entry_strict_mask: u64 = blk: {
             const sp = self.strict_params orelse break :blk 0;
-            break :blk sp.get(def.name.unique.value) orelse 0;
+            break :blk if (sp.get(def.name.unique.value)) |dm| dm.strict else 0;
         };
         for (def.params, 0..) |param_name, i| {
-            var param_val = c.LLVMGetParam(func, @intCast(i));
+            var param_val = c.LLVMGetParam(body_func, @intCast(i));
             if (param_val == null) return error.OutOfMemory;
             if (i < 64 and (entry_strict_mask >> @intCast(i)) & 1 == 1 and
                 c.LLVMGetTypeKind(c.LLVMTypeOf(param_val)) == c.LLVMPointerTypeKind)
             {
                 param_val = self.callForceIfNeeded(param_val);
+            }
+            if (i < 64 and (entry_strict_mask >> @intCast(i)) & 1 == 1) {
+                // Strict parameter: forced above (ptr) or a raw machine
+                // word (worker i64) — either way WHNF from here on.
                 self.whnf_vars.put(param_name.unique.value, {}) catch return error.OutOfMemory;
             }
             try self.bindAndRoot(param_name.unique.value, param_val);
@@ -1820,6 +1904,53 @@ pub const GrinTranslator = struct {
         const arg_count = @min(args.len, 8);
         for (args[0..arg_count], 0..) |val, i| {
             llvm_args[i] = try self.translateValToLlvm(val);
+        }
+
+        // ── Worker fast path (#803) ──────────────────────────────────
+        // Saturated direct call to a function with unboxable strict
+        // parameters: call the `w$` worker, passing raw i64 at unboxed
+        // positions. Boxed pointer arguments are forced (elided when
+        // statically WHNF) and untagged; raw i64 arguments (literals)
+        // pass through. Higher-order and unsaturated uses fall through
+        // to the wrapper, which preserves the boxed ABI.
+        if (self.params.get(name.unique.value) == null and !self.isEntryPoint(name.base)) {
+            const saturated = if (self.arity_map) |am|
+                (if (am.get(name.unique.value)) |arity| arity == args.len else false)
+            else
+                false;
+            if (saturated) {
+                const unbox_mask = self.workerUnboxMask(name.unique.value, args.len);
+                if (unbox_mask != 0) {
+                    var wsym_buf: [300]u8 = undefined;
+                    const wsym = self.workerSymbol(name, &wsym_buf);
+                    const w_type = workerFnType(unbox_mask, args.len);
+                    const worker = c.LLVMGetNamedFunction(self.module, wsym.ptr) orelse
+                        llvm.addFunction(self.module, wsym, w_type);
+                    var w_args: [8]llvm.Value = undefined;
+                    for (0..arg_count) |i| {
+                        const raw = llvm_args[i];
+                        const is_ptr_arg = c.LLVMGetTypeKind(c.LLVMTypeOf(raw)) == c.LLVMPointerTypeKind;
+                        if ((unbox_mask >> @as(u6, @intCast(i))) & 1 == 1) {
+                            w_args[i] = if (is_ptr_arg)
+                                untagInt(self.builder, self.forceOperandIfNeeded(raw, args[i]))
+                            else
+                                raw; // already a raw machine word (literal)
+                        } else {
+                            // Mirror the regular coercion: raw integers
+                            // become tagged immediates for ptr params.
+                            w_args[i] = if (is_ptr_arg) raw else tagInt(self.builder, raw);
+                        }
+                    }
+                    return c.LLVMBuildCall2(
+                        self.builder,
+                        w_type,
+                        worker,
+                        @ptrCast(&w_args),
+                        @intCast(arg_count),
+                        nullTerminate(result_name).ptr,
+                    );
+                }
+            }
         }
 
         // Detect calls to `main` from the REPL entry point.

@@ -1076,7 +1076,7 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     // calls to instance methods (better strictness). The resulting
     // strict-parameter masks let GRIN translation pass strict arguments
     // eagerly instead of allocating F-tag thunks.
-    const strict_params: ?*const std.AutoHashMapUnmanaged(u64, u64) = blk: {
+    const strict_params: ?*const rusholme.core.demand.StrictnessMap = blk: {
         var all_progs = std.ArrayListUnmanaged(rusholme.core.ast.CoreProgram).empty;
         for (module_order) |mod_name| {
             const core_prog = session.programs.get(mod_name) orelse continue;
@@ -1177,9 +1177,9 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
 
     // ── Dispatch to backend-specific emission ─────────────────────────────
     switch (backend_kind) {
-        .native => try emitNative(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name, opt_level, rts_backend),
-        .jit => try emitJit(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name, opt_level, rts_backend),
-        .wasm => try emitWasm(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name, opt_level, rts_backend),
+        .native => try emitNative(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name, opt_level, rts_backend, strict_params),
+        .jit => try emitJit(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name, opt_level, rts_backend, strict_params),
+        .wasm => try emitWasm(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name, opt_level, rts_backend, strict_params),
         .c => {
             var stderr_buf: [4096]u8 = undefined;
             var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
@@ -1204,6 +1204,7 @@ fn emitNative(
     output_name: []const u8,
     opt_level: rusholme.backend.llvm.OptLevel,
     rts_backend: rusholme.backend.grin_to_llvm.RtsBackend,
+    strict_params: ?*const rusholme.core.demand.StrictnessMap,
 ) !void {
     const llvm = rusholme.backend.llvm;
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -1230,6 +1231,7 @@ fn emitNative(
     };
     var translator = rusholme.backend.grin_to_llvm.GrinTranslator.init(arena_alloc, &registry);
     translator.rts_backend = rts_backend;
+    translator.strict_params = strict_params;
     defer translator.deinit();
 
     // Translate each module to a separate LLVM module and emit its bitcode.
@@ -1389,6 +1391,7 @@ fn emitJit(
     output_name: []const u8,
     opt_level: rusholme.backend.llvm.OptLevel,
     rts_backend: rusholme.backend.grin_to_llvm.RtsBackend,
+    strict_params: ?*const rusholme.core.demand.StrictnessMap,
 ) !void {
     _ = session;
     const llvm = rusholme.backend.llvm;
@@ -1416,6 +1419,7 @@ fn emitJit(
     };
     var translator = rusholme.backend.grin_to_llvm.GrinTranslator.init(arena_alloc, &registry);
     translator.rts_backend = rts_backend;
+    translator.strict_params = strict_params;
     defer translator.deinit();
 
     // ── Per-module LLVM translation ───────────────────────────────────────
@@ -1568,6 +1572,7 @@ fn emitWasm(
     output_name: []const u8,
     opt_level: rusholme.backend.llvm.OptLevel,
     rts_backend: rusholme.backend.grin_to_llvm.RtsBackend,
+    strict_params: ?*const rusholme.core.demand.StrictnessMap,
 ) !void {
     _ = session; // Unused for WASM backend
     const llvm = rusholme.backend.llvm;
@@ -1595,6 +1600,7 @@ fn emitWasm(
     };
     var translator = rusholme.backend.grin_to_llvm.GrinTranslator.init(arena_alloc, &registry);
     translator.rts_backend = rts_backend;
+    translator.strict_params = strict_params;
     defer translator.deinit();
 
     // ── Per-module LLVM translation ───────────────────────────────────────

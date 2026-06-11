@@ -48,15 +48,37 @@ const Bind = core.Bind;
 const BindPair = core.BindPair;
 const CoreProgram = core.CoreProgram;
 
-/// Strict-parameter masks, keyed by function binder unique. Bit i set =
-/// strict in parameter i. Functions with more than 64 parameters are
-/// not analysed (no such function survives the desugarer in practice).
-pub const StrictnessMap = std.AutoHashMapUnmanaged(u64, u64);
+/// Per-function demand result. Bit i of `strict` = parameter i is
+/// strict (always forced when the call is evaluated to WHNF). Bit i of
+/// `unbox` = strict AND the parameter's Core type is Int or Char — its
+/// runtime representation is a tagged immediate, so a worker/wrapper
+/// split (#803) can pass it as a raw machine word. `unbox` is always a
+/// subset of `strict`. Functions with more than 64 parameters are not
+/// analysed (no such function survives the desugarer in practice).
+pub const FnDemand = struct {
+    strict: u64 = 0,
+    unbox: u64 = 0,
+};
+
+/// Demand masks keyed by function binder unique.
+pub const StrictnessMap = std.AutoHashMapUnmanaged(u64, FnDemand);
 
 const FnInfo = struct {
     params: []const u64,
+    /// Bit i set = parameter i has an immediate-representation type
+    /// (Int/Char) and is therefore a worker-unboxing candidate.
+    imm_typed: u64,
     body: *const Expr,
 };
+
+/// Is this Core type represented as a tagged immediate at runtime?
+fn isImmediateType(ty: core.CoreType) bool {
+    return switch (ty) {
+        .TyCon => |tc| std.mem.eql(u8, tc.name.base, "Int") or
+            std.mem.eql(u8, tc.name.base, "Char"),
+        else => false,
+    };
+}
 
 /// Analyse all modules of a program. `programs` is the per-module Core
 /// in any order; the analysis is whole-program because user modules call
@@ -95,7 +117,10 @@ pub fn analyse(
     while (fn_it.next()) |entry| {
         const arity = entry.value_ptr.params.len;
         const mask: u64 = if (arity >= 64) ~@as(u64, 0) else (@as(u64, 1) << @intCast(arity)) - 1;
-        try masks.put(alloc, entry.key_ptr.*, mask);
+        try masks.put(alloc, entry.key_ptr.*, .{
+            .strict = mask,
+            .unbox = mask & entry.value_ptr.imm_typed,
+        });
     }
 
     var changed = true;
@@ -112,8 +137,8 @@ pub fn analyse(
                 }
             }
             const slot = masks.getPtr(entry.key_ptr.*).?;
-            if (slot.* != mask) {
-                slot.* = mask;
+            if (slot.strict != mask) {
+                slot.* = .{ .strict = mask, .unbox = mask & info.imm_typed };
                 changed = true;
             }
         }
@@ -130,11 +155,12 @@ pub fn analyse(
             if (hops > 8) break;
             target = next;
         }
-        if (masks.get(target)) |mask| {
-            try masks.put(alloc, entry.key_ptr.*, mask);
+        if (masks.get(target)) |dm| {
+            try masks.put(alloc, entry.key_ptr.*, dm);
         } else if (target < known.reserved_range_end) {
-            // Alias of a raw primop: strict in everything.
-            try masks.put(alloc, entry.key_ptr.*, ~@as(u64, 0));
+            // Alias of a raw primop: strict in everything. No unbox
+            // mask — primop calls inline anyway, no worker exists.
+            try masks.put(alloc, entry.key_ptr.*, .{ .strict = ~@as(u64, 0) });
         }
     }
 
@@ -153,12 +179,20 @@ fn collectFn(
         try aliases.put(alloc, unique, pair.rhs.Var.name.unique.value);
         return;
     }
-    // Lambda chain: collect parameter uniques.
+    // Lambda chain: collect parameter uniques and their type shapes.
     var params = std.ArrayListUnmanaged(u64).empty;
     errdefer params.deinit(alloc);
+    var imm_typed: u64 = 0;
     var cur = pair.rhs;
-    while (cur.* == .Lam) : (cur = cur.Lam.body) {
+    var idx: usize = 0;
+    while (cur.* == .Lam) : ({
+        cur = cur.Lam.body;
+        idx += 1;
+    }) {
         try params.append(alloc, cur.Lam.binder.name.unique.value);
+        if (idx < 64 and isImmediateType(cur.Lam.binder.ty)) {
+            imm_typed |= @as(u64, 1) << @intCast(idx);
+        }
     }
     if (params.items.len == 0) {
         params.deinit(alloc);
@@ -167,6 +201,7 @@ fn collectFn(
     try collectVarAliases(alloc, cur, aliases);
     try fns.put(alloc, unique, .{
         .params = try params.toOwnedSlice(alloc),
+        .imm_typed = imm_typed,
         .body = cur,
     });
 }
@@ -259,7 +294,7 @@ fn demands(
                 // nothing. Oversaturated: the first `arity` args reach the
                 // function; be conservative and require exact saturation.
                 if (n_args != info.params.len) return false;
-                break :blk masks.get(head) orelse 0;
+                break :blk if (masks.get(head)) |dm| dm.strict else 0;
             };
 
             // ∃i. strict(f, i) ∧ demands(a_i, p)
@@ -372,7 +407,7 @@ test "demand: fib-shaped recursion is strict in its parameter" {
     var masks = try analyse(testing.allocator, &progs);
     defer masks.deinit(testing.allocator);
 
-    try testing.expectEqual(@as(u64, 1), masks.get(2000).?);
+    try testing.expectEqual(@as(u64, 1), masks.get(2000).?.strict);
 }
 
 test "demand: accumulator threaded through recursive strict call is strict" {
@@ -419,7 +454,7 @@ test "demand: accumulator threaded through recursive strict call is strict" {
     defer masks.deinit(testing.allocator);
 
     // Both acc (bit 0) and n (bit 1) strict.
-    try testing.expectEqual(@as(u64, 0b11), masks.get(2000).?);
+    try testing.expectEqual(@as(u64, 0b11), masks.get(2000).?.strict);
 }
 
 test "demand: argument only used under a lambda is not strict" {
@@ -442,7 +477,7 @@ test "demand: argument only used under a lambda is not strict" {
     var masks = try analyse(testing.allocator, &progs);
     defer masks.deinit(testing.allocator);
 
-    try testing.expectEqual(@as(u64, 0b01), masks.get(2000).?);
+    try testing.expectEqual(@as(u64, 0b01), masks.get(2000).?.strict);
 }
 
 test "demand: alias bindings inherit the target's strictness" {
@@ -466,6 +501,6 @@ test "demand: alias bindings inherit the target's strictness" {
     var masks = try analyse(testing.allocator, &progs);
     defer masks.deinit(testing.allocator);
 
-    try testing.expectEqual(@as(u64, 0b11), masks.get(2000).?);
-    try testing.expectEqual(@as(u64, 0b11), masks.get(2001).?);
+    try testing.expectEqual(@as(u64, 0b11), masks.get(2000).?.strict);
+    try testing.expectEqual(@as(u64, 0b11), masks.get(2001).?.strict);
 }
