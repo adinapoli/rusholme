@@ -117,7 +117,20 @@ pub const ArenaGc = struct {
     arena: std.heap.ArenaAllocator,
     stats_data: AllocStats,
 
+    /// Bump-chunk size for the inline-allocation fast path. Each chunk
+    /// is carved from the backing arena and then bump-allocated through
+    /// the shared `rts_immix_cursor`/`rts_immix_limit` globals, so the
+    /// LLVM inline-alloc fast path (#798) works under `--rts=arena` too.
+    /// Only one heap backend is active per process, so sharing the
+    /// globals with Immix is safe.
+    pub const BUMP_CHUNK: usize = 1 << 20;
+
     pub fn init(backing: std.mem.Allocator) ArenaGc {
+        // Reset the shared bump window: a previous heap instance (e.g.
+        // an earlier unit test) may have left the globals pointing into
+        // memory that died with its backing arena.
+        rts_immix_cursor = 0;
+        rts_immix_limit = 0;
         return .{
             .arena = std.heap.ArenaAllocator.init(backing),
             .stats_data = .{},
@@ -125,6 +138,9 @@ pub const ArenaGc = struct {
     }
 
     pub fn deinit(self: *ArenaGc) void {
+        // Invalidate the bump window — the chunks die with the arena.
+        rts_immix_cursor = 0;
+        rts_immix_limit = 0;
         self.arena.deinit();
     }
 
@@ -164,6 +180,22 @@ pub const ArenaGc = struct {
 
     fn allocImpl(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment) ?[*]u8 {
         const self: *ArenaGc = @ptrCast(@alignCast(ctx));
+        // Bump fast path through the shared cursor/limit globals —
+        // mirrors what LLVM-generated inline allocations do, so RTS-side
+        // and generated-code allocations interleave in the same chunk.
+        if (@intFromEnum(alignment) <= 3 and len <= BUMP_CHUNK) {
+            const padded = (len + 7) & ~@as(usize, 7);
+            if (rts_immix_cursor + padded > rts_immix_limit) {
+                // Refill: carve a fresh chunk from the backing arena.
+                const chunk = self.arena.allocator().rawAlloc(BUMP_CHUNK, .@"8", @returnAddress()) orelse return null;
+                rts_immix_cursor = @intFromPtr(chunk);
+                rts_immix_limit = @intFromPtr(chunk) + BUMP_CHUNK;
+            }
+            const p: [*]u8 = @ptrFromInt(rts_immix_cursor);
+            rts_immix_cursor += padded;
+            self.stats_data.bytes_allocated += padded;
+            return p;
+        }
         const raw = self.arena.allocator().rawAlloc(len, alignment, @returnAddress()) orelse return null;
         self.stats_data.bytes_allocated += len;
         return raw;
@@ -279,8 +311,12 @@ pub export var rts_shadow_top: u32 = 0;
 // `.limit`. Successful inline bumps write the new cursor back to the
 // mirror; `ImmixGc` reads the mirror the next time it touches its own
 // state (e.g. when scanning for the next hole). Under `--rts=arena`
-// they stay at zero — every allocation overflows the limit and the
-// slow path (the existing `rts_alloc` export) takes over transparently.
+// they stay at zero until the first allocation, which overflows the
+// limit and lets the slow path refill.
+//
+// Under `--rts=arena` the SAME globals serve as the bump window over
+// the arena's current chunk (see `ArenaGc.BUMP_CHUNK`) — only one heap
+// backend is active per process, so the two uses never overlap.
 pub export var rts_immix_cursor: usize = 0;
 pub export var rts_immix_limit: usize = 0;
 

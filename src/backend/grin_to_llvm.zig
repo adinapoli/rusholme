@@ -314,7 +314,6 @@ const PrimOpResult = union(enum) {
     instruction: LLVMInstruction,
 };
 
-
 // ═══════════════════════════════════════════════════════════════════════
 // Heap node helpers
 // ═══════════════════════════════════════════════════════════════════════
@@ -341,6 +340,16 @@ fn tagInt(builder: llvm.Builder, val: llvm.Value) llvm.Value {
     const shifted = c.LLVMBuildShl(builder, val, c.LLVMConstInt(i64_ty, 1, 0), "tag_shl");
     const tagged = c.LLVMBuildOr(builder, shifted, c.LLVMConstInt(i64_ty, 1, 0), "tag_or");
     return c.LLVMBuildIntToPtr(builder, tagged, ptrType(), "tagged_int");
+}
+
+/// Encode a nullary constructor as a tagged immediate: `(disc << 1) | 1`,
+/// same encoding as integers. Case dispatch untags ptr-typed scrutinees
+/// with bit 0 set and switches on the result, so a nullary constructor
+/// never needs a heap node — its discriminant *is* the value. Only valid
+/// for `.Con` tags: F-tags need a heap slot for the Ind update (#605),
+/// and P-tags carry an arity header the apply machinery inspects.
+fn tagImmediateCon(builder: llvm.Builder, disc_val: llvm.Value) llvm.Value {
+    return tagInt(builder, disc_val);
 }
 
 fn untagInt(builder: llvm.Builder, val: llvm.Value) llvm.Value {
@@ -427,22 +436,70 @@ fn declareRtsSetBackend(module: llvm.Module) llvm.Value {
     return c.LLVMAddFunction(module, name, fn_ty);
 }
 
-/// Declare `rts_store_field(node: ptr, index: i32, value: i64) -> void`.
+/// Get-or-define the module-private `rts_store_field(ptr, i32, i64)`.
+/// Field access is a fixed-offset store (`fields(n)[i] = v` in
+/// src/rts/node.zig); defining it as an always-inline body in every
+/// module lets LLVM fold the call away — out-of-line RTS calls for
+/// every field write were a dominant cost on alloc-heavy benches.
 fn declareRtsStoreField(module: llvm.Module) llvm.Value {
     const name = "rts_store_field";
     if (c.LLVMGetNamedFunction(module, name)) |existing| return existing;
     var params = [_]llvm.Type{ ptrType(), llvm.i32Type(), llvm.i64Type() };
     const fn_ty = c.LLVMFunctionType(llvm.voidType(), &params, 3, 0);
-    return c.LLVMAddFunction(module, name, fn_ty);
+    const func = c.LLVMAddFunction(module, name, fn_ty);
+    defineFieldAccessorBody(module, func, .store);
+    return func;
 }
 
-/// Declare `rts_load_field(node: ptr, index: i32) -> i64`.
+/// Get-or-define the module-private `rts_load_field(ptr, i32) -> i64`.
 fn declareRtsLoadField(module: llvm.Module) llvm.Value {
     const name = "rts_load_field";
     if (c.LLVMGetNamedFunction(module, name)) |existing| return existing;
     var params = [_]llvm.Type{ ptrType(), llvm.i32Type() };
     const fn_ty = c.LLVMFunctionType(llvm.i64Type(), &params, 2, 0);
-    return c.LLVMAddFunction(module, name, fn_ty);
+    const func = c.LLVMAddFunction(module, name, fn_ty);
+    defineFieldAccessorBody(module, func, .load);
+    return func;
+}
+
+/// Emit the body for an inline field accessor. The function is given
+/// internal linkage and the `alwaysinline` attribute so the symbol never
+/// clashes with the real RTS export (which remains for Zig-side callers)
+/// and the call disappears during optimisation.
+fn defineFieldAccessorBody(module: llvm.Module, func: llvm.Value, kind: enum { load, store }) void {
+    c.LLVMSetLinkage(func, c.LLVMInternalLinkage);
+    const ctx = c.LLVMGetModuleContext(module);
+    const kind_id = c.LLVMGetEnumAttributeKindForName("alwaysinline", "alwaysinline".len);
+    const attr = c.LLVMCreateEnumAttribute(ctx, kind_id, 0);
+    const fn_index: c_uint = @bitCast(@as(c_int, c.LLVMAttributeFunctionIndex));
+    c.LLVMAddAttributeAtIndex(func, fn_index, attr);
+
+    const builder = c.LLVMCreateBuilderInContext(ctx);
+    defer c.LLVMDisposeBuilder(builder);
+    const entry = llvm.appendBasicBlock(func, "entry");
+    llvm.positionBuilderAtEnd(builder, entry);
+
+    const node_ptr = c.LLVMGetParam(func, 0);
+    const index = c.LLVMGetParam(func, 1);
+    const idx64 = c.LLVMBuildZExt(builder, index, llvm.i64Type(), "idx");
+    // fields base = node + 16 bytes (2 i64 header slots), slot i at +8*i.
+    const hdr = c.LLVMConstInt(llvm.i64Type(), 2, 0);
+    var base_idx = [_]llvm.Value{hdr};
+    const base = c.LLVMBuildGEP2(builder, llvm.i64Type(), node_ptr, &base_idx, 1, "fields.base");
+    var slot_idx = [_]llvm.Value{idx64};
+    const slot = c.LLVMBuildGEP2(builder, llvm.i64Type(), base, &slot_idx, 1, "field.slot");
+
+    switch (kind) {
+        .load => {
+            const v = c.LLVMBuildLoad2(builder, llvm.i64Type(), slot, "field.val");
+            _ = c.LLVMBuildRet(builder, v);
+        },
+        .store => {
+            const v = c.LLVMGetParam(func, 2);
+            _ = c.LLVMBuildStore(builder, v, slot);
+            _ = c.LLVMBuildRetVoid(builder);
+        },
+    }
 }
 
 /// Capacity (in slots) of the shadow-stack buffer exposed by the RTS.
@@ -610,6 +667,16 @@ pub const GrinTranslator = struct {
     /// Keyed by `Name.unique.value` so that variables with the same base name
     /// but different uniques (e.g. `arg_20`, `arg_21`) are kept distinct.
     params: std.AutoHashMap(u64, llvm.Value),
+    /// GRIN variable uniques whose bound value is statically known to be
+    /// in WHNF (primop results, freshly-stored constructor nodes, tagged
+    /// immediates). Case sites consult this to elide the `__rhc_force`
+    /// pre-force call (#800). Cleared at the start of each translateDef.
+    whnf_vars: std.AutoHashMap(u64, void),
+    /// Strict-parameter masks from the Core demand analysis (#802),
+    /// keyed by function unique. Strict parameters are forced once at
+    /// function entry and tracked as WHNF, eliding every per-use force
+    /// in the body. Null when no analysis ran (REPL, debug commands).
+    strict_params: ?*const std.AutoHashMapUnmanaged(u64, u64) = null,
     /// Per-function cache for translated GRIN Case expressions.  The
     /// sequential pattern-match desugarer creates shared fallback nodes
     /// (a DAG) that would be re-translated exponentially without caching.
@@ -674,6 +741,7 @@ pub const GrinTranslator = struct {
             .builder = llvm.createBuilder(ctx),
             .allocator = allocator,
             .params = std.AutoHashMap(u64, llvm.Value).init(allocator),
+            .whnf_vars = std.AutoHashMap(u64, void).init(allocator),
             .case_entry_cache = std.AutoHashMap(usize, llvm.BasicBlock).init(allocator),
             .registry = registry,
             .type_env = TypeEnv.init(),
@@ -683,6 +751,7 @@ pub const GrinTranslator = struct {
 
     pub fn deinit(self: *GrinTranslator) void {
         self.params.deinit();
+        self.whnf_vars.deinit();
         self.case_entry_cache.deinit();
         // registry is not owned — do not deinit it.
         self.type_env.deinit(self.allocator);
@@ -918,8 +987,12 @@ pub const GrinTranslator = struct {
         // exists), or the allocation does not fit the inline shape
         // (line-spanning sizes, very wide nodes).
         const padded_size: u64 = 16 + @as(u64, n_fields) * 8;
+        // Both backends bump through the shared cursor/limit globals;
+        // the arena fast path just skips the Immix line-mark stores.
+        // REPL (ORC JIT) modules cannot resolve the cursor globals
+        // against the bitcode-loaded RTS, so they keep the call path.
         const inline_eligible =
-            self.rts_backend == .immix and
+            self.repl_entry_point == null and
             padded_size <= INLINE_ALLOC_MAX_SIZE and
             n_fields <= INLINE_ALLOC_MAX_FIELDS;
         if (!inline_eligible) {
@@ -1012,27 +1085,31 @@ pub const GrinTranslator = struct {
             const slot_ptr = c.LLVMBuildIntToPtr(self.builder, slot_addr, ptr_ty, "alloc.slot_ptr");
             _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(i64_ty, 0, 0), slot_ptr);
         }
-        // Mark every line the allocation spans as used. Since
+        // Mark every line the allocation spans as used (Immix only:
+        // arena chunks have no block headers, and the line-mark store
+        // would scribble over unrelated memory). Since
         // `padded_size <= LINE_SIZE` (#798 ceiling) the allocation
         // covers at most two lines — mark both unconditionally; a
         // duplicate store on the same byte is harmless. `line_marks`
         // sits at offset 0 of `BlockHeader`, so the byte address for
         // line `i` is `block_base + i`.
-        const block_mask = c.LLVMConstInt(i64_ty, ~@as(u64, IMMIX_BLOCK_SIZE - 1), 0);
-        const block_base = c.LLVMBuildAnd(self.builder, top, block_mask, "alloc.block_base");
-        const offset_first = c.LLVMBuildSub(self.builder, top, block_base, "alloc.off_first");
-        const line_first = c.LLVMBuildLShr(self.builder, offset_first, c.LLVMConstInt(i64_ty, IMMIX_LINE_LOG2, 0), "alloc.line_first");
-        const lm_first_addr = c.LLVMBuildAdd(self.builder, block_base, line_first, "alloc.lm_first_addr");
-        const lm_first_ptr = c.LLVMBuildIntToPtr(self.builder, lm_first_addr, ptr_ty, "alloc.lm_first_ptr");
-        _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(i8_ty, 1, 0), lm_first_ptr);
-        // Second line (only different from the first when the alloc
-        // straddles a boundary). Compute via `(end - 1) >> 7`.
-        const end_inclusive = c.LLVMBuildAdd(self.builder, top, c.LLVMConstInt(i64_ty, padded_size - 1, 0), "alloc.end_inclusive");
-        const offset_last = c.LLVMBuildSub(self.builder, end_inclusive, block_base, "alloc.off_last");
-        const line_last = c.LLVMBuildLShr(self.builder, offset_last, c.LLVMConstInt(i64_ty, IMMIX_LINE_LOG2, 0), "alloc.line_last");
-        const lm_last_addr = c.LLVMBuildAdd(self.builder, block_base, line_last, "alloc.lm_last_addr");
-        const lm_last_ptr = c.LLVMBuildIntToPtr(self.builder, lm_last_addr, ptr_ty, "alloc.lm_last_ptr");
-        _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(i8_ty, 1, 0), lm_last_ptr);
+        if (self.rts_backend == .immix) {
+            const block_mask = c.LLVMConstInt(i64_ty, ~@as(u64, IMMIX_BLOCK_SIZE - 1), 0);
+            const block_base = c.LLVMBuildAnd(self.builder, top, block_mask, "alloc.block_base");
+            const offset_first = c.LLVMBuildSub(self.builder, top, block_base, "alloc.off_first");
+            const line_first = c.LLVMBuildLShr(self.builder, offset_first, c.LLVMConstInt(i64_ty, IMMIX_LINE_LOG2, 0), "alloc.line_first");
+            const lm_first_addr = c.LLVMBuildAdd(self.builder, block_base, line_first, "alloc.lm_first_addr");
+            const lm_first_ptr = c.LLVMBuildIntToPtr(self.builder, lm_first_addr, ptr_ty, "alloc.lm_first_ptr");
+            _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(i8_ty, 1, 0), lm_first_ptr);
+            // Second line (only different from the first when the alloc
+            // straddles a boundary). Compute via `(end - 1) >> 7`.
+            const end_inclusive = c.LLVMBuildAdd(self.builder, top, c.LLVMConstInt(i64_ty, padded_size - 1, 0), "alloc.end_inclusive");
+            const offset_last = c.LLVMBuildSub(self.builder, end_inclusive, block_base, "alloc.off_last");
+            const line_last = c.LLVMBuildLShr(self.builder, offset_last, c.LLVMConstInt(i64_ty, IMMIX_LINE_LOG2, 0), "alloc.line_last");
+            const lm_last_addr = c.LLVMBuildAdd(self.builder, block_base, line_last, "alloc.lm_last_addr");
+            const lm_last_ptr = c.LLVMBuildIntToPtr(self.builder, lm_last_addr, ptr_ty, "alloc.lm_last_ptr");
+            _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(i8_ty, 1, 0), lm_last_ptr);
+        }
         // Publish the new cursor.
         _ = c.LLVMBuildStore(self.builder, end_v, cursor_g);
         _ = c.LLVMBuildBr(self.builder, done_bb);
@@ -1076,7 +1153,9 @@ pub const GrinTranslator = struct {
         // engine manages a shared external __rhc_force via
         // `emitForceModuleIr` / `emitSharedForceModule` — expression
         // modules must NOT define it to avoid duplicate-symbol errors.
-        if (self.registry.fun_tags.count() > 0) {
+        // P-tags also require __rhc_force: case sites rely on it to call
+        // saturated partial applications (P(0) nodes) in scrutinees.
+        if (self.registry.fun_tags.count() > 0 or self.registry.partial_tags.count() > 0) {
             if (self.repl_entry_point == null) {
                 // Whole-program mode: emit the force function here.
                 try self.emitForceFunction();
@@ -1160,7 +1239,7 @@ pub const GrinTranslator = struct {
         // emitted by `emitForceModuleIr`.  This ensures per-def code can
         // force thunks with F-tags introduced by later REPL expressions
         // that the per-def tag table didn't know about at compile time.
-        if (self.registry.fun_tags.count() > 0) {
+        if (self.registry.fun_tags.count() > 0 or self.registry.partial_tags.count() > 0) {
             // Declare __rhc_force as an external function so that
             // callForceIfNeeded can find it via LLVMGetNamedFunction.
             const ptr_ty = ptrType();
@@ -1204,7 +1283,7 @@ pub const GrinTranslator = struct {
         self.module = mod;
         defer self.module = saved_module;
 
-        if (self.registry.fun_tags.count() > 0) {
+        if (self.registry.fun_tags.count() > 0 or self.registry.partial_tags.count() > 0) {
             try self.emitForceFunction();
         }
 
@@ -1289,6 +1368,7 @@ pub const GrinTranslator = struct {
         // Clear previous function's parameter mapping and set up current one.
         self.params.deinit();
         self.params = std.AutoHashMap(u64, llvm.Value).init(self.allocator);
+        self.whnf_vars.clearRetainingCapacity();
 
         // Clear the per-function case expression cache.  The cache prevents
         // exponential re-translation of shared GRIN expressions produced by the
@@ -1298,9 +1378,24 @@ pub const GrinTranslator = struct {
         // Store each parameter as a named value in the params map. For
         // pointer-typed params, also push them onto the shadow stack so
         // the collector sees them as live across this function's body.
+        //
+        // Strict parameters (#802) are forced once here and tracked as
+        // WHNF: the demand analysis proved every execution path forces
+        // them, so a single entry force replaces every per-use force in
+        // the body (a worker/wrapper-lite that keeps the boxed ABI).
+        const entry_strict_mask: u64 = blk: {
+            const sp = self.strict_params orelse break :blk 0;
+            break :blk sp.get(def.name.unique.value) orelse 0;
+        };
         for (def.params, 0..) |param_name, i| {
-            const param_val = c.LLVMGetParam(func, @intCast(i));
+            var param_val = c.LLVMGetParam(func, @intCast(i));
             if (param_val == null) return error.OutOfMemory;
+            if (i < 64 and (entry_strict_mask >> @intCast(i)) & 1 == 1 and
+                c.LLVMGetTypeKind(c.LLVMTypeOf(param_val)) == c.LLVMPointerTypeKind)
+            {
+                param_val = self.callForceIfNeeded(param_val);
+                self.whnf_vars.put(param_name.unique.value, {}) catch return error.OutOfMemory;
+            }
             try self.bindAndRoot(param_name.unique.value, param_val);
         }
 
@@ -1371,9 +1466,12 @@ pub const GrinTranslator = struct {
                         // Non-REPL function: ensure return value matches function signature.
                         // Primop instructions return i64, but user functions return ptr.
                         // Cast i64→ptr to match the declared return type.
+                        // The return-site force upholds the "call results
+                        // are WHNF" convention; skip it when the body's
+                        // value is statically WHNF already.
                         const val_kind2 = c.LLVMGetTypeKind(c.LLVMTypeOf(val));
                         const coerced = if (val_kind2 == c.LLVMPointerTypeKind)
-                            self.callForceIfNeeded(val)
+                            (if (self.exprYieldsWhnf(def.body)) val else self.callForceIfNeeded(val))
                         else if (val_kind2 == c.LLVMIntegerTypeKind)
                             tagInt(self.builder, val)
                         else
@@ -1447,6 +1545,54 @@ pub const GrinTranslator = struct {
         }
     }
 
+    /// Whether a GRIN value is statically known to be in WHNF when it
+    /// reaches an SSA binding: literals and tagged immediates trivially;
+    /// constructor nodes by construction; variables if already tracked.
+    fn valYieldsWhnf(self: *const GrinTranslator, val: grin.Val) bool {
+        return switch (val) {
+            .Lit, .ValTag => true,
+            .ConstTagNode => |ctn| ctn.tag.tag_type == .Con,
+            .Var => |v| self.whnf_vars.contains(v.unique.value),
+            else => false,
+        };
+    }
+
+    /// Whether a GRIN expression's result is statically known to be in
+    /// WHNF. Conservative: anything unrecognised is assumed forceable.
+    ///
+    /// Primop instruction results are tagged immediates; a `Store` of a
+    /// constructor node is WHNF (F/P-tag stores are thunks/closures and
+    /// are not). Direct function calls are WHNF by calling convention:
+    /// every non-main GRIN function forces its return value at the return
+    /// site (see translateReturn) — and that force is itself only elided
+    /// when the returned value is already statically WHNF, so the
+    /// convention is preserved inductively.
+    fn exprYieldsWhnf(self: *const GrinTranslator, expr: *const grin.Expr) bool {
+        return switch (expr.*) {
+            .Return => |v| self.valYieldsWhnf(v),
+            .Store => |v| switch (v) {
+                .ConstTagNode => |ctn| ctn.tag.tag_type == .Con,
+                else => false,
+            },
+            .App => |app| blk: {
+                // `pure` passes its argument through unevaluated.
+                if (std.mem.eql(u8, app.name.base, "pure"))
+                    break :blk app.args.len > 0 and self.valYieldsWhnf(app.args[0]);
+                if (PrimOpMapping.lookup(app.name)) |m|
+                    break :blk m == .instruction;
+                // Direct call (or apply): result forced at the callee's
+                // return site per the calling convention above.
+                break :blk true;
+            },
+            .Block => |inner| self.exprYieldsWhnf(inner),
+            // A bind chain yields its continuation's value. By the time
+            // this runs at a return site, codegen has already walked the
+            // chain and recorded WHNF-ness of every bound variable.
+            .Bind => |b| self.exprYieldsWhnf(b.rhs),
+            else => false,
+        };
+    }
+
     fn translateBind(
         self: *GrinTranslator,
         lhs: *const grin.Expr,
@@ -1467,6 +1613,9 @@ pub const GrinTranslator = struct {
                 const result = try self.translateExprToValue(lhs, v.base);
                 if (result) |val| {
                     try self.bindAndRoot(v.unique.value, val);
+                    if (self.exprYieldsWhnf(lhs)) {
+                        self.whnf_vars.put(v.unique.value, {}) catch return error.OutOfMemory;
+                    }
                 }
                 try self.translateExpr(rhs);
             },
@@ -1525,7 +1674,12 @@ pub const GrinTranslator = struct {
                 const inner_result = try self.translateExprToValue(b.lhs, inner_name);
                 switch (b.pat) {
                     .Var => |v| {
-                        if (inner_result) |val| try self.bindAndRoot(v.unique.value, val);
+                        if (inner_result) |val| {
+                            try self.bindAndRoot(v.unique.value, val);
+                            if (self.exprYieldsWhnf(b.lhs)) {
+                                self.whnf_vars.put(v.unique.value, {}) catch return error.OutOfMemory;
+                            }
+                        }
                     },
                     .Unit => {},
                     .ConstTagNode => |ctn| {
@@ -2142,7 +2296,7 @@ pub const GrinTranslator = struct {
             const operand_raw = try self.translateValToLlvm(args[0]);
             if (c.LLVMGetTypeKind(c.LLVMTypeOf(operand_raw)) == c.LLVMPointerTypeKind) {
                 // Already a pointer — force thunks and return as-is.
-                return self.callForceIfNeeded(operand_raw);
+                return self.forceOperandIfNeeded(operand_raw, args[0]);
             }
             // Raw i64 — tag as ptr to avoid mis-boxing downstream.
             return tagInt(self.builder, operand_raw);
@@ -2156,7 +2310,7 @@ pub const GrinTranslator = struct {
             // thunk (e.g. F:div).  Without forcing, ptrtoint would give the
             // heap address instead of the Haskell integer value.
             const operand_forced = if (c.LLVMGetTypeKind(c.LLVMTypeOf(operand_raw)) == c.LLVMPointerTypeKind)
-                self.callForceIfNeeded(operand_raw)
+                self.forceOperandIfNeeded(operand_raw, args[0])
             else
                 operand_raw;
             const operand = if (c.LLVMGetTypeKind(c.LLVMTypeOf(operand_forced)) == c.LLVMPointerTypeKind)
@@ -2193,11 +2347,11 @@ pub const GrinTranslator = struct {
         // thunks (e.g. F:div).  Without forcing, ptrtoint would give the
         // heap address instead of the Haskell integer value.
         const lhs_forced = if (c.LLVMGetTypeKind(c.LLVMTypeOf(lhs_raw)) == c.LLVMPointerTypeKind)
-            self.callForceIfNeeded(lhs_raw)
+            self.forceOperandIfNeeded(lhs_raw, args[0])
         else
             lhs_raw;
         const rhs_forced = if (c.LLVMGetTypeKind(c.LLVMTypeOf(rhs_raw)) == c.LLVMPointerTypeKind)
-            self.callForceIfNeeded(rhs_raw)
+            self.forceOperandIfNeeded(rhs_raw, args[1])
         else
             rhs_raw;
 
@@ -2272,7 +2426,8 @@ pub const GrinTranslator = struct {
         const false_i64 = c.LLVMConstInt(llvm.i64Type(), @bitCast(false_disc), 0);
         const tag = c.LLVMBuildSelect(self.builder, cmp_i1, true_i64, false_i64, "bool_tag");
 
-        return self.emitAlloc(tag, 0, "bool_node");
+        // Bool is nullary — encode as a tagged immediate, no allocation.
+        return tagImmediateCon(self.builder, tag);
     }
 
     /// Translate a GRIN string literal to an LLVM global string pointer.
@@ -2389,14 +2544,16 @@ pub const GrinTranslator = struct {
                 return error.UnsupportedGrinVal;
             },
             .ValTag => |t| blk: {
-                // Bare tag value — allocate a heap node with 0 fields.
-                // Using a heap node (pointer) rather than a bare i64 discriminant
-                // lets the REPL and case analysis distinguish constructors from
-                // integer literals by LLVM type (ptr vs i64).
                 const disc = self.registry.discriminant(t) orelse return error.UnsupportedGrinVal;
+                const disc_val = c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0);
+                // Nullary constructors are tagged immediates — no heap node.
+                // F-tags still need a heap slot for the Ind update (#605).
+                if (t.tag_type == .Con) {
+                    break :blk tagImmediateCon(self.builder, disc_val);
+                }
                 const alloc_fn = declareRtsAlloc(self.module);
                 var alloc_args2 = [_]llvm.Value{
-                    c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0),
+                    disc_val,
                     c.LLVMConstInt(llvm.i32Type(), 0, 0),
                 };
                 break :blk c.LLVMBuildCall2(
@@ -2436,6 +2593,13 @@ pub const GrinTranslator = struct {
                 // and: https://github.com/adinapoli/rusholme/issues/711
                 if (tag.tag_type == .Fun and n_fields == 0) {
                     n_fields = 1;
+                }
+
+                // Nullary constructors need no heap node at all — they are
+                // tagged immediates (see tagImmediateCon).
+                if (tag.tag_type == .Con and n_fields == 0) {
+                    const disc_val = c.LLVMConstInt(llvm.i64Type(), @bitCast(disc), 0);
+                    return tagImmediateCon(self.builder, disc_val);
                 }
 
                 // Allocate a node via the inline-alloc fast path (#798),
@@ -2518,6 +2682,51 @@ pub const GrinTranslator = struct {
     /// We load the i64 tag word then emit `LLVMBuildSwitch`.  Each alternative
     /// gets its own basic block; a shared `merge` block is appended after all
     /// alts and becomes the new insertion point.
+    /// Emit the tag dispatch for a WHNF scrutinee: a low-bit guard routes
+    /// tagged immediates (raw Ints/Chars and nullary constructors) straight
+    /// to the case dispatch with their untagged payload as the "tag", while
+    /// heap nodes go through a header tag load.
+    ///
+    /// The scrutinee must already be in WHNF — pre-forced via `__rhc_force`,
+    /// which follows indirections, forces F-tag thunks, and calls saturated
+    /// partial applications. This replaces the per-case-site inline eval
+    /// loop, which duplicated the entire F/P-tag switch table at every case
+    /// expression (a major code-size and branch-prediction cost).
+    ///
+    /// Returns the i64 tag value to switch on. The builder is left in the
+    /// dispatch block.
+    fn emitWhnfTagDispatch(self: *GrinTranslator, scrut: llvm.Value) llvm.Value {
+        const i64_ty = llvm.i64Type();
+        const guard_bb = c.LLVMGetInsertBlock(self.builder);
+        const tagload_bb = c.LLVMAppendBasicBlock(self.current_func, "case.tagload");
+        const dispatch_bb = c.LLVMAppendBasicBlock(self.current_func, "case.dispatch");
+
+        const raw = c.LLVMBuildPtrToInt(self.builder, scrut, i64_ty, "scrut.int");
+        const untagged = c.LLVMBuildAShr(self.builder, raw, c.LLVMConstInt(i64_ty, 1, 0), "scrut.untagged");
+        const low_bit = c.LLVMBuildAnd(self.builder, raw, c.LLVMConstInt(i64_ty, 1, 0), "scrut.low_bit");
+        const is_heap = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, low_bit, c.LLVMConstInt(i64_ty, 0, 0), "scrut.is_heap");
+        const is_nonnull = c.LLVMBuildICmp(self.builder, c.LLVMIntNE, raw, c.LLVMConstInt(i64_ty, 0, 0), "scrut.nonnull");
+        const is_valid = c.LLVMBuildAnd(self.builder, is_heap, is_nonnull, "scrut.valid_heap");
+        _ = c.LLVMBuildCondBr(self.builder, is_valid, tagload_bb, dispatch_bb);
+
+        llvm.positionBuilderAtEnd(self.builder, tagload_bb);
+        const header_ty = nodeHeaderType();
+        var tag_idx = [_]llvm.Value{
+            c.LLVMConstInt(llvm.i32Type(), 0, 0),
+            c.LLVMConstInt(llvm.i32Type(), 0, 0),
+        };
+        const tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, scrut, &tag_idx, 2, "scrut.tag_gep");
+        const tag_val = c.LLVMBuildLoad2(self.builder, i64_ty, tag_gep, "scrut.tag");
+        _ = c.LLVMBuildBr(self.builder, dispatch_bb);
+
+        llvm.positionBuilderAtEnd(self.builder, dispatch_bb);
+        const tag_phi = c.LLVMBuildPhi(self.builder, i64_ty, "dispatch.tag");
+        var phi_vals = [_]llvm.Value{ untagged, tag_val };
+        var phi_bbs = [_]llvm.BasicBlock{ guard_bb, tagload_bb };
+        c.LLVMAddIncoming(tag_phi, @ptrCast(&phi_vals), @ptrCast(&phi_bbs), 2);
+        return tag_phi;
+    }
+
     fn translateCase(
         self: *GrinTranslator,
         scrutinee: grin.Val,
@@ -2542,275 +2751,28 @@ pub const GrinTranslator = struct {
         // After pre-forcing, the inline eval loop below is still needed for
         // non-REPL (whole-program) compilation where `__rhc_force` may not
         // exist, and for indirection following.
-        const pre_forced = if (is_ptr) self.callForceIfNeeded(scrut_llvm) else scrut_llvm;
+        // Elide the force entirely when the scrutinee is statically WHNF
+        // (primop result, fresh constructor node, tagged immediate) — #800.
+        const scrut_is_whnf = self.valYieldsWhnf(scrutinee);
+        const pre_forced = if (is_ptr and !scrut_is_whnf)
+            self.callForceIfNeeded(scrut_llvm)
+        else
+            scrut_llvm;
 
-        // ── 1c. Inline eval loop (laziness) ────────────────────────────────
+        // ── 1c. Tag dispatch ───────────────────────────────────────────────
         //
-        // If the scrutinee is a heap pointer, it may be an unevaluated thunk
-        // (F-tag), a saturated partial application (P(0)-tag), or an indirection (Ind).
-        // We insert a loop that forces thunks, evaluates P(0) closures, and follows
-        // indirections until the value is in WHNF.
-        //
-        //   eval.entry:
-        //     %scrut_phi = phi [original, entry] [forced, eval.ind] [result, eval.ftag.*] [result, eval.ptag.*]
-        //     tag = load %scrut_phi.tag
-        //     switch tag: F-tags → force, P(0)-tags → call, Ind → follow, default → case.dispatch
+        // `pre_forced` is in WHNF: `__rhc_force` follows indirections,
+        // forces F-tag thunks, and calls saturated partial applications.
+        // All that remains is routing tagged immediates vs heap nodes to
+        // the alternatives switch (emitWhnfTagDispatch). The former
+        // per-case-site inline eval loop is gone — see #800.
 
         // The "current scrutinee" used by the rest of the function.
-        // For non-pointer scrutinees, no eval loop is needed.
-        var cur_scrut: llvm.Value = pre_forced;
+        const cur_scrut: llvm.Value = pre_forced;
         var cur_tag: llvm.Value = undefined;
 
-        // Create eval loop if we have F-tags (thunks) or P-tags (partial applications) to force
-        const has_forceable_tags = self.registry.fun_tags.count() > 0 or self.registry.partial_tags.count() > 0;
-        if (is_ptr and has_forceable_tags) {
-            const entry_bb = c.LLVMGetInsertBlock(self.builder);
-
-            // Create the eval loop header and dispatch target.
-            const eval_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.entry");
-            const dispatch_bb = c.LLVMAppendBasicBlock(self.current_func, "case.dispatch");
-
-            // Branch from current block to eval loop.
-            _ = c.LLVMBuildBr(self.builder, eval_bb);
-
-            // ── eval.entry: phi + heap-pointer guard + tag load + switch ──
-            llvm.positionBuilderAtEnd(self.builder, eval_bb);
-            const phi = c.LLVMBuildPhi(self.builder, ptrType(), "scrut.eval");
-
-            // Heap-pointer guard: only dereference if the pointer looks
-            // like a valid heap node (aligned to 8 bytes AND above page
-            // zero).  Raw integers stored via inttoptr (e.g. literal 42
-            // in an F-tag thunk field) fail this check and go straight
-            // to case dispatch.
-            const eval_check_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.check");
-            const guard_raw_tag = c.LLVMBuildPtrToInt(self.builder, phi, llvm.i64Type(), "eval.ptr_int");
-            const untagged_raw = c.LLVMBuildAShr(self.builder, guard_raw_tag, c.LLVMConstInt(llvm.i64Type(), 1, 0), "eval.untagged");
-            {
-                const low_bit = c.LLVMBuildAnd(self.builder, guard_raw_tag, c.LLVMConstInt(llvm.i64Type(), 1, 0), "eval.low_bit");
-                const is_heap = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, low_bit, c.LLVMConstInt(llvm.i64Type(), 0, 0), "eval.is_heap");
-                const is_nonnull = c.LLVMBuildICmp(self.builder, c.LLVMIntNE, guard_raw_tag, c.LLVMConstInt(llvm.i64Type(), 0, 0), "eval.nonnull");
-                const is_valid = c.LLVMBuildAnd(self.builder, is_heap, is_nonnull, "eval.valid_heap");
-                _ = c.LLVMBuildCondBr(self.builder, is_valid, eval_check_bb, dispatch_bb);
-            }
-
-            llvm.positionBuilderAtEnd(self.builder, eval_check_bb);
-            const header_ty = nodeHeaderType();
-            var tag_idx = [_]llvm.Value{
-                c.LLVMConstInt(llvm.i32Type(), 0, 0),
-                c.LLVMConstInt(llvm.i32Type(), 0, 0),
-            };
-            const tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, phi, &tag_idx, 2, "eval.tag_gep");
-            const tag_val = c.LLVMBuildLoad2(self.builder, llvm.i64Type(), tag_gep, "eval.tag");
-
-            // Count F-tags + 1 for Ind.
-            const n_eval_cases = @as(u32, @intCast(self.registry.fun_tags.count())) + 1;
-            const eval_switch = c.LLVMBuildSwitch(self.builder, tag_val, dispatch_bb, n_eval_cases);
-
-            // ── Ind case: follow indirection ─────────────────────────────
-            const ind_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.ind");
-            const ind_disc = c.LLVMConstInt(llvm.i64Type(), 0x101, 0); // Tag.Ind
-            c.LLVMAddCase(eval_switch, ind_disc, ind_bb);
-
-            llvm.positionBuilderAtEnd(self.builder, ind_bb);
-            const rts_load_fn = declareRtsLoadField(self.module);
-            var ind_load_args = [_]llvm.Value{
-                phi,
-                c.LLVMConstInt(llvm.i32Type(), 0, 0),
-            };
-            const ind_target_i64 = c.LLVMBuildCall2(
-                self.builder,
-                llvm.getFunctionType(rts_load_fn),
-                rts_load_fn,
-                &ind_load_args,
-                2,
-                "ind.target",
-            );
-            const ind_target = c.LLVMBuildIntToPtr(self.builder, ind_target_i64, ptrType(), "ind.ptr");
-            _ = c.LLVMBuildBr(self.builder, eval_bb);
-
-            // ── F-tag cases: force thunk ─────────────────────────────────
-            // Collect all incoming phi values: entry_bb→pre_forced, ind_bb→ind_target, plus each ftag_bb→result.
-            var phi_incoming_vals = std.ArrayListUnmanaged(llvm.Value).empty;
-            defer phi_incoming_vals.deinit(self.allocator);
-            var phi_incoming_bbs = std.ArrayListUnmanaged(llvm.BasicBlock).empty;
-            defer phi_incoming_bbs.deinit(self.allocator);
-
-            // First two: entry (pre-forced) and ind.
-            phi_incoming_vals.append(self.allocator, pre_forced) catch return error.OutOfMemory;
-            phi_incoming_bbs.append(self.allocator, entry_bb) catch return error.OutOfMemory;
-            phi_incoming_vals.append(self.allocator, ind_target) catch return error.OutOfMemory;
-            phi_incoming_bbs.append(self.allocator, ind_bb) catch return error.OutOfMemory;
-
-            var ftag_iter = self.registry.fun_tags.iterator();
-            while (ftag_iter.next()) |ftag_entry| {
-                const ftag_unique = ftag_entry.key_ptr.*;
-                const ftag_disc = self.registry.discriminants.get(ftag_unique) orelse continue;
-                const ftag_name = self.registry.fun_tag_names.get(ftag_unique) orelse continue;
-                const ftag_n_fields = self.registry.field_counts.get(ftag_unique) orelse 0;
-
-                const ftag_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.ftag");
-                c.LLVMAddCase(eval_switch, c.LLVMConstInt(llvm.i64Type(), @bitCast(ftag_disc), 0), ftag_bb);
-
-                llvm.positionBuilderAtEnd(self.builder, ftag_bb);
-
-                // Load captured arguments from the thunk node's fields.
-                var call_args: [8]llvm.Value = undefined;
-                const n_args = @min(ftag_n_fields, 8);
-                for (0..n_args) |fi| {
-                    var fld_load_args = [_]llvm.Value{
-                        phi,
-                        c.LLVMConstInt(llvm.i32Type(), @intCast(fi), 0),
-                    };
-                    const loaded_i64 = c.LLVMBuildCall2(
-                        self.builder,
-                        llvm.getFunctionType(rts_load_fn),
-                        rts_load_fn,
-                        &fld_load_args,
-                        2,
-                        "ftag.arg",
-                    );
-                    // Thunk fields are pointers (heap nodes).
-                    call_args[fi] = c.LLVMBuildIntToPtr(self.builder, loaded_i64, ptrType(), "ftag.ptr");
-                }
-
-                // Call the function.
-                const fn_name_z = self.formatName(ftag_name);
-                var param_types: [8]llvm.Type = undefined;
-                for (0..n_args) |pi| param_types[pi] = ptrType();
-                const fn_type = llvm.functionType(ptrType(), param_types[0..n_args], false);
-                const func = c.LLVMGetNamedFunction(self.module, fn_name_z) orelse
-                    llvm.addFunction(self.module, fn_name_z, fn_type);
-                const result = c.LLVMBuildCall2(
-                    self.builder,
-                    fn_type,
-                    func,
-                    @ptrCast(&call_args),
-                    @intCast(n_args),
-                    "ftag.result",
-                );
-
-                // Update the thunk with an indirection: tag = Ind, field[0] = result.
-                // All F-tag thunks are now allocated with ≥1 field (see
-                // translateStoreToValue), so the update is unconditional.
-                {
-                    const upd_tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, phi, &tag_idx, 2, "ftag.upd.tag");
-                    _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(llvm.i64Type(), 0x101, 0), upd_tag_gep);
-                    const rts_store_fn = declareRtsStoreField(self.module);
-                    const result_u64 = c.LLVMBuildPtrToInt(self.builder, result, llvm.i64Type(), "ftag.upd.u64");
-                    var upd_store_args = [_]llvm.Value{
-                        phi,
-                        c.LLVMConstInt(llvm.i32Type(), 0, 0),
-                        result_u64,
-                    };
-                    _ = c.LLVMBuildCall2(
-                        self.builder,
-                        llvm.getFunctionType(rts_store_fn),
-                        rts_store_fn,
-                        &upd_store_args,
-                        3,
-                        "",
-                    );
-                }
-
-                // Loop back to re-eval the result.
-                _ = c.LLVMBuildBr(self.builder, eval_bb);
-
-                phi_incoming_vals.append(self.allocator, result) catch return error.OutOfMemory;
-                phi_incoming_bbs.append(self.allocator, ftag_bb) catch return error.OutOfMemory;
-            }
-
-            // ── P-tag cases: force partial applications ─────────────────
-            // For each P-tag, we need to apply it (possibly multiple times)
-            // until it's fully saturated, then force the result.
-            // We use __rhc_apply with a dummy argument (null) to trigger evaluation.
-            var ptag_iter = self.registry.partial_tags.iterator();
-            while (ptag_iter.next()) |ptag_entry| {
-                const ptag_unique = ptag_entry.key_ptr.*;
-                const ptag_disc = self.registry.discriminants.get(ptag_unique) orelse continue;
-
-                const ptag_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.ptag");
-                c.LLVMAddCase(eval_switch, c.LLVMConstInt(llvm.i64Type(), @bitCast(ptag_disc), 0), ptag_bb);
-
-                llvm.positionBuilderAtEnd(self.builder, ptag_bb);
-
-                // A P-tag partial application in a case scrutinee needs to be fully applied.
-                // If the stored fields represent all the arguments the function needs,
-                // we can call it directly. Otherwise, it's an error.
-                const ptag_info = self.registry.partial_tag_info.get(ptag_unique) orelse continue;
-                
-                // Extract and call the function with all stored arguments
-                const fn_name_z = self.formatName(ptag_info.name);
-                const n_fields = ptag_info.n_fields;
-                
-                // Load all captured arguments
-                var call_args: [8]llvm.Value = undefined;
-                for (0..@min(n_fields, 8)) |fi| {
-                    var load_args = [_]llvm.Value{
-                        phi,
-                        c.LLVMConstInt(llvm.i32Type(), @intCast(fi), 0),
-                    };
-                    const loaded = c.LLVMBuildCall2(
-                        self.builder,
-                        llvm.getFunctionType(rts_load_fn),
-                        rts_load_fn,
-                        &load_args,
-                        2,
-                        "pap.arg",
-                    );
-                    call_args[fi] = c.LLVMBuildIntToPtr(self.builder, loaded, ptrType(), "pap.ptr");
-                }
-                
-                // Call the function with stored arguments
-                var fn_param_types: [8]llvm.Type = undefined;
-                for (0..@min(n_fields, 8)) |pi| fn_param_types[pi] = ptrType();
-                const callee_type = llvm.functionType(ptrType(), fn_param_types[0..@min(n_fields, 8)], false);
-                const callee = c.LLVMGetNamedFunction(self.module, fn_name_z) orelse
-                    llvm.addFunction(self.module, fn_name_z, callee_type);
-                const result = c.LLVMBuildCall2(
-                    self.builder,
-                    callee_type,
-                    callee,
-                    @ptrCast(&call_args),
-                    @intCast(@min(n_fields, 8)),
-                    "pap.result",
-                );
-                
-                // Loop back to re-eval the result
-                _ = c.LLVMBuildBr(self.builder, eval_bb);
-                
-                phi_incoming_vals.append(self.allocator, result) catch return error.OutOfMemory;
-                phi_incoming_bbs.append(self.allocator, ptag_bb) catch return error.OutOfMemory;
-            }
-
-            // Wire up the phi node.
-            c.LLVMAddIncoming(
-                phi,
-                @ptrCast(phi_incoming_vals.items.ptr),
-                @ptrCast(phi_incoming_bbs.items.ptr),
-                @intCast(phi_incoming_vals.items.len),
-            );
-
-            // Continue from dispatch block with the resolved scrutinee.
-            // Use a phi for the tag: when arriving from eval.check (the
-            // eval switch default), the tag was loaded from the heap node;
-            // when arriving from eval.entry (heap-guard fail), use the
-            // untagged integer value as the "tag" (for LitPat matching).
-            llvm.positionBuilderAtEnd(self.builder, dispatch_bb);
-            const tag_phi = c.LLVMBuildPhi(self.builder, llvm.i64Type(), "dispatch.tag");
-            var tag_phi_vals = [_]llvm.Value{ tag_val, untagged_raw };
-            var tag_phi_bbs = [_]llvm.BasicBlock{ eval_check_bb, eval_bb };
-            c.LLVMAddIncoming(tag_phi, @ptrCast(&tag_phi_vals), @ptrCast(&tag_phi_bbs), 2);
-            cur_scrut = phi;
-            cur_tag = tag_phi;
-        } else if (is_ptr) {
-            // No F-tags in program — just load the tag directly (no eval loop).
-            const header_ty = nodeHeaderType();
-            var idx = [_]llvm.Value{
-                c.LLVMConstInt(llvm.i32Type(), 0, 0),
-                c.LLVMConstInt(llvm.i32Type(), 0, 0),
-            };
-            const tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, scrut_llvm, &idx, 2, "tag_gep");
-            cur_tag = c.LLVMBuildLoad2(self.builder, llvm.i64Type(), tag_gep, "tag");
+        if (is_ptr) {
+            cur_tag = self.emitWhnfTagDispatch(pre_forced);
         } else {
             cur_tag = scrut_llvm; // Already an i64 discriminant (nullary constructor).
         }
@@ -2956,161 +2918,21 @@ pub const GrinTranslator = struct {
         // Same as translateCase: in REPL mode, per-def modules' inline eval
         // loops only know about F-tags from Prelude compile time. Pre-force
         // via the shared external __rhc_force which knows all F-tags.
-        const pre_forced = if (is_ptr) self.callForceIfNeeded(scrut_llvm) else scrut_llvm;
+        // Elide the force entirely when the scrutinee is statically WHNF
+        // (primop result, fresh constructor node, tagged immediate) — #800.
+        const scrut_is_whnf = self.valYieldsWhnf(scrutinee);
+        const pre_forced = if (is_ptr and !scrut_is_whnf)
+            self.callForceIfNeeded(scrut_llvm)
+        else
+            scrut_llvm;
 
-        var cur_scrut: llvm.Value = pre_forced;
+        // ── 1c. Tag dispatch (same as translateCase) ───────────────────────
+        // `pre_forced` is WHNF; route immediates vs heap nodes (#800).
+        const cur_scrut: llvm.Value = pre_forced;
         var cur_tag: llvm.Value = undefined;
 
-        // Create eval loop if we have F-tags (thunks) or P-tags (partial applications) to force
-        const has_forceable_tags = self.registry.fun_tags.count() > 0 or self.registry.partial_tags.count() > 0;
-        if (is_ptr and has_forceable_tags) {
-            const entry_bb = c.LLVMGetInsertBlock(self.builder);
-            const eval_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.entry");
-            const dispatch_bb = c.LLVMAppendBasicBlock(self.current_func, "case.dispatch");
-
-            _ = c.LLVMBuildBr(self.builder, eval_bb);
-
-            llvm.positionBuilderAtEnd(self.builder, eval_bb);
-            const phi = c.LLVMBuildPhi(self.builder, ptrType(), "scrut.eval");
-
-            // Heap-pointer guard (same as translateCase): skip eval for
-            // tagged integers in F-tag thunk fields.
-            const eval_check_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.check");
-            const guard_raw_tag = c.LLVMBuildPtrToInt(self.builder, phi, llvm.i64Type(), "eval.ptr_int");
-            const untagged_raw = c.LLVMBuildAShr(self.builder, guard_raw_tag, c.LLVMConstInt(llvm.i64Type(), 1, 0), "eval.untagged");
-            {
-                const low_bit = c.LLVMBuildAnd(self.builder, guard_raw_tag, c.LLVMConstInt(llvm.i64Type(), 1, 0), "eval.low_bit");
-                const is_heap = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, low_bit, c.LLVMConstInt(llvm.i64Type(), 0, 0), "eval.is_heap");
-                const is_nonnull = c.LLVMBuildICmp(self.builder, c.LLVMIntNE, guard_raw_tag, c.LLVMConstInt(llvm.i64Type(), 0, 0), "eval.nonnull");
-                const is_valid = c.LLVMBuildAnd(self.builder, is_heap, is_nonnull, "eval.valid_heap");
-                _ = c.LLVMBuildCondBr(self.builder, is_valid, eval_check_bb, dispatch_bb);
-            }
-
-            llvm.positionBuilderAtEnd(self.builder, eval_check_bb);
-            const header_ty = nodeHeaderType();
-            var tag_idx = [_]llvm.Value{
-                c.LLVMConstInt(llvm.i32Type(), 0, 0),
-                c.LLVMConstInt(llvm.i32Type(), 0, 0),
-            };
-            const tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, phi, &tag_idx, 2, "eval.tag_gep");
-            const tag_val = c.LLVMBuildLoad2(self.builder, llvm.i64Type(), tag_gep, "eval.tag");
-
-            const n_eval_cases = @as(u32, @intCast(self.registry.fun_tags.count())) + 1;
-            const eval_switch = c.LLVMBuildSwitch(self.builder, tag_val, dispatch_bb, n_eval_cases);
-
-            // Ind case
-            const ind_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.ind");
-            const ind_disc = c.LLVMConstInt(llvm.i64Type(), 0x101, 0);
-            c.LLVMAddCase(eval_switch, ind_disc, ind_bb);
-
-            llvm.positionBuilderAtEnd(self.builder, ind_bb);
-            const rts_load_fn = declareRtsLoadField(self.module);
-            var ind_load_args = [_]llvm.Value{ phi, c.LLVMConstInt(llvm.i32Type(), 0, 0) };
-            const ind_target_i64 = c.LLVMBuildCall2(self.builder, llvm.getFunctionType(rts_load_fn), rts_load_fn, &ind_load_args, 2, "ind.target");
-            const ind_target = c.LLVMBuildIntToPtr(self.builder, ind_target_i64, ptrType(), "ind.ptr");
-            _ = c.LLVMBuildBr(self.builder, eval_bb);
-
-            var phi_incoming_vals = std.ArrayListUnmanaged(llvm.Value).empty;
-            defer phi_incoming_vals.deinit(self.allocator);
-            var phi_incoming_bbs = std.ArrayListUnmanaged(llvm.BasicBlock).empty;
-            defer phi_incoming_bbs.deinit(self.allocator);
-
-            // Entry uses pre-forced value so external __rhc_force result feeds in.
-            phi_incoming_vals.append(self.allocator, pre_forced) catch return error.OutOfMemory;
-            phi_incoming_bbs.append(self.allocator, entry_bb) catch return error.OutOfMemory;
-            phi_incoming_vals.append(self.allocator, ind_target) catch return error.OutOfMemory;
-            phi_incoming_bbs.append(self.allocator, ind_bb) catch return error.OutOfMemory;
-
-            // F-tag cases
-            var ftag_iter = self.registry.fun_tags.iterator();
-            while (ftag_iter.next()) |ftag_entry| {
-                const ftag_unique = ftag_entry.key_ptr.*;
-                const ftag_disc = self.registry.discriminants.get(ftag_unique) orelse continue;
-                const ftag_name = self.registry.fun_tag_names.get(ftag_unique) orelse continue;
-                const ftag_n_fields = self.registry.field_counts.get(ftag_unique) orelse 0;
-
-                const ftag_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.ftag");
-                c.LLVMAddCase(eval_switch, c.LLVMConstInt(llvm.i64Type(), @bitCast(ftag_disc), 0), ftag_bb);
-                llvm.positionBuilderAtEnd(self.builder, ftag_bb);
-
-                var call_args: [8]llvm.Value = undefined;
-                const n_args = @min(ftag_n_fields, 8);
-                for (0..n_args) |fi| {
-                    var fld_load_args = [_]llvm.Value{ phi, c.LLVMConstInt(llvm.i32Type(), @intCast(fi), 0) };
-                    const loaded_i64 = c.LLVMBuildCall2(self.builder, llvm.getFunctionType(rts_load_fn), rts_load_fn, &fld_load_args, 2, "ftag.arg");
-                    call_args[fi] = c.LLVMBuildIntToPtr(self.builder, loaded_i64, ptrType(), "ftag.ptr");
-                }
-
-                const fn_name_z = self.formatName(ftag_name);
-                var param_types: [8]llvm.Type = undefined;
-                for (0..n_args) |pi| param_types[pi] = ptrType();
-                const fn_type = llvm.functionType(ptrType(), param_types[0..n_args], false);
-                const func = c.LLVMGetNamedFunction(self.module, fn_name_z) orelse llvm.addFunction(self.module, fn_name_z, fn_type);
-                const result = c.LLVMBuildCall2(self.builder, fn_type, func, @ptrCast(&call_args), @intCast(n_args), "ftag.result");
-
-                // Update thunk to indirection. All F-tag thunks are allocated
-                // with ≥1 field, so the update is unconditional.
-                {
-                    const upd_tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, phi, &tag_idx, 2, "ftag.upd.tag");
-                    _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(llvm.i64Type(), 0x101, 0), upd_tag_gep);
-                    const rts_store_fn = declareRtsStoreField(self.module);
-                    const result_u64 = c.LLVMBuildPtrToInt(self.builder, result, llvm.i64Type(), "ftag.upd.u64");
-                    var upd_store_args = [_]llvm.Value{ phi, c.LLVMConstInt(llvm.i32Type(), 0, 0), result_u64 };
-                    _ = c.LLVMBuildCall2(self.builder, llvm.getFunctionType(rts_store_fn), rts_store_fn, &upd_store_args, 3, "");
-                }
-
-                _ = c.LLVMBuildBr(self.builder, eval_bb);
-                phi_incoming_vals.append(self.allocator, result) catch return error.OutOfMemory;
-                phi_incoming_bbs.append(self.allocator, ftag_bb) catch return error.OutOfMemory;
-            }
-
-            // P-tag cases
-            var ptag_iter = self.registry.partial_tags.iterator();
-            while (ptag_iter.next()) |ptag_entry| {
-                const ptag_unique = ptag_entry.key_ptr.*;
-                const ptag_disc = self.registry.discriminants.get(ptag_unique) orelse continue;
-                const ptag_bb = c.LLVMAppendBasicBlock(self.current_func, "eval.ptag");
-                c.LLVMAddCase(eval_switch, c.LLVMConstInt(llvm.i64Type(), @bitCast(ptag_disc), 0), ptag_bb);
-                llvm.positionBuilderAtEnd(self.builder, ptag_bb);
-
-                const ptag_info = self.registry.partial_tag_info.get(ptag_unique) orelse continue;
-                const fn_name_z = self.formatName(ptag_info.name);
-                const n_fields = ptag_info.n_fields;
-
-                var call_args: [8]llvm.Value = undefined;
-                for (0..@min(n_fields, 8)) |fi| {
-                    var load_args = [_]llvm.Value{ phi, c.LLVMConstInt(llvm.i32Type(), @intCast(fi), 0) };
-                    const loaded = c.LLVMBuildCall2(self.builder, llvm.getFunctionType(rts_load_fn), rts_load_fn, &load_args, 2, "pap.arg");
-                    call_args[fi] = c.LLVMBuildIntToPtr(self.builder, loaded, ptrType(), "pap.ptr");
-                }
-
-                var fn_param_types: [8]llvm.Type = undefined;
-                for (0..@min(n_fields, 8)) |pi| fn_param_types[pi] = ptrType();
-                const callee_type = llvm.functionType(ptrType(), fn_param_types[0..@min(n_fields, 8)], false);
-                const callee = c.LLVMGetNamedFunction(self.module, fn_name_z) orelse llvm.addFunction(self.module, fn_name_z, callee_type);
-                const result = c.LLVMBuildCall2(self.builder, callee_type, callee, @ptrCast(&call_args), @intCast(@min(n_fields, 8)), "pap.result");
-
-                _ = c.LLVMBuildBr(self.builder, eval_bb);
-                phi_incoming_vals.append(self.allocator, result) catch return error.OutOfMemory;
-                phi_incoming_bbs.append(self.allocator, ptag_bb) catch return error.OutOfMemory;
-            }
-
-            c.LLVMAddIncoming(phi, @ptrCast(phi_incoming_vals.items.ptr), @ptrCast(phi_incoming_bbs.items.ptr), @intCast(phi_incoming_vals.items.len));
-
-            // Tag phi: merge tag_val from eval.check and untagged integer from
-            // eval.entry (heap-guard fail path).
-            llvm.positionBuilderAtEnd(self.builder, dispatch_bb);
-            const tag_phi = c.LLVMBuildPhi(self.builder, llvm.i64Type(), "dispatch.tag");
-            var tag_phi_vals = [_]llvm.Value{ tag_val, untagged_raw };
-            var tag_phi_bbs = [_]llvm.BasicBlock{ eval_check_bb, eval_bb };
-            c.LLVMAddIncoming(tag_phi, @ptrCast(&tag_phi_vals), @ptrCast(&tag_phi_bbs), 2);
-            cur_scrut = phi;
-            cur_tag = tag_phi;
-        } else if (is_ptr) {
-            const header_ty = nodeHeaderType();
-            var idx = [_]llvm.Value{ c.LLVMConstInt(llvm.i32Type(), 0, 0), c.LLVMConstInt(llvm.i32Type(), 0, 0) };
-            const tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, scrut_llvm, &idx, 2, "tag_gep");
-            cur_tag = c.LLVMBuildLoad2(self.builder, llvm.i64Type(), tag_gep, "tag");
+        if (is_ptr) {
+            cur_tag = self.emitWhnfTagDispatch(pre_forced);
         } else {
             cur_tag = scrut_llvm;
         }
@@ -3214,7 +3036,7 @@ pub const GrinTranslator = struct {
 
             // Translate the alternative body as a value (not with ret)
             const alt_value = try self.translateExprToValue(alt.body, result_name);
-            
+
             // Every alternative must produce a value in bind context
             if (alt_value) |val| {
                 // Normalize value type: box i64 nullary constructors into heap nodes
@@ -3228,7 +3050,7 @@ pub const GrinTranslator = struct {
                     tagInt(self.builder, val)
                 else
                     val;
-                
+
                 try phi_values.append(self.allocator, normalized_val);
                 const cur_bb = c.LLVMGetInsertBlock(self.builder);
                 try phi_blocks.append(self.allocator, cur_bb);
@@ -3241,12 +3063,12 @@ pub const GrinTranslator = struct {
 
         // ── 5. Create phi node in merge block ──────────────────────────────
         llvm.positionBuilderAtEnd(self.builder, merge_bb);
-        
+
         if (phi_values.items.len == 0) return null;
-        
+
         // All values have been normalized to ptr type, so phi is always ptr
         const phi = c.LLVMBuildPhi(self.builder, ptrType(), nullTerminate(result_name).ptr);
-        
+
         c.LLVMAddIncoming(
             phi,
             @ptrCast(phi_values.items.ptr),
@@ -3257,7 +3079,7 @@ pub const GrinTranslator = struct {
         // ── 6. Emit unreachable in default block (for non-exhaustive matches) ──
         llvm.positionBuilderAtEnd(self.builder, unreachable_bb);
         _ = c.LLVMBuildUnreachable(self.builder);
-        
+
         // Reposition at merge for continuation
         llvm.positionBuilderAtEnd(self.builder, merge_bb);
 
@@ -3375,8 +3197,14 @@ pub const GrinTranslator = struct {
                     // Non-main, non-REPL functions return ptr.
                     // Force any F-tagged thunks to WHNF before returning
                     // so that callers always receive evaluated values.
+                    // (This return-site force is the convention that makes
+                    // every direct call result WHNF — see exprYieldsWhnf.)
+                    // Skip it when the value is statically WHNF already.
                     if (is_ptr) {
-                        const forced = self.callForceIfNeeded(llvm_val);
+                        const forced = if (self.valYieldsWhnf(val))
+                            llvm_val
+                        else
+                            self.callForceIfNeeded(llvm_val);
                         self.buildRetWithShadowRestore(forced);
                         return;
                     }
@@ -3491,7 +3319,7 @@ pub const GrinTranslator = struct {
         const tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, phi, &tag_idx, 2, "tag_gep");
         const tag_val = c.LLVMBuildLoad2(self.builder, i64_ty, tag_gep, "tag");
 
-        const n_cases = @as(u32, @intCast(self.registry.fun_tags.count())) + 1;
+        const n_cases = @as(u32, @intCast(self.registry.fun_tags.count() + self.registry.partial_tags.count())) + 1;
         const sw = c.LLVMBuildSwitch(self.builder, tag_val, done_bb, n_cases);
 
         // ── Ind case: follow indirection ───────────────────────────────
@@ -3597,6 +3425,67 @@ pub const GrinTranslator = struct {
             phi_bbs.append(self.allocator, ftag_bb) catch return error.OutOfMemory;
         }
 
+        // ── P-tag cases: call saturated partial applications ───────────
+        // Mirrors the P-tag arm the per-case-site inline eval loops used
+        // to emit (now that case sites rely solely on __rhc_force, the
+        // P(0) forcing must live here). A P(0) node stores all the
+        // function's arguments; load them and call directly.
+        //
+        // Only saturated (missing == 0) closures are callable. An
+        // under-saturated partial application is already WHNF — it falls
+        // through the switch default to `done` and is returned as-is.
+        var ptag_iter = self.registry.partial_tags.iterator();
+        while (ptag_iter.next()) |ptag_entry| {
+            const ptag_unique = ptag_entry.key_ptr.*;
+            const ptag_disc = self.registry.discriminants.get(ptag_unique) orelse continue;
+            const ptag_info = self.registry.partial_tag_info.get(ptag_unique) orelse continue;
+            if (ptag_info.missing != 0) continue;
+
+            const ptag_bb = c.LLVMAppendBasicBlock(func, "ptag");
+            c.LLVMAddCase(sw, c.LLVMConstInt(i64_ty, @bitCast(ptag_disc), 0), ptag_bb);
+
+            llvm.positionBuilderAtEnd(self.builder, ptag_bb);
+
+            const fn_name_z = self.formatName(ptag_info.name);
+            const n_fields = ptag_info.n_fields;
+            var call_args: [8]llvm.Value = undefined;
+            const n_args = @min(n_fields, 8);
+            for (0..n_args) |fi| {
+                var fld_args = [_]llvm.Value{
+                    phi,
+                    c.LLVMConstInt(llvm.i32Type(), @intCast(fi), 0),
+                };
+                const loaded = c.LLVMBuildCall2(
+                    self.builder,
+                    llvm.getFunctionType(rts_load_fn),
+                    rts_load_fn,
+                    &fld_args,
+                    2,
+                    "pap_arg",
+                );
+                call_args[fi] = c.LLVMBuildIntToPtr(self.builder, loaded, ptr_ty, "pap_ptr");
+            }
+
+            var fn_param_types: [8]llvm.Type = undefined;
+            for (0..n_args) |pi| fn_param_types[pi] = ptr_ty;
+            const callee_type = llvm.functionType(ptr_ty, fn_param_types[0..n_args], false);
+            const callee = c.LLVMGetNamedFunction(self.module, fn_name_z) orelse
+                llvm.addFunction(self.module, fn_name_z, callee_type);
+            const result = c.LLVMBuildCall2(
+                self.builder,
+                callee_type,
+                callee,
+                @ptrCast(&call_args),
+                @intCast(n_args),
+                "pap_result",
+            );
+
+            _ = c.LLVMBuildBr(self.builder, eval_bb);
+
+            phi_vals.append(self.allocator, result) catch return error.OutOfMemory;
+            phi_bbs.append(self.allocator, ptag_bb) catch return error.OutOfMemory;
+        }
+
         // Wire up phi.
         c.LLVMAddIncoming(
             phi,
@@ -3613,18 +3502,75 @@ pub const GrinTranslator = struct {
     /// Emit a call to `__rhc_force` if the module contains F-tags.
     /// Returns the forced pointer value, or the original value unchanged
     /// if no F-tags exist (i.e. `__rhc_force` was never emitted).
+    /// Force a translated operand unless its GRIN value is statically
+    /// WHNF (strict-forced parameter, primop result, immediate).
+    fn forceOperandIfNeeded(self: *GrinTranslator, raw: llvm.Value, val: grin.Val) llvm.Value {
+        if (self.valYieldsWhnf(val)) return raw;
+        return self.callForceIfNeeded(raw);
+    }
+
     fn callForceIfNeeded(self: *GrinTranslator, val: llvm.Value) llvm.Value {
-        if (self.registry.fun_tags.count() == 0) return val;
-        const force_fn = c.LLVMGetNamedFunction(self.module, "__rhc_force") orelse return val;
+        if (self.registry.fun_tags.count() == 0 and self.registry.partial_tags.count() == 0) return val;
+        if (c.LLVMGetNamedFunction(self.module, "__rhc_force") == null) return val;
+        const guard = self.getOrDefineForceFastGuard();
         var args = [_]llvm.Value{val};
         return c.LLVMBuildCall2(
             self.builder,
-            llvm.getFunctionType(force_fn),
-            force_fn,
+            llvm.getFunctionType(guard),
+            guard,
             &args,
             1,
             "forced",
         );
+    }
+
+    /// Get-or-define the module-internal `__rhc_force_fast(ptr) -> ptr`:
+    /// an always-inline guard that returns tagged immediates (and null)
+    /// without a call, and defers heap pointers to the full `__rhc_force`.
+    /// After LLVM inlining, forcing a value that is statically a tagged
+    /// immediate folds away entirely, and runtime forces of immediates
+    /// cost two bit tests instead of a function call.
+    fn getOrDefineForceFastGuard(self: *GrinTranslator) llvm.Value {
+        const name = "__rhc_force_fast";
+        if (c.LLVMGetNamedFunction(self.module, name)) |existing| return existing;
+
+        const ptr_ty = ptrType();
+        const i64_ty = llvm.i64Type();
+        var param_types = [_]llvm.Type{ptr_ty};
+        const fn_ty = llvm.functionType(ptr_ty, &param_types, false);
+        const func = llvm.addFunction(self.module, name, fn_ty);
+        c.LLVMSetLinkage(func, c.LLVMInternalLinkage);
+        const ctx = c.LLVMGetModuleContext(self.module);
+        const kind_id = c.LLVMGetEnumAttributeKindForName("alwaysinline", "alwaysinline".len);
+        const attr = c.LLVMCreateEnumAttribute(ctx, kind_id, 0);
+        const fn_index: c_uint = @bitCast(@as(c_int, c.LLVMAttributeFunctionIndex));
+        c.LLVMAddAttributeAtIndex(func, fn_index, attr);
+
+        const saved_bb = c.LLVMGetInsertBlock(self.builder);
+        defer if (saved_bb != null) llvm.positionBuilderAtEnd(self.builder, saved_bb);
+
+        const entry_bb = llvm.appendBasicBlock(func, "entry");
+        const slow_bb = c.LLVMAppendBasicBlock(func, "slow");
+        const done_bb = c.LLVMAppendBasicBlock(func, "done");
+        llvm.positionBuilderAtEnd(self.builder, entry_bb);
+        const param = c.LLVMGetParam(func, 0);
+        const raw = c.LLVMBuildPtrToInt(self.builder, param, i64_ty, "raw");
+        const low = c.LLVMBuildAnd(self.builder, raw, c.LLVMConstInt(i64_ty, 1, 0), "low");
+        const is_imm = c.LLVMBuildICmp(self.builder, c.LLVMIntNE, low, c.LLVMConstInt(i64_ty, 0, 0), "is_imm");
+        const is_null = c.LLVMBuildICmp(self.builder, c.LLVMIntEQ, raw, c.LLVMConstInt(i64_ty, 0, 0), "is_null");
+        const skip = c.LLVMBuildOr(self.builder, is_imm, is_null, "skip");
+        _ = c.LLVMBuildCondBr(self.builder, skip, done_bb, slow_bb);
+
+        llvm.positionBuilderAtEnd(self.builder, slow_bb);
+        const heavy = c.LLVMGetNamedFunction(self.module, "__rhc_force").?;
+        var slow_args = [_]llvm.Value{param};
+        const forced = c.LLVMBuildCall2(self.builder, llvm.getFunctionType(heavy), heavy, &slow_args, 1, "forced.slow");
+        _ = c.LLVMBuildRet(self.builder, forced);
+
+        llvm.positionBuilderAtEnd(self.builder, done_bb);
+        _ = c.LLVMBuildRet(self.builder, param);
+
+        return func;
     }
 
     /// Force a heap pointer to WHNF by following indirections and forcing
