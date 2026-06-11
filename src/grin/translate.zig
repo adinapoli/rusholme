@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const core = @import("../core/ast.zig");
+const demand = @import("../core/demand.zig");
 const grin = @import("ast.zig");
 const PrimOp = @import("primop.zig").PrimOp;
 const FieldType = grin.FieldType;
@@ -145,7 +146,7 @@ const TranslateCtx = struct {
     // (#802): function unique → bitmask (bit i = strict in param i).
     // Strict arguments are passed eagerly instead of as F-tag thunks.
     // Null when no analysis ran (REPL, debug commands) — all args lazy.
-    strict_params: ?*const std.AutoHashMapUnmanaged(u64, u64) = null,
+    strict_params: ?*const demand.StrictnessMap = null,
 
     pub fn init(alloc: std.mem.Allocator) TranslateCtx {
         return .{
@@ -517,7 +518,7 @@ pub fn translateProgram(
     core_prog: CoreProgram,
     external_arities: ?*const std.AutoHashMapUnmanaged(u64, u32),
     external_con_map: ?*const std.AutoHashMapUnmanaged(u64, u32),
-    strict_params: ?*const std.AutoHashMapUnmanaged(u64, u64),
+    strict_params: ?*const demand.StrictnessMap,
 ) !GrinProgram {
     // Build the arity map for partial/over-application handling.
     var arity_map = try buildArityMap(alloc, core_prog);
@@ -1393,7 +1394,7 @@ fn wrapWithLazyBindsForFunc(
         const sp = ctx.strict_params orelse break :blk 0;
         const arity = ctx.getFunctionArity(app.name) orelse break :blk 0;
         if (app.args.len != arity) break :blk 0;
-        break :blk sp.get(app.name.unique.value) orelse 0;
+        break :blk if (sp.get(app.name.unique.value)) |dm| dm.strict else 0;
     };
 
     var result = inner;
