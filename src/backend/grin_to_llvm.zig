@@ -3355,11 +3355,16 @@ pub const GrinTranslator = struct {
         // to emit (now that case sites rely solely on __rhc_force, the
         // P(0) forcing must live here). A P(0) node stores all the
         // function's arguments; load them and call directly.
+        //
+        // Only saturated (missing == 0) closures are callable. An
+        // under-saturated partial application is already WHNF — it falls
+        // through the switch default to `done` and is returned as-is.
         var ptag_iter = self.registry.partial_tags.iterator();
         while (ptag_iter.next()) |ptag_entry| {
             const ptag_unique = ptag_entry.key_ptr.*;
             const ptag_disc = self.registry.discriminants.get(ptag_unique) orelse continue;
             const ptag_info = self.registry.partial_tag_info.get(ptag_unique) orelse continue;
+            if (ptag_info.missing != 0) continue;
 
             const ptag_bb = c.LLVMAppendBasicBlock(func, "ptag");
             c.LLVMAddCase(sw, c.LLVMConstInt(i64_ty, @bitCast(ptag_disc), 0), ptag_bb);
