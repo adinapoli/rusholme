@@ -437,22 +437,70 @@ fn declareRtsSetBackend(module: llvm.Module) llvm.Value {
     return c.LLVMAddFunction(module, name, fn_ty);
 }
 
-/// Declare `rts_store_field(node: ptr, index: i32, value: i64) -> void`.
+/// Get-or-define the module-private `rts_store_field(ptr, i32, i64)`.
+/// Field access is a fixed-offset store (`fields(n)[i] = v` in
+/// src/rts/node.zig); defining it as an always-inline body in every
+/// module lets LLVM fold the call away — out-of-line RTS calls for
+/// every field write were a dominant cost on alloc-heavy benches.
 fn declareRtsStoreField(module: llvm.Module) llvm.Value {
     const name = "rts_store_field";
     if (c.LLVMGetNamedFunction(module, name)) |existing| return existing;
     var params = [_]llvm.Type{ ptrType(), llvm.i32Type(), llvm.i64Type() };
     const fn_ty = c.LLVMFunctionType(llvm.voidType(), &params, 3, 0);
-    return c.LLVMAddFunction(module, name, fn_ty);
+    const func = c.LLVMAddFunction(module, name, fn_ty);
+    defineFieldAccessorBody(module, func, .store);
+    return func;
 }
 
-/// Declare `rts_load_field(node: ptr, index: i32) -> i64`.
+/// Get-or-define the module-private `rts_load_field(ptr, i32) -> i64`.
 fn declareRtsLoadField(module: llvm.Module) llvm.Value {
     const name = "rts_load_field";
     if (c.LLVMGetNamedFunction(module, name)) |existing| return existing;
     var params = [_]llvm.Type{ ptrType(), llvm.i32Type() };
     const fn_ty = c.LLVMFunctionType(llvm.i64Type(), &params, 2, 0);
-    return c.LLVMAddFunction(module, name, fn_ty);
+    const func = c.LLVMAddFunction(module, name, fn_ty);
+    defineFieldAccessorBody(module, func, .load);
+    return func;
+}
+
+/// Emit the body for an inline field accessor. The function is given
+/// internal linkage and the `alwaysinline` attribute so the symbol never
+/// clashes with the real RTS export (which remains for Zig-side callers)
+/// and the call disappears during optimisation.
+fn defineFieldAccessorBody(module: llvm.Module, func: llvm.Value, kind: enum { load, store }) void {
+    c.LLVMSetLinkage(func, c.LLVMInternalLinkage);
+    const ctx = c.LLVMGetModuleContext(module);
+    const kind_id = c.LLVMGetEnumAttributeKindForName("alwaysinline", "alwaysinline".len);
+    const attr = c.LLVMCreateEnumAttribute(ctx, kind_id, 0);
+    const fn_index: c_uint = @bitCast(@as(c_int, c.LLVMAttributeFunctionIndex));
+    c.LLVMAddAttributeAtIndex(func, fn_index, attr);
+
+    const builder = c.LLVMCreateBuilderInContext(ctx);
+    defer c.LLVMDisposeBuilder(builder);
+    const entry = llvm.appendBasicBlock(func, "entry");
+    llvm.positionBuilderAtEnd(builder, entry);
+
+    const node_ptr = c.LLVMGetParam(func, 0);
+    const index = c.LLVMGetParam(func, 1);
+    const idx64 = c.LLVMBuildZExt(builder, index, llvm.i64Type(), "idx");
+    // fields base = node + 16 bytes (2 i64 header slots), slot i at +8*i.
+    const hdr = c.LLVMConstInt(llvm.i64Type(), 2, 0);
+    var base_idx = [_]llvm.Value{hdr};
+    const base = c.LLVMBuildGEP2(builder, llvm.i64Type(), node_ptr, &base_idx, 1, "fields.base");
+    var slot_idx = [_]llvm.Value{idx64};
+    const slot = c.LLVMBuildGEP2(builder, llvm.i64Type(), base, &slot_idx, 1, "field.slot");
+
+    switch (kind) {
+        .load => {
+            const v = c.LLVMBuildLoad2(builder, llvm.i64Type(), slot, "field.val");
+            _ = c.LLVMBuildRet(builder, v);
+        },
+        .store => {
+            const v = c.LLVMGetParam(func, 2);
+            _ = c.LLVMBuildStore(builder, v, slot);
+            _ = c.LLVMBuildRetVoid(builder);
+        },
+    }
 }
 
 /// Capacity (in slots) of the shadow-stack buffer exposed by the RTS.
