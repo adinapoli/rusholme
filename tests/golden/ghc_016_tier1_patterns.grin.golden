@@ -10,9 +10,7 @@ describeNumber_1004 arg_0_1007 =
   case arg_0_1007 of
     #0 ->
       pure #"zero"
+    #1 ->
+      pure #"one"
     _ ->
-      case arg_0_1007 of
-        #1 ->
-          pure #"one"
-        _ ->
-          pure #"many"
+      pure #"many"

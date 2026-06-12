@@ -27,6 +27,7 @@
 
 const std = @import("std");
 const core = @import("ast.zig");
+const known = @import("../naming/known.zig");
 const Name = core.Name;
 const Unique = core.Unique;
 const Expr = core.Expr;
@@ -284,7 +285,15 @@ pub const LambdaLifter = struct {
                 // Data constructors are globally available and must never be
                 // captured as free variables.  In Haskell, constructor names
                 // start with an uppercase letter or ':'.
-                if (!isDataCon(v.name.base) and !scope.contains(v.name.unique.value)) {
+                // Reserved-range uniques (< known.reserved_range_end) are
+                // well-known builtins (`error`, `undefined`, …) injected by
+                // the desugarer. They are globally available — like data
+                // constructors — and must never be captured as free
+                // variables of a lifted lambda.
+                if (!isDataCon(v.name.base) and
+                    v.name.unique.value >= known.reserved_range_end and
+                    !scope.contains(v.name.unique.value))
+                {
                     try fvs.add(self.alloc, v.name.unique.value);
                 }
                 // Remember the source-level base name AND the actual Core
@@ -1082,9 +1091,13 @@ test "lambdaLift: nested lambda free vars include enclosing lambda params" {
 
     // f = \x -> (\y -> x) 5
     // The lifted function for \y -> x should have x as a free variable.
+    //
+    // Uniques are >= 1000: the renamer never assigns user binders inside
+    // the reserved builtin range, and the lifter treats reserved-range
+    // uniques as globally in scope (never captured).
 
-    const x_id = testId("x", 1);
-    const y_id = testId("y", 2);
+    const x_id = testId("x", 1001);
+    const y_id = testId("y", 1002);
     const five_lit = try alloc.create(Expr);
     five_lit.* = .{ .Lit = .{ .val = .{ .Int = 5 }, .span = testSpan() } };
 
@@ -1137,9 +1150,9 @@ test "lambdaLift: nested lambda free vars include enclosing lambda params" {
         const info = &entry.value_ptr.*;
         if (info.needs_lifting) {
             found_lifted = true;
-            // The inner lambda \y -> x has x (unique=1) as a free variable.
+            // The inner lambda \y -> x has x (unique=1001) as a free variable.
             try testing.expectEqual(@as(usize, 1), info.free_vars.len);
-            try testing.expectEqual(@as(u64, 1), info.free_vars[0]);
+            try testing.expectEqual(@as(u64, 1001), info.free_vars[0]);
         }
     }
     try testing.expect(found_lifted);
@@ -1503,9 +1516,9 @@ test "lambdaLift: lifted function preserves free-variable source names (#510)" {
     // f = \x -> (\y -> x) 5
     // The lifted function is `lifted_0 x y = x` — its outermost binder
     // must carry the source base name "x", not the legacy placeholder
-    // "fv".
-    const x_id = testId("x", 1);
-    const y_id = testId("y", 2);
+    // "fv". Uniques >= 1000: reserved-range uniques are never captured.
+    const x_id = testId("x", 1001);
+    const y_id = testId("y", 1002);
 
     const five_lit = try alloc.create(Expr);
     five_lit.* = .{ .Lit = .{ .val = .{ .Int = 5 }, .span = testSpan() } };
@@ -1560,7 +1573,7 @@ test "lambdaLift: lifted function preserves free-variable source names (#510)" {
     };
 
     try testing.expectEqualStrings("x", outermost_binder.name.base);
-    try testing.expectEqual(@as(u64, 1), outermost_binder.name.unique.value);
+    try testing.expectEqual(@as(u64, 1001), outermost_binder.name.unique.value);
 }
 
 test "lambdaLift: lifted function preserves free-variable types (#511)" {
@@ -1580,12 +1593,12 @@ test "lambdaLift: lifted function preserves free-variable types (#511)" {
     } };
 
     const x_id = Id{
-        .name = .{ .base = "x", .unique = .{ .value = 1 } },
+        .name = .{ .base = "x", .unique = .{ .value = 1001 } },
         .ty = char_ty,
         .span = testSpan(),
     };
     const y_id = Id{
-        .name = .{ .base = "y", .unique = .{ .value = 2 } },
+        .name = .{ .base = "y", .unique = .{ .value = 1002 } },
         .ty = char_ty,
         .span = testSpan(),
     };

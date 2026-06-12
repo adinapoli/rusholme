@@ -65,6 +65,7 @@ pub const core = struct {
     pub const specialise = @import("core/specialise.zig");
     pub const demand = @import("core/demand.zig");
     pub const match_check = @import("core/match_check.zig");
+    pub const simplify = @import("core/simplify.zig");
 };
 
 pub const grin = struct {

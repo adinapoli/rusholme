@@ -3,12 +3,10 @@ unwrapNode_1003 arg_0_1015 =
   case arg_0_1015 of
     (CNode_1001 _field_0_0_0_1018 x_1009 _field_0_0_2_1016) ->
       pure x_1009
+    CLeaf_1000 ->
+      pure #0
     _ ->
-      case arg_0_1015 of
-        CLeaf_1000 ->
-          pure #0
-        _ ->
-          pure #"Non-exhaustive patterns in function"
+      error_5 #"Non-exhaustive patterns in function"
 
 leftValue_1004 arg_0_1019 =
   case arg_0_1019 of
@@ -37,4 +35,4 @@ sumPair_1006 arg_0_1028 =
     (C(,) a_1012 _field_0_0_1_1029) ->
       pure a_1012
     _ ->
-      pure #"Non-exhaustive patterns in function"
+      error_5 #"Non-exhaustive patterns in function"

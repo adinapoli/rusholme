@@ -24,6 +24,7 @@
 //! force the variable `p`?
 //!
 //!   demands(p)                      = true
+//!   demands(⊥)                      = true                  (vacuous: ⊥ never reaches WHNF)
 //!   demands(prim a1..an)           = ∃i. demands(ai)        (primops are strict)
 //!   demands(f a1..an) | saturated  = ∃i. strict(f,i) ∧ demands(ai)
 //!   demands(f a1..an) | partial    = false                  (P-node is WHNF)
@@ -253,6 +254,28 @@ fn resolveAlias(aliases: *const std.AutoHashMapUnmanaged(u64, u64), unique: u64)
     return cur;
 }
 
+/// Is `e` certainly bottom — guaranteed to diverge (or abort) when
+/// evaluated to WHNF? Recognises applications of `error` / `primError`
+/// and any reference to `undefined`. The desugarer emits
+/// `error "Non-exhaustive patterns …"` as the fallback alternative of
+/// every compiled pattern match, so dead default branches land here.
+///
+/// A bottoming expression vacuously demands every variable: if one
+/// branch of a case is ⊥, that branch can never weaken the strictness
+/// meet over the alternatives (`f x = ⊥` is strict in `x` by the
+/// definition `f ⊥ = ⊥`). GHC's DmdAnal does the same by giving such
+/// branches the bottom demand type.
+fn isBottom(e: *const Expr) bool {
+    var n_args: usize = 0;
+    var cur = e;
+    while (cur.* == .App) : (n_args += 1) cur = cur.App.fn_expr;
+    if (cur.* != .Var) return false;
+    const base = cur.Var.name.base;
+    if (std.mem.eql(u8, base, "undefined")) return true;
+    return n_args >= 1 and
+        (std.mem.eql(u8, base, "error") or std.mem.eql(u8, base, "primError"));
+}
+
 /// Does evaluating `e` to WHNF force the variable `p`?
 fn demands(
     e: *const Expr,
@@ -261,6 +284,7 @@ fn demands(
     aliases: *const std.AutoHashMapUnmanaged(u64, u64),
     masks: *const StrictnessMap,
 ) bool {
+    if (isBottom(e)) return true;
     switch (e.*) {
         .Var => |id| return resolveAlias(aliases, id.name.unique.value) == p,
         .Lit, .Lam, .Type, .Coercion => return false,
@@ -455,6 +479,85 @@ test "demand: accumulator threaded through recursive strict call is strict" {
 
     // Both acc (bit 0) and n (bit 1) strict.
     try testing.expectEqual(@as(u64, 0b11), masks.get(2000).?.strict);
+}
+
+test "demand: dead non-exhaustive error branch does not poison strictness" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The desugarer compiles `if a < b then q else helper (sub a b) b (add q 1)`
+    // into nested cases whose innermost default is `error "Non-exhaustive…"`.
+    // helper = \a -> \b -> \q ->
+    //   case lt a b of
+    //     True  -> q
+    //     _     -> case lt a b of
+    //       False -> helper (sub a b) b (add q 1)
+    //       _     -> error "Non-exhaustive patterns in case"
+    const a = testId("a", 1);
+    const b = testId("b", 2);
+    const q = testId("q", 3);
+    const lt = testId("lt_Int", 10);
+    const add = testId("add_Int", 11);
+    const sub = testId("sub_Int", 12);
+    const err = testId("error", 5);
+    const helper = testId("helper", 2000);
+
+    const scrut = try app(alloc, try app(alloc, try v(alloc, lt), try v(alloc, a)), try v(alloc, b));
+    const rec_call = try app(
+        alloc,
+        try app(
+            alloc,
+            try app(
+                alloc,
+                try v(alloc, helper),
+                try app(alloc, try app(alloc, try v(alloc, sub), try v(alloc, a)), try v(alloc, b)),
+            ),
+            try v(alloc, b),
+        ),
+        try app(alloc, try app(alloc, try v(alloc, add), try v(alloc, q)), try lit(alloc, 1)),
+    );
+    const err_str = try alloc.create(Expr);
+    err_str.* = .{ .Lit = .{ .val = .{ .String = "Non-exhaustive patterns in case" }, .span = testSpan() } };
+    const err_call = try app(alloc, try v(alloc, err), err_str);
+
+    const inner_alts = try alloc.alloc(core.Alt, 2);
+    inner_alts[0] = .{ .con = .{ .DataAlt = .{ .base = "False", .unique = .{ .value = 20 } } }, .binders = &.{}, .body = rec_call };
+    inner_alts[1] = .{ .con = .{ .Default = {} }, .binders = &.{}, .body = err_call };
+    const inner_case = try alloc.create(Expr);
+    inner_case.* = .{ .Case = .{
+        .scrutinee = scrut,
+        .binder = testId("s2", 31),
+        .ty = .{ .TyVar = .{ .base = "t", .unique = .{ .value = 0 } } },
+        .alts = inner_alts,
+        .span = testSpan(),
+    } };
+
+    const outer_alts = try alloc.alloc(core.Alt, 2);
+    outer_alts[0] = .{ .con = .{ .DataAlt = .{ .base = "True", .unique = .{ .value = 21 } } }, .binders = &.{}, .body = try v(alloc, q) };
+    outer_alts[1] = .{ .con = .{ .Default = {} }, .binders = &.{}, .body = inner_case };
+    const outer_case = try alloc.create(Expr);
+    outer_case.* = .{ .Case = .{
+        .scrutinee = scrut,
+        .binder = testId("s1", 30),
+        .ty = .{ .TyVar = .{ .base = "t", .unique = .{ .value = 0 } } },
+        .alts = outer_alts,
+        .span = testSpan(),
+    } };
+
+    const binds = try alloc.alloc(Bind, 1);
+    binds[0] = .{ .NonRec = .{
+        .binder = helper,
+        .rhs = try lam(alloc, a, try lam(alloc, b, try lam(alloc, q, outer_case))),
+    } };
+    const progs = [_]CoreProgram{.{ .data_decls = &.{}, .binds = binds }};
+
+    var masks = try analyse(testing.allocator, &progs);
+    defer masks.deinit(testing.allocator);
+
+    // All three parameters strict — the dead error branch must not
+    // demote the accumulator `q` to lazy.
+    try testing.expectEqual(@as(u64, 0b111), masks.get(2000).?.strict);
 }
 
 test "demand: argument only used under a lambda is not strict" {

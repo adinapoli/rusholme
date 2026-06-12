@@ -5,10 +5,8 @@ data Wrapper_1008 a = (Wrap_1002 :: forall a_1014. a_1014 -> Wrapper_1008 a_1014
 
 (unwrapNode_1003 :: (Tree_1007 Int_100) -> Int_100) = \(arg_0_1015 :: Tree_1007 Int_100) -> case arg_0_1015 of (arg_0_1015 :: Tree_1007 Int_100) {
   Node_1001 (_field_0_0_0_1018 :: _t) (x_1009 :: Int_100) (_field_0_0_2_1016 :: _t) -> x_1009
-  _ -> case arg_0_1015 of (arg_0_1015 :: Tree_1007 Int_100) {
-    Leaf_1000 -> 0
-    _ -> "Non-exhaustive patterns in function"
-  }
+  Leaf_1000 -> 0
+  _ -> error_5 "Non-exhaustive patterns in function"
 }
 
 (leftValue_1004 :: (Tree_1007 Int_100) -> Int_100) = \(arg_0_1019 :: Tree_1007 Int_100) -> case arg_0_1019 of (arg_0_1019 :: Tree_1007 Int_100) {
@@ -27,5 +25,5 @@ in case arg_0_1026 of (arg_0_1026 :: Wrapper_1008 Int_100) {
 
 (sumPair_1006 :: ((,)_209 Int_100 Int_100) -> Int_100) = \(arg_0_1028 :: (,)_209 Int_100 Int_100) -> case arg_0_1028 of (arg_0_1028 :: (,)_209 Int_100 Int_100) {
   (,) (a_1012 :: Int_100) (_field_0_0_1_1029 :: _t) -> a_1012
-  _ -> "Non-exhaustive patterns in function"
+  _ -> error_5 "Non-exhaustive patterns in function"
 }
