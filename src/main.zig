@@ -1256,6 +1256,25 @@ fn emitNative(
             std.process.exit(1);
         };
 
+        // Opt-in IR verification (`RHC_VERIFY_LLVM=1`): structural
+        // errors (broken dominance, type mismatches) fail loudly here
+        // rather than silently miscompiling downstream. Not always-on
+        // yet: the translator currently reuses cached function values
+        // across `translateModuleGrin` calls, so multi-module builds
+        // carry cross-context references that trip the verifier on
+        // issues unrelated to the current change.
+        // tracked in: https://github.com/adinapoli/rusholme/issues/815
+        if (std.c.getenv("RHC_VERIFY_LLVM") != null) {
+            llvm.verifyModule(llvm_mod) catch {
+                var stderr_buf: [4096]u8 = undefined;
+                var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+                const stderr = &stderr_fw.interface;
+                try stderr.print("rhc: internal compiler error — LLVM IR verification failed for module '{s}'\n", .{mod_name});
+                try stderr.flush();
+                std.process.exit(1);
+            };
+        }
+
         // Prefer the source-declared module name (`module Foo where`) for
         // the on-disk `.bc` stem so that files given as absolute paths
         // (e.g. `/tmp/Foo.hs`) produce `Foo.bc` rather than the

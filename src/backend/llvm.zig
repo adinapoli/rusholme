@@ -7,6 +7,7 @@ const std = @import("std");
 
 // Import LLVM-C API headers
 const llvm_c = @cImport({
+    @cInclude("llvm-c/Analysis.h");
     @cInclude("llvm-c/Core.h");
     @cInclude("llvm-c/Target.h");
     @cInclude("llvm-c/TargetMachine.h");
@@ -326,7 +327,20 @@ pub const TargetError = error{
     TargetMachineCreationFailed,
     EmitFailed,
     PassPipelineFailed,
+    ModuleVerifyFailed,
 };
+
+/// Run the LLVM IR verifier over the module, printing any structural
+/// errors (broken dominance, type mismatches, …) to stderr. Codegen
+/// bugs must fail loudly here rather than silently miscompile.
+pub fn verifyModule(module: Module) TargetError!void {
+    var error_msg: [*c]u8 = null;
+    if (llvm_c.LLVMVerifyModule(module, llvm_c.LLVMPrintMessageAction, &error_msg) != 0) {
+        if (error_msg) |msg| llvm_c.LLVMDisposeMessage(msg);
+        return error.ModuleVerifyFailed;
+    }
+    if (error_msg) |msg| llvm_c.LLVMDisposeMessage(msg);
+}
 
 /// Optimisation level selected by the user (`-O<level>` on `rhc build`).
 ///
