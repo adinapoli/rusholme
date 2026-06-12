@@ -519,7 +519,8 @@ pub fn translateProgram(
     external_arities: ?*const std.AutoHashMapUnmanaged(u64, u32),
     external_con_map: ?*const std.AutoHashMapUnmanaged(u64, u32),
     strict_params: ?*const demand.StrictnessMap,
-) !GrinProgram {
+    initial_name_counter: u64,
+) !struct { program: GrinProgram, next_name_counter: u64 } {
     // Build the arity map for partial/over-application handling.
     var arity_map = try buildArityMap(alloc, core_prog);
     defer arity_map.deinit(alloc);
@@ -533,6 +534,7 @@ pub fn translateProgram(
     defer con_field_types.deinit(alloc);
 
     var ctx = TranslateCtx.init(alloc);
+    ctx.name_counter = initial_name_counter;
     defer ctx.deinit();
     ctx.strict_params = strict_params;
 
@@ -665,10 +667,13 @@ pub fn translateProgram(
     // Move arity map from context to program (issue #595)
     const arities = ctx.arity_map;
 
-    return GrinProgram{
-        .defs = defs_slice,
-        .field_types = field_types,
-        .arities = arities,
+    return .{
+        .program = GrinProgram{
+            .defs = defs_slice,
+            .field_types = field_types,
+            .arities = arities,
+        },
+        .next_name_counter = ctx.name_counter,
     };
 }
 
@@ -2447,7 +2452,8 @@ test "translateProgram: simple identity function" {
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null, null, null);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_prog = grin_result.program;
 
     // Should have one definition with one parameter.
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
@@ -2522,7 +2528,8 @@ test "translateProgram: literal value" {
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null, null, null);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_prog = grin_result.program;
 
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
 
@@ -2702,7 +2709,8 @@ test "translateProgram: partial application generates P-tag" {
         .binds = &[_]CoreBind{ .{ .NonRec = map_pair }, .{ .NonRec = main_pair } },
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null, null, null);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_prog = grin_result.program;
 
     // Should have 2 definitions: map and main
     try testing.expectEqual(@as(usize, 2), grin_prog.defs.len);
@@ -2785,7 +2793,8 @@ test "translateProgram: over-application generates chained apply calls" {
         .binds = &[_]CoreBind{ .{ .NonRec = id_pair }, .{ .NonRec = main_pair } },
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null, null, null);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_prog = grin_result.program;
 
     // Should have 2 definitions: id and main
     try testing.expectEqual(@as(usize, 2), grin_prog.defs.len);
@@ -2896,7 +2905,8 @@ test "translateApp: nested application f (g x) emits Bind for complex arg (#374)
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null, null, null);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_prog = grin_result.program;
 
     // Should have one definition with 3 parameters (f, g, x).
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
@@ -2984,7 +2994,8 @@ test "translateProgram: external 0-arity function produces App not Return Var" {
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, &external_arities, null, null);
+    const grin_result = try translateProgram(alloc, core_prog, &external_arities, null, null, 0);
+    const grin_prog = grin_result.program;
 
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
 
@@ -3105,7 +3116,8 @@ test "wrapWithLazyBindsForCon: Case arg lambda-lifted into thunk (#518)" {
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null, null, null);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_prog = grin_result.program;
 
     // Should have 2 defs: f and the lifted thunk helper.
     try testing.expectEqual(@as(usize, 2), grin_prog.defs.len);
@@ -3238,7 +3250,8 @@ test "translateLet: complex NonRec RHS suspended as lambda-lifted thunk" {
         .binds = &.{.{ .NonRec = .{ .binder = f_id, .rhs = lam_x } }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null, null, null);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_prog = grin_result.program;
 
     // Two defs: f and the lifted thunk helper.
     try testing.expectEqual(@as(usize, 2), grin_prog.defs.len);
@@ -3384,7 +3397,8 @@ test "translateExpr: multi-binding Rec let emits one Update per binder (#747)" {
         .binds = &[_]CoreBind{.{ .NonRec = main_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null, null, null);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_prog = grin_result.program;
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
 
     const main_body = grin_prog.defs[0].body;
@@ -3461,7 +3475,8 @@ test "translateExpr: Rec backpatch chain follows dependency order (#753)" {
         .binds = &[_]CoreBind{.{ .NonRec = main_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null, null, null);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_prog = grin_result.program;
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
 
     var ptrs: std.ArrayListUnmanaged(GrinName) = .empty;

@@ -683,23 +683,10 @@ async function build() {
     console.log('   ⚠️  No placeholder found in template.html');
   }
   
-  // Benchmark section (read bench/results.json checked into the repo).
-  console.log('📊 Generating benchmark charts...');
-  const bench = loadBenchResults();
-  if (bench && bench.runs.length > 0) {
-    const explorerHTML = generateBenchExplorerHTML(bench);
-
-    const explorerPlaceholder = '<!-- BENCH_EXPLORER_PLACEHOLDER -->';
-    if (html.includes(explorerPlaceholder)) {
-      html = html.replace(explorerPlaceholder, explorerHTML);
-    } else {
-      console.log('   ⚠️  No bench explorer placeholder found in template.html');
-    }
-
-    console.log(`   ✓ Rendered ${Object.keys(bench.runs[bench.runs.length - 1].programs).length} bench charts (${bench.runs.length} run${bench.runs.length === 1 ? '' : 's'} of history)`);
-  } else {
-    console.log('   ⚠️  No bench/results.json found — skipping benchmarks section');
-  }
+  // Benchmark section is now rendered dynamically at runtime
+  // from bench/results.json (fetched client-side).
+  // The template already contains the full interactive explorer
+  // that fetches the JSON file — no build-time replacement needed.
 
   // Write output
   const outputPath = path.join(__dirname, 'index.html');
