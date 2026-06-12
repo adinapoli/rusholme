@@ -60,10 +60,11 @@ jobs:
 
       - name: Copy files for Pages upload
         run: |
-          mkdir -p _site
+          mkdir -p _site/bench
           cp website/index.html _site/
           cp website/logo.png _site/
           cp website/repl.wasm _site/
+          cp bench/results.json _site/bench/
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

@@ -716,7 +716,8 @@ fn cmdGrin(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     }
 
     // ── Translate to GRIN ───────────────────────────────────────────────
-    const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted, null, null, null);
+    const grin_result = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted, null, null, null, 0);
+    const grin_prog = grin_result.program;
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
@@ -835,7 +836,8 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     }
 
     // ── Translate to GRIN ───────────────────────────────────────────────
-    const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted, null, null, null);
+    const grin_result = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted, null, null, null, 0);
+    const grin_prog = grin_result.program;
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
         std.process.exit(1);
@@ -1133,11 +1135,18 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     // Thread the lifted-function name counter across modules so that each
     // module's lifted functions get globally unique LLVM symbol names.
     var next_lift_id: u64 = 0;
+    // Thread the GRIN name counter across modules so that each module's
+    // lifted thunk names (e.g. _thunk_18) get globally unique LLVM symbols.
+    // Without this, two modules that both create 19 thunks would both emit
+    // _thunk_18, causing a linker "symbol multiply defined" error (#812).
+    var next_grin_name_counter: u64 = 0;
     for (module_order) |mod_name| {
         const core_prog = session.programs.get(mod_name) orelse continue;
         const lift_result = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog, cross_module_scope, next_lift_id);
         next_lift_id = lift_result.next_lifted_id;
-        const grin_prog = try rusholme.grin.translate.translateProgram(arena_alloc, lift_result.program, &cross_module_arities, &cross_module_con_map, strict_params);
+        const grin_result = try rusholme.grin.translate.translateProgram(arena_alloc, lift_result.program, &cross_module_arities, &cross_module_con_map, strict_params, next_grin_name_counter);
+        next_grin_name_counter = grin_result.next_name_counter;
+        const grin_prog = grin_result.program;
         try per_module_grin.append(arena_alloc, grin_prog);
 
         // Accumulate this module's function arities for subsequent modules

@@ -7,12 +7,31 @@ optional GHC -O2 comparison.
 
 ## Programs
 
-| File              | Profile                                                                 |
-|-------------------|-------------------------------------------------------------------------|
-| `fib_rec.hs`      | Pure compute. No allocation. Isolates call-overhead + Int arithmetic.   |
-| `sum_to.hs`       | Tail-style recursion over an Int range. Stresses calls, no allocs.      |
-| `build_list.hs`   | Allocates one Cons cell per element; folds the list. Alloc-heavy.       |
-| `tree_sum.hs`     | Balanced binary tree of `Node Int Tree Tree`. 2 pointer fields per node — exercises the tracer's per-tag pointer mask (#779). |
+| File                | Profile                                                                 |
+|---------------------|-------------------------------------------------------------------------|
+| `fib_rec.hs`        | Pure compute. No allocation. Isolates call-overhead + Int arithmetic.   |
+| `sum_to.hs`         | Tail-style recursion over an Int range. Stresses calls, no allocs.      |
+| `build_list.hs`    | Allocates one Cons cell per element; folds the list. Alloc-heavy.       |
+| `tree_sum.hs`       | Balanced binary tree of `Node Int Tree Tree`. 2 pointer fields per node — exercises the tracer's per-tag pointer mask (#779). |
+| `binary_trees.hs`   | Alloc-heavy tree create + destroy. Short-lived allocation, GC stress.   |
+| `rose_tree.hs`      | Rose tree traversal. Variable-arity children, less regular than binary.|
+| `mergesort.hs`      | Merge sort. Comparison + allocation of intermediate lists.             |
+| `fannkuch.hs`       | Prefix reversal on a list. Pattern matching + list manipulation.       |
+| `fasta.hs`          | String concatenation (append-heavy). Quadratic list-append pattern.   |
+| `knucleotide.hs`    | BST frequency counting. Comparison + lookup + update of a search tree.|
+| `regex_dna.hs`      | State machine dispatch. Multi-branch pattern-match overhead on small ADTs. |
+| `reverse_complement.hs` | List reversal + per-element complement. Pattern matching + allocation. |
+| `pidigits.hs`       | GCD inner loop. Tight arithmetic recursion, no allocation.            |
+| `nbody_simple.hs`   | Newton's method (isqrt) in a tight loop. Numerical + recursive.       |
+| `mandelbrot.hs`     | Mandelbrot escape iteration, fixed-point Int arithmetic. Compute-bound. |
+| `spectral_norm.hs`  | Matrix-vector multiply (fixed-point). Nested recursive loops.          |
+| `lazy.hs`           | Call-by-need thunk evaluation. Tests thunk skip/force/sharing overhead.|
+| `nsieve.hs`         | **Sieve of Eratosthenes.** Sequential list filtering — removes multiples of each prime. Different from knucleotide (BST): flat linear marking/filtering pattern. |
+| `tak.hs`            | **Takeuchi function.** 3-way deep recursion (unlike fib's 2-way). Enormous call tree with nested recursive calls. Pure compute, no allocation. |
+| `queens.hs`         | **N-Queens.** Backtracking search with early pruning. Non-uniform control flow, building/discarding partial solutions. Tests different iteration pattern than any other bench. |
+| `matmul.hs`         | **Matrix-matrix multiply.** Dense triple-nested loops with index-based list access. Different from spectral_norm (sparse matrix-vector). |
+| `hof_chain.hs`      | **Higher-order function chains.** Map + fold with partially applied closures (addN k). Tests closure allocation + application overhead, unlike all direct-recursion benches. |
+| `hanoi.hs`          | **Towers of Hanoi.** 2-way branching with 4 Int arguments (disk + 3 pegs). Different calling-convention surface than fib (1 arg) or tak (3 args). Non-tail + checksum. |
 
 ## Usage
 

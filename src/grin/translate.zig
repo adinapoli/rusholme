@@ -519,7 +519,8 @@ pub fn translateProgram(
     external_arities: ?*const std.AutoHashMapUnmanaged(u64, u32),
     external_con_map: ?*const std.AutoHashMapUnmanaged(u64, u32),
     strict_params: ?*const demand.StrictnessMap,
-) !GrinProgram {
+    initial_name_counter: u64,
+) !struct { program: GrinProgram, next_name_counter: u64 } {
     // Build the arity map for partial/over-application handling.
     var arity_map = try buildArityMap(alloc, core_prog);
     defer arity_map.deinit(alloc);
@@ -533,6 +534,7 @@ pub fn translateProgram(
     defer con_field_types.deinit(alloc);
 
     var ctx = TranslateCtx.init(alloc);
+    ctx.name_counter = initial_name_counter;
     defer ctx.deinit();
     ctx.strict_params = strict_params;
 
@@ -665,10 +667,13 @@ pub fn translateProgram(
     // Move arity map from context to program (issue #595)
     const arities = ctx.arity_map;
 
-    return GrinProgram{
-        .defs = defs_slice,
-        .field_types = field_types,
-        .arities = arities,
+    return .{
+        .program = GrinProgram{
+            .defs = defs_slice,
+            .field_types = field_types,
+            .arities = arities,
+        },
+        .next_name_counter = ctx.name_counter,
     };
 }
 
@@ -1612,6 +1617,64 @@ fn collectFreeVarsVal(alloc: std.mem.Allocator, val: GrinVal, bound: *const Uniq
     }
 }
 
+/// Lambda-lift a complex GRIN expression into a fresh top-level helper
+/// and return `store (F_thunk_N [captured…])` suspending it (#518).
+///
+/// The helper's parameters reuse the expression's free-variable names, so
+/// the body resolves unchanged. Top-level functions and constructors are
+/// global and therefore not captured.
+fn liftExprToThunkStore(ctx: *TranslateCtx, expr: *GrinExpr) anyerror!*GrinExpr {
+    var bound_set = UniqueSet{};
+    defer bound_set.deinit(ctx.alloc);
+    var free_set = UniqueSet{};
+    defer free_set.deinit(ctx.alloc);
+
+    try collectFreeVarsExpr(ctx.alloc, expr, &bound_set, &free_set);
+
+    var free_vars = std.ArrayListUnmanaged(GrinName).empty;
+    defer free_vars.deinit(ctx.alloc);
+
+    var fv_iter = free_set.iterator();
+    while (fv_iter.next()) |entry| {
+        const uid = entry.key_ptr.*;
+        if (ctx.arity_map.contains(uid)) continue;
+        if (ctx.con_map.contains(uid)) continue;
+        // Resolve the unique back to its GrinName via var_map.
+        if (ctx.var_map.get(uid)) |name| {
+            try free_vars.append(ctx.alloc, name);
+        }
+    }
+
+    // Generate helper function: _thunk_N fv1 fv2 ... = <expr>
+    const helper_name = try ctx.freshName("_thunk");
+    const params = try ctx.alloc.alloc(GrinName, free_vars.items.len);
+    const capture_vals = try ctx.alloc.alloc(GrinVal, free_vars.items.len);
+    for (free_vars.items, 0..) |fv, j| {
+        // The helper's parameter names match the captured variables
+        // so the body expression (which references them by unique)
+        // resolves correctly.
+        params[j] = fv;
+        capture_vals[j] = .{ .Var = fv };
+    }
+
+    const helper_def = GrinDef{
+        .name = helper_name,
+        .params = params,
+        .body = expr,
+    };
+    try ctx.lifted_defs.append(ctx.alloc, helper_def);
+    try ctx.arity_map.put(ctx.alloc, helper_name.unique.value, @intCast(params.len));
+
+    // Emit: store (F_thunk_N [fv1, fv2, ...])
+    const ftag = GrinTag{ .tag_type = .{ .Fun = {} }, .name = helper_name };
+    const store_expr = try ctx.alloc.create(GrinExpr);
+    store_expr.* = .{ .Store = .{ .ConstTagNode = .{
+        .tag = ftag,
+        .fields = capture_vals,
+    } } };
+    return store_expr;
+}
+
 /// Wrap an inner expression with lazy thunk stores for constructor arguments.
 ///
 /// In Haskell, constructor arguments are lazy: `Succ (double x)` does not
@@ -1684,57 +1747,7 @@ fn wrapWithLazyBindsForCon(
                 //   helper function and suspend as an F-tagged thunk
                 //   (issue #518).
                 if (exprInvolvesComputation(pb.complex_expr)) {
-                    // Lambda-lift: compute free variables, generate helper.
-                    var bound_set = UniqueSet{};
-                    defer bound_set.deinit(ctx.alloc);
-                    var free_set = UniqueSet{};
-                    defer free_set.deinit(ctx.alloc);
-
-                    try collectFreeVarsExpr(ctx.alloc, pb.complex_expr, &bound_set, &free_set);
-
-                    // Filter: remove top-level functions and constructors
-                    // (they are global, not captured in the thunk).
-                    var free_vars = std.ArrayListUnmanaged(GrinName).empty;
-                    defer free_vars.deinit(ctx.alloc);
-
-                    var fv_iter = free_set.iterator();
-                    while (fv_iter.next()) |entry| {
-                        const uid = entry.key_ptr.*;
-                        if (ctx.arity_map.contains(uid)) continue;
-                        if (ctx.con_map.contains(uid)) continue;
-                        // Resolve the unique back to its GrinName via var_map.
-                        if (ctx.var_map.get(uid)) |name| {
-                            try free_vars.append(ctx.alloc, name);
-                        }
-                    }
-
-                    // Generate helper function: _thunk_N fv1 fv2 ... = <expr>
-                    const helper_name = try ctx.freshName("_thunk");
-                    const params = try ctx.alloc.alloc(GrinName, free_vars.items.len);
-                    const capture_vals = try ctx.alloc.alloc(GrinVal, free_vars.items.len);
-                    for (free_vars.items, 0..) |fv, j| {
-                        // The helper's parameter names match the captured variables
-                        // so the body expression (which references them by unique)
-                        // resolves correctly.
-                        params[j] = fv;
-                        capture_vals[j] = .{ .Var = fv };
-                    }
-
-                    const helper_def = GrinDef{
-                        .name = helper_name,
-                        .params = params,
-                        .body = pb.complex_expr,
-                    };
-                    try ctx.lifted_defs.append(ctx.alloc, helper_def);
-                    try ctx.arity_map.put(ctx.alloc, helper_name.unique.value, @intCast(params.len));
-
-                    // Emit: store (F_thunk_N [fv1, fv2, ...])
-                    const ftag = GrinTag{ .tag_type = .{ .Fun = {} }, .name = helper_name };
-                    const store_expr = try ctx.alloc.create(GrinExpr);
-                    store_expr.* = .{ .Store = .{ .ConstTagNode = .{
-                        .tag = ftag,
-                        .fields = capture_vals,
-                    } } };
+                    const store_expr = try liftExprToThunkStore(ctx, pb.complex_expr);
                     const bind_expr = try ctx.alloc.create(GrinExpr);
                     bind_expr.* = .{ .Bind = .{
                         .lhs = store_expr,
@@ -1961,8 +1974,20 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
                         break :blk rhs_expr;
                     },
                     else => {
-                        // Other complex RHS (Bind, Case, etc.) — already a
-                        // monadic expression whose result we bind directly.
+                        // Other complex RHS (Bind, Case, etc.). Anything
+                        // involving genuine computation must be suspended
+                        // as a lambda-lifted thunk: binding it eagerly
+                        // violates call-by-need. A dead
+                        // `let u = f (n - 1)` whose call has a non-atomic
+                        // argument translates to a Bind chain, and eager
+                        // evaluation turned it into a second recursive
+                        // call per iteration — exponential blowup
+                        // (bench/lazy.hs hung before this).
+                        // Store/Bind chains that merely build constructor
+                        // values are already WHNF — keep those eager.
+                        if (exprInvolvesComputation(rhs_expr)) {
+                            break :blk try liftExprToThunkStore(ctx, rhs_expr);
+                        }
                         break :blk rhs_expr;
                     },
                 }
@@ -2134,8 +2159,40 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
                     else => {},
                 }
 
-                // Complex expression (higher-order app, Case, Bind, etc.):
-                // evaluate into a temp var, then update the placeholder.
+                // Complex expression involving genuine computation (Case,
+                // Bind chains with calls): suspend as a lambda-lifted
+                // thunk, exactly like the known-App case above — eager
+                // evaluation here would violate call-by-need (see the
+                // NonRec path). The thunk may capture sibling placeholders;
+                // it is only forced after the whole group is backpatched,
+                // so the captured pointers are valid by then.
+                if (exprInvolvesComputation(rhs_expr)) {
+                    const store_thunk = try liftExprToThunkStore(ctx, rhs_expr);
+                    const thunk_var = try ctx.freshName("thunk");
+                    const update_expr = try ctx.alloc.create(GrinExpr);
+                    update_expr.* = .{ .Update = .{
+                        .ptr = placeholders[i],
+                        .val = .{ .Var = thunk_var },
+                    } };
+                    const store_update = try chainStoreUpdate(ctx, store_thunk, thunk_var, update_expr);
+
+                    if (current_expr) |prev| {
+                        const bind_chain = try ctx.alloc.create(GrinExpr);
+                        bind_chain.* = .{ .Bind = .{
+                            .lhs = prev,
+                            .pat = .{ .Var = try ctx.freshName("_") },
+                            .rhs = store_update,
+                        } };
+                        current_expr = bind_chain;
+                    } else {
+                        current_expr = store_update;
+                    }
+                    continue;
+                }
+
+                // Remaining complex shapes (constructor Store/Bind chains,
+                // already WHNF): evaluate into a temp var, then update the
+                // placeholder.
                 const temp_var = try ctx.freshName("rec_rhs");
                 const update_expr = try ctx.alloc.create(GrinExpr);
                 update_expr.* = .{ .Update = .{
@@ -2395,7 +2452,8 @@ test "translateProgram: simple identity function" {
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null, null, null);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_prog = grin_result.program;
 
     // Should have one definition with one parameter.
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
@@ -2470,7 +2528,8 @@ test "translateProgram: literal value" {
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null, null, null);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_prog = grin_result.program;
 
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
 
@@ -2650,7 +2709,8 @@ test "translateProgram: partial application generates P-tag" {
         .binds = &[_]CoreBind{ .{ .NonRec = map_pair }, .{ .NonRec = main_pair } },
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null, null, null);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_prog = grin_result.program;
 
     // Should have 2 definitions: map and main
     try testing.expectEqual(@as(usize, 2), grin_prog.defs.len);
@@ -2733,7 +2793,8 @@ test "translateProgram: over-application generates chained apply calls" {
         .binds = &[_]CoreBind{ .{ .NonRec = id_pair }, .{ .NonRec = main_pair } },
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null, null, null);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_prog = grin_result.program;
 
     // Should have 2 definitions: id and main
     try testing.expectEqual(@as(usize, 2), grin_prog.defs.len);
@@ -2844,7 +2905,8 @@ test "translateApp: nested application f (g x) emits Bind for complex arg (#374)
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null, null, null);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_prog = grin_result.program;
 
     // Should have one definition with 3 parameters (f, g, x).
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
@@ -2932,7 +2994,8 @@ test "translateProgram: external 0-arity function produces App not Return Var" {
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, &external_arities, null, null);
+    const grin_result = try translateProgram(alloc, core_prog, &external_arities, null, null, 0);
+    const grin_prog = grin_result.program;
 
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
 
@@ -3053,7 +3116,8 @@ test "wrapWithLazyBindsForCon: Case arg lambda-lifted into thunk (#518)" {
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null, null, null);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_prog = grin_result.program;
 
     // Should have 2 defs: f and the lifted thunk helper.
     try testing.expectEqual(@as(usize, 2), grin_prog.defs.len);
@@ -3106,6 +3170,110 @@ test "wrapWithLazyBindsForCon: Case arg lambda-lifted into thunk (#518)" {
         .Bind => |bind| {
             switch (bind.rhs.*) {
                 .Case => {},
+                else => return error.TestUnexpectedResult,
+            }
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "translateLet: complex NonRec RHS suspended as lambda-lifted thunk" {
+    // Core: f x = let u = (case x of { 0 -> 42; _ -> 99 }) in 7
+    //
+    // Expected GRIN:
+    //   f x =
+    //     u <- store (F_thunk [x])    -- complex RHS suspended, not run
+    //     pure #7
+    //
+    //   _thunk x = case x of { ... }
+    //
+    // A complex RHS (anything that translates to a Bind/Case chain, e.g.
+    // a call with a non-atomic argument) must NOT be evaluated eagerly at
+    // the binding site: `let u = f (n - 1) in ... f (n - 1) ...` would
+    // otherwise turn the dead binding into a second recursive call per
+    // iteration — exponential blowup for call-by-need semantics.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const x_id = core.Id{
+        .name = grin.Name{ .base = "x", .unique = .{ .value = 701 } },
+        .ty = undefined,
+        .span = undefined,
+    };
+    const u_id = core.Id{
+        .name = grin.Name{ .base = "u", .unique = .{ .value = 702 } },
+        .ty = undefined,
+        .span = undefined,
+    };
+    const f_id = core.Id{
+        .name = grin.Name{ .base = "f", .unique = .{ .value = 703 } },
+        .ty = undefined,
+        .span = undefined,
+    };
+
+    // case x of { 0 -> 42; _ -> 99 }
+    const x_var = try alloc.create(CoreExpr);
+    x_var.* = .{ .Var = x_id };
+    const lit_42 = try alloc.create(CoreExpr);
+    lit_42.* = .{ .Lit = .{ .val = .{ .Int = 42 }, .span = undefined } };
+    const lit_99 = try alloc.create(CoreExpr);
+    lit_99.* = .{ .Lit = .{ .val = .{ .Int = 99 }, .span = undefined } };
+    const case_expr = try alloc.create(CoreExpr);
+    case_expr.* = .{ .Case = .{
+        .scrutinee = x_var,
+        .binder = x_id,
+        .ty = .{ .TyCon = .{ .name = grin.Name{ .base = "Int", .unique = .{ .value = 700 } }, .args = &.{} } },
+        .alts = &.{
+            .{ .con = .{ .LitAlt = .{ .Int = 0 } }, .binders = &.{}, .body = lit_42 },
+            .{ .con = .Default, .binders = &.{}, .body = lit_99 },
+        },
+        .span = undefined,
+    } };
+
+    // let u = <case> in 7
+    const lit_7 = try alloc.create(CoreExpr);
+    lit_7.* = .{ .Lit = .{ .val = .{ .Int = 7 }, .span = undefined } };
+    const let_expr = try alloc.create(CoreExpr);
+    let_expr.* = .{ .Let = .{
+        .bind = .{ .NonRec = .{ .binder = u_id, .rhs = case_expr } },
+        .body = lit_7,
+        .span = undefined,
+    } };
+
+    // f = \x -> let ...
+    const lam_x = try alloc.create(CoreExpr);
+    lam_x.* = .{ .Lam = .{ .binder = x_id, .body = let_expr, .span = undefined } };
+
+    const core_prog = CoreProgram{
+        .data_decls = &.{},
+        .binds = &.{.{ .NonRec = .{ .binder = f_id, .rhs = lam_x } }},
+    };
+
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_prog = grin_result.program;
+
+    // Two defs: f and the lifted thunk helper.
+    try testing.expectEqual(@as(usize, 2), grin_prog.defs.len);
+
+    const f_def = grin_prog.defs[0];
+    try testing.expectEqualStrings("f", f_def.name.base);
+
+    // f's body must bind a Store of an F-tagged thunk, NOT evaluate the
+    // case eagerly.
+    switch (f_def.body.*) {
+        .Bind => |bind| {
+            switch (bind.lhs.*) {
+                .Store => |store_val| switch (store_val) {
+                    .ConstTagNode => |ctn| {
+                        switch (ctn.tag.tag_type) {
+                            .Fun => {},
+                            else => return error.TestUnexpectedResult,
+                        }
+                        try testing.expectEqualStrings("_thunk", ctn.tag.name.base);
+                    },
+                    else => return error.TestUnexpectedResult,
+                },
                 else => return error.TestUnexpectedResult,
             }
         },
@@ -3229,7 +3397,8 @@ test "translateExpr: multi-binding Rec let emits one Update per binder (#747)" {
         .binds = &[_]CoreBind{.{ .NonRec = main_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null, null, null);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_prog = grin_result.program;
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
 
     const main_body = grin_prog.defs[0].body;
@@ -3306,7 +3475,8 @@ test "translateExpr: Rec backpatch chain follows dependency order (#753)" {
         .binds = &[_]CoreBind{.{ .NonRec = main_pair }},
     };
 
-    const grin_prog = try translateProgram(alloc, core_prog, null, null, null);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_prog = grin_result.program;
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
 
     var ptrs: std.ArrayListUnmanaged(GrinName) = .empty;

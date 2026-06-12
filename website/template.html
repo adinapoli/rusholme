@@ -754,14 +754,48 @@
                 </a>
             </div>
 
-            <!-- Summary cards: current gap-to-GHC per program. -->
-            <div id="bench-summary" class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-12">
-                <!-- BENCH_SUMMARY_PLACEHOLDER -->
-            </div>
-
-            <!-- Per-program time-series charts (Vega-Lite). -->
-            <div id="bench-charts" class="grid lg:grid-cols-2 gap-6">
-                <!-- BENCH_CHARTS_PLACEHOLDER -->
+            <!-- Interactive bench explorer: program list on the left,
+                 the selected program's time-series chart on the right.
+                 Rows are tinted by the latest run's verdict — green when
+                 the best rhc backend beats GHC, red-ish otherwise.
+                 Data is fetched dynamically from bench/results.json so
+                 new benchmarks appear automatically after each run. -->
+            <div id="bench-explorer">
+                <!-- Loading state -->
+                <div id="bench-loading" class="flex items-center justify-center py-12">
+                    <div class="w-5 h-5 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin"></div>
+                    <span class="ml-3 text-gray-400 text-sm">Loading benchmarks…</span>
+                </div>
+                <!-- Error state (hidden) -->
+                <div id="bench-error" class="hidden py-8 text-center">
+                    <p class="text-rose-400 text-sm">Failed to load benchmark data.</p>
+                    <p class="text-gray-500 text-xs mt-1">Make sure <code class="text-emerald-400/80">bench/results.json</code> is accessible.</p>
+                </div>
+                <!-- Content (populated dynamically) -->
+                <div id="bench-content" class="hidden">
+                    <div id="bench-summary" class="flex flex-wrap items-center gap-3 mb-6"></div>
+                    <div class="flex flex-col lg:flex-row gap-6">
+                        <div class="lg:w-80 shrink-0 flex flex-col gap-3">
+                            <div class="flex gap-2">
+                                <input type="search" id="bench-filter" placeholder="Filter benchmarks…"
+                                    class="flex-1 min-w-0 bg-gray-900/80 border border-gray-700 rounded-xl px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-emerald-500/50" />
+                                <button type="button" id="bench-sort"
+                                    class="shrink-0 bg-gray-900/80 border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-400 hover:text-gray-200 hover:border-gray-500 transition-colors"
+                                    title="Toggle sort: name / gap">A–Z</button>
+                            </div>
+                            <div class="flex flex-col gap-1.5 max-h-[36rem] overflow-y-auto pr-1" id="bench-nav"></div>
+                        </div>
+                        <div class="flex-1 min-w-0 bg-gray-900/60 rounded-2xl border border-gray-800 p-5 self-start w-full lg:sticky lg:top-24">
+                            <div class="flex flex-wrap items-baseline justify-between gap-3 mb-1">
+                                <h3 class="text-base font-mono text-white" id="bench-detail-title"></h3>
+                                <span class="text-sm font-semibold" id="bench-detail-verdict"></span>
+                            </div>
+                            <div class="flex flex-wrap gap-2 mb-4" id="bench-detail-chips"></div>
+                            <div id="bench-detail-chart" class="w-full" style="min-height: 300px;"></div>
+                            <p class="text-gray-500 text-xs mt-3">Mean wall-clock per committed run, log scale. Shaded band is ±σ. Hover points for the exact numbers and commit.</p>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <p class="text-gray-500 text-xs mt-8 text-center">
@@ -772,6 +806,387 @@
             </p>
         </div>
     </section>
+
+    <!-- Dynamic benchmark data loader -->
+    <script>
+    (function () {
+      /* ── Fetch bench/results.json and render the explorer ─────────── */
+      var RESULTS_URL = 'bench/results.json';
+
+      function escapeHtml(text) {
+        var d = document.createElement('div');
+        d.textContent = text;
+        return d.innerHTML;
+      }
+
+      function fmtMs(ms) { return ms >= 100 ? ms.toFixed(0) : ms.toFixed(2); }
+
+      function chip(label, value, colour) {
+        return '<span class="inline-flex items-baseline gap-1.5 rounded-lg border border-gray-700/80 bg-gray-800/60 px-2.5 py-1">'
+          + '<span class="w-1.5 h-1.5 rounded-full self-center" style="background:' + colour + '"></span>'
+          + '<span class="text-xs text-gray-400">' + label + '</span>'
+          + '<span class="text-sm font-semibold text-gray-100">' + fmtMs(value) + '</span>'
+          + '<span class="text-[10px] text-gray-500">ms</span></span>';
+      }
+
+      /**
+       * Process the raw results.json and return the data structures
+       * needed to render the explorer.
+       */
+      function processBenchData(bench) {
+        if (!bench || !bench.runs || bench.runs.length === 0) return null;
+
+        var records = [];
+        for (var ri = 0; ri < bench.runs.length; ri++) {
+          var run = bench.runs[ri];
+          for (var name in run.programs) {
+            var p = run.programs[name];
+            records.push({
+              program: name, date: run.date, compiler: 'rhc (arena)',
+              mean_ms: p.rhc_mean_ms,
+              lo_ms: Math.max(0.001, p.rhc_mean_ms - p.rhc_stddev_ms),
+              hi_ms: p.rhc_mean_ms + p.rhc_stddev_ms,
+              stddev_ms: p.rhc_stddev_ms, commit: run.commit,
+            });
+            if (typeof p.rhc_immix_mean_ms === 'number') {
+              records.push({
+                program: name, date: run.date, compiler: 'rhc (immix)',
+                mean_ms: p.rhc_immix_mean_ms,
+                lo_ms: Math.max(0.001, p.rhc_immix_mean_ms - p.rhc_immix_stddev_ms),
+                hi_ms: p.rhc_immix_mean_ms + p.rhc_immix_stddev_ms,
+                stddev_ms: p.rhc_immix_stddev_ms, commit: run.commit,
+              });
+            }
+            records.push({
+              program: name, date: run.date, compiler: 'ghc',
+              mean_ms: p.ghc_mean_ms,
+              lo_ms: Math.max(0.001, p.ghc_mean_ms - p.ghc_stddev_ms),
+              hi_ms: p.ghc_mean_ms + p.ghc_stddev_ms,
+              stddev_ms: p.ghc_stddev_ms, commit: run.commit,
+            });
+          }
+        }
+
+        var namesSet = {};
+        for (var i = 0; i < records.length; i++) namesSet[records[i].program] = true;
+        var names = Object.keys(namesSet).sort();
+
+        var latest = bench.runs[bench.runs.length - 1];
+        var previous = bench.runs.length > 1 ? bench.runs[bench.runs.length - 2] : null;
+
+        function gapIn(run, name) {
+          var p = run && run.programs[name];
+          if (!p) return null;
+          var rhcBest = (typeof p.rhc_immix_mean_ms === 'number')
+            ? Math.min(p.rhc_mean_ms, p.rhc_immix_mean_ms)
+            : p.rhc_mean_ms;
+          return rhcBest / p.ghc_mean_ms;
+        }
+
+        // Build Vega-Lite specs per program
+        var specs = {};
+        var rowsMeta = [];
+
+        for (var ni = 0; ni < names.length; ni++) {
+          var name = names[ni];
+          var data = records.filter(function(r) { return r.program === name; });
+
+          specs[name] = {
+            $schema: 'https://vega.github.io/schema/vega-lite/v5.json',
+            background: 'transparent',
+            width: 'container',
+            height: 280,
+            padding: { left: 12, right: 12, top: 12, bottom: 24 },
+            data: { values: data },
+            encoding: {
+              x: {
+                field: 'date', type: 'temporal',
+                axis: { title: null, format: '%b %d', tickCount: 6, labelColor: '#9ca3af', tickColor: '#374151', domainColor: '#374151' },
+              },
+              color: {
+                field: 'compiler', type: 'nominal',
+                scale: { domain: ['rhc (arena)', 'rhc (immix)', 'ghc'], range: ['#34d399', '#60a5fa', '#f7a41d'] },
+                legend: { labelColor: '#d1d5db', titleColor: '#9ca3af', orient: 'top-right', symbolType: 'circle' },
+              },
+            },
+            layer: [
+              {
+                mark: { type: 'rule', strokeWidth: 6, opacity: 0.18, strokeCap: 'round' },
+                encoding: {
+                  y:  { field: 'lo_ms', type: 'quantitative', scale: { type: 'log' }, axis: null },
+                  y2: { field: 'hi_ms' },
+                },
+              },
+              {
+                mark: { type: 'line', strokeWidth: 2.5, interpolate: 'monotone' },
+                encoding: {
+                  y: {
+                    field: 'mean_ms', type: 'quantitative',
+                    scale: { type: 'log', nice: true, zero: false },
+                    axis: { title: 'mean (ms, log)', titleColor: '#9ca3af', labelColor: '#9ca3af', tickColor: '#374151', domainColor: '#374151', gridColor: '#1f2937' },
+                  },
+                },
+              },
+              {
+                mark: { type: 'point', filled: true, size: 80, opacity: 1 },
+                encoding: {
+                  y: { field: 'mean_ms', type: 'quantitative', scale: { type: 'log' }, axis: null },
+                  tooltip: [
+                    { field: 'compiler', type: 'nominal', title: 'compiler' },
+                    { field: 'mean_ms', type: 'quantitative', title: 'mean (ms)', format: '.3f' },
+                    { field: 'stddev_ms', type: 'quantitative', title: 'σ (ms)', format: '.3f' },
+                    { field: 'date', type: 'temporal', title: 'when' },
+                    { field: 'commit', type: 'nominal', title: 'commit' },
+                  ],
+                },
+              },
+            ],
+            config: {
+              view: { stroke: 'transparent' },
+              axis: { grid: true, gridColor: '#1f2937', labelFont: 'ui-sans-serif', titleFont: 'ui-sans-serif' },
+              legend: { titleFontSize: 11, labelFontSize: 11 },
+            },
+          };
+
+          var p = latest.programs[name];
+          var gap = gapIn(latest, name);
+          var prevGap = gapIn(previous, name);
+          var trend = null;
+          if (gap !== null && prevGap !== null) {
+            if (gap < prevGap * 0.98) trend = 'up';
+            else if (gap > prevGap * 1.02) trend = 'down';
+            else trend = 'flat';
+          }
+          rowsMeta.push({
+            name: name,
+            gap: gap,
+            trend: trend,
+            rhc_ms: p ? p.rhc_mean_ms : null,
+            rhc_immix_ms: (p && typeof p.rhc_immix_mean_ms === 'number') ? p.rhc_immix_mean_ms : null,
+            ghc_ms: p ? p.ghc_mean_ms : null,
+          });
+        }
+
+        return { specs: specs, rowsMeta: rowsMeta, names: names, latest: latest };
+      }
+
+      /**
+       * Render the processed data into the DOM.
+       */
+      function renderBenchExplorer(data) {
+        var specs = data.specs;
+        var rowsMeta = data.rowsMeta;
+        var names = data.names;
+
+        // Hide loading, show content
+        document.getElementById('bench-loading').style.display = 'none';
+        document.getElementById('bench-content').classList.remove('hidden');
+
+        // Summary stats
+        var scored = rowsMeta.filter(function(m) { return m.gap !== null; });
+        var wins = scored.filter(function(m) { return m.gap <= 1.0; }).length;
+        var losses = scored.length - wins;
+        var geomean = scored.length
+          ? Math.exp(scored.reduce(function(acc, m) { return acc + Math.log(m.gap); }, 0) / scored.length)
+          : null;
+        var geomeanColour = geomean === null ? 'text-gray-400'
+          : geomean <= 1.0 ? 'text-emerald-300'
+          : geomean <= 1.5 ? 'text-amber-300'
+          : 'text-rose-300';
+
+        var summaryHTML = ''
+          + '<div class="flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-4 py-1.5">'
+          + '  <span class="w-2 h-2 rounded-full bg-emerald-400"></span>'
+          + '  <span class="text-sm text-emerald-300 font-semibold">' + wins + '</span>'
+          + '  <span class="text-xs text-gray-400">rusholme wins</span>'
+          + '</div>'
+          + '<div class="flex items-center gap-2 rounded-full border border-rose-500/30 bg-rose-500/10 px-4 py-1.5">'
+          + '  <span class="w-2 h-2 rounded-full bg-rose-400"></span>'
+          + '  <span class="text-sm text-rose-300 font-semibold">' + losses + '</span>'
+          + '  <span class="text-xs text-gray-400">ghc wins</span>'
+          + '</div>';
+        if (geomean !== null) {
+          summaryHTML += ''
+            + '<div class="flex items-center gap-2 rounded-full border border-gray-700 bg-gray-800/60 px-4 py-1.5">'
+            + '  <span class="text-sm font-semibold ' + geomeanColour + '">' + geomean.toFixed(2) + '×</span>'
+            + '  <span class="text-xs text-gray-400">geometric-mean gap vs GHC</span>'
+            + '</div>';
+        }
+        document.getElementById('bench-summary').innerHTML = summaryHTML;
+
+        // Nav rows
+        var trendGlyph = function (trend) {
+          if (trend === 'up') return '<span class="text-emerald-400" title="faster than previous run">▴</span>';
+          if (trend === 'down') return '<span class="text-rose-400" title="slower than previous run">▾</span>';
+          if (trend === 'flat') return '<span class="text-gray-600" title="unchanged since previous run">▸</span>';
+          return '';
+        };
+
+        var rowsHTML = '';
+        for (var i = 0; i < rowsMeta.length; i++) {
+          var m = rowsMeta[i];
+          var tint, badge, badgeText;
+          if (m.gap === null) {
+            tint = 'border-gray-800 hover:bg-gray-800/60';
+            badge = 'text-gray-500';
+            badgeText = 'n/a';
+          } else if (m.gap <= 1.0) {
+            tint = 'border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20';
+            badge = 'text-emerald-300';
+            badgeText = (1 / m.gap).toFixed(2) + '× faster';
+          } else if (m.gap <= 1.5) {
+            tint = 'border-rose-500/20 bg-rose-500/5 hover:bg-rose-500/15';
+            badge = 'text-rose-300/80';
+            badgeText = m.gap.toFixed(2) + '× slower';
+          } else {
+            tint = 'border-rose-500/40 bg-rose-500/15 hover:bg-rose-500/25';
+            badge = 'text-rose-300';
+            badgeText = m.gap.toFixed(2) + '× slower';
+          }
+          rowsHTML += ''
+            + '<button type="button" data-bench="' + escapeHtml(m.name) + '" data-gap="' + (m.gap === null ? '' : m.gap) + '"'
+            + '    class="bench-row w-full flex items-center justify-between gap-3 px-4 py-2.5 rounded-xl border ' + tint + ' transition-all duration-150 text-left">'
+            + '  <span class="flex items-center gap-2 min-w-0">'
+            + '    ' + trendGlyph(m.trend)
+            + '    <span class="text-sm font-mono text-gray-200 truncate">' + escapeHtml(m.name) + '</span>'
+            + '  </span>'
+            + '  <span class="text-xs font-semibold whitespace-nowrap ' + badge + '">' + badgeText + '</span>'
+            + '</button>';
+        }
+        document.getElementById('bench-nav').innerHTML = rowsHTML;
+
+        // Interactive selection
+        var selected = null;
+
+        function select(name) {
+          if (!specs[name]) return;
+          selected = name;
+          document.querySelectorAll('#bench-nav .bench-row').forEach(function (row) {
+            var active = row.dataset.bench === name;
+            row.classList.toggle('ring-2', active);
+            row.classList.toggle('ring-white', active);
+          });
+          document.getElementById('bench-detail-title').textContent = name + '.hs';
+          var meta = null;
+          for (var i = 0; i < rowsMeta.length; i++) {
+            if (rowsMeta[i].name === name) { meta = rowsMeta[i]; break; }
+          }
+          var verdictEl = document.getElementById('bench-detail-verdict');
+          var chipsEl = document.getElementById('bench-detail-chips');
+          if (meta && meta.gap !== null) {
+            if (meta.gap <= 1.0) {
+              verdictEl.textContent = (1 / meta.gap).toFixed(2) + '× faster than GHC';
+              verdictEl.className = 'text-sm font-semibold text-emerald-300';
+            } else {
+              verdictEl.textContent = meta.gap.toFixed(2) + '× slower than GHC';
+              verdictEl.className = 'text-sm font-semibold ' + (meta.gap <= 1.5 ? 'text-rose-300/80' : 'text-rose-300');
+            }
+            var chips = [chip('rhc arena', meta.rhc_ms, '#34d399')];
+            if (meta.rhc_immix_ms !== null) chips.push(chip('rhc immix', meta.rhc_immix_ms, '#60a5fa'));
+            chips.push(chip('ghc', meta.ghc_ms, '#f7a41d'));
+            chipsEl.innerHTML = chips.join('');
+          } else {
+            verdictEl.textContent = '';
+            chipsEl.innerHTML = '';
+          }
+          vegaEmbed('#bench-detail-chart', specs[name], { actions: false, renderer: 'svg' })
+            .catch(function (e) { console.error('vega-embed failed for ' + name + ':', e); });
+        }
+
+        // Click handler (delegated)
+        var nav = document.getElementById('bench-nav');
+        nav.addEventListener('click', function (ev) {
+          var row = ev.target.closest('.bench-row');
+          if (row) select(row.dataset.bench);
+        });
+
+        // Arrow keys
+        function visibleRows() {
+          return Array.prototype.filter.call(
+            document.querySelectorAll('#bench-nav .bench-row'),
+            function (r) { return r.style.display !== 'none'; });
+        }
+        nav.addEventListener('keydown', function (ev) {
+          if (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp') return;
+          ev.preventDefault();
+          var rows = visibleRows();
+          if (!rows.length) return;
+          var idx = Array.prototype.findIndex.call(rows, function (r) { return r.dataset.bench === selected; });
+          idx = ev.key === 'ArrowDown' ? Math.min(idx + 1, rows.length - 1) : Math.max(idx - 1, 0);
+          select(rows[idx].dataset.bench);
+          rows[idx].focus();
+          rows[idx].scrollIntoView({ block: 'nearest' });
+        });
+
+        // Filter
+        var filter = document.getElementById('bench-filter');
+        filter.addEventListener('input', function () {
+          var q = filter.value.trim().toLowerCase();
+          document.querySelectorAll('#bench-nav .bench-row').forEach(function (row) {
+            row.style.display = row.dataset.bench.toLowerCase().indexOf(q) === -1 ? 'none' : '';
+          });
+        });
+
+        // Sort toggle
+        var sortBtn = document.getElementById('bench-sort');
+        var byGap = false;
+        sortBtn.addEventListener('click', function () {
+          byGap = !byGap;
+          sortBtn.textContent = byGap ? 'gap' : 'A–Z';
+          var rows = Array.prototype.slice.call(document.querySelectorAll('#bench-nav .bench-row'));
+          rows.sort(function (a, b) {
+            if (!byGap) return a.dataset.bench.localeCompare(b.dataset.bench);
+            var ga = a.dataset.gap === '' ? -Infinity : parseFloat(a.dataset.gap);
+            var gb = b.dataset.gap === '' ? -Infinity : parseFloat(b.dataset.gap);
+            return gb - ga;
+          });
+          rows.forEach(function (r) { nav.appendChild(r); });
+        });
+
+        // Auto-select first
+        var first = nav.querySelector('.bench-row');
+        if (first) select(first.dataset.bench);
+      }
+
+      /* ── Main: fetch data and render ─────────────────────────────── */
+      function loadBenchmarks() {
+        fetch(RESULTS_URL)
+          .then(function (res) {
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return res.json();
+          })
+          .then(function (data) {
+            var processed = processBenchData(data);
+            if (!processed) {
+              document.getElementById('bench-loading').style.display = 'none';
+              document.getElementById('bench-error').classList.remove('hidden');
+              return;
+            }
+            renderBenchExplorer(processed);
+          })
+          .catch(function (err) {
+            console.error('Failed to load benchmarks:', err);
+            document.getElementById('bench-loading').style.display = 'none';
+            document.getElementById('bench-error').classList.remove('hidden');
+          });
+      }
+
+      // Wait for vega-embed to be available, then load.
+      if (typeof vegaEmbed === 'function') {
+        loadBenchmarks();
+      } else {
+        // vega-embed is loaded async; retry every 100ms.
+        var vegaCheck = setInterval(function () {
+          if (typeof vegaEmbed === 'function') {
+            clearInterval(vegaCheck);
+            loadBenchmarks();
+          }
+        }, 100);
+        // Give up after 10s
+        setTimeout(function () { clearInterval(vegaCheck); }, 10000);
+      }
+    })();
+    </script>
 
     <!-- GRIN Showcase Section -->
     <section id="grin" class="py-24 px-4 sm:px-6 lg:px-8 bg-gray-950 relative">

@@ -64,3 +64,5 @@ current-issue.md
 docs/superpowers
 tmp
 zig-pkg
+bench/*.o
+bench/*.hi
