@@ -15,6 +15,7 @@ const SourcePos = ast_mod.SourcePos;
 const diag_mod = @import("../diagnostics/diagnostic.zig");
 const DiagnosticCollector = diag_mod.DiagnosticCollector;
 const match_check = @import("match_check.zig");
+const simplify = @import("simplify.zig");
 
 pub const DesugarCtx = struct {
     alloc: std.mem.Allocator,
@@ -492,11 +493,18 @@ pub fn desugarModule(
         }
     }
 
+    // Merge the sequential pattern-match case chains the desugaring
+    // above produces (see simplify.zig) so every downstream consumer —
+    // demand analysis, GRIN translation, golden dumps — sees a single
+    // multi-alternative case per scrutinee instead of a re-evaluating
+    // chain.
+    const program = try simplify.simplifyProgram(alloc, ast_mod.CoreProgram{
+        .data_decls = try data_decls.toOwnedSlice(alloc),
+        .binds = try binds.toOwnedSlice(alloc),
+    });
+
     return DesugarResult{
-        .program = ast_mod.CoreProgram{
-            .data_decls = try data_decls.toOwnedSlice(alloc),
-            .binds = try binds.toOwnedSlice(alloc),
-        },
+        .program = program,
         .dict_names = ctx.dict_names,
     };
 }
@@ -1467,6 +1475,34 @@ fn findEvidenceForVar(
     return try result.toOwnedSlice(ctx.alloc);
 }
 
+/// Wrap the hidden `enumFrom*` function reference behind arithmetic-
+/// sequence sugar (`[n..]`, `[n..m]`, …) with its solved dictionary
+/// evidence, mirroring what `desugarExpr` does for ordinary
+/// class-method `Var` occurrences. The typechecker records the wanted
+/// `Enum` constraint keyed by the sugar node's span and the renamer-
+/// attached `fn_name` unique (see infer.zig `constrainEnumSugar`).
+fn applyEnumSugarEvidence(
+    ctx: *DesugarCtx,
+    fn_var: *const ast_mod.Expr,
+    fn_name: Name,
+    span: SourceSpan,
+) std.mem.Allocator.Error!*const ast_mod.Expr {
+    const scheme = ctx.types.schemes.get(fn_name.unique) orelse return fn_var;
+    const evidences = try findEvidenceForVar(ctx, fn_name.unique.value, span, scheme);
+    var current = fn_var;
+    for (evidences) |ev| {
+        const dict_arg = try buildDictExpr(ctx, ev, span);
+        const app_node = try ctx.alloc.create(ast_mod.Expr);
+        app_node.* = .{ .App = .{
+            .fn_expr = current,
+            .arg = dict_arg,
+            .span = span,
+        } };
+        current = app_node;
+    }
+    return current;
+}
+
 // ── Default method dict threading ─────────────────────────────────────
 
 /// Walk a Core expression and wrap every reference to a class method
@@ -1762,13 +1798,7 @@ fn desugarGuardedRhs(
     const alloc = ctx.alloc;
 
     // Start with the non-exhaustive fallback.
-    var fallback = try alloc.create(ast_mod.Expr);
-    fallback.* = .{
-        .Lit = .{
-            .val = .{ .String = "Non-exhaustive patterns in function" },
-            .span = syntheticSpan(),
-        },
-    };
+    var fallback = try patternMatchError(alloc, "Non-exhaustive patterns in function");
 
     // Build from the last guarded RHS back to the first so that each
     // alternative wraps around the previous fallback.
@@ -2158,13 +2188,7 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
             };
 
             // Start with a non-exhaustive error as the fallback.
-            var current_body = try alloc.create(ast_mod.Expr);
-            current_body.* = .{
-                .Lit = .{
-                    .val = .{ .String = "Non-exhaustive patterns in case" },
-                    .span = syntheticSpan(),
-                },
-            };
+            var current_body = try patternMatchError(alloc, "Non-exhaustive patterns in case");
 
             // Process alternatives bottom-to-top.
             var alt_idx: usize = c.alts.len;
@@ -2527,9 +2551,10 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                 .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
                 .span = enum_from.span,
             } };
+            const callee = try applyEnumSugarEvidence(ctx, fn_var, enum_from.fn_name, enum_from.span);
             const from_arg = try desugarExpr(ctx, enum_from.from.*);
             node.* = .{ .App = .{
-                .fn_expr = fn_var,
+                .fn_expr = callee,
                 .arg = from_arg,
                 .span = enum_from.span,
             } };
@@ -2542,11 +2567,12 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                 .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
                 .span = enum_from_to.span,
             } };
+            const callee = try applyEnumSugarEvidence(ctx, fn_var, enum_from_to.fn_name, enum_from_to.span);
             const from_arg = try desugarExpr(ctx, enum_from_to.from.*);
             const to_arg = try desugarExpr(ctx, enum_from_to.to.*);
             const partial = try alloc.create(ast_mod.Expr);
             partial.* = .{ .App = .{
-                .fn_expr = fn_var,
+                .fn_expr = callee,
                 .arg = from_arg,
                 .span = enum_from_to.span,
             } };
@@ -2564,11 +2590,12 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                 .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
                 .span = enum_from_then.span,
             } };
+            const callee = try applyEnumSugarEvidence(ctx, fn_var, enum_from_then.fn_name, enum_from_then.span);
             const from_arg = try desugarExpr(ctx, enum_from_then.from.*);
             const then_arg = try desugarExpr(ctx, enum_from_then.then.*);
             const partial = try alloc.create(ast_mod.Expr);
             partial.* = .{ .App = .{
-                .fn_expr = fn_var,
+                .fn_expr = callee,
                 .arg = from_arg,
                 .span = enum_from_then.span,
             } };
@@ -2586,12 +2613,13 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                 .ty = ast_mod.CoreType{ .TyVar = Name{ .base = "t", .unique = .{ .value = 0 } } },
                 .span = enum_from_then_to.span,
             } };
+            const callee = try applyEnumSugarEvidence(ctx, fn_var, enum_from_then_to.fn_name, enum_from_then_to.span);
             const from_arg = try desugarExpr(ctx, enum_from_then_to.from.*);
             const then_arg = try desugarExpr(ctx, enum_from_then_to.then.*);
             const to_arg = try desugarExpr(ctx, enum_from_then_to.to.*);
             const partial1 = try alloc.create(ast_mod.Expr);
             partial1.* = .{ .App = .{
-                .fn_expr = fn_var,
+                .fn_expr = callee,
                 .arg = from_arg,
                 .span = enum_from_then_to.span,
             } };
@@ -2785,13 +2813,7 @@ fn desugarMatch(
     // Process equations from top to bottom.
     // We build the body inside-out: start with the last fallback (a non-exhaustive
     // error literal), then layer on the equations from bottom to top.
-    var current_body = try ctx.alloc.create(ast_mod.Expr);
-    current_body.* = .{
-        .Lit = .{
-            .val = .{ .String = "Non-exhaustive patterns in function" },
-            .span = syntheticSpan(),
-        },
-    };
+    var current_body = try patternMatchError(ctx.alloc, "Non-exhaustive patterns in function");
 
     // Pre-register pattern variables in `local_binders` so that `desugarRhs`
     // can resolve them.  This is necessary for instance method bindings whose
@@ -3216,6 +3238,40 @@ fn freshFieldBinder(
 /// track through the pattern match compiler (no full type propagation yet).
 fn dummyCoreType() ast_mod.CoreType {
     return .{ .TyVar = .{ .base = "_t", .unique = .{ .value = 0 } } };
+}
+
+/// Build the pattern-match-failure fallback expression: `error "<msg>"`.
+///
+/// The fallback is a real application of the `error` builtin rather than a
+/// bare string literal so that Core stays honest about divergence: the
+/// demand analysis (#802) treats bottoming expressions as demanding every
+/// variable (⊥ is the bottom of the demand lattice), so an unreachable
+/// non-exhaustive branch cannot weaken the strictness of the reachable
+/// alternatives. It also means a genuinely non-exhaustive match aborts
+/// with a diagnostic instead of returning the message string as if it
+/// were the matched value.
+fn patternMatchError(
+    alloc: std.mem.Allocator,
+    msg: []const u8,
+) std.mem.Allocator.Error!*ast_mod.Expr {
+    const err_fn = try alloc.create(ast_mod.Expr);
+    err_fn.* = .{ .Var = .{
+        .name = Known.Fn.@"error",
+        .ty = dummyCoreType(),
+        .span = syntheticSpan(),
+    } };
+    const lit = try alloc.create(ast_mod.Expr);
+    lit.* = .{ .Lit = .{
+        .val = .{ .String = msg },
+        .span = syntheticSpan(),
+    } };
+    const call = try alloc.create(ast_mod.Expr);
+    call.* = .{ .App = .{
+        .fn_expr = err_fn,
+        .arg = lit,
+        .span = syntheticSpan(),
+    } };
+    return call;
 }
 
 /// Convert a CoreType back to HType so it can be stored in `local_binders`.

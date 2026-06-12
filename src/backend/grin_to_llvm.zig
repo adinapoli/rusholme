@@ -650,6 +650,19 @@ pub const GrinTranslator = struct {
     /// immediates). Case sites consult this to elide the `__rhc_force`
     /// pre-force call (#800). Cleared at the start of each translateDef.
     whnf_vars: std.AutoHashMap(u64, void),
+    /// GRIN variable uniques statically known to hold an *integer
+    /// immediate* — a tagged-int `ptr` or a raw `i64` (distinguished at
+    /// use sites by LLVM type kind, as everywhere else). A strict subset
+    /// of `whnf_vars`. Sources: primop instruction results, unboxed
+    /// (strict ∧ Int-typed) parameters, and case scrutinees dispatched
+    /// against integer literal patterns. Consulted by the cheap-thunk
+    /// speculation in `translateStoreToValue` (see
+    /// `speculableArithStore`). Cleared per translateDef.
+    imm_vars: std.AutoHashMap(u64, void),
+    /// True while translating the body of a CPR worker — a `w$` worker
+    /// whose return type is raw i64 (see `workerCpr`). The return site
+    /// untags instead of boxing.
+    current_fn_cpr: bool = false,
     /// Strict-parameter masks from the Core demand analysis (#802),
     /// keyed by function unique. Strict parameters are forced once at
     /// function entry and tracked as WHNF, eliding every per-use force
@@ -720,6 +733,7 @@ pub const GrinTranslator = struct {
             .allocator = allocator,
             .params = std.AutoHashMap(u64, llvm.Value).init(allocator),
             .whnf_vars = std.AutoHashMap(u64, void).init(allocator),
+            .imm_vars = std.AutoHashMap(u64, void).init(allocator),
             .case_entry_cache = std.AutoHashMap(usize, llvm.BasicBlock).init(allocator),
             .registry = registry,
             .type_env = TypeEnv.init(),
@@ -730,6 +744,7 @@ pub const GrinTranslator = struct {
     pub fn deinit(self: *GrinTranslator) void {
         self.params.deinit();
         self.whnf_vars.deinit();
+        self.imm_vars.deinit();
         self.case_entry_cache.deinit();
         // registry is not owned — do not deinit it.
         self.type_env.deinit(self.allocator);
@@ -905,9 +920,20 @@ pub const GrinTranslator = struct {
             .Return => |v| switch (v) {
                 .ValTag => true,
                 .Lit => |lit| lit == .Int or lit == .Char or lit == .Bool,
+                // `pure x` re-binds x — immediate-ness carries over.
+                .Var => |vr| self.imm_vars.contains(vr.unique.value),
                 else => false,
             },
-            .App => |app| if (PrimOpMapping.lookup(app.name)) |m| m == .instruction else false,
+            .App => |app| if (PrimOpMapping.lookup(app.name)) |m|
+                m == .instruction
+            else
+                self.appLowersToCprWorker(app),
+            // A speculated arithmetic thunk store produces a tagged
+            // immediate, not a heap node (see translateStoreToValue).
+            .Store => |v| switch (v) {
+                .ConstTagNode => |ctn| self.speculableArithStore(ctn) != null,
+                else => false,
+            },
             .Block => |inner| self.exprYieldsImmediate(inner),
             .Bind => |b| self.exprYieldsImmediate(b.rhs),
             else => false,
@@ -1323,15 +1349,58 @@ pub const GrinTranslator = struct {
         return written;
     }
 
+    /// Does this expression certainly abort the process when evaluated
+    /// (tail position is an `error`/`unreachable` primop)? Such case
+    /// alternatives end in `unreachable` and contribute no incoming
+    /// value to the merge phi — a ⊥ branch must not drag an otherwise
+    /// all-i64 phi into the boxed-ptr representation.
+    fn exprEndsInAbort(expr: *const grin.Expr) bool {
+        return switch (expr.*) {
+            .App => |app| std.mem.eql(u8, app.name.base, "error") or
+                std.mem.eql(u8, app.name.base, "primError") or
+                std.mem.eql(u8, app.name.base, "unreachable"),
+            .Bind => |b| exprEndsInAbort(b.rhs),
+            .Block => |e| exprEndsInAbort(e),
+            else => false,
+        };
+    }
+
+    /// Will this GRIN application be lowered as a saturated direct call
+    /// to a CPR worker (raw i64 result)? Mirrors the conditions of the
+    /// worker fast path in translateAppToValue exactly — the two must
+    /// agree on the call's result type.
+    fn appLowersToCprWorker(self: *const GrinTranslator, app: anytype) bool {
+        if (self.params.get(app.name.unique.value) != null) return false;
+        if (self.isEntryPoint(app.name.base)) return false;
+        const am = self.arity_map orelse return false;
+        const arity = am.get(app.name.unique.value) orelse return false;
+        if (arity != app.args.len) return false;
+        if (self.workerUnboxMask(app.name.unique.value, app.args.len) == 0) return false;
+        return self.workerCpr(app.name.unique.value);
+    }
+
+    /// Does the worker for this function return a raw i64 instead of a
+    /// boxed ptr? True when the demand analysis proved the result type
+    /// is an integer immediate (FnDemand.cpr — return-value unboxing).
+    /// Must agree between translateDef and translateAppToValue, like
+    /// `workerUnboxMask`.
+    fn workerCpr(self: *const GrinTranslator, fn_unique: u64) bool {
+        const sp = self.strict_params orelse return false;
+        const dm = sp.get(fn_unique) orelse return false;
+        return dm.cpr;
+    }
+
     /// LLVM function type of a worker: raw i64 at unboxed positions,
-    /// ptr elsewhere; always returns ptr.
-    fn workerFnType(unbox_mask: u64, arity: usize) llvm.Type {
+    /// ptr elsewhere; returns raw i64 when the result is unboxed
+    /// (`cpr`), ptr otherwise.
+    fn workerFnType(unbox_mask: u64, arity: usize, cpr: bool) llvm.Type {
         var param_types: [8]llvm.Type = undefined;
         for (0..arity) |i| {
             const unboxed = (unbox_mask >> @as(u6, @intCast(i))) & 1 == 1;
             param_types[i] = if (unboxed) llvm.i64Type() else ptrType();
         }
-        return llvm.functionType(ptrType(), param_types[0..arity], false);
+        const ret_ty = if (cpr) llvm.i64Type() else ptrType();
+        return llvm.functionType(ret_ty, param_types[0..arity], false);
     }
 
     fn translateDef(self: *GrinTranslator, def: grin.Def) TranslationError!void {
@@ -1378,10 +1447,12 @@ pub const GrinTranslator = struct {
         // higher-order use — keeps working unchanged. Saturated direct
         // calls go straight to the worker (translateAppToValue).
         const unbox_mask = if (is_entry) 0 else self.workerUnboxMask(def.name.unique.value, def.params.len);
+        const worker_cpr = unbox_mask != 0 and self.workerCpr(def.name.unique.value);
+        self.current_fn_cpr = worker_cpr;
         const body_func = if (unbox_mask == 0) func else blk: {
             var wsym_buf: [300]u8 = undefined;
             const wsym = self.workerSymbol(def.name, &wsym_buf);
-            const w_type = workerFnType(unbox_mask, def.params.len);
+            const w_type = workerFnType(unbox_mask, def.params.len, worker_cpr);
             const worker = c.LLVMGetNamedFunction(self.module, wsym.ptr) orelse
                 llvm.addFunction(self.module, wsym, w_type);
 
@@ -1410,7 +1481,10 @@ pub const GrinTranslator = struct {
                 @intCast(def.params.len),
                 "worker.result",
             );
-            _ = llvm.buildRet(self.builder, r);
+            // CPR worker returns a raw i64 — re-box (tag) for the
+            // wrapper's ptr ABI.
+            const wrapped = if (worker_cpr) tagInt(self.builder, r) else r;
+            _ = llvm.buildRet(self.builder, wrapped);
             break :blk worker;
         };
 
@@ -1440,6 +1514,7 @@ pub const GrinTranslator = struct {
         self.params.deinit();
         self.params = std.AutoHashMap(u64, llvm.Value).init(self.allocator);
         self.whnf_vars.clearRetainingCapacity();
+        self.imm_vars.clearRetainingCapacity();
 
         // Clear the per-function case expression cache.  The cache prevents
         // exponential re-translation of shared GRIN expressions produced by the
@@ -1454,10 +1529,11 @@ pub const GrinTranslator = struct {
         // WHNF: the demand analysis proved every execution path forces
         // them, so a single entry force replaces every per-use force in
         // the body (a worker/wrapper-lite that keeps the boxed ABI).
-        const entry_strict_mask: u64 = blk: {
-            const sp = self.strict_params orelse break :blk 0;
-            break :blk if (sp.get(def.name.unique.value)) |dm| dm.strict else 0;
+        const fn_demand: core_demand.FnDemand = blk: {
+            const sp = self.strict_params orelse break :blk .{};
+            break :blk sp.get(def.name.unique.value) orelse .{};
         };
+        const entry_strict_mask = fn_demand.strict;
         for (def.params, 0..) |param_name, i| {
             var param_val = c.LLVMGetParam(body_func, @intCast(i));
             if (param_val == null) return error.OutOfMemory;
@@ -1470,6 +1546,12 @@ pub const GrinTranslator = struct {
                 // Strict parameter: forced above (ptr) or a raw machine
                 // word (worker i64) — either way WHNF from here on.
                 self.whnf_vars.put(param_name.unique.value, {}) catch return error.OutOfMemory;
+                if ((fn_demand.unbox >> @intCast(i)) & 1 == 1) {
+                    // Strict ∧ Int/Char-typed (#803): the forced value is
+                    // an integer immediate (tagged ptr in a wrapper, raw
+                    // i64 in a worker).
+                    self.imm_vars.put(param_name.unique.value, {}) catch return error.OutOfMemory;
+                }
             }
             try self.bindAndRoot(param_name.unique.value, param_val);
         }
@@ -1537,6 +1619,19 @@ pub const GrinTranslator = struct {
                                 self.buildRetWithShadowRestore(val);
                             }
                         }
+                    } else if (self.current_fn_cpr) {
+                        // CPR worker: the function returns a raw i64.
+                        // The result type is Int/Char, so the forced
+                        // value is always a tagged immediate — untag
+                        // ptr-typed values; raw integers pass through.
+                        // A self-recursive call (already i64, no
+                        // post-call force) becomes a genuine tail call.
+                        const val_kind2 = c.LLVMGetTypeKind(c.LLVMTypeOf(val));
+                        const coerced = if (val_kind2 == c.LLVMPointerTypeKind) blk2: {
+                            const forced = if (self.exprYieldsWhnf(def.body)) val else self.callForceIfNeeded(val);
+                            break :blk2 untagInt(self.builder, forced);
+                        } else val;
+                        self.buildRetWithShadowRestore(coerced);
                     } else {
                         // Non-REPL function: ensure return value matches function signature.
                         // Primop instructions return i64, but user functions return ptr.
@@ -1620,6 +1715,117 @@ pub const GrinTranslator = struct {
         }
     }
 
+    /// Cheap, total integer operations eligible for thunk speculation.
+    const SpecArithOp = enum { add, sub, mul };
+
+    /// If this F-tag store suspends a cheap, total integer primop whose
+    /// operands are all integer literals or immediate-known variables,
+    /// return the operation — the thunk can be evaluated on the spot
+    /// ("ok for speculation", cf. GHC's exprOkForSpeculation): one ALU
+    /// instruction replaces a 32-byte thunk allocation plus the eventual
+    /// force/update round-trip. Division is deliberately excluded — it
+    /// can raise, and speculating it would surface an error a lazy
+    /// program never evaluates.
+    ///
+    /// Only the Prelude operator wrappers `+` `-` `*` are matched: those
+    /// are the names under which the desugarer suspends arithmetic
+    /// (primop applications themselves are always eager and never
+    /// thunked, see translate.zig wrapWithLazyBindsForFunc).
+    fn speculableArithStore(self: *const GrinTranslator, ctn: anytype) ?SpecArithOp {
+        if (ctn.tag.tag_type != .Fun) return null;
+        if (ctn.fields.len != 2) return null;
+        const base = ctn.tag.name.base;
+        const op: SpecArithOp = if (std.mem.eql(u8, base, "+"))
+            .add
+        else if (std.mem.eql(u8, base, "-"))
+            .sub
+        else if (std.mem.eql(u8, base, "*"))
+            .mul
+        else
+            return null;
+        for (ctn.fields) |field| {
+            switch (field) {
+                .Lit => |lit| if (lit != .Int) return null,
+                .Var => |v| if (!self.imm_vars.contains(v.unique.value)) return null,
+                else => return null,
+            }
+        }
+        return op;
+    }
+
+    /// Snapshot of the per-function variable-fact maps, taken before
+    /// translating a case alternative and restored afterwards. Facts
+    /// established inside one alternative (case-dispatch rebinding of the
+    /// scrutinee, WHNF/immediate knowledge) are dominated by that
+    /// alternative's blocks only — letting them leak into a sibling
+    /// alternative's translation would reference SSA values that do not
+    /// dominate it.
+    const ScopeSnapshot = struct {
+        params: std.AutoHashMap(u64, llvm.Value),
+        whnf: std.AutoHashMap(u64, void),
+        imm: std.AutoHashMap(u64, void),
+    };
+
+    fn saveScope(self: *GrinTranslator) TranslationError!ScopeSnapshot {
+        var snap = ScopeSnapshot{
+            .params = std.AutoHashMap(u64, llvm.Value).init(self.allocator),
+            .whnf = std.AutoHashMap(u64, void).init(self.allocator),
+            .imm = std.AutoHashMap(u64, void).init(self.allocator),
+        };
+        errdefer {
+            snap.params.deinit();
+            snap.whnf.deinit();
+            snap.imm.deinit();
+        }
+        var pit = self.params.iterator();
+        while (pit.next()) |e| snap.params.put(e.key_ptr.*, e.value_ptr.*) catch return error.OutOfMemory;
+        var wit = self.whnf_vars.keyIterator();
+        while (wit.next()) |k| snap.whnf.put(k.*, {}) catch return error.OutOfMemory;
+        var iit = self.imm_vars.keyIterator();
+        while (iit.next()) |k| snap.imm.put(k.*, {}) catch return error.OutOfMemory;
+        return snap;
+    }
+
+    fn restoreScope(self: *GrinTranslator, snap: *ScopeSnapshot) void {
+        self.params.deinit();
+        self.whnf_vars.deinit();
+        self.imm_vars.deinit();
+        self.params = snap.params;
+        self.whnf_vars = snap.whnf;
+        self.imm_vars = snap.imm;
+        snap.* = undefined;
+    }
+
+    /// Record what the case dispatch just established about a variable
+    /// scrutinee: the pre-forced SSA value replaces the (possibly thunk)
+    /// binding so every nested use — including nested cases on the same
+    /// variable — skips re-forcing, and the variable is WHNF. If any
+    /// alternative matches an integer literal the scrutinee is an Int,
+    /// so its forced form is a tagged immediate (speculation operand).
+    ///
+    /// Dominance: the dispatch block dominates every alternative and the
+    /// continuation after the case, so the forced value is in scope at
+    /// all downstream uses. Sibling alternatives of an *enclosing* case
+    /// are protected by the per-alternative scope save/restore.
+    fn noteForcedScrutinee(
+        self: *GrinTranslator,
+        scrutinee: grin.Val,
+        pre_forced: llvm.Value,
+        is_ptr: bool,
+        alts: []const grin.Alt,
+    ) TranslationError!void {
+        if (scrutinee != .Var or !is_ptr) return;
+        const su = scrutinee.Var.unique.value;
+        self.params.put(su, pre_forced) catch return error.OutOfMemory;
+        self.whnf_vars.put(su, {}) catch return error.OutOfMemory;
+        for (alts) |alt| {
+            if (alt.pat == .LitPat and alt.pat.LitPat == .Int) {
+                self.imm_vars.put(su, {}) catch return error.OutOfMemory;
+                break;
+            }
+        }
+    }
+
     /// Whether a GRIN value is statically known to be in WHNF when it
     /// reaches an SSA binding: literals and tagged immediates trivially;
     /// constructor nodes by construction; variables if already tracked.
@@ -1646,7 +1852,8 @@ pub const GrinTranslator = struct {
         return switch (expr.*) {
             .Return => |v| self.valYieldsWhnf(v),
             .Store => |v| switch (v) {
-                .ConstTagNode => |ctn| ctn.tag.tag_type == .Con,
+                .ConstTagNode => |ctn| ctn.tag.tag_type == .Con or
+                    self.speculableArithStore(ctn) != null,
                 else => false,
             },
             .App => |app| blk: {
@@ -1690,6 +1897,7 @@ pub const GrinTranslator = struct {
                     if (self.exprYieldsImmediate(lhs)) {
                         // Tagged immediate — no heap pointer, no root.
                         try self.params.put(v.unique.value, val);
+                        self.imm_vars.put(v.unique.value, {}) catch return error.OutOfMemory;
                     } else {
                         try self.bindAndRoot(v.unique.value, val);
                     }
@@ -1758,6 +1966,7 @@ pub const GrinTranslator = struct {
                             if (self.exprYieldsImmediate(b.lhs)) {
                                 // Tagged immediate — no heap pointer, no root.
                                 try self.params.put(v.unique.value, val);
+                                self.imm_vars.put(v.unique.value, {}) catch return error.OutOfMemory;
                             } else {
                                 try self.bindAndRoot(v.unique.value, val);
                             }
@@ -1923,7 +2132,7 @@ pub const GrinTranslator = struct {
                 if (unbox_mask != 0) {
                     var wsym_buf: [300]u8 = undefined;
                     const wsym = self.workerSymbol(name, &wsym_buf);
-                    const w_type = workerFnType(unbox_mask, args.len);
+                    const w_type = workerFnType(unbox_mask, args.len, self.workerCpr(name.unique.value));
                     const worker = c.LLVMGetNamedFunction(self.module, wsym.ptr) orelse
                         llvm.addFunction(self.module, wsym, w_type);
                     var w_args: [8]llvm.Value = undefined;
@@ -2705,6 +2914,23 @@ pub const GrinTranslator = struct {
     fn translateStoreToValue(self: *GrinTranslator, val: grin.Val, result_name: []const u8) TranslationError!?llvm.Value {
         switch (val) {
             .ConstTagNode => |ctn| {
+                // ── Cheap-thunk speculation ─────────────────────────
+                // Suspending `a ± b` over operands that are statically
+                // known integer immediates costs a 32-byte thunk node
+                // that the consumer forces (and updates) later; the
+                // operation itself is one instruction and cannot fail.
+                // Evaluate it now and hand back a tagged immediate.
+                if (self.speculableArithStore(ctn)) |op| {
+                    const lhs_raw = try self.specOperand(ctn.fields[0]);
+                    const rhs_raw = try self.specOperand(ctn.fields[1]);
+                    const res = switch (op) {
+                        .add => c.LLVMBuildAdd(self.builder, lhs_raw, rhs_raw, "spec_add"),
+                        .sub => c.LLVMBuildSub(self.builder, lhs_raw, rhs_raw, "spec_sub"),
+                        .mul => c.LLVMBuildMul(self.builder, lhs_raw, rhs_raw, "spec_mul"),
+                    };
+                    return tagInt(self.builder, res);
+                }
+
                 const tag = ctn.tag;
                 var n_fields: u32 = @intCast(ctn.fields.len);
                 const disc = self.registry.discriminant(tag) orelse return error.UnsupportedGrinVal;
@@ -2805,6 +3031,19 @@ pub const GrinTranslator = struct {
         _ = try self.translateStoreToValue(val, "stored");
     }
 
+    /// Materialise a speculation operand as a raw (untagged) i64.
+    /// Integer literals arrive as raw i64 constants; immediate-known
+    /// variables hold either a tagged-int `ptr` (untag it) or a raw
+    /// `i64` (use as is) — same type-kind discrimination as every other
+    /// mixed-representation site.
+    fn specOperand(self: *GrinTranslator, field: grin.Val) TranslationError!llvm.Value {
+        const v = try self.translateValToLlvm(field);
+        if (c.LLVMGetTypeKind(c.LLVMTypeOf(v)) == c.LLVMPointerTypeKind) {
+            return untagInt(self.builder, v);
+        }
+        return v;
+    }
+
     /// Translate a Case expression into an LLVM switch + per-alt basic blocks.
     ///
     /// The scrutinee is expected to be either:
@@ -2890,6 +3129,7 @@ pub const GrinTranslator = struct {
             self.callForceIfNeeded(scrut_llvm)
         else
             scrut_llvm;
+        try self.noteForcedScrutinee(scrutinee, pre_forced, is_ptr, alts);
 
         // ── 1c. Tag dispatch ───────────────────────────────────────────────
         //
@@ -2975,6 +3215,12 @@ pub const GrinTranslator = struct {
         for (alts, 0..) |alt, i| {
             llvm.positionBuilderAtEnd(self.builder, alt_bbs[i]);
 
+            // Facts established inside this alternative (field binders,
+            // nested case rebinding) must not leak into sibling
+            // alternatives — their SSA values do not dominate them.
+            var scope = try self.saveScope();
+            defer self.restoreScope(&scope);
+
             // For NodePat alts: load each field via rts_load_field(node, index).
             // Use TypeEnv to determine the correct LLVM type for each field.
             // HPT-lite: This ensures type consistency for LLVM codegen.
@@ -3057,6 +3303,7 @@ pub const GrinTranslator = struct {
             self.callForceIfNeeded(scrut_llvm)
         else
             scrut_llvm;
+        try self.noteForcedScrutinee(scrutinee, pre_forced, is_ptr, alts);
 
         // ── 1c. Tag dispatch (same as translateCase) ───────────────────────
         // `pre_forced` is WHNF; route immediates vs heap nodes (#800).
@@ -3135,6 +3382,10 @@ pub const GrinTranslator = struct {
         for (alts, 0..) |alt, i| {
             llvm.positionBuilderAtEnd(self.builder, alt_bbs[i]);
 
+            // Same per-alternative fact scoping as translateCase.
+            var scope = try self.saveScope();
+            defer self.restoreScope(&scope);
+
             // Handle NodePat field binding (same as translateCase)
             if (alt.pat == .NodePat and is_ptr) {
                 const np = alt.pat.NodePat;
@@ -3169,21 +3420,18 @@ pub const GrinTranslator = struct {
             // Translate the alternative body as a value (not with ret)
             const alt_value = try self.translateExprToValue(alt.body, result_name);
 
+            // A ⊥ alternative (error/unreachable in tail position) never
+            // reaches the merge block: rts_error aborts. Terminate with
+            // `unreachable` and contribute no phi incoming, so a dead
+            // branch cannot change the phi's representation.
+            if (exprEndsInAbort(alt.body)) {
+                _ = c.LLVMBuildUnreachable(self.builder);
+                continue;
+            }
+
             // Every alternative must produce a value in bind context
             if (alt_value) |val| {
-                // Normalize value type: box i64 nullary constructors into heap nodes
-                // so all phi incoming values have the same type (ptr).
-                // This handles cases where different alternatives return nullary
-                // constructors (i64 discriminants) vs heap-allocated nodes (ptr).
-                const val_ty = c.LLVMTypeOf(val);
-                const val_kind = c.LLVMGetTypeKind(val_ty);
-                const is_i64 = val_kind == c.LLVMIntegerTypeKind and c.LLVMGetIntTypeWidth(val_ty) == 64;
-                const normalized_val: llvm.Value = if (is_i64)
-                    tagInt(self.builder, val)
-                else
-                    val;
-
-                try phi_values.append(self.allocator, normalized_val);
+                try phi_values.append(self.allocator, val);
                 const cur_bb = c.LLVMGetInsertBlock(self.builder);
                 try phi_blocks.append(self.allocator, cur_bb);
                 _ = c.LLVMBuildBr(self.builder, merge_bb);
@@ -3193,13 +3441,45 @@ pub const GrinTranslator = struct {
             }
         }
 
+        // ── 4b. Normalize phi incoming types ──────────────────────────────
+        // All incoming values must share one LLVM type. When every
+        // alternative yields a raw i64 (primop results, CPR worker
+        // calls, unboxed params), keep an i64 phi: boxing each arm into
+        // a tagged ptr only for the consumer (or the CPR return site) to
+        // untag it again costs two instructions per arm and pushes a
+        // tail-position recursive call out of tail position. Mixed
+        // kinds normalize to ptr by tagging the i64 arms inside their
+        // own predecessor blocks (just before the branch to merge).
+        var all_i64 = phi_values.items.len > 0;
+        for (phi_values.items) |val| {
+            const ty = c.LLVMTypeOf(val);
+            const is_i64 = c.LLVMGetTypeKind(ty) == c.LLVMIntegerTypeKind and
+                c.LLVMGetIntTypeWidth(ty) == 64;
+            if (!is_i64) {
+                all_i64 = false;
+                break;
+            }
+        }
+        if (!all_i64) {
+            for (phi_values.items, phi_blocks.items) |*val, block| {
+                const ty = c.LLVMTypeOf(val.*);
+                const is_i64 = c.LLVMGetTypeKind(ty) == c.LLVMIntegerTypeKind and
+                    c.LLVMGetIntTypeWidth(ty) == 64;
+                if (is_i64) {
+                    const term = c.LLVMGetBasicBlockTerminator(block);
+                    c.LLVMPositionBuilderBefore(self.builder, term);
+                    val.* = tagInt(self.builder, val.*);
+                }
+            }
+        }
+
         // ── 5. Create phi node in merge block ──────────────────────────────
         llvm.positionBuilderAtEnd(self.builder, merge_bb);
 
         if (phi_values.items.len == 0) return null;
 
-        // All values have been normalized to ptr type, so phi is always ptr
-        const phi = c.LLVMBuildPhi(self.builder, ptrType(), nullTerminate(result_name).ptr);
+        const phi_ty = if (all_i64) llvm.i64Type() else ptrType();
+        const phi = c.LLVMBuildPhi(self.builder, phi_ty, nullTerminate(result_name).ptr);
 
         c.LLVMAddIncoming(
             phi,
@@ -3323,6 +3603,22 @@ pub const GrinTranslator = struct {
                         const tagged = tagInt(self.builder, llvm_val);
                         const as_i64 = c.LLVMBuildPtrToInt(self.builder, tagged, llvm.i64Type(), "tagged_i64");
                         self.buildRetWithShadowRestore(as_i64);
+                        return;
+                    }
+                } else if (self.current_fn_cpr) {
+                    // CPR worker: raw i64 return. The result type is
+                    // Int/Char, so the forced value is always a tagged
+                    // immediate — untag it; raw integers pass through.
+                    if (is_ptr) {
+                        const forced = if (self.valYieldsWhnf(val))
+                            llvm_val
+                        else
+                            self.callForceIfNeeded(llvm_val);
+                        self.buildRetWithShadowRestore(untagInt(self.builder, forced));
+                        return;
+                    }
+                    if (is_int) {
+                        self.buildRetWithShadowRestore(llvm_val);
                         return;
                     }
                 } else if (!is_native_main) {
@@ -3637,8 +3933,31 @@ pub const GrinTranslator = struct {
     /// Force a translated operand unless its GRIN value is statically
     /// WHNF (strict-forced parameter, primop result, immediate).
     fn forceOperandIfNeeded(self: *GrinTranslator, raw: llvm.Value, val: grin.Val) llvm.Value {
-        if (self.valYieldsWhnf(val)) return raw;
-        return self.callForceIfNeeded(raw);
+        if (self.valYieldsWhnf(val)) {
+            // The operand may have been captured before a later force
+            // rebound this variable (see below) — the recorded binding
+            // is the freshest (already-forced) value, the captured raw
+            // may still be the suspended thunk.
+            if (val == .Var) {
+                if (self.params.get(val.Var.unique.value)) |cur| {
+                    if (c.LLVMGetTypeKind(c.LLVMTypeOf(cur)) ==
+                        c.LLVMGetTypeKind(c.LLVMTypeOf(raw))) return cur;
+                }
+            }
+            return raw;
+        }
+        const forced = self.callForceIfNeeded(raw);
+        // Variable operand: remember the forced value so later uses in
+        // dominated code skip re-forcing (LLVM cannot CSE __rhc_force
+        // calls itself — forcing updates the thunk in place). Sibling
+        // case alternatives are protected by the per-alternative scope
+        // save/restore.
+        if (val == .Var and forced != raw) {
+            const u = val.Var.unique.value;
+            self.params.put(u, forced) catch return forced;
+            self.whnf_vars.put(u, {}) catch return forced;
+        }
+        return forced;
     }
 
     fn callForceIfNeeded(self: *GrinTranslator, val: llvm.Value) llvm.Value {

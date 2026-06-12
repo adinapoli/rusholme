@@ -147,6 +147,11 @@ const TranslateCtx = struct {
     // Strict arguments are passed eagerly instead of as F-tag thunks.
     // Null when no analysis ran (REPL, debug commands) — all args lazy.
     strict_params: ?*const demand.StrictnessMap = null,
+    // Strict `let` binders from the same analysis: `let x = f a in body`
+    // where the body certainly forces `x`. Translated as an eager call
+    // (let-to-case) instead of an F-thunk store. Null when no analysis
+    // ran — every let RHS is suspended as before.
+    strict_lets: ?*const demand.LetSet = null,
 
     pub fn init(alloc: std.mem.Allocator) TranslateCtx {
         return .{
@@ -519,6 +524,7 @@ pub fn translateProgram(
     external_arities: ?*const std.AutoHashMapUnmanaged(u64, u32),
     external_con_map: ?*const std.AutoHashMapUnmanaged(u64, u32),
     strict_params: ?*const demand.StrictnessMap,
+    strict_lets: ?*const demand.LetSet,
     initial_name_counter: u64,
 ) !struct { program: GrinProgram, next_name_counter: u64 } {
     // Build the arity map for partial/over-application handling.
@@ -537,6 +543,7 @@ pub fn translateProgram(
     ctx.name_counter = initial_name_counter;
     defer ctx.deinit();
     ctx.strict_params = strict_params;
+    ctx.strict_lets = strict_lets;
 
     // Copy the arity map into the context.
     var iter = arity_map.iterator();
@@ -1959,6 +1966,16 @@ fn translateLet(ctx: *TranslateCtx, let_expr: *const CoreLet) anyerror!*GrinExpr
                         break :blk e;
                     },
                     .App => |app| {
+                        // Let-to-case (#802 demand analysis): when the let
+                        // body certainly forces this binder, suspending the
+                        // RHS buys nothing — the thunk is allocated, forced
+                        // and updated on every execution path. Evaluate the
+                        // call eagerly instead.
+                        if (ctx.strict_lets) |sl| {
+                            if (sl.contains(pair.binder.name.unique.value)) {
+                                break :blk rhs_expr;
+                            }
+                        }
                         // Function application: wrap as lazy thunk if the
                         // function is a known top-level definition.
                         if (ctx.getFunctionArity(app.name) != null) {
@@ -2452,7 +2469,7 @@ test "translateProgram: simple identity function" {
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, null, 0);
     const grin_prog = grin_result.program;
 
     // Should have one definition with one parameter.
@@ -2528,7 +2545,7 @@ test "translateProgram: literal value" {
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, null, 0);
     const grin_prog = grin_result.program;
 
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
@@ -2709,7 +2726,7 @@ test "translateProgram: partial application generates P-tag" {
         .binds = &[_]CoreBind{ .{ .NonRec = map_pair }, .{ .NonRec = main_pair } },
     };
 
-    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, null, 0);
     const grin_prog = grin_result.program;
 
     // Should have 2 definitions: map and main
@@ -2793,7 +2810,7 @@ test "translateProgram: over-application generates chained apply calls" {
         .binds = &[_]CoreBind{ .{ .NonRec = id_pair }, .{ .NonRec = main_pair } },
     };
 
-    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, null, 0);
     const grin_prog = grin_result.program;
 
     // Should have 2 definitions: id and main
@@ -2905,7 +2922,7 @@ test "translateApp: nested application f (g x) emits Bind for complex arg (#374)
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, null, 0);
     const grin_prog = grin_result.program;
 
     // Should have one definition with 3 parameters (f, g, x).
@@ -2994,7 +3011,7 @@ test "translateProgram: external 0-arity function produces App not Return Var" {
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_result = try translateProgram(alloc, core_prog, &external_arities, null, null, 0);
+    const grin_result = try translateProgram(alloc, core_prog, &external_arities, null, null, null, 0);
     const grin_prog = grin_result.program;
 
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
@@ -3116,7 +3133,7 @@ test "wrapWithLazyBindsForCon: Case arg lambda-lifted into thunk (#518)" {
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, null, 0);
     const grin_prog = grin_result.program;
 
     // Should have 2 defs: f and the lifted thunk helper.
@@ -3250,7 +3267,7 @@ test "translateLet: complex NonRec RHS suspended as lambda-lifted thunk" {
         .binds = &.{.{ .NonRec = .{ .binder = f_id, .rhs = lam_x } }},
     };
 
-    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, null, 0);
     const grin_prog = grin_result.program;
 
     // Two defs: f and the lifted thunk helper.
@@ -3397,7 +3414,7 @@ test "translateExpr: multi-binding Rec let emits one Update per binder (#747)" {
         .binds = &[_]CoreBind{.{ .NonRec = main_pair }},
     };
 
-    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, null, 0);
     const grin_prog = grin_result.program;
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
 
@@ -3475,7 +3492,7 @@ test "translateExpr: Rec backpatch chain follows dependency order (#753)" {
         .binds = &[_]CoreBind{.{ .NonRec = main_pair }},
     };
 
-    const grin_result = try translateProgram(alloc, core_prog, null, null, null, 0);
+    const grin_result = try translateProgram(alloc, core_prog, null, null, null, null, 0);
     const grin_prog = grin_result.program;
     try testing.expectEqual(@as(usize, 1), grin_prog.defs.len);
 

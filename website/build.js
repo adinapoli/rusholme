@@ -688,6 +688,21 @@ async function build() {
   // The template already contains the full interactive explorer
   // that fetches the JSON file — no build-time replacement needed.
 
+  // Stage bench/results.json next to index.html so the client-side
+  // fetch('bench/results.json') resolves both locally (`npm run serve`
+  // serves website/ as the site root) and on CI (which mirrors this
+  // layout by copying the file into _site/bench/). website/bench/ is
+  // generated output and gitignored.
+  const benchSrc = path.join(__dirname, '../bench/results.json');
+  if (fs.existsSync(benchSrc)) {
+    const benchOutDir = path.join(__dirname, 'bench');
+    fs.mkdirSync(benchOutDir, { recursive: true });
+    fs.copyFileSync(benchSrc, path.join(benchOutDir, 'results.json'));
+    console.log('   ✓ Staged bench/results.json for local serving');
+  } else {
+    console.log('   ⚠️  ../bench/results.json missing — bench explorer will 404');
+  }
+
   // Write output
   const outputPath = path.join(__dirname, 'index.html');
   fs.writeFileSync(outputPath, html, 'utf-8');

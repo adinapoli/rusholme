@@ -716,7 +716,7 @@ fn cmdGrin(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     }
 
     // ── Translate to GRIN ───────────────────────────────────────────────
-    const grin_result = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted, null, null, null, 0);
+    const grin_result = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted, null, null, null, null, 0);
     const grin_prog = grin_result.program;
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
@@ -836,7 +836,7 @@ fn cmdLl(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
     }
 
     // ── Translate to GRIN ───────────────────────────────────────────────
-    const grin_result = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted, null, null, null, 0);
+    const grin_result = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted, null, null, null, null, 0);
     const grin_prog = grin_result.program;
     if (diags.hasErrors()) {
         try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
@@ -1078,16 +1078,18 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     // calls to instance methods (better strictness). The resulting
     // strict-parameter masks let GRIN translation pass strict arguments
     // eagerly instead of allocating F-tag thunks.
-    const strict_params: ?*const rusholme.core.demand.StrictnessMap = blk: {
+    const demand_info: *rusholme.core.demand.AnalysisResult = blk: {
         var all_progs = std.ArrayListUnmanaged(rusholme.core.ast.CoreProgram).empty;
         for (module_order) |mod_name| {
             const core_prog = session.programs.get(mod_name) orelse continue;
             try all_progs.append(arena_alloc, core_prog);
         }
-        const masks = try arena_alloc.create(rusholme.core.demand.StrictnessMap);
-        masks.* = try rusholme.core.demand.analyse(arena_alloc, all_progs.items);
-        break :blk masks;
+        const info = try arena_alloc.create(rusholme.core.demand.AnalysisResult);
+        info.* = try rusholme.core.demand.analyse(arena_alloc, all_progs.items);
+        break :blk info;
     };
+    const strict_params: ?*const rusholme.core.demand.StrictnessMap = &demand_info.masks;
+    const strict_lets: ?*const rusholme.core.demand.LetSet = &demand_info.strict_lets;
 
     // ── Per-module lambda lift + GRIN translation ───────────────────────
     // Each Haskell module is lambda-lifted and GRIN-translated independently.
@@ -1144,7 +1146,7 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
         const core_prog = session.programs.get(mod_name) orelse continue;
         const lift_result = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog, cross_module_scope, next_lift_id);
         next_lift_id = lift_result.next_lifted_id;
-        const grin_result = try rusholme.grin.translate.translateProgram(arena_alloc, lift_result.program, &cross_module_arities, &cross_module_con_map, strict_params, next_grin_name_counter);
+        const grin_result = try rusholme.grin.translate.translateProgram(arena_alloc, lift_result.program, &cross_module_arities, &cross_module_con_map, strict_params, strict_lets, next_grin_name_counter);
         next_grin_name_counter = grin_result.next_name_counter;
         const grin_prog = grin_result.program;
         try per_module_grin.append(arena_alloc, grin_prog);
@@ -1255,6 +1257,25 @@ fn emitNative(
             try stderr.flush();
             std.process.exit(1);
         };
+
+        // Opt-in IR verification (`RHC_VERIFY_LLVM=1`): structural
+        // errors (broken dominance, type mismatches) fail loudly here
+        // rather than silently miscompiling downstream. Not always-on
+        // yet: the translator currently reuses cached function values
+        // across `translateModuleGrin` calls, so multi-module builds
+        // carry cross-context references that trip the verifier on
+        // issues unrelated to the current change.
+        // tracked in: https://github.com/adinapoli/rusholme/issues/815
+        if (std.c.getenv("RHC_VERIFY_LLVM") != null) {
+            llvm.verifyModule(llvm_mod) catch {
+                var stderr_buf: [4096]u8 = undefined;
+                var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+                const stderr = &stderr_fw.interface;
+                try stderr.print("rhc: internal compiler error — LLVM IR verification failed for module '{s}'\n", .{mod_name});
+                try stderr.flush();
+                std.process.exit(1);
+            };
+        }
 
         // Prefer the source-declared module name (`module Foo where`) for
         // the on-disk `.bc` stem so that files given as absolute paths

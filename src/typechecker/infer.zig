@@ -871,6 +871,50 @@ fn getExprSpan(expr: RExpr) SourceSpan {
     };
 }
 
+/// Type the hidden `enumFrom*` function reference behind an
+/// arithmetic-sequence sugar node (`[n..]`, `[n..m]`, …) the same way
+/// the `Var` rule types an ordinary polymorphic occurrence:
+///
+///  1. instantiate the function's scheme with fresh metavars,
+///  2. record its wanted class constraints (`Enum a`) keyed to the
+///     sugar node's span and the renamer-attached `fn_name` unique —
+///     the same key the desugarer uses to look up dictionary evidence
+///     (`findEvidenceForVar`),
+///  3. unify the instantiated type with the concrete
+///     `arg₁ -> … -> argₙ -> [elem]` shape so the constraint's type
+///     variable is pinned to the element type before solving.
+///
+/// Without this, `[1..]` compiled to a dictionary-less `enumFrom 1`
+/// call — an unsaturated class-method selector that produced garbage
+/// at runtime.
+fn constrainEnumSugar(
+    ctx: *InferCtx,
+    fn_name: Name,
+    span: SourceSpan,
+    arg_tys: []const *HType,
+    list_ty: *HType,
+) std.mem.Allocator.Error!void {
+    const scheme = ctx.env.lookupScheme(fn_name.unique) orelse return;
+    if (scheme.binders.len == 0) return;
+    const inst = try scheme.instantiate(ctx.alloc, ctx.mv_supply);
+    for (inst.wanted) |wc| {
+        try ctx.wanted_constraints.append(ctx.alloc, .{ .Class = .{
+            .class_name = wc.class_name,
+            .ty = wc.ty,
+            .span = span,
+            .var_unique = fn_name.unique,
+        } });
+    }
+    var expected = list_ty;
+    var i = arg_tys.len;
+    while (i > 0) {
+        i -= 1;
+        expected = try ctx.alloc_ty(HType{ .Fun = .{ .arg = arg_tys[i], .res = expected } });
+    }
+    const inst_ty = try ctx.alloc_ty(inst.ty);
+    try ctx.unifyNow(inst_ty, expected, span);
+}
+
 /// Helper to extract a source span from an RPat.
 /// Returns syntheticSpan() if the pattern variant doesn't have a simple span.
 fn getPatSpan(pat: *const RPat) SourceSpan {
@@ -1567,28 +1611,38 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
 
         // ── Arithmetic sequences (Haskell 2010 §3.10) ────────────────
         //
-        // All four forms desugar to enumFrom*/enumFromThen* which require
-        // an Enum constraint.  At this stage we simply unify the element
-        // expressions and return [τ] — constraint solving is deferred to
-        // a later milestone.
+        // All four forms desugar to enumFrom*/enumFromThen* which
+        // require an Enum constraint. Each form types the hidden
+        // function reference like an ordinary polymorphic Var
+        // occurrence (`constrainEnumSugar`): instantiate its scheme,
+        // record the wanted `Enum` constraint keyed to the sugar node's
+        // span + fn_name unique so the desugarer can attach dictionary
+        // evidence, and unify the instantiated type with the concrete
+        // `elem -> … -> [elem]` shape.
         .EnumFrom => |e| blk: {
             const elem_ty = try infer(ctx, e.from.*);
             const args = try ctx.alloc.dupe(HType, &.{ctx.conArgIndirection(elem_ty)});
-            break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
+            const list_ty = try ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
+            try constrainEnumSugar(ctx, e.fn_name, e.span, &.{elem_ty}, list_ty);
+            break :blk list_ty;
         },
         .EnumFromThen => |e| blk: {
             const from_ty = try infer(ctx, e.from.*);
             const then_ty = try infer(ctx, e.then.*);
             try ctx.unifyNow(from_ty, then_ty, e.span);
             const args = try ctx.alloc.dupe(HType, &.{ctx.conArgIndirection(from_ty)});
-            break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
+            const list_ty = try ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
+            try constrainEnumSugar(ctx, e.fn_name, e.span, &.{ from_ty, then_ty }, list_ty);
+            break :blk list_ty;
         },
         .EnumFromTo => |e| blk: {
             const from_ty = try infer(ctx, e.from.*);
             const to_ty = try infer(ctx, e.to.*);
             try ctx.unifyNow(from_ty, to_ty, e.span);
             const args = try ctx.alloc.dupe(HType, &.{ctx.conArgIndirection(from_ty)});
-            break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
+            const list_ty = try ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
+            try constrainEnumSugar(ctx, e.fn_name, e.span, &.{ from_ty, to_ty }, list_ty);
+            break :blk list_ty;
         },
         .EnumFromThenTo => |e| blk: {
             const from_ty = try infer(ctx, e.from.*);
@@ -1597,7 +1651,9 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
             try ctx.unifyNow(from_ty, then_ty, e.span);
             try ctx.unifyNow(from_ty, to_ty, e.span);
             const args = try ctx.alloc.dupe(HType, &.{ctx.conArgIndirection(from_ty)});
-            break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
+            const list_ty = try ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.List, .args = args } });
+            try constrainEnumSugar(ctx, e.fn_name, e.span, &.{ from_ty, then_ty, to_ty }, list_ty);
+            break :blk list_ty;
         },
 
         // ── Paren ─────────────────────────────────────────────────────

@@ -24,6 +24,7 @@
 //! force the variable `p`?
 //!
 //!   demands(p)                      = true
+//!   demands(⊥)                      = true                  (vacuous: ⊥ never reaches WHNF)
 //!   demands(prim a1..an)           = ∃i. demands(ai)        (primops are strict)
 //!   demands(f a1..an) | saturated  = ∃i. strict(f,i) ∧ demands(ai)
 //!   demands(f a1..an) | partial    = false                  (P-node is WHNF)
@@ -58,16 +59,45 @@ const CoreProgram = core.CoreProgram;
 pub const FnDemand = struct {
     strict: u64 = 0,
     unbox: u64 = 0,
+    /// The function's result type is Int or Char, so its WHNF value is
+    /// always a tagged integer immediate. A worker/wrapper split can
+    /// then give the worker a raw `i64` return (return-value unboxing —
+    /// the 1-bit integer subset of GHC's Constructed Product Result
+    /// analysis): saturated callers skip the post-call force entirely
+    /// and self-recursive workers become genuine tail calls.
+    cpr: bool = false,
 };
 
 /// Demand masks keyed by function binder unique.
 pub const StrictnessMap = std.AutoHashMapUnmanaged(u64, FnDemand);
+
+/// Uniques of `let` binders whose body certainly forces them.
+pub const LetSet = std.AutoHashMapUnmanaged(u64, void);
+
+/// Result of the whole-program demand analysis: per-function strict
+/// parameter masks plus the set of strict `let` binders (let-to-case
+/// candidates, GHC's "let-to-case" transform): `let x = f a in body`
+/// where `body` demands `x` can evaluate the RHS eagerly instead of
+/// suspending it as an F-thunk — the body forces the thunk on every
+/// execution path anyway, so the allocation is pure overhead.
+pub const AnalysisResult = struct {
+    masks: StrictnessMap,
+    strict_lets: LetSet,
+
+    pub fn deinit(self: *AnalysisResult, alloc: std.mem.Allocator) void {
+        self.masks.deinit(alloc);
+        self.strict_lets.deinit(alloc);
+    }
+};
 
 const FnInfo = struct {
     params: []const u64,
     /// Bit i set = parameter i has an immediate-representation type
     /// (Int/Char) and is therefore a worker-unboxing candidate.
     imm_typed: u64,
+    /// The declared result type (after all parameter arrows) is Int or
+    /// Char — return-value unboxing candidate (FnDemand.cpr).
+    cpr: bool,
     body: *const Expr,
 };
 
@@ -80,6 +110,26 @@ fn isImmediateType(ty: core.CoreType) bool {
     };
 }
 
+/// Does the function type reach an immediate-representation result
+/// (Int/Char) after exactly `arity` parameter arrows? `forall` binders
+/// are erased at runtime and skipped.
+fn resultIsImmediate(ty: core.CoreType, arity: usize) bool {
+    var cur = ty;
+    var stripped: usize = 0;
+    while (true) {
+        switch (cur) {
+            .ForAllTy => |fa| cur = fa.body.*,
+            .FunTy => |ft| {
+                if (stripped == arity) return false;
+                cur = ft.res.*;
+                stripped += 1;
+            },
+            else => break,
+        }
+    }
+    return stripped == arity and isImmediateType(cur);
+}
+
 /// Analyse all modules of a program. `programs` is the per-module Core
 /// in any order; the analysis is whole-program because user modules call
 /// Prelude functions. The returned map is owned by the caller (deinit
@@ -87,7 +137,7 @@ fn isImmediateType(ty: core.CoreType) bool {
 pub fn analyse(
     alloc: std.mem.Allocator,
     programs: []const CoreProgram,
-) std.mem.Allocator.Error!StrictnessMap {
+) std.mem.Allocator.Error!AnalysisResult {
     // ── Collect functions: unique → (params, body) ──────────────────
     var fns = std.AutoHashMapUnmanaged(u64, FnInfo){};
     defer {
@@ -120,6 +170,7 @@ pub fn analyse(
         try masks.put(alloc, entry.key_ptr.*, .{
             .strict = mask,
             .unbox = mask & entry.value_ptr.imm_typed,
+            .cpr = entry.value_ptr.cpr,
         });
     }
 
@@ -138,7 +189,7 @@ pub fn analyse(
             }
             const slot = masks.getPtr(entry.key_ptr.*).?;
             if (slot.strict != mask) {
-                slot.* = .{ .strict = mask, .unbox = mask & info.imm_typed };
+                slot.* = .{ .strict = mask, .unbox = mask & info.imm_typed, .cpr = info.cpr };
                 changed = true;
             }
         }
@@ -164,7 +215,56 @@ pub fn analyse(
         }
     }
 
-    return masks;
+    // ── Strict let binders (let-to-case candidates) ─────────────────
+    // With the fixpoint masks in hand, walk every function body and
+    // record each non-recursive `let x = rhs in body` whose body
+    // demands `x`.
+    var strict_lets = LetSet{};
+    errdefer strict_lets.deinit(alloc);
+    var lets_it = fns.iterator();
+    while (lets_it.next()) |entry| {
+        try collectStrictLets(alloc, entry.value_ptr.body, &strict_lets, &fns, &aliases, &masks);
+    }
+
+    return .{ .masks = masks, .strict_lets = strict_lets };
+}
+
+/// Walk an expression tree recording every non-recursive `let` binder
+/// that its body certainly forces (see `AnalysisResult.strict_lets`).
+fn collectStrictLets(
+    alloc: std.mem.Allocator,
+    e: *const Expr,
+    out: *LetSet,
+    fns: *const std.AutoHashMapUnmanaged(u64, FnInfo),
+    aliases: *const std.AutoHashMapUnmanaged(u64, u64),
+    masks: *const StrictnessMap,
+) std.mem.Allocator.Error!void {
+    switch (e.*) {
+        .Var, .Lit, .Type, .Coercion => {},
+        .Lam => |l| try collectStrictLets(alloc, l.body, out, fns, aliases, masks),
+        .App => |a| {
+            try collectStrictLets(alloc, a.fn_expr, out, fns, aliases, masks);
+            try collectStrictLets(alloc, a.arg, out, fns, aliases, masks);
+        },
+        .Case => |c| {
+            try collectStrictLets(alloc, c.scrutinee, out, fns, aliases, masks);
+            for (c.alts) |alt| try collectStrictLets(alloc, alt.body, out, fns, aliases, masks);
+        },
+        .Let => |l| {
+            switch (l.bind) {
+                .NonRec => |pair| {
+                    if (demands(l.body, pair.binder.name.unique.value, fns, aliases, masks)) {
+                        try out.put(alloc, pair.binder.name.unique.value, {});
+                    }
+                    try collectStrictLets(alloc, pair.rhs, out, fns, aliases, masks);
+                },
+                .Rec => |pairs| for (pairs) |pair| {
+                    try collectStrictLets(alloc, pair.rhs, out, fns, aliases, masks);
+                },
+            }
+            try collectStrictLets(alloc, l.body, out, fns, aliases, masks);
+        },
+    }
 }
 
 fn collectFn(
@@ -199,9 +299,13 @@ fn collectFn(
         return; // CAF — nothing to analyse.
     }
     try collectVarAliases(alloc, cur, aliases);
+    // Compute before toOwnedSlice below — it empties `params`, so an
+    // inline field initializer would see arity 0.
+    const cpr = resultIsImmediate(pair.binder.ty, params.items.len);
     try fns.put(alloc, unique, .{
         .params = try params.toOwnedSlice(alloc),
         .imm_typed = imm_typed,
+        .cpr = cpr,
         .body = cur,
     });
 }
@@ -253,6 +357,28 @@ fn resolveAlias(aliases: *const std.AutoHashMapUnmanaged(u64, u64), unique: u64)
     return cur;
 }
 
+/// Is `e` certainly bottom — guaranteed to diverge (or abort) when
+/// evaluated to WHNF? Recognises applications of `error` / `primError`
+/// and any reference to `undefined`. The desugarer emits
+/// `error "Non-exhaustive patterns …"` as the fallback alternative of
+/// every compiled pattern match, so dead default branches land here.
+///
+/// A bottoming expression vacuously demands every variable: if one
+/// branch of a case is ⊥, that branch can never weaken the strictness
+/// meet over the alternatives (`f x = ⊥` is strict in `x` by the
+/// definition `f ⊥ = ⊥`). GHC's DmdAnal does the same by giving such
+/// branches the bottom demand type.
+fn isBottom(e: *const Expr) bool {
+    var n_args: usize = 0;
+    var cur = e;
+    while (cur.* == .App) : (n_args += 1) cur = cur.App.fn_expr;
+    if (cur.* != .Var) return false;
+    const base = cur.Var.name.base;
+    if (std.mem.eql(u8, base, "undefined")) return true;
+    return n_args >= 1 and
+        (std.mem.eql(u8, base, "error") or std.mem.eql(u8, base, "primError"));
+}
+
 /// Does evaluating `e` to WHNF force the variable `p`?
 fn demands(
     e: *const Expr,
@@ -261,6 +387,7 @@ fn demands(
     aliases: *const std.AutoHashMapUnmanaged(u64, u64),
     masks: *const StrictnessMap,
 ) bool {
+    if (isBottom(e)) return true;
     switch (e.*) {
         .Var => |id| return resolveAlias(aliases, id.name.unique.value) == p,
         .Lit, .Lam, .Type, .Coercion => return false,
@@ -404,8 +531,9 @@ test "demand: fib-shaped recursion is strict in its parameter" {
     binds[0] = .{ .NonRec = .{ .binder = fib, .rhs = try lam(alloc, n, case_e) } };
     const progs = [_]CoreProgram{.{ .data_decls = &.{}, .binds = binds }};
 
-    var masks = try analyse(testing.allocator, &progs);
-    defer masks.deinit(testing.allocator);
+    var res = try analyse(testing.allocator, &progs);
+    defer res.deinit(testing.allocator);
+    const masks = res.masks;
 
     try testing.expectEqual(@as(u64, 1), masks.get(2000).?.strict);
 }
@@ -450,11 +578,92 @@ test "demand: accumulator threaded through recursive strict call is strict" {
     } };
     const progs = [_]CoreProgram{.{ .data_decls = &.{}, .binds = binds }};
 
-    var masks = try analyse(testing.allocator, &progs);
-    defer masks.deinit(testing.allocator);
+    var res = try analyse(testing.allocator, &progs);
+    defer res.deinit(testing.allocator);
+    const masks = res.masks;
 
     // Both acc (bit 0) and n (bit 1) strict.
     try testing.expectEqual(@as(u64, 0b11), masks.get(2000).?.strict);
+}
+
+test "demand: dead non-exhaustive error branch does not poison strictness" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The desugarer compiles `if a < b then q else helper (sub a b) b (add q 1)`
+    // into nested cases whose innermost default is `error "Non-exhaustive…"`.
+    // helper = \a -> \b -> \q ->
+    //   case lt a b of
+    //     True  -> q
+    //     _     -> case lt a b of
+    //       False -> helper (sub a b) b (add q 1)
+    //       _     -> error "Non-exhaustive patterns in case"
+    const a = testId("a", 1);
+    const b = testId("b", 2);
+    const q = testId("q", 3);
+    const lt = testId("lt_Int", 10);
+    const add = testId("add_Int", 11);
+    const sub = testId("sub_Int", 12);
+    const err = testId("error", 5);
+    const helper = testId("helper", 2000);
+
+    const scrut = try app(alloc, try app(alloc, try v(alloc, lt), try v(alloc, a)), try v(alloc, b));
+    const rec_call = try app(
+        alloc,
+        try app(
+            alloc,
+            try app(
+                alloc,
+                try v(alloc, helper),
+                try app(alloc, try app(alloc, try v(alloc, sub), try v(alloc, a)), try v(alloc, b)),
+            ),
+            try v(alloc, b),
+        ),
+        try app(alloc, try app(alloc, try v(alloc, add), try v(alloc, q)), try lit(alloc, 1)),
+    );
+    const err_str = try alloc.create(Expr);
+    err_str.* = .{ .Lit = .{ .val = .{ .String = "Non-exhaustive patterns in case" }, .span = testSpan() } };
+    const err_call = try app(alloc, try v(alloc, err), err_str);
+
+    const inner_alts = try alloc.alloc(core.Alt, 2);
+    inner_alts[0] = .{ .con = .{ .DataAlt = .{ .base = "False", .unique = .{ .value = 20 } } }, .binders = &.{}, .body = rec_call };
+    inner_alts[1] = .{ .con = .{ .Default = {} }, .binders = &.{}, .body = err_call };
+    const inner_case = try alloc.create(Expr);
+    inner_case.* = .{ .Case = .{
+        .scrutinee = scrut,
+        .binder = testId("s2", 31),
+        .ty = .{ .TyVar = .{ .base = "t", .unique = .{ .value = 0 } } },
+        .alts = inner_alts,
+        .span = testSpan(),
+    } };
+
+    const outer_alts = try alloc.alloc(core.Alt, 2);
+    outer_alts[0] = .{ .con = .{ .DataAlt = .{ .base = "True", .unique = .{ .value = 21 } } }, .binders = &.{}, .body = try v(alloc, q) };
+    outer_alts[1] = .{ .con = .{ .Default = {} }, .binders = &.{}, .body = inner_case };
+    const outer_case = try alloc.create(Expr);
+    outer_case.* = .{ .Case = .{
+        .scrutinee = scrut,
+        .binder = testId("s1", 30),
+        .ty = .{ .TyVar = .{ .base = "t", .unique = .{ .value = 0 } } },
+        .alts = outer_alts,
+        .span = testSpan(),
+    } };
+
+    const binds = try alloc.alloc(Bind, 1);
+    binds[0] = .{ .NonRec = .{
+        .binder = helper,
+        .rhs = try lam(alloc, a, try lam(alloc, b, try lam(alloc, q, outer_case))),
+    } };
+    const progs = [_]CoreProgram{.{ .data_decls = &.{}, .binds = binds }};
+
+    var res = try analyse(testing.allocator, &progs);
+    defer res.deinit(testing.allocator);
+    const masks = res.masks;
+
+    // All three parameters strict — the dead error branch must not
+    // demote the accumulator `q` to lazy.
+    try testing.expectEqual(@as(u64, 0b111), masks.get(2000).?.strict);
 }
 
 test "demand: argument only used under a lambda is not strict" {
@@ -474,8 +683,9 @@ test "demand: argument only used under a lambda is not strict" {
     } };
     const progs = [_]CoreProgram{.{ .data_decls = &.{}, .binds = binds }};
 
-    var masks = try analyse(testing.allocator, &progs);
-    defer masks.deinit(testing.allocator);
+    var res = try analyse(testing.allocator, &progs);
+    defer res.deinit(testing.allocator);
+    const masks = res.masks;
 
     try testing.expectEqual(@as(u64, 0b01), masks.get(2000).?.strict);
 }
@@ -498,8 +708,9 @@ test "demand: alias bindings inherit the target's strictness" {
     binds[1] = .{ .NonRec = .{ .binder = plus, .rhs = try v(alloc, prim_add) } };
     const progs = [_]CoreProgram{.{ .data_decls = &.{}, .binds = binds }};
 
-    var masks = try analyse(testing.allocator, &progs);
-    defer masks.deinit(testing.allocator);
+    var res = try analyse(testing.allocator, &progs);
+    defer res.deinit(testing.allocator);
+    const masks = res.masks;
 
     try testing.expectEqual(@as(u64, 0b11), masks.get(2000).?.strict);
     try testing.expectEqual(@as(u64, 0b11), masks.get(2001).?.strict);
