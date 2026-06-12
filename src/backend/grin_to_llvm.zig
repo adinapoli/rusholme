@@ -3933,8 +3933,31 @@ pub const GrinTranslator = struct {
     /// Force a translated operand unless its GRIN value is statically
     /// WHNF (strict-forced parameter, primop result, immediate).
     fn forceOperandIfNeeded(self: *GrinTranslator, raw: llvm.Value, val: grin.Val) llvm.Value {
-        if (self.valYieldsWhnf(val)) return raw;
-        return self.callForceIfNeeded(raw);
+        if (self.valYieldsWhnf(val)) {
+            // The operand may have been captured before a later force
+            // rebound this variable (see below) — the recorded binding
+            // is the freshest (already-forced) value, the captured raw
+            // may still be the suspended thunk.
+            if (val == .Var) {
+                if (self.params.get(val.Var.unique.value)) |cur| {
+                    if (c.LLVMGetTypeKind(c.LLVMTypeOf(cur)) ==
+                        c.LLVMGetTypeKind(c.LLVMTypeOf(raw))) return cur;
+                }
+            }
+            return raw;
+        }
+        const forced = self.callForceIfNeeded(raw);
+        // Variable operand: remember the forced value so later uses in
+        // dominated code skip re-forcing (LLVM cannot CSE __rhc_force
+        // calls itself — forcing updates the thunk in place). Sibling
+        // case alternatives are protected by the per-alternative scope
+        // save/restore.
+        if (val == .Var and forced != raw) {
+            const u = val.Var.unique.value;
+            self.params.put(u, forced) catch return forced;
+            self.whnf_vars.put(u, {}) catch return forced;
+        }
+        return forced;
     }
 
     fn callForceIfNeeded(self: *GrinTranslator, val: llvm.Value) llvm.Value {
