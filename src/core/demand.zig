@@ -59,16 +59,45 @@ const CoreProgram = core.CoreProgram;
 pub const FnDemand = struct {
     strict: u64 = 0,
     unbox: u64 = 0,
+    /// The function's result type is Int or Char, so its WHNF value is
+    /// always a tagged integer immediate. A worker/wrapper split can
+    /// then give the worker a raw `i64` return (return-value unboxing —
+    /// the 1-bit integer subset of GHC's Constructed Product Result
+    /// analysis): saturated callers skip the post-call force entirely
+    /// and self-recursive workers become genuine tail calls.
+    cpr: bool = false,
 };
 
 /// Demand masks keyed by function binder unique.
 pub const StrictnessMap = std.AutoHashMapUnmanaged(u64, FnDemand);
+
+/// Uniques of `let` binders whose body certainly forces them.
+pub const LetSet = std.AutoHashMapUnmanaged(u64, void);
+
+/// Result of the whole-program demand analysis: per-function strict
+/// parameter masks plus the set of strict `let` binders (let-to-case
+/// candidates, GHC's "let-to-case" transform): `let x = f a in body`
+/// where `body` demands `x` can evaluate the RHS eagerly instead of
+/// suspending it as an F-thunk — the body forces the thunk on every
+/// execution path anyway, so the allocation is pure overhead.
+pub const AnalysisResult = struct {
+    masks: StrictnessMap,
+    strict_lets: LetSet,
+
+    pub fn deinit(self: *AnalysisResult, alloc: std.mem.Allocator) void {
+        self.masks.deinit(alloc);
+        self.strict_lets.deinit(alloc);
+    }
+};
 
 const FnInfo = struct {
     params: []const u64,
     /// Bit i set = parameter i has an immediate-representation type
     /// (Int/Char) and is therefore a worker-unboxing candidate.
     imm_typed: u64,
+    /// The declared result type (after all parameter arrows) is Int or
+    /// Char — return-value unboxing candidate (FnDemand.cpr).
+    cpr: bool,
     body: *const Expr,
 };
 
@@ -81,6 +110,26 @@ fn isImmediateType(ty: core.CoreType) bool {
     };
 }
 
+/// Does the function type reach an immediate-representation result
+/// (Int/Char) after exactly `arity` parameter arrows? `forall` binders
+/// are erased at runtime and skipped.
+fn resultIsImmediate(ty: core.CoreType, arity: usize) bool {
+    var cur = ty;
+    var stripped: usize = 0;
+    while (true) {
+        switch (cur) {
+            .ForAllTy => |fa| cur = fa.body.*,
+            .FunTy => |ft| {
+                if (stripped == arity) return false;
+                cur = ft.res.*;
+                stripped += 1;
+            },
+            else => break,
+        }
+    }
+    return stripped == arity and isImmediateType(cur);
+}
+
 /// Analyse all modules of a program. `programs` is the per-module Core
 /// in any order; the analysis is whole-program because user modules call
 /// Prelude functions. The returned map is owned by the caller (deinit
@@ -88,7 +137,7 @@ fn isImmediateType(ty: core.CoreType) bool {
 pub fn analyse(
     alloc: std.mem.Allocator,
     programs: []const CoreProgram,
-) std.mem.Allocator.Error!StrictnessMap {
+) std.mem.Allocator.Error!AnalysisResult {
     // ── Collect functions: unique → (params, body) ──────────────────
     var fns = std.AutoHashMapUnmanaged(u64, FnInfo){};
     defer {
@@ -121,6 +170,7 @@ pub fn analyse(
         try masks.put(alloc, entry.key_ptr.*, .{
             .strict = mask,
             .unbox = mask & entry.value_ptr.imm_typed,
+            .cpr = entry.value_ptr.cpr,
         });
     }
 
@@ -139,7 +189,7 @@ pub fn analyse(
             }
             const slot = masks.getPtr(entry.key_ptr.*).?;
             if (slot.strict != mask) {
-                slot.* = .{ .strict = mask, .unbox = mask & info.imm_typed };
+                slot.* = .{ .strict = mask, .unbox = mask & info.imm_typed, .cpr = info.cpr };
                 changed = true;
             }
         }
@@ -165,7 +215,56 @@ pub fn analyse(
         }
     }
 
-    return masks;
+    // ── Strict let binders (let-to-case candidates) ─────────────────
+    // With the fixpoint masks in hand, walk every function body and
+    // record each non-recursive `let x = rhs in body` whose body
+    // demands `x`.
+    var strict_lets = LetSet{};
+    errdefer strict_lets.deinit(alloc);
+    var lets_it = fns.iterator();
+    while (lets_it.next()) |entry| {
+        try collectStrictLets(alloc, entry.value_ptr.body, &strict_lets, &fns, &aliases, &masks);
+    }
+
+    return .{ .masks = masks, .strict_lets = strict_lets };
+}
+
+/// Walk an expression tree recording every non-recursive `let` binder
+/// that its body certainly forces (see `AnalysisResult.strict_lets`).
+fn collectStrictLets(
+    alloc: std.mem.Allocator,
+    e: *const Expr,
+    out: *LetSet,
+    fns: *const std.AutoHashMapUnmanaged(u64, FnInfo),
+    aliases: *const std.AutoHashMapUnmanaged(u64, u64),
+    masks: *const StrictnessMap,
+) std.mem.Allocator.Error!void {
+    switch (e.*) {
+        .Var, .Lit, .Type, .Coercion => {},
+        .Lam => |l| try collectStrictLets(alloc, l.body, out, fns, aliases, masks),
+        .App => |a| {
+            try collectStrictLets(alloc, a.fn_expr, out, fns, aliases, masks);
+            try collectStrictLets(alloc, a.arg, out, fns, aliases, masks);
+        },
+        .Case => |c| {
+            try collectStrictLets(alloc, c.scrutinee, out, fns, aliases, masks);
+            for (c.alts) |alt| try collectStrictLets(alloc, alt.body, out, fns, aliases, masks);
+        },
+        .Let => |l| {
+            switch (l.bind) {
+                .NonRec => |pair| {
+                    if (demands(l.body, pair.binder.name.unique.value, fns, aliases, masks)) {
+                        try out.put(alloc, pair.binder.name.unique.value, {});
+                    }
+                    try collectStrictLets(alloc, pair.rhs, out, fns, aliases, masks);
+                },
+                .Rec => |pairs| for (pairs) |pair| {
+                    try collectStrictLets(alloc, pair.rhs, out, fns, aliases, masks);
+                },
+            }
+            try collectStrictLets(alloc, l.body, out, fns, aliases, masks);
+        },
+    }
 }
 
 fn collectFn(
@@ -200,9 +299,13 @@ fn collectFn(
         return; // CAF — nothing to analyse.
     }
     try collectVarAliases(alloc, cur, aliases);
+    // Compute before toOwnedSlice below — it empties `params`, so an
+    // inline field initializer would see arity 0.
+    const cpr = resultIsImmediate(pair.binder.ty, params.items.len);
     try fns.put(alloc, unique, .{
         .params = try params.toOwnedSlice(alloc),
         .imm_typed = imm_typed,
+        .cpr = cpr,
         .body = cur,
     });
 }
@@ -428,8 +531,9 @@ test "demand: fib-shaped recursion is strict in its parameter" {
     binds[0] = .{ .NonRec = .{ .binder = fib, .rhs = try lam(alloc, n, case_e) } };
     const progs = [_]CoreProgram{.{ .data_decls = &.{}, .binds = binds }};
 
-    var masks = try analyse(testing.allocator, &progs);
-    defer masks.deinit(testing.allocator);
+    var res = try analyse(testing.allocator, &progs);
+    defer res.deinit(testing.allocator);
+    const masks = res.masks;
 
     try testing.expectEqual(@as(u64, 1), masks.get(2000).?.strict);
 }
@@ -474,8 +578,9 @@ test "demand: accumulator threaded through recursive strict call is strict" {
     } };
     const progs = [_]CoreProgram{.{ .data_decls = &.{}, .binds = binds }};
 
-    var masks = try analyse(testing.allocator, &progs);
-    defer masks.deinit(testing.allocator);
+    var res = try analyse(testing.allocator, &progs);
+    defer res.deinit(testing.allocator);
+    const masks = res.masks;
 
     // Both acc (bit 0) and n (bit 1) strict.
     try testing.expectEqual(@as(u64, 0b11), masks.get(2000).?.strict);
@@ -552,8 +657,9 @@ test "demand: dead non-exhaustive error branch does not poison strictness" {
     } };
     const progs = [_]CoreProgram{.{ .data_decls = &.{}, .binds = binds }};
 
-    var masks = try analyse(testing.allocator, &progs);
-    defer masks.deinit(testing.allocator);
+    var res = try analyse(testing.allocator, &progs);
+    defer res.deinit(testing.allocator);
+    const masks = res.masks;
 
     // All three parameters strict — the dead error branch must not
     // demote the accumulator `q` to lazy.
@@ -577,8 +683,9 @@ test "demand: argument only used under a lambda is not strict" {
     } };
     const progs = [_]CoreProgram{.{ .data_decls = &.{}, .binds = binds }};
 
-    var masks = try analyse(testing.allocator, &progs);
-    defer masks.deinit(testing.allocator);
+    var res = try analyse(testing.allocator, &progs);
+    defer res.deinit(testing.allocator);
+    const masks = res.masks;
 
     try testing.expectEqual(@as(u64, 0b01), masks.get(2000).?.strict);
 }
@@ -601,8 +708,9 @@ test "demand: alias bindings inherit the target's strictness" {
     binds[1] = .{ .NonRec = .{ .binder = plus, .rhs = try v(alloc, prim_add) } };
     const progs = [_]CoreProgram{.{ .data_decls = &.{}, .binds = binds }};
 
-    var masks = try analyse(testing.allocator, &progs);
-    defer masks.deinit(testing.allocator);
+    var res = try analyse(testing.allocator, &progs);
+    defer res.deinit(testing.allocator);
+    const masks = res.masks;
 
     try testing.expectEqual(@as(u64, 0b11), masks.get(2000).?.strict);
     try testing.expectEqual(@as(u64, 0b11), masks.get(2001).?.strict);

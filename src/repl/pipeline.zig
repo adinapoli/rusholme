@@ -406,7 +406,7 @@ pub const Pipeline = struct {
         }
 
         // ── Translate to GRIN ──────────────────────────────────────
-        const grin_result = translate_mod.translateProgram(alloc, lift_result.program, external_arities, external_con_map, null, 0) catch {
+        const grin_result = translate_mod.translateProgram(alloc, lift_result.program, external_arities, external_con_map, null, null, 0) catch {
             module_types.deinit(alloc);
             return CompileError.OutOfMemory;
         };
