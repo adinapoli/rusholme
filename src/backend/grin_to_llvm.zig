@@ -1349,6 +1349,22 @@ pub const GrinTranslator = struct {
         return written;
     }
 
+    /// Does this expression certainly abort the process when evaluated
+    /// (tail position is an `error`/`unreachable` primop)? Such case
+    /// alternatives end in `unreachable` and contribute no incoming
+    /// value to the merge phi — a ⊥ branch must not drag an otherwise
+    /// all-i64 phi into the boxed-ptr representation.
+    fn exprEndsInAbort(expr: *const grin.Expr) bool {
+        return switch (expr.*) {
+            .App => |app| std.mem.eql(u8, app.name.base, "error") or
+                std.mem.eql(u8, app.name.base, "primError") or
+                std.mem.eql(u8, app.name.base, "unreachable"),
+            .Bind => |b| exprEndsInAbort(b.rhs),
+            .Block => |e| exprEndsInAbort(e),
+            else => false,
+        };
+    }
+
     /// Will this GRIN application be lowered as a saturated direct call
     /// to a CPR worker (raw i64 result)? Mirrors the conditions of the
     /// worker fast path in translateAppToValue exactly — the two must
@@ -3403,6 +3419,15 @@ pub const GrinTranslator = struct {
 
             // Translate the alternative body as a value (not with ret)
             const alt_value = try self.translateExprToValue(alt.body, result_name);
+
+            // A ⊥ alternative (error/unreachable in tail position) never
+            // reaches the merge block: rts_error aborts. Terminate with
+            // `unreachable` and contribute no phi incoming, so a dead
+            // branch cannot change the phi's representation.
+            if (exprEndsInAbort(alt.body)) {
+                _ = c.LLVMBuildUnreachable(self.builder);
+                continue;
+            }
 
             // Every alternative must produce a value in bind context
             if (alt_value) |val| {
