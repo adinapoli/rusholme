@@ -79,6 +79,10 @@ const data_function_source = @embedFile("data_function_source");
 /// between `Data.Function` and Prelude.
 const ghc_base_source = @embedFile("ghc_base_source");
 
+const data_list_source = @embedFile("data_list_source");
+const data_maybe_source = @embedFile("data_maybe_source");
+const data_either_source = @embedFile("data_either_source");
+
 // ── Result types ──────────────────────────────────────────────────────
 
 /// Result of processing a REPL input.
@@ -287,11 +291,14 @@ pub const Session = struct {
         self.loadBootModule(rhc_prim_source, 0);
         self.loadBootModule(data_function_source, 1);
         self.loadBootModule(ghc_base_source, 2);
+        self.loadBootModule(data_list_source, 3);
+        self.loadBootModule(data_maybe_source, 4);
+        self.loadBootModule(data_either_source, 5);
 
         var diags = DiagnosticCollector.init();
         defer diags.deinit(self.allocator);
 
-        const file_id: FileId = 3; // Prelude is the fourth boot module.
+        const file_id: FileId = 6; // Prelude is the seventh boot module.
 
         const result = self.pipeline.compileModule(
             prelude_source,

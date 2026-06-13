@@ -138,6 +138,15 @@ pub fn build(b: *std.Build) void {
     mod.addAnonymousImport("ghc_base_source", .{
         .root_source_file = b.path("lib/ghc-internal/GHC/Base.hs"),
     });
+    mod.addAnonymousImport("data_list_source", .{
+        .root_source_file = b.path("lib/base/Data/List.hs"),
+    });
+    mod.addAnonymousImport("data_maybe_source", .{
+        .root_source_file = b.path("lib/base/Data/Maybe.hs"),
+    });
+    mod.addAnonymousImport("data_either_source", .{
+        .root_source_file = b.path("lib/base/Data/Either.hs"),
+    });
 
     // Runtime module - for LLVM-based runtime tests
     const runtime_mod = b.addModule("runtime", .{
@@ -370,6 +379,33 @@ pub fn build(b: *std.Build) void {
     const ghc_base_path_wf = b.addNamedWriteFiles("ghc_base_path");
     const ghc_base_path_file = ghc_base_path_wf.add("path.txt", ghc_base_path_option);
 
+    // Data.List source path.
+    const data_list_path_option = b.option(
+        []const u8,
+        "data-list-path",
+        "Path to lib/base/Data/List.hs",
+    ) orelse b.getInstallPath(.@"prefix", "lib/base/Data/List.hs");
+    const data_list_path_wf = b.addNamedWriteFiles("data_list_path");
+    const data_list_path_file = data_list_path_wf.add("path.txt", data_list_path_option);
+
+    // Data.Maybe source path.
+    const data_maybe_path_option = b.option(
+        []const u8,
+        "data-maybe-path",
+        "Path to lib/base/Data/Maybe.hs",
+    ) orelse b.getInstallPath(.@"prefix", "lib/base/Data/Maybe.hs");
+    const data_maybe_path_wf = b.addNamedWriteFiles("data_maybe_path");
+    const data_maybe_path_file = data_maybe_path_wf.add("path.txt", data_maybe_path_option);
+
+    // Data.Either source path.
+    const data_either_path_option = b.option(
+        []const u8,
+        "data-either-path",
+        "Path to lib/base/Data/Either.hs",
+    ) orelse b.getInstallPath(.@"prefix", "lib/base/Data/Either.hs");
+    const data_either_path_wf = b.addNamedWriteFiles("data_either_path");
+    const data_either_path_file = data_either_path_wf.add("path.txt", data_either_path_option);
+
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
@@ -441,6 +477,15 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addAnonymousImport("ghc_base_path", .{
         .root_source_file = ghc_base_path_file,
     });
+    exe.root_module.addAnonymousImport("data_list_path", .{
+        .root_source_file = data_list_path_file,
+    });
+    exe.root_module.addAnonymousImport("data_maybe_path", .{
+        .root_source_file = data_maybe_path_file,
+    });
+    exe.root_module.addAnonymousImport("data_either_path", .{
+        .root_source_file = data_either_path_file,
+    });
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
@@ -457,6 +502,10 @@ pub fn build(b: *std.Build) void {
     b.installFile("lib/base/Data/Function.hs", "lib/base/Data/Function.hs");
     // GHC.Base: compiler-magic types + core classes.
     b.installFile("lib/ghc-internal/GHC/Base.hs", "lib/ghc-internal/GHC/Base.hs");
+    // base/Data.{List,Maybe,Either}: pure consumer combinators.
+    b.installFile("lib/base/Data/List.hs", "lib/base/Data/List.hs");
+    b.installFile("lib/base/Data/Maybe.hs", "lib/base/Data/Maybe.hs");
+    b.installFile("lib/base/Data/Either.hs", "lib/base/Data/Either.hs");
 
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
@@ -747,6 +796,15 @@ pub fn build(b: *std.Build) void {
     });
     repl_wasm.root_module.addAnonymousImport("ghc_base_source", .{
         .root_source_file = b.path("lib/ghc-internal/GHC/Base.hs"),
+    });
+    repl_wasm.root_module.addAnonymousImport("data_list_source", .{
+        .root_source_file = b.path("lib/base/Data/List.hs"),
+    });
+    repl_wasm.root_module.addAnonymousImport("data_maybe_source", .{
+        .root_source_file = b.path("lib/base/Data/Maybe.hs"),
+    });
+    repl_wasm.root_module.addAnonymousImport("data_either_source", .{
+        .root_source_file = b.path("lib/base/Data/Either.hs"),
     });
     // Reactor mode: the REPL is a long-lived module with exported functions,
     // not a command that runs once and exits. In reactor mode the entry point
