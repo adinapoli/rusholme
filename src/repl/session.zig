@@ -70,6 +70,10 @@ const prelude_source = @embedFile("prelude_source");
 /// Prelude.  Mirrors the multi-boot wiring `cmdBuild` uses (#655).
 const rhc_prim_source = @embedFile("rhc_prim_source");
 
+/// Data.Function source — base-package combinators (`id`, `const`,
+/// `flip`, `(.)`, `($)`).  Compiled between `RHC.Prim` and Prelude.
+const data_function_source = @embedFile("data_function_source");
+
 // ── Result types ──────────────────────────────────────────────────────
 
 /// Result of processing a REPL input.
@@ -269,18 +273,19 @@ pub const Session = struct {
             return;
         };
 
-        // Compile RHC.Prim ahead of Prelude.  Its exports (every
-        // `foreign import prim` wrapper) are accumulated into the
-        // session state so Prelude's `import RHC.Prim` resolves and
-        // every downstream input can reach the primops too.
-        // Non-fatal: a missing/broken RHC.Prim degrades the REPL to
-        // wired-in names + Prelude, matching pre-split behaviour.
+        // Compile RHC.Prim → Data.Function ahead of Prelude.  Each
+        // boot module's exports are accumulated into the session
+        // state so the next compile sees them.  Non-fatal: a
+        // missing/broken boot module degrades the REPL to wired-in
+        // names + whatever managed to load, matching pre-split
+        // behaviour.
         self.loadBootModule(rhc_prim_source, 0);
+        self.loadBootModule(data_function_source, 1);
 
         var diags = DiagnosticCollector.init();
         defer diags.deinit(self.allocator);
 
-        const file_id: FileId = 1; // Prelude gets file_id 1 (after RHC.Prim).
+        const file_id: FileId = 2; // Prelude is the third boot module.
 
         const result = self.pipeline.compileModule(
             prelude_source,

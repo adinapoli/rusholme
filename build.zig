@@ -130,6 +130,10 @@ pub fn build(b: *std.Build) void {
     mod.addAnonymousImport("rhc_prim_source", .{
         .root_source_file = b.path("lib/rhc-prim/RHC/Prim.hs"),
     });
+    // Data.Function source: base-package combinators (id/const/…).
+    mod.addAnonymousImport("data_function_source", .{
+        .root_source_file = b.path("lib/base/Data/Function.hs"),
+    });
 
     // Runtime module - for LLVM-based runtime tests
     const runtime_mod = b.addModule("runtime", .{
@@ -340,6 +344,16 @@ pub fn build(b: *std.Build) void {
     const rhc_prim_path_wf = b.addNamedWriteFiles("rhc_prim_path");
     const rhc_prim_path_file = rhc_prim_path_wf.add("path.txt", rhc_prim_path_option);
 
+    // Data.Function source path: the base-package combinators module
+    // (id/const/flip/(.)/($)).  Compiled between RHC.Prim and Prelude.
+    const data_function_path_option = b.option(
+        []const u8,
+        "data-function-path",
+        "Path to lib/base/Data/Function.hs",
+    ) orelse b.getInstallPath(.@"prefix", "lib/base/Data/Function.hs");
+    const data_function_path_wf = b.addNamedWriteFiles("data_function_path");
+    const data_function_path_file = data_function_path_wf.add("path.txt", data_function_path_option);
+
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
@@ -405,6 +419,9 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addAnonymousImport("rhc_prim_path", .{
         .root_source_file = rhc_prim_path_file,
     });
+    exe.root_module.addAnonymousImport("data_function_path", .{
+        .root_source_file = data_function_path_file,
+    });
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
@@ -417,6 +434,8 @@ pub fn build(b: *std.Build) void {
     b.installFile("lib/Prelude.hs", "lib/Prelude.hs");
     // Same for RHC.Prim, the innermost boot package compiled before Prelude.
     b.installFile("lib/rhc-prim/RHC/Prim.hs", "lib/rhc-prim/RHC/Prim.hs");
+    // Data.Function: pure base-package combinators.
+    b.installFile("lib/base/Data/Function.hs", "lib/base/Data/Function.hs");
 
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
@@ -701,6 +720,9 @@ pub fn build(b: *std.Build) void {
     });
     repl_wasm.root_module.addAnonymousImport("rhc_prim_source", .{
         .root_source_file = b.path("lib/rhc-prim/RHC/Prim.hs"),
+    });
+    repl_wasm.root_module.addAnonymousImport("data_function_source", .{
+        .root_source_file = b.path("lib/base/Data/Function.hs"),
     });
     // Reactor mode: the REPL is a long-lived module with exported functions,
     // not a command that runs once and exits. In reactor mode the entry point
