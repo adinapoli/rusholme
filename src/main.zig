@@ -96,6 +96,32 @@ fn getPreludePath() []const u8 {
     return @embedFile("prelude_path");
 }
 
+/// Get the path to the RHC.Prim source file baked in at compile time.
+/// RHC.Prim is the innermost boot package and is compiled before Prelude.
+fn getRhcPrimPath() []const u8 {
+    return @embedFile("rhc_prim_path");
+}
+
+/// Boot modules that the driver auto-prepends, in dependency order.
+///
+/// These mirror the planned `ghc-internal → base` package layering
+/// (decision 0008, amended by `docs/plans/2026-06-13-ghc-internal-base-split.md`):
+/// the innermost layer is `RHC.Prim`, then the public `Prelude`.  More
+/// boot modules (`GHC.Base`, `Data.List`, …) will be added here as the
+/// split progresses.
+///
+/// Each entry pairs a declared module name with a callable that returns
+/// the baked-in source path.  We use a callable rather than a path string
+/// because `@embedFile` requires a compile-time-known import name.
+const BootModule = struct {
+    module_name: []const u8,
+    pathFn: *const fn () []const u8,
+};
+const boot_modules = [_]BootModule{
+    .{ .module_name = "RHC.Prim", .pathFn = getRhcPrimPath },
+    .{ .module_name = "Prelude", .pathFn = getPreludePath },
+};
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -975,40 +1001,45 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     const compile_env_mod = rusholme.modules.compile_env;
     var source_modules: std.ArrayListUnmanaged(compile_env_mod.SourceModule) = .empty;
 
-    // ── Auto-prepend Prelude unless the user explicitly passed it ────────
-    // Check if any user-provided file is the Prelude module.
-    var user_provides_prelude = false;
+    // ── Auto-prepend boot modules unless the user explicitly passed them ─
+    //
+    // The boot modules (`RHC.Prim`, `Prelude`, …) form the layered
+    // Prelude stack.  We prepend them in declared dependency order so
+    // the module graph topo-sorts them ahead of user code.  An entry is
+    // skipped when the user has already supplied a file whose inferred
+    // module name matches — this lets a test or a custom Prelude shadow
+    // a boot module wholesale.
+    var user_module_names: std.StringHashMapUnmanaged(void) = .empty;
     for (file_paths) |fp| {
         const mod_name = try rusholme.modules.module_graph.inferModuleName(arena_alloc, fp);
-        if (std.mem.eql(u8, mod_name, "Prelude")) {
-            user_provides_prelude = true;
-            break;
-        }
+        try user_module_names.put(arena_alloc, mod_name, {});
     }
 
-    // File ID 0 is reserved for the Prelude; user modules start at 1.
+    // File IDs are assigned monotonically; boot modules take the low IDs.
     var next_file_id: u32 = 0;
 
-    if (!user_provides_prelude) {
-        const prelude_path = getPreludePath();
-        if (readSourceFile(arena_alloc, io, prelude_path)) |prelude_source| {
+    for (boot_modules) |boot| {
+        if (user_module_names.contains(boot.module_name)) continue;
+        const boot_path = boot.pathFn();
+        if (readSourceFile(arena_alloc, io, boot_path)) |boot_source| {
             try source_modules.append(arena_alloc, .{
-                .module_name = "Prelude",
-                .source = prelude_source,
+                .module_name = boot.module_name,
+                .source = boot_source,
                 .file_id = next_file_id,
-                .source_path = prelude_path,
+                .source_path = boot_path,
             });
             next_file_id += 1;
         } else |err| {
-            // Prelude not found is non-fatal in development; warn and continue
-            // without implicit Prelude compilation. User modules will still
-            // get wired-in names from populateWiredIn/initBuiltins.
+            // A missing boot module is non-fatal in development: warn and
+            // continue without it.  User modules still get wired-in names
+            // from `initBuiltins` / `populateWiredIn`.  This matches the
+            // pre-split behaviour for a missing Prelude.
             var stderr_buf: [4096]u8 = undefined;
             var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
             const stderr = &stderr_fw.interface;
             switch (err) {
-                error.FileNotFound => try stderr.print("rhc: warning: Prelude not found at '{s}'; using built-in names only\n", .{prelude_path}),
-                else => try stderr.print("rhc: warning: cannot read Prelude '{s}': {}; using built-in names only\n", .{ prelude_path, err }),
+                error.FileNotFound => try stderr.print("rhc: warning: boot module '{s}' not found at '{s}'; using built-in names only\n", .{ boot.module_name, boot_path }),
+                else => try stderr.print("rhc: warning: cannot read boot module '{s}' at '{s}': {}; using built-in names only\n", .{ boot.module_name, boot_path, err }),
             }
             try stderr.flush();
         }

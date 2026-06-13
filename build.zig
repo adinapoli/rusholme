@@ -325,6 +325,16 @@ pub fn build(b: *std.Build) void {
     const prelude_path_wf = b.addNamedWriteFiles("prelude_path");
     const prelude_path_file = prelude_path_wf.add("path.txt", prelude_path_option);
 
+    // RHC.Prim source path: the innermost boot package, holds every
+    // `foreign import prim` declaration.  Compiled before Prelude.
+    const rhc_prim_path_option = b.option(
+        []const u8,
+        "rhc-prim-path",
+        "Path to lib/rhc-prim/RHC/Prim.hs",
+    ) orelse b.getInstallPath(.@"prefix", "lib/rhc-prim/RHC/Prim.hs");
+    const rhc_prim_path_wf = b.addNamedWriteFiles("rhc_prim_path");
+    const rhc_prim_path_file = rhc_prim_path_wf.add("path.txt", rhc_prim_path_option);
+
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
@@ -387,6 +397,9 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addAnonymousImport("prelude_path", .{
         .root_source_file = prelude_path_file,
     });
+    exe.root_module.addAnonymousImport("rhc_prim_path", .{
+        .root_source_file = rhc_prim_path_file,
+    });
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
@@ -397,6 +410,8 @@ pub fn build(b: *std.Build) void {
     // Install the Prelude source file alongside the binary so the compiler
     // can find it at runtime via the baked-in prelude_path.
     b.installFile("lib/Prelude.hs", "lib/Prelude.hs");
+    // Same for RHC.Prim, the innermost boot package compiled before Prelude.
+    b.installFile("lib/rhc-prim/RHC/Prim.hs", "lib/rhc-prim/RHC/Prim.hs");
 
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
