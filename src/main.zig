@@ -108,13 +108,19 @@ fn getDataFunctionPath() []const u8 {
     return @embedFile("data_function_path");
 }
 
+/// Get the path to the GHC.Base source file baked in at compile time.
+/// Compiled after Data.Function and before Prelude.
+fn getGhcBasePath() []const u8 {
+    return @embedFile("ghc_base_path");
+}
+
 /// Boot modules that the driver auto-prepends, in dependency order.
 ///
-/// These mirror the planned `ghc-internal → base` package layering
-/// (decision 0008, amended by `docs/plans/2026-06-13-ghc-internal-base-split.md`):
-/// `RHC.Prim` (foreign-prim wrappers) → `Data.Function` (combinators) →
-/// `Prelude` (everything else, still in progress).  More boot modules
-/// (`GHC.Base`, `Data.List`, …) will be added here as the split progresses.
+/// Mirror the layered Prelude per `docs/plans/2026-06-13-ghc-internal-base-split.md`:
+/// `RHC.Prim` (foreign-prim wrappers) → `Data.Function` (combinators)
+/// → `GHC.Base` (compiler-magic types + core classes) → `Prelude`
+/// (re-export shell + list/Maybe/Either helpers).  More boot modules
+/// (`Data.List`, …) follow.
 ///
 /// Each entry pairs a declared module name with a callable that returns
 /// the baked-in source path.  We use a callable rather than a path string
@@ -126,6 +132,7 @@ const BootModule = struct {
 const boot_modules = [_]BootModule{
     .{ .module_name = "RHC.Prim", .pathFn = getRhcPrimPath },
     .{ .module_name = "Data.Function", .pathFn = getDataFunctionPath },
+    .{ .module_name = "GHC.Base", .pathFn = getGhcBasePath },
     .{ .module_name = "Prelude", .pathFn = getPreludePath },
 };
 
