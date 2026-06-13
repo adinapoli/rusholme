@@ -20,6 +20,7 @@ const Pipeline = pipeline_mod.Pipeline;
 const CompileResult = pipeline_mod.CompileResult;
 const CompileError = pipeline_mod.CompileError;
 const InputKind = pipeline_mod.InputKind;
+const SpecialiseEnv = pipeline_mod.SpecialiseEnv;
 
 const renamer_mod = @import("../renamer/renamer.zig");
 const RenameEnv = renamer_mod.RenameEnv;
@@ -174,6 +175,17 @@ pub const Session = struct {
     // from prior REPL inputs (#588).
     accumulated_type_con_names: std.StringHashMapUnmanaged(Name),
 
+    // Accumulated dictionary-passing specialisation environment.
+    // Mirrors `cmdBuild`'s whole-program specialise pass (#807): each
+    // compiled module's selectors/dicts are folded in, and the
+    // following input's pipeline rewrites class-method dispatch
+    // against this env before lambda-lifting.  Without it the JIT
+    // sees Show/Eq/Ord instance bodies still routed through
+    // dictionary selectors and crashes at runtime
+    // (`Non-exhaustive patterns in case`).  Tracked in:
+    // https://github.com/adinapoli/rusholme/issues/829
+    accumulated_spec_env: SpecialiseEnv,
+
     /// Create a new REPL session with initialised compiler state.
     pub fn init(allocator: Allocator, io: std.Io) SessionError!Session {
         var u_supply = UniqueSupply{};
@@ -214,6 +226,7 @@ pub const Session = struct {
             .accumulated_class_env = ClassEnv.init(allocator),
             .accumulated_dict_names = .empty,
             .accumulated_type_con_names = .empty,
+            .accumulated_spec_env = .{},
         };
 
         // Load the Prelude so its functions are available immediately.
@@ -226,6 +239,7 @@ pub const Session = struct {
     /// Release all session resources.
     pub fn deinit(self: *Session) void {
         // GrinEngine has no deinit; only JitEngine does.
+        self.accumulated_spec_env.deinit(self.allocator);
         self.accumulated_type_con_names.deinit(self.allocator);
         self.accumulated_dict_names.deinit(self.allocator);
         self.accumulated_class_env.deinit();
@@ -281,6 +295,7 @@ pub const Session = struct {
             &self.accumulated_class_env,
             &self.accumulated_dict_names,
             &self.accumulated_type_con_names,
+            &self.accumulated_spec_env,
         ) catch {
             // Prelude failed to compile — roll back and continue without it.
             self.ty_env.pop();
@@ -357,6 +372,7 @@ pub const Session = struct {
             &self.accumulated_class_env,
             &self.accumulated_dict_names,
             &self.accumulated_type_con_names,
+            &self.accumulated_spec_env,
         ) catch return;
 
         for (result.grin_prog.defs) |def| {
@@ -445,6 +461,7 @@ pub const Session = struct {
             &self.accumulated_class_env,
             &self.accumulated_dict_names,
             &self.accumulated_type_con_names,
+            &self.accumulated_spec_env,
         ) catch |err| {
             // Capture compilation context for diagnostic rendering.
             self.last_source = self.pipeline.last_source;

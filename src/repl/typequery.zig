@@ -83,6 +83,7 @@ pub fn typeOf(
         &session.accumulated_class_env,
         &session.accumulated_dict_names,
         &session.accumulated_type_con_names,
+        &session.accumulated_spec_env,
     ) catch |err| {
         // Capture compilation context for diagnostic rendering.
         session.last_source = session.pipeline.last_source;
