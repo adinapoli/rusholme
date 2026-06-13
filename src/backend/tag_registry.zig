@@ -106,6 +106,37 @@ pub const TagRegistry = struct {
         };
     }
 
+    /// Pre-register the wired-in constructors (True/False/Nil/Cons/…)
+    /// with stable discriminants so cross-module translation that
+    /// references them (e.g. `wrapComparisonAsBool` in a `foreign
+    /// import prim` wrapper compiled before any data declaration is
+    /// seen) gets the same discriminant the later `data` declaration
+    /// will reuse.  Each call is idempotent.
+    ///
+    /// Without this, RHC.Prim's `primLtInt` lowers to a Bool-tagged
+    /// `(True=2, False=3)` immediate while Prelude later registers
+    /// True/False under `(True=0x1000, False=0x1001)` — the case
+    /// alternatives never match and execution falls into the
+    /// non-exhaustive default arm.  Tracked in #826/#829.
+    pub fn preregisterWiredInCons(self: *TagRegistry, alloc: std.mem.Allocator) !void {
+        const Known = @import("../naming/known.zig");
+        const wired = [_]struct { name: grin.Name, n_fields: u32 }{
+            .{ .name = Known.Con.True, .n_fields = 0 },
+            .{ .name = Known.Con.False, .n_fields = 0 },
+            .{ .name = Known.Con.Unit, .n_fields = 0 },
+            .{ .name = Known.Con.Nil, .n_fields = 0 },
+            .{ .name = Known.Con.Cons, .n_fields = 2 },
+            .{ .name = Known.Con.Nothing, .n_fields = 0 },
+            .{ .name = Known.Con.Just, .n_fields = 1 },
+            .{ .name = Known.Con.Left, .n_fields = 1 },
+            .{ .name = Known.Con.Right, .n_fields = 1 },
+        };
+        for (wired) |w| {
+            const tag = grin.Tag{ .name = w.name, .tag_type = .Con };
+            try self.register(alloc, tag, w.n_fields);
+        }
+    }
+
     pub fn deinit(self: *TagRegistry, alloc: std.mem.Allocator) void {
         self.discriminants.deinit(alloc);
         self.field_counts.deinit(alloc);

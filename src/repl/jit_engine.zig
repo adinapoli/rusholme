@@ -110,6 +110,17 @@ pub const JitEngine = struct {
             .jit = jit,
         };
 
+        // Pre-register wired-in constructors (True/False/Nil/Cons/…)
+        // so a `foreign import prim` wrapper in RHC.Prim — compiled
+        // and added to the JIT *before* Prelude declares `Bool` —
+        // bakes the same discriminants Prelude will later reuse.
+        // Without this the JIT REPL crashes on `42` (show wrapping
+        // hits `case n < 0 of True … False …`, but the Bool node
+        // produced by `primLtInt` carries the fallback discriminants
+        // and never matches the case's later-assigned ones).
+        engine.registry.preregisterWiredInCons(allocator) catch
+            return JitError.OutOfMemory;
+
         try engine.registerRtsSymbols();
 
         return engine;
