@@ -26,6 +26,7 @@ module Prelude
     ) where
 
 import RHC.Prim
+import Data.Function
 
 -- ========================================================================
 -- Data types
@@ -50,16 +51,6 @@ infixl 7 *, `div`, `mod`
 infix  4 ==, /=, <, >, <=, >=
 infixr 3 &&
 infixr 2 ||
-
--- ========================================================================
--- Identity and const
--- ========================================================================
-
-id :: a -> a
-id x = x
-
-const :: a -> b -> a
-const x _ = x
 
 -- ========================================================================
 -- Error
@@ -433,19 +424,6 @@ instance Enum Ordering where
     if primGeInt (fromEnum p) (fromEnum o)
     then enumFromThenTo o p GT
     else enumFromThenTo o p LT
-
--- ========================================================================
--- Higher-order combinators
--- ========================================================================
-
-flip :: (a -> b -> c) -> b -> a -> c
-flip f x y = f y x
-
-(.) :: (b -> c) -> (a -> b) -> a -> c
-(.) f g x = f (g x)
-
-($) :: (a -> b) -> a -> b
-($) f x = f x
 
 -- ========================================================================
 -- List functions
