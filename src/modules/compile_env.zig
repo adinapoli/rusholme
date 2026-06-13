@@ -520,12 +520,25 @@ pub const CompileEnv = struct {
 
         // ── Build interface ───────────────────────────────────────────────
         const export_list = module.exports;
+        // Collect the ifaces of every directly-imported module so that
+        // `buildModIface` can satisfy re-export entries (issue #368) by
+        // copying matching `ExportedValue` / `ExportedDataDecl` records.
+        // Imports whose source did not appear in this build (e.g. resolved
+        // via `--package-db`, or simply missing) are silently skipped — the
+        // earlier compilation stages have already diagnosed those.
+        var imported_ifaces_list: std.ArrayListUnmanaged(ModIface) = .empty;
+        defer imported_ifaces_list.deinit(self.alloc);
+        for (module.imports) |imp| {
+            const imp_iface = self.ifaces.get(imp.module_name) orelse continue;
+            try imported_ifaces_list.append(self.alloc, imp_iface);
+        }
         var iface = try mod_iface.buildModIface(
             self.alloc,
             module_name,
             export_list,
             core_prog,
             &module_types,
+            imported_ifaces_list.items,
         );
         // Extend the interface with class and dictionary name data so that
         // downstream modules can reconstruct a ClassEnv and DictNameMap from
@@ -1992,4 +2005,143 @@ test "compileProgram: missing import emits module_not_found diagnostic" {
         }
     }
     try testing.expect(found);
+}
+
+// ── Re-export of imported names (issue #368) ─────────────────────────────
+
+test "compileProgram: Var re-export — Main resolves a name defined upstream and re-exported" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const io = testing.io;
+
+    const a_src =
+        \\{-# LANGUAGE NoImplicitPrelude #-}
+        \\module A (foo) where
+        \\foo :: Int
+        \\foo = 42
+        \\
+    ;
+    const b_src =
+        \\{-# LANGUAGE NoImplicitPrelude #-}
+        \\module B (foo) where
+        \\import A (foo)
+        \\
+    ;
+    const main_src =
+        \\{-# LANGUAGE NoImplicitPrelude #-}
+        \\module Main where
+        \\import B (foo)
+        \\answer :: Int
+        \\answer = foo
+        \\
+    ;
+
+    var r = try compileProgram(alloc, io, &.{
+        .{ .module_name = "A", .source = a_src, .file_id = 1 },
+        .{ .module_name = "B", .source = b_src, .file_id = 2 },
+        .{ .module_name = "Main", .source = main_src, .file_id = 3 },
+    }, &.{});
+    defer r.env.deinit();
+
+    try testing.expect(!r.result.had_errors);
+
+    // B's iface must re-publish `foo` so the renamer can resolve it from Main.
+    const b_iface = r.env.ifaces.get("B").?;
+    var saw_foo = false;
+    for (b_iface.values) |ev| {
+        if (std.mem.eql(u8, ev.name, "foo")) saw_foo = true;
+    }
+    try testing.expect(saw_foo);
+}
+
+test "compileProgram: module re-export — `module B` propagates all of B's exports" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const io = testing.io;
+
+    const a_src =
+        \\{-# LANGUAGE NoImplicitPrelude #-}
+        \\module A (foo, bar) where
+        \\foo :: Int
+        \\foo = 1
+        \\bar :: Int
+        \\bar = 2
+        \\
+    ;
+    // Wrapper module that imports A and re-exports the entire A surface.
+    const wrap_src =
+        \\{-# LANGUAGE NoImplicitPrelude #-}
+        \\module Wrap (module A) where
+        \\import A
+        \\
+    ;
+    const main_src =
+        \\{-# LANGUAGE NoImplicitPrelude #-}
+        \\module Main where
+        \\import Wrap
+        \\answer :: Int
+        \\answer = foo
+        \\other :: Int
+        \\other = bar
+        \\
+    ;
+
+    var r = try compileProgram(alloc, io, &.{
+        .{ .module_name = "A", .source = a_src, .file_id = 1 },
+        .{ .module_name = "Wrap", .source = wrap_src, .file_id = 2 },
+        .{ .module_name = "Main", .source = main_src, .file_id = 3 },
+    }, &.{});
+    defer r.env.deinit();
+
+    try testing.expect(!r.result.had_errors);
+
+    const wrap_iface = r.env.ifaces.get("Wrap").?;
+    var saw_foo = false;
+    var saw_bar = false;
+    for (wrap_iface.values) |ev| {
+        if (std.mem.eql(u8, ev.name, "foo")) saw_foo = true;
+        if (std.mem.eql(u8, ev.name, "bar")) saw_bar = true;
+    }
+    try testing.expect(saw_foo);
+    try testing.expect(saw_bar);
+}
+
+test "compileProgram: Type(..) re-export — data declaration with constructors flows through" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const io = testing.io;
+
+    const a_src =
+        \\{-# LANGUAGE NoImplicitPrelude #-}
+        \\module A (Shape(..)) where
+        \\data Shape = Square | Circle
+        \\
+    ;
+    // The parser does not yet accept `Shape(..)` in an import spec, so B uses
+    // a whole-module `import A` to bring `Shape` and its constructors into
+    // scope.  The re-export side of the test is the only thing under test.
+    const b_src =
+        \\{-# LANGUAGE NoImplicitPrelude #-}
+        \\module B (Shape(..)) where
+        \\import A
+        \\
+    ;
+
+    var r = try compileProgram(alloc, io, &.{
+        .{ .module_name = "A", .source = a_src, .file_id = 1 },
+        .{ .module_name = "B", .source = b_src, .file_id = 2 },
+    }, &.{});
+    defer r.env.deinit();
+
+    try testing.expect(!r.result.had_errors);
+
+    const b_iface = r.env.ifaces.get("B").?;
+    try testing.expectEqual(@as(usize, 1), b_iface.data_decls.len);
+    const dd = b_iface.data_decls[0];
+    try testing.expectEqualStrings("Shape", dd.name);
+    // `Shape(..)` propagates both constructors.
+    try testing.expectEqual(@as(usize, 2), dd.constructors.len);
 }

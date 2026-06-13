@@ -409,6 +409,7 @@ pub fn buildModIface(
     export_list: ?[]const ExportSpec,
     core_prog: CoreProgram,
     module_types: *const ModuleTypes,
+    imported_ifaces: []const ModIface,
 ) std.mem.Allocator.Error!ModIface {
     // ── Expand class `C(..)` exports into method name Var entries ───────
     // Haskell 2010 §5.2: `C(..)` for a class C exports all of C's methods.
@@ -497,11 +498,119 @@ pub fn buildModIface(
         });
     }
 
+    // ── Re-export of imported names (issue #368) ────────────────────────
+    //
+    // An export-list entry can name something this module imports rather than
+    // defines.  Haskell 2010 §5.2 makes no distinction at the export point —
+    // the importer cannot tell whether the name was defined here or merely
+    // re-exported.  We satisfy any such entry by copying the matching
+    // `ExportedValue` / `ExportedDataDecl` from an upstream iface.
+    //
+    // Variants:
+    //   - `Var v` / `Con c` → copy the matching value from any imported iface.
+    //   - `Type ts`         → copy the matching data decl; if the entry is
+    //                         `T` (no `(..)`), strip constructors so the
+    //                         downstream importer cannot pattern-match on them.
+    //   - `Module m`        → copy every value and data decl exported by the
+    //                         iface whose name is `m` (and not already
+    //                         satisfied locally).
+    //
+    // Class methods carried by `class C(..)` are expanded into synthetic
+    // `Var` entries above and flow through the `Var` branch here, so an
+    // imported class re-exported via `C(..)` exposes its method selectors
+    // correctly.  Class and instance declarations themselves are already
+    // republished by `serialiseClassEnvIntoIface` because the importer's
+    // `class_env` is seeded transitively before serialisation.
+    if (export_list != null) {
+        for (effective_exports.?) |spec| {
+            switch (spec) {
+                .Var => |name_str| {
+                    if (containsValueByName(values.items, name_str)) continue;
+                    try reexportValueByName(alloc, &values, imported_ifaces, name_str);
+                },
+                .Con => |name_str| {
+                    if (containsValueByName(values.items, name_str)) continue;
+                    try reexportValueByName(alloc, &values, imported_ifaces, name_str);
+                },
+                .Type => |ts| {
+                    if (containsTypeByName(data_decls.items, ts.name)) continue;
+                    try reexportTypeByName(alloc, &data_decls, imported_ifaces, ts.name, ts.with_constructors);
+                },
+                .Module => |m| {
+                    for (imported_ifaces) |imp| {
+                        if (!std.mem.eql(u8, imp.module_name, m)) continue;
+                        for (imp.values) |ev| {
+                            if (containsValueByName(values.items, ev.name)) continue;
+                            try values.append(alloc, ev);
+                        }
+                        for (imp.data_decls) |dd| {
+                            if (containsTypeByName(data_decls.items, dd.name)) continue;
+                            try data_decls.append(alloc, dd);
+                        }
+                    }
+                },
+            }
+        }
+    }
+
     return ModIface{
         .module_name = module_name,
         .values = try values.toOwnedSlice(alloc),
         .data_decls = try data_decls.toOwnedSlice(alloc),
     };
+}
+
+fn containsValueByName(list: []const ExportedValue, name_str: []const u8) bool {
+    for (list) |ev| {
+        if (std.mem.eql(u8, ev.name, name_str)) return true;
+    }
+    return false;
+}
+
+fn containsTypeByName(list: []const ExportedDataDecl, name_str: []const u8) bool {
+    for (list) |dd| {
+        if (std.mem.eql(u8, dd.name, name_str)) return true;
+    }
+    return false;
+}
+
+fn reexportValueByName(
+    alloc: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(ExportedValue),
+    imported_ifaces: []const ModIface,
+    name_str: []const u8,
+) std.mem.Allocator.Error!void {
+    for (imported_ifaces) |imp| {
+        for (imp.values) |ev| {
+            if (std.mem.eql(u8, ev.name, name_str)) {
+                try out.append(alloc, ev);
+                return;
+            }
+        }
+    }
+}
+
+fn reexportTypeByName(
+    alloc: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(ExportedDataDecl),
+    imported_ifaces: []const ModIface,
+    name_str: []const u8,
+    with_constructors: bool,
+) std.mem.Allocator.Error!void {
+    for (imported_ifaces) |imp| {
+        for (imp.data_decls) |dd| {
+            if (!std.mem.eql(u8, dd.name, name_str)) continue;
+            const exported = if (with_constructors) dd else ExportedDataDecl{
+                .name = dd.name,
+                .unique = dd.unique,
+                .tyvar_names = dd.tyvar_names,
+                .tyvar_uniques = dd.tyvar_uniques,
+                .constructors = &.{},
+            };
+            try out.append(alloc, exported);
+            return;
+        }
+    }
 }
 
 /// Build an `ExportedValue` for a single binder, looking up its scheme
