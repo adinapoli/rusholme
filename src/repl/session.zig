@@ -20,6 +20,7 @@ const Pipeline = pipeline_mod.Pipeline;
 const CompileResult = pipeline_mod.CompileResult;
 const CompileError = pipeline_mod.CompileError;
 const InputKind = pipeline_mod.InputKind;
+const SpecialiseEnv = pipeline_mod.SpecialiseEnv;
 
 const renamer_mod = @import("../renamer/renamer.zig");
 const RenameEnv = renamer_mod.RenameEnv;
@@ -57,13 +58,17 @@ const ClassEnv = class_env_mod.ClassEnv;
 const desugar_mod = @import("../core/desugar.zig");
 const DictNameMap = desugar_mod.DesugarCtx.DictNameMap;
 
-// ── Embedded Prelude source ───────────────────────────────────────────
+// ── Embedded boot-module sources ──────────────────────────────────────
 
 /// The Prelude source text, embedded at compile time.
 /// The anonymous import "prelude_source" is registered in build.zig on
 /// both the library module (mod) and the WASM REPL module, so this
 /// resolves correctly for native, WASM, and test targets.
 const prelude_source = @embedFile("prelude_source");
+
+/// RHC.Prim source — the innermost boot package, loaded ahead of
+/// Prelude.  Mirrors the multi-boot wiring `cmdBuild` uses (#655).
+const rhc_prim_source = @embedFile("rhc_prim_source");
 
 // ── Result types ──────────────────────────────────────────────────────
 
@@ -170,6 +175,17 @@ pub const Session = struct {
     // from prior REPL inputs (#588).
     accumulated_type_con_names: std.StringHashMapUnmanaged(Name),
 
+    // Accumulated dictionary-passing specialisation environment.
+    // Mirrors `cmdBuild`'s whole-program specialise pass (#807): each
+    // compiled module's selectors/dicts are folded in, and the
+    // following input's pipeline rewrites class-method dispatch
+    // against this env before lambda-lifting.  Without it the JIT
+    // sees Show/Eq/Ord instance bodies still routed through
+    // dictionary selectors and crashes at runtime
+    // (`Non-exhaustive patterns in case`).  Tracked in:
+    // https://github.com/adinapoli/rusholme/issues/829
+    accumulated_spec_env: SpecialiseEnv,
+
     /// Create a new REPL session with initialised compiler state.
     pub fn init(allocator: Allocator, io: std.Io) SessionError!Session {
         var u_supply = UniqueSupply{};
@@ -210,6 +226,7 @@ pub const Session = struct {
             .accumulated_class_env = ClassEnv.init(allocator),
             .accumulated_dict_names = .empty,
             .accumulated_type_con_names = .empty,
+            .accumulated_spec_env = .{},
         };
 
         // Load the Prelude so its functions are available immediately.
@@ -222,6 +239,7 @@ pub const Session = struct {
     /// Release all session resources.
     pub fn deinit(self: *Session) void {
         // GrinEngine has no deinit; only JitEngine does.
+        self.accumulated_spec_env.deinit(self.allocator);
         self.accumulated_type_con_names.deinit(self.allocator);
         self.accumulated_dict_names.deinit(self.allocator);
         self.accumulated_class_env.deinit();
@@ -244,17 +262,25 @@ pub const Session = struct {
     /// Non-fatal: on failure, the session continues with built-in names
     /// only.  This keeps the REPL usable even if the Prelude has issues.
     fn loadPrelude(self: *Session) void {
-        // Push scope frames for Prelude bindings (permanent — never popped).
+        // Push scope frames for boot-module bindings (permanent — never popped).
         self.rename_env.scope.push() catch return;
         self.ty_env.push() catch {
             self.rename_env.scope.pop();
             return;
         };
 
+        // Compile RHC.Prim ahead of Prelude.  Its exports (every
+        // `foreign import prim` wrapper) are accumulated into the
+        // session state so Prelude's `import RHC.Prim` resolves and
+        // every downstream input can reach the primops too.
+        // Non-fatal: a missing/broken RHC.Prim degrades the REPL to
+        // wired-in names + Prelude, matching pre-split behaviour.
+        self.loadBootModule(rhc_prim_source, 0);
+
         var diags = DiagnosticCollector.init();
         defer diags.deinit(self.allocator);
 
-        const file_id: FileId = 0; // Prelude gets file_id 0 (same as batch compiler)
+        const file_id: FileId = 1; // Prelude gets file_id 1 (after RHC.Prim).
 
         const result = self.pipeline.compileModule(
             prelude_source,
@@ -264,11 +290,12 @@ pub const Session = struct {
             &self.ty_env,
             &self.mv_supply,
             &diags,
-            null, // no external arities yet
-            null, // no external con_map yet
-            null, // no external class_env yet
-            null, // no external dict_names yet
-            null, // no external type_con_names yet
+            &self.accumulated_arities,
+            &self.accumulated_con_map,
+            &self.accumulated_class_env,
+            &self.accumulated_dict_names,
+            &self.accumulated_type_con_names,
+            &self.accumulated_spec_env,
         ) catch {
             // Prelude failed to compile — roll back and continue without it.
             self.ty_env.pop();
@@ -323,6 +350,68 @@ pub const Session = struct {
         }
     }
 
+    /// Compile one boot module (currently just `RHC.Prim`) and fold
+    /// its outputs into the same accumulators that `loadPrelude` uses
+    /// for the Prelude.  Soft-failures are absorbed so the REPL stays
+    /// usable when a boot module is broken — same policy as
+    /// `loadPrelude`.
+    fn loadBootModule(self: *Session, source: []const u8, file_id: FileId) void {
+        var diags = DiagnosticCollector.init();
+        defer diags.deinit(self.allocator);
+
+        const result = self.pipeline.compileModule(
+            source,
+            file_id,
+            &self.u_supply,
+            &self.rename_env,
+            &self.ty_env,
+            &self.mv_supply,
+            &diags,
+            &self.accumulated_arities,
+            &self.accumulated_con_map,
+            &self.accumulated_class_env,
+            &self.accumulated_dict_names,
+            &self.accumulated_type_con_names,
+            &self.accumulated_spec_env,
+        ) catch return;
+
+        for (result.grin_prog.defs) |def| {
+            self.accumulated_defs.append(self.allocator, def) catch return;
+            self.accumulated_arities.put(
+                self.allocator,
+                def.name.unique.value,
+                @intCast(def.params.len),
+            ) catch return;
+        }
+
+        for (result.core_data_decls) |decl| {
+            for (decl.constructors) |con| {
+                self.accumulated_con_map.put(
+                    self.allocator,
+                    con.name.unique.value,
+                    translate_mod.countConFields(con.ty),
+                ) catch return;
+            }
+            self.accumulated_type_con_names.put(self.allocator, decl.name.base, decl.name) catch return;
+        }
+
+        // Merge class_env/dict_names: the boot module may declare neither,
+        // but if it does they must accumulate (the Prelude pass below
+        // will see them through the seed parameters).
+        self.accumulated_class_env.mergeFrom(&result.class_env) catch return;
+        var dn_it = result.dict_names.iterator();
+        while (dn_it.next()) |entry| {
+            self.accumulated_dict_names.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*) catch return;
+        }
+
+        if (!is_wasi) {
+            self.engine.addDeclarations(&result.grin_prog) catch |err| {
+                std.debug.print("Warning: addDeclarations failed for boot module: {}\n", .{err});
+                return;
+            };
+        }
+    }
+
     // ── Input processing ──────────────────────────────────────────────
 
     /// Compile a REPL input through the full pipeline.
@@ -372,6 +461,7 @@ pub const Session = struct {
             &self.accumulated_class_env,
             &self.accumulated_dict_names,
             &self.accumulated_type_con_names,
+            &self.accumulated_spec_env,
         ) catch |err| {
             // Capture compilation context for diagnostic rendering.
             self.last_source = self.pipeline.last_source;

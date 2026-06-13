@@ -267,7 +267,11 @@ const PendingBind = struct {
 
 /// Analyze a Core program to build the arity map.
 /// This maps each function name to its arity (number of lambda parameters).
-fn buildArityMap(alloc: std.mem.Allocator, core_prog: CoreProgram) !std.AutoHashMapUnmanaged(u64, u32) {
+fn buildArityMap(
+    alloc: std.mem.Allocator,
+    core_prog: CoreProgram,
+    external_arities: ?*const std.AutoHashMapUnmanaged(u64, u32),
+) !std.AutoHashMapUnmanaged(u64, u32) {
     var arity_map = std.AutoHashMapUnmanaged(u64, u32){};
     errdefer arity_map.deinit(alloc);
 
@@ -286,6 +290,17 @@ fn buildArityMap(alloc: std.mem.Allocator, core_prog: CoreProgram) !std.AutoHash
                     try arity_map.put(alloc, unique_id, arity);
                 }
             },
+        }
+    }
+
+    // Seed externals so that resolveEtaArity below can chase aliases
+    // pointing at functions defined in upstream modules. Local entries
+    // already in `arity_map` take precedence.
+    if (external_arities) |ext| {
+        var ext_iter = ext.iterator();
+        while (ext_iter.next()) |entry| {
+            const gop = try arity_map.getOrPut(alloc, entry.key_ptr.*);
+            if (!gop.found_existing) gop.value_ptr.* = entry.value_ptr.*;
         }
     }
 
@@ -528,7 +543,10 @@ pub fn translateProgram(
     initial_name_counter: u64,
 ) !struct { program: GrinProgram, next_name_counter: u64 } {
     // Build the arity map for partial/over-application handling.
-    var arity_map = try buildArityMap(alloc, core_prog);
+    // Pass externals so that `resolveEtaArity` can chase eta-alias
+    // chains across module boundaries — e.g. Prelude's `error =
+    // primError` needs `primError`'s arity from RHC.Prim.
+    var arity_map = try buildArityMap(alloc, core_prog, external_arities);
     defer arity_map.deinit(alloc);
 
     // Build the constructor map from data declarations.
@@ -2599,7 +2617,7 @@ test "buildArityMap: correctly counts lambda parameters" {
         .binds = &.{.{ .NonRec = bind_pair }},
     };
 
-    var arity_map = try buildArityMap(alloc, core_prog);
+    var arity_map = try buildArityMap(alloc, core_prog, null);
     defer arity_map.deinit(alloc);
 
     // id should have arity 1

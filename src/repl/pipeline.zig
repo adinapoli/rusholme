@@ -45,6 +45,8 @@ const env_mod = @import("../typechecker/env.zig");
 
 const desugar_mod = @import("../core/desugar.zig");
 const lift_mod = @import("../core/lift.zig");
+const specialise_mod = @import("../core/specialise.zig");
+pub const SpecialiseEnv = specialise_mod.SpecialiseEnv;
 
 const translate_mod = @import("../grin/translate.zig");
 const grin_ast = @import("../grin/ast.zig");
@@ -305,6 +307,7 @@ pub const Pipeline = struct {
         external_class_env: ?*const ClassEnv,
         external_dict_names: ?*const DictNameMap,
         external_type_con_names: ?*const TypeConNames,
+        spec_env: ?*SpecialiseEnv,
     ) CompileError!ModuleResult {
         const alloc = self.allocator;
 
@@ -372,6 +375,28 @@ pub const Pipeline = struct {
             return CompileError.CompilationFailed;
         }
 
+        // ── Specialise ─────────────────────────────────────────────
+        // Mirror cmdBuild's whole-program specialisation (#807) so
+        // that REPL inputs see the same `(<) dict$Ord$Int x y` →
+        // `primLtInt x y` rewrites that AOT gets.  Without this the
+        // Show Int / Eq / Ord instance bodies stay dispatched through
+        // dictionary selectors, and the JIT crashes at runtime when
+        // the case scrutinee's tag does not match either alternative
+        // (`Non-exhaustive patterns in case`).  Tracked in:
+        // https://github.com/adinapoli/rusholme/issues/829
+        const post_spec_program: core_ast.CoreProgram = blk: {
+            const env = spec_env orelse break :blk desugar_result.program;
+            specialise_mod.collectEnv(alloc, env, desugar_result.program) catch {
+                module_types.deinit(alloc);
+                return CompileError.OutOfMemory;
+            };
+            const specialised = specialise_mod.specialiseProgram(alloc, env, desugar_result.program) catch {
+                module_types.deinit(alloc);
+                return CompileError.OutOfMemory;
+            };
+            break :blk specialised;
+        };
+
         // ── Lambda lift ────────────────────────────────────────────
         // Thread the unique IDs of all previously-known bindings (Prelude
         // and earlier REPL inputs) into the lifter as its external scope.
@@ -396,7 +421,7 @@ pub const Pipeline = struct {
                 try external_unique_list.append(alloc, entry.value_ptr.*.unique.value);
             }
         }
-        const lift_result = lift_mod.lambdaLift(alloc, desugar_result.program, external_unique_list.items, 0) catch {
+        const lift_result = lift_mod.lambdaLift(alloc, post_spec_program, external_unique_list.items, 0) catch {
             module_types.deinit(alloc);
             return CompileError.OutOfMemory;
         };
@@ -447,6 +472,7 @@ pub const Pipeline = struct {
         external_class_env: ?*const ClassEnv,
         external_dict_names: ?*const DictNameMap,
         external_type_con_names: ?*const TypeConNames,
+        spec_env: ?*SpecialiseEnv,
     ) CompileError!CompileResult {
         const alloc = self.allocator;
         const file_id: FileId = 0;
@@ -483,7 +509,7 @@ pub const Pipeline = struct {
             var decl_diags = DiagnosticCollector.init();
             defer decl_diags.deinit(alloc);
 
-            if (self.compileModule(decl_source, file_id, u_supply, rename_env, ty_env, mv_supply, &decl_diags, external_arities, external_con_map, external_class_env, external_dict_names, external_type_con_names)) |result| {
+            if (self.compileModule(decl_source, file_id, u_supply, rename_env, ty_env, mv_supply, &decl_diags, external_arities, external_con_map, external_class_env, external_dict_names, external_type_con_names, spec_env)) |result| {
                 // Copy any diagnostics from the attempt
                 try copyDiagnostics(alloc, &decl_diags, diags);
                 return .{ .program = result.grin_prog, .kind = decl_kind, .core_data_decls = result.core_data_decls, .class_env = result.class_env, .dict_names = result.dict_names };
@@ -525,7 +551,7 @@ pub const Pipeline = struct {
             self.last_source = str_source;
             self.last_input_kind = .expression;
 
-            if (self.compileModule(str_source, file_id, u_supply, rename_env, ty_env, mv_supply, &str_diags, external_arities, external_con_map, external_class_env, external_dict_names, external_type_con_names)) |result| {
+            if (self.compileModule(str_source, file_id, u_supply, rename_env, ty_env, mv_supply, &str_diags, external_arities, external_con_map, external_class_env, external_dict_names, external_type_con_names, spec_env)) |result| {
                 const decl_diag_count = diags.diagnostics.items.len;
                 clearLeadingDiags(alloc, diags, decl_diag_count);
                 return .{ .program = result.grin_prog, .kind = .expression_io, .core_data_decls = result.core_data_decls, .class_env = result.class_env, .dict_names = result.dict_names };
@@ -569,7 +595,7 @@ pub const Pipeline = struct {
             self.last_source = show_source;
             self.last_input_kind = .expression;
 
-            if (self.compileModule(show_source, file_id, u_supply, rename_env, ty_env, mv_supply, &show_diags, external_arities, external_con_map, external_class_env, external_dict_names, external_type_con_names)) |result| {
+            if (self.compileModule(show_source, file_id, u_supply, rename_env, ty_env, mv_supply, &show_diags, external_arities, external_con_map, external_class_env, external_dict_names, external_type_con_names, spec_env)) |result| {
                 // Show-wrapped compilation succeeded — keep the scope
                 // frame and clear any declaration diagnostics.
                 const decl_diag_count = diags.diagnostics.items.len;
@@ -596,7 +622,7 @@ pub const Pipeline = struct {
             self.last_source = expr_source;
             self.last_input_kind = .expression;
 
-            if (self.compileModule(expr_source, file_id, u_supply, rename_env, ty_env, mv_supply, diags, external_arities, external_con_map, external_class_env, external_dict_names, external_type_con_names)) |result| {
+            if (self.compileModule(expr_source, file_id, u_supply, rename_env, ty_env, mv_supply, diags, external_arities, external_con_map, external_class_env, external_dict_names, external_type_con_names, spec_env)) |result| {
                 // Expression succeeded — clear declaration diagnostics.
                 clearLeadingDiags(alloc, diags, decl_diag_count);
                 return .{ .program = result.grin_prog, .kind = .expression, .core_data_decls = result.core_data_decls, .class_env = result.class_env, .dict_names = result.dict_names };
@@ -661,6 +687,7 @@ test "pipeline: compile simple literal expression" {
         null,
         null,
         null,
+        null,
     );
 
     try testing.expect(result.program.defs.len > 0);
@@ -692,6 +719,7 @@ test "pipeline: compile data declaration" {
         &ty_env,
         &mv_supply,
         &diags,
+        null,
         null,
         null,
         null,
@@ -729,6 +757,7 @@ test "pipeline: compile function declaration" {
         &ty_env,
         &mv_supply,
         &diags,
+        null,
         null,
         null,
         null,
@@ -851,6 +880,7 @@ test "pipeline: handle let prefix in declarations" {
         &ty_env,
         &mv_supply,
         &diags,
+        null,
         null,
         null,
         null,

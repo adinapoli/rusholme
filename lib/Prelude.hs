@@ -25,29 +25,7 @@ module Prelude
     , enumFrom, enumFromTo, enumFromThen, enumFromThenTo
     ) where
 
--- ========================================================================
--- PrimOp imports
--- ========================================================================
-
-foreign import prim "add_Int"   primAddInt   :: Int -> Int -> Int
-foreign import prim "sub_Int"   primSubInt   :: Int -> Int -> Int
-foreign import prim "mul_Int"   primMulInt   :: Int -> Int -> Int
-foreign import prim "neg_Int"   primNegInt   :: Int -> Int
-foreign import prim "abs_Int"   primAbsInt   :: Int -> Int
-foreign import prim "quot_Int"  primQuotInt  :: Int -> Int -> Int
-foreign import prim "rem_Int"   primRemInt   :: Int -> Int -> Int
-foreign import prim "eq_Int"    primEqInt    :: Int -> Int -> Bool
-foreign import prim "ne_Int"    primNeInt    :: Int -> Int -> Bool
-foreign import prim "lt_Int"    primLtInt    :: Int -> Int -> Bool
-foreign import prim "le_Int"    primLeInt    :: Int -> Int -> Bool
-foreign import prim "gt_Int"    primGtInt    :: Int -> Int -> Bool
-foreign import prim "ge_Int"    primGeInt    :: Int -> Int -> Bool
-foreign import prim "putChar_"      primPutChar  :: Char -> IO ()
-foreign import prim "primPutStrLn"  primPutStrLn :: String -> IO ()
-foreign import prim "primPutStr"    primPutStr   :: String -> IO ()
-foreign import prim "error"     primError    :: String -> a
-foreign import prim "intToChar" intToChar    :: Int -> Char
-foreign import prim "charToInt" charToInt    :: Char -> Int
+import RHC.Prim
 
 -- ========================================================================
 -- Data types

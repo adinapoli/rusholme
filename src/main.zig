@@ -975,6 +975,7 @@ fn loadPrelude(
         null, // no external class_env yet
         null, // no external dict_names yet
         null, // no external type_con_names yet
+        null, // single-module loadPrelude: no shared SpecialiseEnv
     );
     // Prelude bindings are now accumulated in rename_env and ty_env.
     // Return the class env and dict names so callers can seed their

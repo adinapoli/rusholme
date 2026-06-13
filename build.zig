@@ -125,6 +125,11 @@ pub fn build(b: *std.Build) void {
     mod.addAnonymousImport("prelude_source", .{
         .root_source_file = b.path("lib/Prelude.hs"),
     });
+    // RHC.Prim source: the innermost boot package, compiled by the
+    // REPL session ahead of Prelude.
+    mod.addAnonymousImport("rhc_prim_source", .{
+        .root_source_file = b.path("lib/rhc-prim/RHC/Prim.hs"),
+    });
 
     // Runtime module - for LLVM-based runtime tests
     const runtime_mod = b.addModule("runtime", .{
@@ -693,6 +698,9 @@ pub fn build(b: *std.Build) void {
     // Embed the Prelude source for the WASM REPL (same as the library module).
     repl_wasm.root_module.addAnonymousImport("prelude_source", .{
         .root_source_file = b.path("lib/Prelude.hs"),
+    });
+    repl_wasm.root_module.addAnonymousImport("rhc_prim_source", .{
+        .root_source_file = b.path("lib/rhc-prim/RHC/Prim.hs"),
     });
     // Reactor mode: the REPL is a long-lived module with exported functions,
     // not a command that runs once and exits. In reactor mode the entry point
