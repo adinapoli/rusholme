@@ -132,6 +132,37 @@ pub const InstanceInfo = struct {
     rigid_scope: []const RigidBinding = &.{},
 };
 
+/// The unique of the outermost type constructor of an instance head.
+///
+/// For `instance Eq Int` the head is `Con(Int)`, so this is `Int`'s unique;
+/// for `instance Eq a => Eq [a]` it is `[]`'s unique.  In Haskell 2010 (no
+/// overlapping instances) there is at most one instance per (class, head type
+/// constructor), so this constructor — together with the class and the
+/// defining source span — identifies an instance definition.  Returns `null`
+/// for a head with no outermost constructor (e.g. a bare type variable), in
+/// which case identity falls back to the class and span alone.
+fn instanceHeadKey(head: HType) ?u64 {
+    return switch (head) {
+        .Con => |c| c.name.unique.value,
+        else => null,
+    };
+}
+
+/// Whether two `InstanceInfo`s denote the *same instance definition*.
+///
+/// They do iff they share a class, an instance-head type constructor, and a
+/// defining source span.  `mergeFrom` relies on this to treat instance
+/// environments as sets: importing one instance along several module-graph
+/// paths (a diamond) must be idempotent, since instances are global and always
+/// transitively visible in Haskell.  Two *distinct* definitions of the same
+/// (class, head) live at different source spans, so they are preserved and the
+/// solver still reports them as a genuine overlapping-instance error.
+fn sameInstanceDefinition(a: InstanceInfo, b: InstanceInfo) bool {
+    if (a.class_name.unique.value != b.class_name.unique.value) return false;
+    if (instanceHeadKey(a.head) != instanceHeadKey(b.head)) return false;
+    return std.meta.eql(a.span, b.span);
+}
+
 // ── ClassEnv ──────────────────────────────────────────────────────────
 
 /// The class and instance environment.
@@ -244,13 +275,20 @@ pub const ClassEnv = struct {
         return &.{};
     }
 
-    /// Merge all classes and instances from `other` into `self`.
+    /// Merge all classes and instances from `other` into `self` as a set union.
     ///
     /// Classes are copied by unique ID (existing entries are overwritten).
-    /// Instances are appended to the existing instance list for each class.
+    /// Instances are unioned: an instance already present (per
+    /// `sameInstanceDefinition`) is not appended again, so merging is
+    /// idempotent.  This matters because instances are global and transitively
+    /// visible — a module reachable along several import paths (a diamond in
+    /// the module graph) would otherwise contribute its instances multiple
+    /// times, which the solver then misreports as overlapping instances.
+    /// Genuinely distinct definitions of the same (class, head) differ in their
+    /// source span and are still kept, preserving real overlap detection.
     ///
-    /// Used by the REPL to seed a fresh `InferCtx.class_env` with
-    /// classes/instances accumulated from prior inputs, and to merge
+    /// Used to seed a module's `InferCtx.class_env` from its imports, by the
+    /// REPL to accumulate classes/instances across inputs, and to merge
     /// newly-declared classes/instances back into the session state.
     pub fn mergeFrom(self: *ClassEnv, other: *const ClassEnv) !void {
         // Merge class declarations.
@@ -259,7 +297,7 @@ pub const ClassEnv = struct {
             try self.classes.put(self.alloc, entry.key_ptr.*, entry.value_ptr.*);
         }
 
-        // Merge instance declarations.
+        // Merge instance declarations as a set (skip definitions already present).
         var inst_it = other.instances.iterator();
         while (inst_it.next()) |entry| {
             const gop = try self.instances.getOrPut(self.alloc, entry.key_ptr.*);
@@ -267,7 +305,11 @@ pub const ClassEnv = struct {
                 gop.value_ptr.* = .empty;
             }
             for (entry.value_ptr.items) |inst| {
-                try gop.value_ptr.append(self.alloc, inst);
+                for (gop.value_ptr.items) |existing| {
+                    if (sameInstanceDefinition(existing, inst)) break;
+                } else {
+                    try gop.value_ptr.append(self.alloc, inst);
+                }
             }
         }
     }
@@ -332,6 +374,67 @@ test "ClassEnv: add and lookup instances" {
     // No instances for Show
     const show_instances = env.lookupInstances(Known.Class.Show.unique.value);
     try testing.expectEqual(0, show_instances.len);
+}
+
+test "ClassEnv: mergeFrom unions identical instances idempotently" {
+    // The same instance definition (same class, head, and span) reachable along
+    // two import paths must not be double-counted (diamond import).
+    const inst: InstanceInfo = .{
+        .class_name = Known.Class.Eq,
+        .head = HType{ .Con = .{ .name = Known.Type.Int, .args = &.{} } },
+        .context = &.{},
+        .span = testSpan(),
+    };
+
+    var a = ClassEnv.init(testing.allocator);
+    defer a.deinit();
+    try a.addInstance(inst);
+
+    var b = ClassEnv.init(testing.allocator);
+    defer b.deinit();
+    try b.addInstance(inst);
+
+    try a.mergeFrom(&b);
+    try testing.expectEqual(1, a.lookupInstances(Known.Class.Eq.unique.value).len);
+
+    // Merging again is still a no-op.
+    try a.mergeFrom(&b);
+    try testing.expectEqual(1, a.lookupInstances(Known.Class.Eq.unique.value).len);
+}
+
+test "ClassEnv: mergeFrom keeps genuinely distinct instances" {
+    // Same (class, head) but different defining spans = a real
+    // overlapping-instance error, which must survive the merge so the solver
+    // can report it.  Different heads must also both survive.
+    const span1 = SourceSpan.init(span_mod.SourcePos.init(1, 1, 1), span_mod.SourcePos.init(1, 1, 2));
+    const span2 = SourceSpan.init(span_mod.SourcePos.init(2, 9, 1), span_mod.SourcePos.init(2, 9, 2));
+
+    var a = ClassEnv.init(testing.allocator);
+    defer a.deinit();
+    try a.addInstance(.{
+        .class_name = Known.Class.Eq,
+        .head = HType{ .Con = .{ .name = Known.Type.Int, .args = &.{} } },
+        .context = &.{},
+        .span = span1,
+    });
+
+    var b = ClassEnv.init(testing.allocator);
+    defer b.deinit();
+    try b.addInstance(.{ // same head, different span → distinct definition
+        .class_name = Known.Class.Eq,
+        .head = HType{ .Con = .{ .name = Known.Type.Int, .args = &.{} } },
+        .context = &.{},
+        .span = span2,
+    });
+    try b.addInstance(.{ // different head → distinct definition
+        .class_name = Known.Class.Eq,
+        .head = HType{ .Con = .{ .name = Known.Type.Bool, .args = &.{} } },
+        .context = &.{},
+        .span = span1,
+    });
+
+    try a.mergeFrom(&b);
+    try testing.expectEqual(3, a.lookupInstances(Known.Class.Eq.unique.value).len);
 }
 
 test "ClassEnv: superclass chain" {
