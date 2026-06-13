@@ -183,7 +183,21 @@ pub const PrettyPrinter = struct {
         switch (spec) {
             .Var => |name| try self.write(name),
             .Con => |name| try self.write(name),
-            .TyCon => |name| try self.write(name),
+            .TyCon => |t| {
+                try self.write(t.name);
+                switch (t.sub) {
+                    .None => {},
+                    .All => try self.write("(..)"),
+                    .Named => |cs| {
+                        try self.write("(");
+                        for (cs, 0..) |c, i| {
+                            if (i > 0) try self.write(", ");
+                            try self.write(c);
+                        }
+                        try self.write(")");
+                    },
+                }
+            },
             .Class => |name| try self.write(name),
         }
     }

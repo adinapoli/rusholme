@@ -238,6 +238,8 @@ test "should_compile: sc050_class_default_method" { try testShouldCompile(std.te
 test "should_compile: sc051_consecutive_paren_patterns" { try testShouldCompile(std.testing.allocator, "sc051_consecutive_paren_patterns"); }
 test "should_compile: sc052_minus_in_export" { try testShouldCompile(std.testing.allocator, "sc052_minus_in_export"); }
 test "should_compile: sc053_minus_and_plus_in_export" { try testShouldCompile(std.testing.allocator, "sc053_minus_and_plus_in_export"); }
+test "should_compile: sc054_dotted_module_reexport (#822)" { try testShouldCompile(std.testing.allocator, "sc054_dotted_module_reexport"); }
+test "should_compile: sc055_import_tycon_sub (#823)" { try testShouldCompile(std.testing.allocator, "sc055_import_tycon_sub"); }
 
 // ── should_fail test declarations ─────────────────────────────────────────
 

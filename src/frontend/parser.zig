@@ -867,7 +867,11 @@ pub const Parser = struct {
                 try items.append(self.allocator, .{ .Var = tok.token.varid });
             } else if (tag == .conid) {
                 const tok = try self.advance();
-                try items.append(self.allocator, .{ .TyCon = tok.token.conid });
+                const sub = try self.parseTyConSub();
+                try items.append(self.allocator, .{ .TyCon = .{
+                    .name = tok.token.conid,
+                    .sub = sub,
+                } });
             } else if (tag == .open_paren) {
                 // ( varsym ) — operator import
                 _ = try self.advance();
@@ -886,6 +890,31 @@ pub const Parser = struct {
             .hiding = hiding,
             .items = try items.toOwnedSlice(self.allocator),
         };
+    }
+
+    /// Parse an optional sub-import after a type constructor in an import
+    /// spec: `(..)` → `.All`, `(C1, C2)` → `.Named [...]`, missing → `.None`.
+    /// Implements #823.
+    fn parseTyConSub(self: *Parser) ParseError!ast_mod.TyConSub {
+        if (!(try self.check(.open_paren))) return .None;
+        _ = try self.advance();
+        if (try self.check(.dotdot)) {
+            _ = try self.advance();
+            _ = try self.expect(.close_paren);
+            return .All;
+        }
+        // Comma-separated list of constructor names (conids) — possibly
+        // empty (`T()` would mean "type with no constructors", which is
+        // rare but legal in Haskell 2010).
+        var cons: std.ArrayListUnmanaged([]const u8) = .empty;
+        while (true) {
+            if (try self.check(.close_paren)) break;
+            const c = try self.expect(.conid);
+            try cons.append(self.allocator, c.token.conid);
+            if (try self.match(.comma) == null) break;
+        }
+        _ = try self.expect(.close_paren);
+        return .{ .Named = try cons.toOwnedSlice(self.allocator) };
     }
 
     // ── Top-level declarations ─────────────────────────────────────────

@@ -51,8 +51,23 @@ pub const ImportSpecs = struct {
 pub const ImportSpec = union(enum) {
     Var: []const u8,
     Con: []const u8,
-    TyCon: []const u8,
+    /// A type constructor import, with optional sub-import:
+    ///   `T`            → `.sub = .None`
+    ///   `T(..)`        → `.sub = .All`
+    ///   `T(C1, C2)`    → `.sub = .{ .Named = &.{"C1", "C2"} }`
+    TyCon: TyConImport,
     Class: []const u8,
+};
+
+pub const TyConImport = struct {
+    name: []const u8,
+    sub: TyConSub = .None,
+};
+
+pub const TyConSub = union(enum) {
+    None,
+    All,
+    Named: []const []const u8,
 };
 
 /// Export specification
