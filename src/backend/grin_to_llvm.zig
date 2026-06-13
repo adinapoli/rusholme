@@ -725,7 +725,17 @@ pub const GrinTranslator = struct {
 
     pub fn init(allocator: std.mem.Allocator, registry: *TagRegistry) GrinTranslator {
         llvm.initialize();
-        const ctx = llvm.createContext();
+        // Use the global LLVM context. Type helpers throughout the
+        // backend (`ptrType`, `i64Type`, etc.) read types from the
+        // global context, and a per-translator context would put
+        // every per-module Function (created in `self.ctx`) in a
+        // different context from its own type — the bitcode writer
+        // serialises that as a cross-context reference and downstream
+        // modules end up with corrupt records.  All modules created
+        // here go into the global context too, so cross-module
+        // declarations match.  Tracked in:
+        // https://github.com/adinapoli/rusholme/issues/826
+        const ctx = c.LLVMGetGlobalContext();
         return .{
             .ctx = ctx,
             .module = llvm.createModule("haskell", ctx),
@@ -749,8 +759,10 @@ pub const GrinTranslator = struct {
         // registry is not owned — do not deinit it.
         self.type_env.deinit(self.allocator);
         llvm.disposeBuilder(self.builder);
-        // Disposing the context also disposes modules created within it.
-        llvm.disposeContext(self.ctx);
+        // Do NOT dispose `self.ctx`: it is the LLVM global context,
+        // shared across the whole process.  Modules created within it
+        // are reclaimed when LLVM tears down on exit.  (See the
+        // matching init comment about cross-context references.)
     }
 
     /// Extract the tag discriminants for well-known constructors
@@ -2061,8 +2073,17 @@ pub const GrinTranslator = struct {
         // and route them to the LLVM-level __rhc_apply instead.
         if (std.mem.eql(u8, name.base, "apply") and name.unique.value == 9998) {
             if (args.len >= 2) {
-                const f_val = try self.translateValToLlvm(args[0]);
-                const x_val = try self.translateValToLlvm(args[1]);
+                var f_val = try self.translateValToLlvm(args[0]);
+                var x_val = try self.translateValToLlvm(args[1]);
+                // __rhc_apply's signature is (ptr, ptr) -> ptr. Raw i64
+                // arguments (literals, primop results) must be re-tagged
+                // as boxed ptrs before being passed through.
+                if (c.LLVMGetTypeKind(c.LLVMTypeOf(f_val)) == c.LLVMIntegerTypeKind) {
+                    f_val = tagInt(self.builder, f_val);
+                }
+                if (c.LLVMGetTypeKind(c.LLVMTypeOf(x_val)) == c.LLVMIntegerTypeKind) {
+                    x_val = tagInt(self.builder, x_val);
+                }
                 const apply_fn = c.LLVMGetNamedFunction(self.module, "__rhc_apply") orelse blk: {
                     var apply_params = [_]llvm.Type{ ptrType(), ptrType() };
                     const apply_type = llvm.functionType(ptrType(), &apply_params, false);
