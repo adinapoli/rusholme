@@ -57,13 +57,17 @@ const ClassEnv = class_env_mod.ClassEnv;
 const desugar_mod = @import("../core/desugar.zig");
 const DictNameMap = desugar_mod.DesugarCtx.DictNameMap;
 
-// ── Embedded Prelude source ───────────────────────────────────────────
+// ── Embedded boot-module sources ──────────────────────────────────────
 
 /// The Prelude source text, embedded at compile time.
 /// The anonymous import "prelude_source" is registered in build.zig on
 /// both the library module (mod) and the WASM REPL module, so this
 /// resolves correctly for native, WASM, and test targets.
 const prelude_source = @embedFile("prelude_source");
+
+/// RHC.Prim source — the innermost boot package, loaded ahead of
+/// Prelude.  Mirrors the multi-boot wiring `cmdBuild` uses (#655).
+const rhc_prim_source = @embedFile("rhc_prim_source");
 
 // ── Result types ──────────────────────────────────────────────────────
 
@@ -244,17 +248,25 @@ pub const Session = struct {
     /// Non-fatal: on failure, the session continues with built-in names
     /// only.  This keeps the REPL usable even if the Prelude has issues.
     fn loadPrelude(self: *Session) void {
-        // Push scope frames for Prelude bindings (permanent — never popped).
+        // Push scope frames for boot-module bindings (permanent — never popped).
         self.rename_env.scope.push() catch return;
         self.ty_env.push() catch {
             self.rename_env.scope.pop();
             return;
         };
 
+        // Compile RHC.Prim ahead of Prelude.  Its exports (every
+        // `foreign import prim` wrapper) are accumulated into the
+        // session state so Prelude's `import RHC.Prim` resolves and
+        // every downstream input can reach the primops too.
+        // Non-fatal: a missing/broken RHC.Prim degrades the REPL to
+        // wired-in names + Prelude, matching pre-split behaviour.
+        self.loadBootModule(rhc_prim_source, 0);
+
         var diags = DiagnosticCollector.init();
         defer diags.deinit(self.allocator);
 
-        const file_id: FileId = 0; // Prelude gets file_id 0 (same as batch compiler)
+        const file_id: FileId = 1; // Prelude gets file_id 1 (after RHC.Prim).
 
         const result = self.pipeline.compileModule(
             prelude_source,
@@ -264,11 +276,11 @@ pub const Session = struct {
             &self.ty_env,
             &self.mv_supply,
             &diags,
-            null, // no external arities yet
-            null, // no external con_map yet
-            null, // no external class_env yet
-            null, // no external dict_names yet
-            null, // no external type_con_names yet
+            &self.accumulated_arities,
+            &self.accumulated_con_map,
+            &self.accumulated_class_env,
+            &self.accumulated_dict_names,
+            &self.accumulated_type_con_names,
         ) catch {
             // Prelude failed to compile — roll back and continue without it.
             self.ty_env.pop();
@@ -318,6 +330,67 @@ pub const Session = struct {
                 // Non-fatal: continue with Prelude symbols in renamer/typechecker
                 // but unavailable in JIT (expressions using them will fail at link time).
                 std.debug.print("Warning: addDeclarations failed for Prelude: {}\n", .{err});
+                return;
+            };
+        }
+    }
+
+    /// Compile one boot module (currently just `RHC.Prim`) and fold
+    /// its outputs into the same accumulators that `loadPrelude` uses
+    /// for the Prelude.  Soft-failures are absorbed so the REPL stays
+    /// usable when a boot module is broken — same policy as
+    /// `loadPrelude`.
+    fn loadBootModule(self: *Session, source: []const u8, file_id: FileId) void {
+        var diags = DiagnosticCollector.init();
+        defer diags.deinit(self.allocator);
+
+        const result = self.pipeline.compileModule(
+            source,
+            file_id,
+            &self.u_supply,
+            &self.rename_env,
+            &self.ty_env,
+            &self.mv_supply,
+            &diags,
+            &self.accumulated_arities,
+            &self.accumulated_con_map,
+            &self.accumulated_class_env,
+            &self.accumulated_dict_names,
+            &self.accumulated_type_con_names,
+        ) catch return;
+
+        for (result.grin_prog.defs) |def| {
+            self.accumulated_defs.append(self.allocator, def) catch return;
+            self.accumulated_arities.put(
+                self.allocator,
+                def.name.unique.value,
+                @intCast(def.params.len),
+            ) catch return;
+        }
+
+        for (result.core_data_decls) |decl| {
+            for (decl.constructors) |con| {
+                self.accumulated_con_map.put(
+                    self.allocator,
+                    con.name.unique.value,
+                    translate_mod.countConFields(con.ty),
+                ) catch return;
+            }
+            self.accumulated_type_con_names.put(self.allocator, decl.name.base, decl.name) catch return;
+        }
+
+        // Merge class_env/dict_names: the boot module may declare neither,
+        // but if it does they must accumulate (the Prelude pass below
+        // will see them through the seed parameters).
+        self.accumulated_class_env.mergeFrom(&result.class_env) catch return;
+        var dn_it = result.dict_names.iterator();
+        while (dn_it.next()) |entry| {
+            self.accumulated_dict_names.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*) catch return;
+        }
+
+        if (!is_wasi) {
+            self.engine.addDeclarations(&result.grin_prog) catch |err| {
+                std.debug.print("Warning: addDeclarations failed for boot module: {}\n", .{err});
                 return;
             };
         }
