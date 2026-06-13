@@ -236,13 +236,64 @@ re-run the suite locally and commit a fresh entry.
 Run the benchmarks if your change touches any of:
 
 - `src/backend/`, `src/grin/`, `src/core/`, `src/typecheck/`,
-  `src/desugar/`, `src/parser/`
-- `src/rts/`, `lib/Prelude.hs`
+  `src/desugar/`, `src/parser/`, `src/modules/`
+- `src/rts/`, `lib/Prelude.hs`, `lib/rhc-prim/`, `lib/ghc-internal/`,
+  `lib/base/`
 - `bench/` itself (a new bench program counts)
 
 Skip the benchmarks (and explain why in the PR) when your change is
 documentation-only, test-only, or strictly mechanical (renames, comment
 fixes, ROADMAP updates).
+
+### When to run
+
+Bench **before opening the PR**, not after merging — by the time it is
+on `main` a regression is part of the history and must be diagnosed
+under a second changeset.  Per-PR is fine when several PRs in a stack
+each shift perf in different directions; one bench refresh on the tip
+of the stack misses the per-step attribution.  If a stack is shipping
+intentionally with one bench commit at the end, say so explicitly in
+the cover PR description so reviewers know to attribute the delta to
+the whole stack.
+
+### Compare against the previous entry
+
+After `bench-all.sh` writes a new entry, diff the per-program means
+against the previous one.  A compact comparison from the repo root:
+
+```bash
+python3 - <<'PY'
+import json
+with open('bench/results.json') as f:
+    runs = json.load(f)['runs']
+prev, curr = runs[-2]['programs'], runs[-1]['programs']
+print(f'{"program":<22}{"prev":>10}{"curr":>10}{"delta":>10}')
+for p in sorted(curr):
+    pv = prev.get(p, {}).get('rhc_mean_ms')
+    cv = curr[p]['rhc_mean_ms']
+    d  = (cv - pv) / pv * 100 if pv else 0
+    if pv:
+        print(f'{p:<22}{pv:>10.3f}{cv:>10.3f}{d:>+9.1f}%')
+PY
+```
+
+**Treat as a regression and chase before pushing**:
+
+- Any program ≥10 ms with a per-program **delta > +10 %**.
+- More than three programs with **delta > +20 %** (broad regression).
+
+Programs under ~1 ms run within hyperfine's noise floor — a single-
+program +30 % on a sub-millisecond program is usually noise, but five
+of them in the same direction is the same broad regression as one
++10 % on a long-running program.  Use the long-running programs
+(queens, hanoi, nbody_simple, matmul, knucleotide, fib_rec) as the
+primary signal; treat short ones as a corroborating bulk metric.
+
+If the regression is real and intentional (e.g. correctness fix that
+trades cycles for soundness), document it in the PR body with the
+delta table above and call out which programs slowed by how much.
+Reviewers can then decide whether the trade is worth it instead of
+discovering it weeks later.
 
 ### How to run
 
