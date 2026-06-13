@@ -303,37 +303,12 @@ fn collectFn(
     // inline field initializer would see arity 0.
     const cpr = resultIsImmediate(pair.binder.ty, params.items.len);
 
-    // Foreign-import-prim wrappers (`\x0 .. xn -> primop x0 .. xn`)
-    // are not eligible for the worker/wrapper split (#803).  Generating
-    // a `w$` worker for them produces a raw-i64 ABI symbol whose
-    // definition lives in the wrapper's defining module, but cross-
-    // module direct callers emit an external declaration with the same
-    // raw-i64 ABI; that external decl is then routed through LLVM
-    // optimisations against a different `Function`/`Module` context
-    // than the wrapper's definition, which corrupts the call.  The
-    // wrapper is a one-instruction body anyway (the primop inlines
-    // directly), so suppressing the worker costs nothing.  Tracked in:
-    // https://github.com/adinapoli/rusholme/issues/826
-    const is_primop_wrapper = isPrimopApp(cur);
-    const eff_imm_typed: u64 = if (is_primop_wrapper) 0 else imm_typed;
-    const eff_cpr: bool = if (is_primop_wrapper) false else cpr;
-
     try fns.put(alloc, unique, .{
         .params = try params.toOwnedSlice(alloc),
-        .imm_typed = eff_imm_typed,
-        .cpr = eff_cpr,
+        .imm_typed = imm_typed,
+        .cpr = cpr,
         .body = cur,
     });
-}
-
-/// Is `e` a single `App` whose head is a primop? That is the canonical
-/// shape produced by the desugarer for a `foreign import prim` wrapper
-/// body (`\x0 .. xn -> primop_canonical_name x0 .. xn`).
-fn isPrimopApp(e: *const Expr) bool {
-    var cur = e;
-    while (cur.* == .App) cur = cur.App.fn_expr;
-    if (cur.* != .Var) return false;
-    return primop.PrimOp.fromString(cur.Var.name.base) != null;
 }
 
 /// Record `let x = y` variable aliases from a function body. The pattern
