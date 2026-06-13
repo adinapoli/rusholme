@@ -134,6 +134,10 @@ pub fn build(b: *std.Build) void {
     mod.addAnonymousImport("data_function_source", .{
         .root_source_file = b.path("lib/base/Data/Function.hs"),
     });
+    // GHC.Base source: compiler-magic types + core classes.
+    mod.addAnonymousImport("ghc_base_source", .{
+        .root_source_file = b.path("lib/ghc-internal/GHC/Base.hs"),
+    });
 
     // Runtime module - for LLVM-based runtime tests
     const runtime_mod = b.addModule("runtime", .{
@@ -354,6 +358,18 @@ pub fn build(b: *std.Build) void {
     const data_function_path_wf = b.addNamedWriteFiles("data_function_path");
     const data_function_path_file = data_function_path_wf.add("path.txt", data_function_path_option);
 
+    // GHC.Base source path: the compiler-magic types + core class
+    // hierarchy (Bool/Maybe/Either/Ordering, Eq/Ord/Bounded/Enum/Show,
+    // monomorphic Int arithmetic, Show helpers).  Compiled between
+    // Data.Function and Prelude.
+    const ghc_base_path_option = b.option(
+        []const u8,
+        "ghc-base-path",
+        "Path to lib/ghc-internal/GHC/Base.hs",
+    ) orelse b.getInstallPath(.@"prefix", "lib/ghc-internal/GHC/Base.hs");
+    const ghc_base_path_wf = b.addNamedWriteFiles("ghc_base_path");
+    const ghc_base_path_file = ghc_base_path_wf.add("path.txt", ghc_base_path_option);
+
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
@@ -422,6 +438,9 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addAnonymousImport("data_function_path", .{
         .root_source_file = data_function_path_file,
     });
+    exe.root_module.addAnonymousImport("ghc_base_path", .{
+        .root_source_file = ghc_base_path_file,
+    });
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
@@ -436,6 +455,8 @@ pub fn build(b: *std.Build) void {
     b.installFile("lib/rhc-prim/RHC/Prim.hs", "lib/rhc-prim/RHC/Prim.hs");
     // Data.Function: pure base-package combinators.
     b.installFile("lib/base/Data/Function.hs", "lib/base/Data/Function.hs");
+    // GHC.Base: compiler-magic types + core classes.
+    b.installFile("lib/ghc-internal/GHC/Base.hs", "lib/ghc-internal/GHC/Base.hs");
 
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
@@ -723,6 +744,9 @@ pub fn build(b: *std.Build) void {
     });
     repl_wasm.root_module.addAnonymousImport("data_function_source", .{
         .root_source_file = b.path("lib/base/Data/Function.hs"),
+    });
+    repl_wasm.root_module.addAnonymousImport("ghc_base_source", .{
+        .root_source_file = b.path("lib/ghc-internal/GHC/Base.hs"),
     });
     // Reactor mode: the REPL is a long-lived module with exported functions,
     // not a command that runs once and exits. In reactor mode the entry point

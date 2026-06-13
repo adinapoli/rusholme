@@ -228,6 +228,14 @@ pub const Pipeline = struct {
     /// which need the original expression type, not IO ().
     enable_show_wrapping: bool = true,
 
+    /// Globally-unique counter for GRIN-generated symbol names
+    /// (`_thunk_N`, lifted helpers).  Threaded through every
+    /// `translateProgram` call so symbols across boot modules and
+    /// REPL inputs do not collide at JIT add time
+    /// (`Duplicate definition of symbol '_thunk_17'`).  Mirrors
+    /// `next_grin_name_counter` in `cmdBuild`.
+    grin_name_counter: u64 = 0,
+
     /// Create a new pipeline.
     pub fn init(allocator: Allocator, io: std.Io) Pipeline {
         return .{
@@ -431,10 +439,11 @@ pub const Pipeline = struct {
         }
 
         // ── Translate to GRIN ──────────────────────────────────────
-        const grin_result = translate_mod.translateProgram(alloc, lift_result.program, external_arities, external_con_map, null, null, 0) catch {
+        const grin_result = translate_mod.translateProgram(alloc, lift_result.program, external_arities, external_con_map, null, null, self.grin_name_counter) catch {
             module_types.deinit(alloc);
             return CompileError.OutOfMemory;
         };
+        self.grin_name_counter = grin_result.next_name_counter;
         const grin_prog = grin_result.program;
         if (diags.hasErrors()) {
             module_types.deinit(alloc);

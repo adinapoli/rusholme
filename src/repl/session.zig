@@ -74,6 +74,11 @@ const rhc_prim_source = @embedFile("rhc_prim_source");
 /// `flip`, `(.)`, `($)`).  Compiled between `RHC.Prim` and Prelude.
 const data_function_source = @embedFile("data_function_source");
 
+/// GHC.Base source — compiler-magic types + core class hierarchy
+/// (Bool/Maybe/Either/Ordering, Eq/Ord/Bounded/Enum/Show).  Compiled
+/// between `Data.Function` and Prelude.
+const ghc_base_source = @embedFile("ghc_base_source");
+
 // ── Result types ──────────────────────────────────────────────────────
 
 /// Result of processing a REPL input.
@@ -281,11 +286,12 @@ pub const Session = struct {
         // behaviour.
         self.loadBootModule(rhc_prim_source, 0);
         self.loadBootModule(data_function_source, 1);
+        self.loadBootModule(ghc_base_source, 2);
 
         var diags = DiagnosticCollector.init();
         defer diags.deinit(self.allocator);
 
-        const file_id: FileId = 2; // Prelude is the third boot module.
+        const file_id: FileId = 3; // Prelude is the fourth boot module.
 
         const result = self.pipeline.compileModule(
             prelude_source,
