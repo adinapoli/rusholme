@@ -147,6 +147,9 @@ pub fn build(b: *std.Build) void {
     mod.addAnonymousImport("data_either_source", .{
         .root_source_file = b.path("lib/base/Data/Either.hs"),
     });
+    mod.addAnonymousImport("data_char_source", .{
+        .root_source_file = b.path("lib/base/Data/Char.hs"),
+    });
 
     // Runtime module - for LLVM-based runtime tests
     const runtime_mod = b.addModule("runtime", .{
@@ -406,6 +409,31 @@ pub fn build(b: *std.Build) void {
     const data_either_path_wf = b.addNamedWriteFiles("data_either_path");
     const data_either_path_file = data_either_path_wf.add("path.txt", data_either_path_option);
 
+    // Data.Char source path.
+    const data_char_path_option = b.option(
+        []const u8,
+        "data-char-path",
+        "Path to lib/base/Data/Char.hs",
+    ) orelse b.getInstallPath(.@"prefix", "lib/base/Data/Char.hs");
+    const data_char_path_wf = b.addNamedWriteFiles("data_char_path");
+    const data_char_path_file = data_char_path_wf.add("path.txt", data_char_path_option);
+
+    // ── Default package database path ──────────────────────────────────────
+    // Baked into the rhc binary via @embedFile and prepended to the user's
+    // `--package-db` list at startup, so `rhc build` consults the pre-built
+    // boot artifacts in `zig-out/lib/rhc-store` without an explicit flag.
+    // The directory itself is populated by the stage-2 bootstrap step
+    // declared below.  At runtime, the directory not existing or being
+    // empty is fine — `tryLoadFromPackageDbs` falls through to source
+    // compilation via the boot-module auto-prepend.
+    const default_pkg_db_option = b.option(
+        []const u8,
+        "default-package-db",
+        "Default package database path",
+    ) orelse b.getInstallPath(.lib, "rhc-store");
+    const default_pkg_db_wf = b.addNamedWriteFiles("default_package_db");
+    const default_pkg_db_file = default_pkg_db_wf.add("path.txt", default_pkg_db_option);
+
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
@@ -486,6 +514,12 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addAnonymousImport("data_either_path", .{
         .root_source_file = data_either_path_file,
     });
+    exe.root_module.addAnonymousImport("data_char_path", .{
+        .root_source_file = data_char_path_file,
+    });
+    exe.root_module.addAnonymousImport("default_package_db", .{
+        .root_source_file = default_pkg_db_file,
+    });
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
@@ -494,18 +528,60 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     // Install the Prelude source file alongside the binary so the compiler
-    // can find it at runtime via the baked-in prelude_path.
-    b.installFile("lib/Prelude.hs", "lib/Prelude.hs");
-    // Same for RHC.Prim, the innermost boot package compiled before Prelude.
-    b.installFile("lib/rhc-prim/RHC/Prim.hs", "lib/rhc-prim/RHC/Prim.hs");
-    // Data.Function: pure base-package combinators.
-    b.installFile("lib/base/Data/Function.hs", "lib/base/Data/Function.hs");
-    // GHC.Base: compiler-magic types + core classes.
-    b.installFile("lib/ghc-internal/GHC/Base.hs", "lib/ghc-internal/GHC/Base.hs");
-    // base/Data.{List,Maybe,Either}: pure consumer combinators.
-    b.installFile("lib/base/Data/List.hs", "lib/base/Data/List.hs");
-    b.installFile("lib/base/Data/Maybe.hs", "lib/base/Data/Maybe.hs");
-    b.installFile("lib/base/Data/Either.hs", "lib/base/Data/Either.hs");
+    // can find it at runtime via the baked-in prelude_path.  We capture
+    // each install step explicitly so the stage-2 bootstrap (declared
+    // below) can `dependOn` them without pulling in the full
+    // `b.getInstallStep()` (which would create a cycle).
+    const boot_source_installs = [_]*std.Build.Step.InstallFile{
+        b.addInstallFile(b.path("lib/Prelude.hs"), "lib/Prelude.hs"),
+        b.addInstallFile(b.path("lib/rhc-prim/RHC/Prim.hs"), "lib/rhc-prim/RHC/Prim.hs"),
+        b.addInstallFile(b.path("lib/base/Data/Function.hs"), "lib/base/Data/Function.hs"),
+        b.addInstallFile(b.path("lib/ghc-internal/GHC/Base.hs"), "lib/ghc-internal/GHC/Base.hs"),
+        b.addInstallFile(b.path("lib/base/Data/List.hs"), "lib/base/Data/List.hs"),
+        b.addInstallFile(b.path("lib/base/Data/Maybe.hs"), "lib/base/Data/Maybe.hs"),
+        b.addInstallFile(b.path("lib/base/Data/Either.hs"), "lib/base/Data/Either.hs"),
+        b.addInstallFile(b.path("lib/base/Data/Char.hs"), "lib/base/Data/Char.hs"),
+    };
+    for (boot_source_installs) |s| b.getInstallStep().dependOn(&s.step);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Stage-2 boot-package bootstrap
+    // ═══════════════════════════════════════════════════════════════════════
+    // After the rhc binary is built and the boot module sources are installed
+    // to zig-out/lib/, invoke rhc once to compile the whole layered Prelude
+    // stack into pre-built `.rhi` + `.bc` artifacts under the rhc-store dir.
+    //
+    // A single `rhc build --no-link --artifact-dir <store> lib/Prelude.hs`
+    // invocation pulls in every boot module via the source-prepend, so all
+    // seven artifacts (RHC.Prim, Data.Function, GHC.Base, Data.{List,Maybe,
+    // Either}, Prelude) land in the store from one run.
+    //
+    // Subsequent `rhc build` invocations on user code see the populated
+    // store via the baked-in `default_package_db` path (#837 deliverable 2).
+    // The boot-module source-prepend remains the source of truth for
+    // codegen until per-module .bc link integration lands (PR-C).
+    const bootstrap_run = b.addRunArtifact(exe);
+    bootstrap_run.addArgs(&.{ "build", "--no-link", "--artifact-dir" });
+    bootstrap_run.addArg(default_pkg_db_option);
+    // rhc auto-prepends every other boot module via its baked-in paths;
+    // passing Prelude as the positional triggers the whole layered
+    // compile.  We use the install-dir path (not the source tree) so
+    // it matches the binary's baked-in `prelude_path` and reads from
+    // the same files rhc would at user-`rhc build` time.
+    bootstrap_run.addArg(prelude_path_option);
+    // The bootstrap depends on the boot-source install steps but NOT on
+    // the full install step — `b.getInstallStep()` will depend on the
+    // bootstrap below, and a cycle would arise if it pointed back.
+    for (boot_source_installs) |s| bootstrap_run.step.dependOn(&s.step);
+    // Expose as a named step so users can rebuild just the store.
+    // Also wired into the default install step so `zig build` populates
+    // the store as part of the normal build.
+    const bootstrap_step = b.step(
+        "bootstrap",
+        "Compile boot packages into zig-out/lib/rhc-store",
+    );
+    bootstrap_step.dependOn(&bootstrap_run.step);
+    b.getInstallStep().dependOn(&bootstrap_run.step);
 
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
@@ -805,6 +881,9 @@ pub fn build(b: *std.Build) void {
     });
     repl_wasm.root_module.addAnonymousImport("data_either_source", .{
         .root_source_file = b.path("lib/base/Data/Either.hs"),
+    });
+    repl_wasm.root_module.addAnonymousImport("data_char_source", .{
+        .root_source_file = b.path("lib/base/Data/Char.hs"),
     });
     // Reactor mode: the REPL is a long-lived module with exported functions,
     // not a command that runs once and exits. In reactor mode the entry point

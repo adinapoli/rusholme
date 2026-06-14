@@ -126,6 +126,26 @@ fn getDataEitherPath() []const u8 {
     return @embedFile("data_either_path");
 }
 
+fn getDataCharPath() []const u8 {
+    return @embedFile("data_char_path");
+}
+
+/// Get the default package-database path baked in at compile time.
+/// Points at `zig-out/lib/rhc-store/` (or wherever
+/// `-Ddefault-package-db=<path>` was set at build time).  Populated by
+/// the stage-2 bootstrap step in `build.zig` with pre-built boot
+/// module `.rhi`+`.bc` artifacts.  Prepended to the user's
+/// `--package-db` list at startup so user `rhc build` invocations
+/// resolve imports through cached interfaces.
+///
+/// At runtime the directory may not exist (clean tree, no
+/// `zig build bootstrap` yet) — `tryLoadFromPackageDbs` swallows
+/// missing-file errors as cache misses and falls back to the
+/// auto-prepended source compilation path.
+fn getDefaultPackageDb() []const u8 {
+    return @embedFile("default_package_db");
+}
+
 /// Boot modules that the driver auto-prepends, in dependency order.
 ///
 /// Mirror the layered Prelude per `docs/plans/2026-06-13-ghc-internal-base-split.md`:
@@ -147,6 +167,10 @@ const boot_modules = [_]BootModule{
     .{ .module_name = "Data.List", .pathFn = getDataListPath },
     .{ .module_name = "Data.Maybe", .pathFn = getDataMaybePath },
     .{ .module_name = "Data.Either", .pathFn = getDataEitherPath },
+    // Data.Char is not in the implicit Prelude (matches GHC: `Data.Char` is
+    // explicit-import only).  We still source-prepend it so cross-references
+    // and topo can resolve cleanly when user code does `import Data.Char`.
+    .{ .module_name = "Data.Char", .pathFn = getDataCharPath },
     .{ .module_name = "Prelude", .pathFn = getPreludePath },
 };
 
@@ -282,6 +306,9 @@ pub fn main(init: std.process.Init) !void {
                 \\    --backend <str>          Backend: native (default), jit, wasm, c.
                 \\    --rts <str>              RTS heap backend: arena (default) or immix.
                 \\    --package-db <str>...    Package database path (may be repeated).
+                \\    --artifact-dir <str>     Write per-module .rhi+.bc artifacts to this dir; module name dots become subdirs.
+                \\    --no-link                Skip the final link step; emit only per-module artifacts.
+                \\    --no-boot                Skip auto-prepend of boot modules (RHC.Prim, Prelude, …).
                 \\    --repl                   Compile for REPL use (internal).
                 \\<str>...
                 \\
@@ -297,6 +324,9 @@ pub fn main(init: std.process.Init) !void {
                 \\    --backend <str>          Backend: native (default), jit, wasm, c.
                 \\    --rts <str>              RTS heap backend: arena (default) or immix.
                 \\    --package-db <str>...    Package database path (may be repeated).
+                \\    --artifact-dir <str>     Write per-module .rhi+.bc artifacts to this dir; module name dots become subdirs.
+                \\    --no-link                Skip the final link step; emit only per-module artifacts.
+                \\    --no-boot                Skip auto-prepend of boot modules (RHC.Prim, Prelude, …).
                 \\<str>...
                 \\
             );
@@ -386,6 +416,9 @@ pub fn main(init: std.process.Init) !void {
                 build_res.args.@"package-db",
                 opt_level,
                 rts_backend,
+                build_res.args.@"artifact-dir",
+                build_res.args.@"no-link" != 0,
+                build_res.args.@"no-boot" != 0,
             );
         },
 
@@ -1018,7 +1051,20 @@ fn loadPrelude(
 /// - native: compiles to native executable via LLVM
 /// - wasm: compiles to WebAssembly binary (.wasm)
 /// - jit, c: not yet implemented
-fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8, output_name: []const u8, backend_kind: rusholme.backend.backend_mod.BackendKind, is_repl: bool, package_dbs: []const []const u8, opt_level: rusholme.backend.llvm.OptLevel, rts_backend: rusholme.backend.grin_to_llvm.RtsBackend) !void {
+fn cmdBuild(
+    allocator: std.mem.Allocator,
+    io: Io,
+    file_paths: []const []const u8,
+    output_name: []const u8,
+    backend_kind: rusholme.backend.backend_mod.BackendKind,
+    is_repl: bool,
+    package_dbs: []const []const u8,
+    opt_level: rusholme.backend.llvm.OptLevel,
+    rts_backend: rusholme.backend.grin_to_llvm.RtsBackend,
+    artifact_dir: ?[]const u8,
+    no_link: bool,
+    no_boot: bool,
+) !void {
     // REPL mode placeholder - for WASM backend compiles stateful REPL
     _ = is_repl;
 
@@ -1029,6 +1075,16 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
 
     const compile_env_mod = rusholme.modules.compile_env;
     var source_modules: std.ArrayListUnmanaged(compile_env_mod.SourceModule) = .empty;
+
+    // Prepend the baked-in default package db so user `rhc build` picks up
+    // pre-built boot artifacts without needing an explicit
+    // `--package-db zig-out/lib/rhc-store` flag.  User-supplied
+    // `--package-db` paths still take precedence on lookup ties because the
+    // default is searched last (first-match-wins in tryLoadFromPackageDbs).
+    var effective_pkg_dbs: std.ArrayListUnmanaged([]const u8) = .empty;
+    try effective_pkg_dbs.appendSlice(arena_alloc, package_dbs);
+    const default_db = getDefaultPackageDb();
+    if (default_db.len > 0) try effective_pkg_dbs.append(arena_alloc, default_db);
 
     // ── Auto-prepend boot modules unless the user explicitly passed them ─
     //
@@ -1047,15 +1103,34 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     // File IDs are assigned monotonically; boot modules take the low IDs.
     var next_file_id: u32 = 0;
 
-    for (boot_modules) |boot| {
+    // `--no-boot` skips the auto-prepend entirely.  This is the bootstrap
+    // mode used by `build.zig` when compiling the boot packages themselves
+    // — RHC.Prim has nothing to depend on, GHC.Base depends only on
+    // RHC.Prim (resolved via `--package-db`), and so on.  User-mode builds
+    // always want the prepend.
+    if (!no_boot) {
+        for (boot_modules) |boot| {
         if (user_module_names.contains(boot.module_name)) continue;
+        // NOTE: even when `effective_pkg_dbs` carries a full set of
+        // boot-module `.rhi`+`.bc` artifacts, we currently still
+        // source-prepend the boot stack.  Skipping the prepend lets
+        // the cached code path provide the interfaces, but the LLVM
+        // tag registry and `__rhc_force` module are built from the
+        // *fresh* per-module GRIN — cached modules contribute no
+        // GRIN to that registry, so the resulting force module is
+        // incomplete and the link fails.  Full cache-only codegen is
+        // tracked separately (see PR-C scope notes in the issue).
         const boot_path = boot.pathFn();
         if (readSourceFile(arena_alloc, io, boot_path)) |boot_source| {
             try source_modules.append(arena_alloc, .{
                 .module_name = boot.module_name,
                 .source = boot_source,
                 .file_id = next_file_id,
-                .source_path = boot_path,
+                // When emitting to an artifact dir we drop `source_path` so
+                // `compile_env.zig` does NOT auto-write `.rhi` next to the
+                // source.  The store-canonical `.rhi` is written explicitly
+                // below into `<artifact_dir>/<Module/Path>.rhi`.
+                .source_path = if (artifact_dir == null) boot_path else null,
             });
             next_file_id += 1;
         } else |err| {
@@ -1072,6 +1147,7 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
             }
             try stderr.flush();
         }
+        }
     }
 
     for (file_paths) |fp| {
@@ -1087,7 +1163,12 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
             try stderr.flush();
             std.process.exit(1);
         };
-        const mod_name = try rusholme.modules.module_graph.inferModuleName(arena_alloc, fp);
+        // Prefer the source-declared `module Foo where` name over the
+        // path-inferred one so a file whose path doesn't mirror its module
+        // (e.g. `lib/base/Data/List.hs` declaring `module Data.List where`)
+        // still topo-sorts and resolves imports correctly.
+        const mod_name = extractSourceModuleName(source) orelse
+            try rusholme.modules.module_graph.inferModuleName(arena_alloc, fp);
         try source_modules.append(arena_alloc, .{
             .module_name = mod_name,
             .source = source,
@@ -1096,7 +1177,7 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
         next_file_id += 1;
     }
 
-    var session_result = try compile_env_mod.compileProgram(arena_alloc, io, source_modules.items, package_dbs);
+    var session_result = try compile_env_mod.compileProgram(arena_alloc, io, source_modules.items, effective_pkg_dbs.items);
     var session = &session_result.env;
     defer session.deinit();
 
@@ -1113,6 +1194,28 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     }
 
     const module_order = session_result.result.module_order;
+
+    // ── Store-mode `.rhi` export ────────────────────────────────────────
+    // When `--artifact-dir` is given, write one `.rhi` per locally-compiled
+    // module into the canonical store layout
+    // (`<artifact_dir>/<Module/Path>.rhi`, dots → slashes).  Modules pulled
+    // from `--package-db` already have their `.rhi` in the source db and
+    // are skipped (they have no entry in `session.programs`).
+    if (artifact_dir) |dir| {
+        for (module_order) |mod_name| {
+            if (session.programs.get(mod_name) == null) continue; // package-db hit
+            const iface = session.ifaces.get(mod_name) orelse continue;
+            // Prefer the source-declared `module Foo where` name over
+            // the path-inferred one so `lib/rhc-prim/RHC/Prim.hs`
+            // lands as `RHC/Prim.rhi`, not `lib/rhc-prim/RHC/Prim.rhi`
+            // (mirrors the `.bc` stem logic in `emitNative`).
+            const stem_name: []const u8 = if (session.parsed_modules.get(mod_name)) |parsed|
+                parsed.module_name
+            else
+                mod_name;
+            try writeArtifactRhi(arena_alloc, io, dir, stem_name, iface);
+        }
+    }
 
     // ── Whole-program dictionary specialisation (#807) ──────────────────
     // Resolve class-method dispatch through statically-known dictionaries
@@ -1247,8 +1350,19 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
     };
 
     // ── Dispatch to backend-specific emission ─────────────────────────────
+    // `--artifact-dir` is only supported on the native backend for now.  JIT
+    // and WASM paths emit bitcode shapes that aren't directly consumable as
+    // store artifacts yet; the boot-store layout only needs native bitcode.
+    if (artifact_dir != null and backend_kind != .native) {
+        var stderr_buf: [4096]u8 = undefined;
+        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+        const stderr = &stderr_fw.interface;
+        try stderr.print("rhc build: --artifact-dir requires --backend=native\n", .{});
+        try stderr.flush();
+        std.process.exit(1);
+    }
     switch (backend_kind) {
-        .native => try emitNative(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name, opt_level, rts_backend, strict_params),
+        .native => try emitNative(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name, opt_level, rts_backend, strict_params, artifact_dir, no_link),
         .jit => try emitJit(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name, opt_level, rts_backend, strict_params),
         .wasm => try emitWasm(arena_alloc, io, session, module_order, per_module_grin.items, all_grin, output_name, opt_level, rts_backend, strict_params),
         .c => {
@@ -1265,6 +1379,12 @@ fn cmdBuild(allocator: std.mem.Allocator, io: Io, file_paths: []const []const u8
 }
 
 /// Emit native executable (the original cmdBuild logic).
+///
+/// When `artifact_dir` is non-null, per-module `.bc` files are written into
+/// `<artifact_dir>/<Module/Path>.bc` (dots → slashes) instead of the current
+/// working directory.  When `no_link` is true, the final link step is
+/// skipped — useful when emitting boot-package artifacts that have no
+/// `main`.
 fn emitNative(
     allocator: std.mem.Allocator,
     io: Io,
@@ -1276,6 +1396,8 @@ fn emitNative(
     opt_level: rusholme.backend.llvm.OptLevel,
     rts_backend: rusholme.backend.grin_to_llvm.RtsBackend,
     strict_params: ?*const rusholme.core.demand.StrictnessMap,
+    artifact_dir: ?[]const u8,
+    no_link: bool,
 ) !void {
     const llvm = rusholme.backend.llvm;
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -1345,7 +1467,13 @@ fn emitNative(
             parsed.module_name
         else
             mod_name;
-        const bc_path = try std.fmt.allocPrint(arena_alloc, "{s}.bc", .{bc_stem});
+        const bc_path = if (artifact_dir) |dir| blk: {
+            const full_stem = try artifactStem(arena_alloc, dir, bc_stem);
+            defer arena_alloc.free(full_stem);
+            const p = try std.fmt.allocPrint(arena_alloc, "{s}.bc", .{full_stem});
+            try ensureParentDirs(io, p);
+            break :blk p;
+        } else try std.fmt.allocPrint(arena_alloc, "{s}.bc", .{bc_stem});
         llvm.writeBitcodeToFile(llvm_mod, bc_path) catch |err| {
             var stderr_buf: [4096]u8 = undefined;
             var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
@@ -1357,6 +1485,44 @@ fn emitNative(
 
         try llvm_modules.append(arena_alloc, llvm_mod);
     }
+
+    // ── Pull cached-module bitcode into the link ─────────────────────────
+    // For every module that was resolved through `--package-db` *and*
+    // was NOT also source-compiled (so `session.programs` has no
+    // bindings for it), parse its sibling `.bc` and append to the
+    // link set.  When source-prepend is active for a boot module its
+    // fresh `.bc` already provides the symbols, so loading the cached
+    // copy would yield "multiple definition" errors.  This filter
+    // matters when the user explicitly opts out of source-prepend
+    // (e.g. `rhc build --no-boot --package-db <store> …`).
+    var bc_it = session.cached_bc_paths.iterator();
+    while (bc_it.next()) |entry| {
+        const mod_name = entry.key_ptr.*;
+        if (session.programs.get(mod_name)) |prog| {
+            if (prog.binds.len > 0 or prog.data_decls.len > 0) continue;
+        }
+        const bc_path = entry.value_ptr.*;
+        const cached_mod = llvm.parseBitcodeFile(bc_path) catch |err| {
+            var stderr_buf: [4096]u8 = undefined;
+            var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+            const stderr = &stderr_fw.interface;
+            try stderr.print(
+                "rhc: failed to parse cached bitcode for module '{s}' at '{s}': {}\n",
+                .{ mod_name, bc_path, err },
+            );
+            try stderr.flush();
+            std.process.exit(1);
+        };
+        try llvm_modules.append(arena_alloc, cached_mod);
+    }
+
+    // `--no-link` mode: per-module `.bc` artifacts are the only output.
+    // Skip the shared `__rhc_force` module (it covers only this build's tag
+    // table, which is incomplete in a per-package build), the in-process
+    // bitcode merge, object emission, and final linker invocation.  The
+    // user's downstream `rhc build` rebuilds the force module with a full
+    // cross-package tag table.
+    if (no_link) return;
 
     // Emit the shared __rhc_force module.  Per-module code declares
     // __rhc_force as external; this module provides the definition.
@@ -1937,6 +2103,149 @@ fn renderDiagnostics(
 }
 
 /// Read a source file from disk into an owned allocation.
+/// Compute the per-module store path stem (without extension).  Dots in the
+/// module name become path separators so `Data.Maybe` lands under a
+/// `Data/` subdir.  Caller owns the returned slice.
+fn artifactStem(
+    alloc: std.mem.Allocator,
+    artifact_dir: []const u8,
+    module_name: []const u8,
+) ![]u8 {
+    const sep = std.fs.path.sep;
+    const rel = try alloc.dupe(u8, module_name);
+    for (rel) |*c| if (c.* == '.') {
+        c.* = sep;
+    };
+    defer alloc.free(rel);
+    return std.fs.path.join(alloc, &.{ artifact_dir, rel });
+}
+
+/// Create all intermediate directories above `file_path`.  No-op if they
+/// already exist.
+fn ensureParentDirs(io: Io, file_path: []const u8) !void {
+    if (std.fs.path.dirname(file_path)) |dir| {
+        try Dir.cwd().createDirPath(io, dir);
+    }
+}
+
+/// Write `iface` to `<artifact_dir>/<Module/Path>.rhi`, creating intermediate
+/// directories as needed.
+fn writeArtifactRhi(
+    alloc: std.mem.Allocator,
+    io: Io,
+    artifact_dir: []const u8,
+    module_name: []const u8,
+    iface: rusholme.modules.mod_iface.ModIface,
+) !void {
+    const stem = try artifactStem(alloc, artifact_dir, module_name);
+    defer alloc.free(stem);
+    const rhi_path = try std.fmt.allocPrint(alloc, "{s}.rhi", .{stem});
+    defer alloc.free(rhi_path);
+    try ensureParentDirs(io, rhi_path);
+    try rusholme.modules.mod_iface.writeRhiToDisk(alloc, io, rhi_path, iface);
+}
+
+test "artifactStem: dots become path separators under artifact_dir" {
+    const testing = std.testing;
+    const sep = std.fs.path.sep;
+    const got = try artifactStem(testing.allocator, "/tmp/store", "Data.Maybe");
+    defer testing.allocator.free(got);
+    const expected = try std.fmt.allocPrint(
+        testing.allocator,
+        "/tmp/store{c}Data{c}Maybe",
+        .{ sep, sep },
+    );
+    defer testing.allocator.free(expected);
+    try testing.expectEqualStrings(expected, got);
+}
+
+test "extractSourceModuleName: basic header" {
+    const got = extractSourceModuleName("module Foo.Bar where\n").?;
+    try std.testing.expectEqualStrings("Foo.Bar", got);
+}
+
+test "extractSourceModuleName: pragma + comments before header" {
+    const src =
+        \\{-# LANGUAGE NoImplicitPrelude #-}
+        \\-- top of file
+        \\{- block comment -}
+        \\
+        \\module Data.List
+        \\    ( map, filter
+        \\    ) where
+        \\
+    ;
+    const got = extractSourceModuleName(src).?;
+    try std.testing.expectEqualStrings("Data.List", got);
+}
+
+test "extractSourceModuleName: missing header returns null" {
+    try std.testing.expect(extractSourceModuleName("x = 42\n") == null);
+}
+
+test "artifactStem: top-level module name has no subdir" {
+    const testing = std.testing;
+    const got = try artifactStem(testing.allocator, "/tmp/store", "Main");
+    defer testing.allocator.free(got);
+    const sep = std.fs.path.sep;
+    const expected = try std.fmt.allocPrint(testing.allocator, "/tmp/store{c}Main", .{sep});
+    defer testing.allocator.free(expected);
+    try testing.expectEqualStrings(expected, got);
+}
+
+/// Lexical scan of `source` for the first `module Foo.Bar` declaration.
+/// Returns a borrowed sub-slice of `source` containing the dotted name, or
+/// null if no module header is present (top-level `Main` style file).
+///
+/// Skips `--` line comments and `{- … -}` block comments before each
+/// non-whitespace token, mirroring the lexer's prefix scanner.  Does not
+/// validate that the identifier is well-formed beyond the first-character
+/// class; the downstream parser will diagnose any malformed header.
+fn extractSourceModuleName(source: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i < source.len) {
+        // Skip whitespace.
+        while (i < source.len and (source[i] == ' ' or source[i] == '\t' or source[i] == '\n' or source[i] == '\r')) i += 1;
+        if (i >= source.len) return null;
+
+        // Skip `-- …` line comments.
+        if (i + 1 < source.len and source[i] == '-' and source[i + 1] == '-') {
+            while (i < source.len and source[i] != '\n') i += 1;
+            continue;
+        }
+        // Skip `{- … -}` block comments (no nesting — Haskell allows
+        // nesting but for the header scan we don't bother).
+        if (i + 1 < source.len and source[i] == '{' and source[i + 1] == '-') {
+            i += 2;
+            while (i + 1 < source.len and !(source[i] == '-' and source[i + 1] == '}')) i += 1;
+            if (i + 1 < source.len) i += 2;
+            continue;
+        }
+        // Skip `{-# … #-}` pragmas — caught by the block-comment branch above.
+        break;
+    }
+
+    // Expect literal "module" followed by whitespace.
+    const kw = "module";
+    if (i + kw.len > source.len) return null;
+    if (!std.mem.eql(u8, source[i .. i + kw.len], kw)) return null;
+    i += kw.len;
+    if (i >= source.len) return null;
+    if (!(source[i] == ' ' or source[i] == '\t' or source[i] == '\n' or source[i] == '\r')) return null;
+    while (i < source.len and (source[i] == ' ' or source[i] == '\t' or source[i] == '\n' or source[i] == '\r')) i += 1;
+
+    // Read dotted identifier: start with [A-Z], continue with [A-Za-z0-9_'.].
+    if (i >= source.len or !std.ascii.isUpper(source[i])) return null;
+    const start = i;
+    while (i < source.len) : (i += 1) {
+        const c = source[i];
+        if (std.ascii.isAlphanumeric(c) or c == '_' or c == '\'' or c == '.') continue;
+        break;
+    }
+    if (i == start) return null;
+    return source[start..i];
+}
+
 fn readSourceFile(allocator: std.mem.Allocator, io: Io, path: []const u8) ![]u8 {
     const file = try Dir.openFile(.cwd(), io, path, .{});
     defer file.close(io);

@@ -182,6 +182,16 @@ instance Eq Bool where
   (==) = eqBool
   (/=) = neBool
 
+eqChar :: Char -> Char -> Bool
+eqChar x y = primEqInt (charToInt x) (charToInt y)
+
+neChar :: Char -> Char -> Bool
+neChar x y = primNeInt (charToInt x) (charToInt y)
+
+instance Eq Char where
+  (==) = eqChar
+  (/=) = neChar
+
 -- ========================================================================
 -- Ord type class
 -- ========================================================================
@@ -206,6 +216,28 @@ instance Ord Int where
   (<=) = primLeInt
   (>)  = primGtInt
   (>=) = primGeInt
+
+compareChar :: Char -> Char -> Ordering
+compareChar x y = compareInt (charToInt x) (charToInt y)
+
+ltChar :: Char -> Char -> Bool
+ltChar x y = primLtInt (charToInt x) (charToInt y)
+
+leChar :: Char -> Char -> Bool
+leChar x y = primLeInt (charToInt x) (charToInt y)
+
+gtChar :: Char -> Char -> Bool
+gtChar x y = primGtInt (charToInt x) (charToInt y)
+
+geChar :: Char -> Char -> Bool
+geChar x y = primGeInt (charToInt x) (charToInt y)
+
+instance Ord Char where
+  compare = compareChar
+  (<)  = ltChar
+  (<=) = leChar
+  (>)  = gtChar
+  (>=) = geChar
 
 -- ========================================================================
 -- Bounded type class
