@@ -130,6 +130,10 @@ fn getDataCharPath() []const u8 {
     return @embedFile("data_char_path");
 }
 
+fn getDataTuplePath() []const u8 {
+    return @embedFile("data_tuple_path");
+}
+
 /// Get the default package-database path baked in at compile time.
 /// Points at `zig-out/lib/rhc-store/` (or wherever
 /// `-Ddefault-package-db=<path>` was set at build time).  Populated by
@@ -171,6 +175,9 @@ const boot_modules = [_]BootModule{
     // explicit-import only).  We still source-prepend it so cross-references
     // and topo can resolve cleanly when user code does `import Data.Char`.
     .{ .module_name = "Data.Char", .pathFn = getDataCharPath },
+    // Data.Tuple: pair accessors + curry/uncurry.  Like Data.Char,
+    // not part of implicit Prelude — explicit import required.
+    .{ .module_name = "Data.Tuple", .pathFn = getDataTuplePath },
     .{ .module_name = "Prelude", .pathFn = getPreludePath },
 };
 
