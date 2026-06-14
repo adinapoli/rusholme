@@ -100,6 +100,12 @@ pub const SigEnv = struct {
         try self.addType(alloc, &.{
             .{ .unique = known.Con.Tuple5.unique.value, .base = "(,,,,)", .arity = 5 },
         });
+        try self.addType(alloc, &.{
+            .{ .unique = known.Con.Tuple6.unique.value, .base = "(,,,,,)", .arity = 6 },
+        });
+        try self.addType(alloc, &.{
+            .{ .unique = known.Con.Tuple7.unique.value, .base = "(,,,,,,)", .arity = 7 },
+        });
     }
 };
 
@@ -158,13 +164,7 @@ pub fn normalize(alloc: std.mem.Allocator, rpat: RPat) NormalizeError!Pat {
             break :blk .{ .con = .{ .unique = ic.con.unique.value, .base = ic.con.base, .args = args } };
         },
         .Tuple => |ps| blk: {
-            const con_name = switch (ps.len) {
-                2 => known.Con.Tuple2,
-                3 => known.Con.Tuple3,
-                4 => known.Con.Tuple4,
-                5 => known.Con.Tuple5,
-                else => return error.Unsupported,
-            };
+            const con_name = known.Con.tuple(ps.len) orelse return error.Unsupported;
             const args = try alloc.alloc(Pat, ps.len);
             for (ps, 0..) |p, i| args[i] = try normalize(alloc, p);
             break :blk .{ .con = .{ .unique = con_name.unique.value, .base = con_name.base, .args = args } };

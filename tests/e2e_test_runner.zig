@@ -252,6 +252,10 @@ test "e2e: e2e_842_data_tuple" {
     try testE2e(std.testing.allocator, "e2e_842_data_tuple");
 }
 
+test "e2e: e2e_846_wide_tuples (#846)" {
+    try testE2e(std.testing.allocator, "e2e_846_wide_tuples");
+}
+
 test "e2e: e2e_843_data_ord" {
     try testE2e(std.testing.allocator, "e2e_843_data_ord");
 }

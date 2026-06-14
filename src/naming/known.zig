@@ -84,6 +84,28 @@ pub const Con = struct {
     pub const Tuple3 = name("(,,)", 210);
     pub const Tuple4 = name("(,,,)", 211);
     pub const Tuple5 = name("(,,,,)", 212);
+    pub const Tuple6 = name("(,,,,,)", 213);
+    pub const Tuple7 = name("(,,,,,,)", 214);
+
+    /// Highest tuple arity wired end-to-end (constructor, scheme, GRIN,
+    /// match-check). Arities above this are not yet supported.
+    pub const max_tuple_arity: usize = 7;
+
+    /// Return the well-known tuple constructor `Name` for the given arity,
+    /// or `null` if the arity is outside the supported range (2..=7).
+    /// Arity 1 is a parenthesised expression, not a tuple, and arity 0 is
+    /// the `Unit` constructor — neither is handled here.
+    pub fn tuple(arity: usize) ?Name {
+        return switch (arity) {
+            2 => Tuple2,
+            3 => Tuple3,
+            4 => Tuple4,
+            5 => Tuple5,
+            6 => Tuple6,
+            7 => Tuple7,
+            else => null,
+        };
+    }
 };
 
 /// The start of the non-reserved unique ID range.

@@ -549,17 +549,13 @@ fn astTypeToHTypeWithScope(
             }
 
             const args = try elem_tys.toOwnedSlice(ctx.alloc);
-            const tuple_name = switch (args.len) {
-                1 => Known.Type.Unit, // Actually a unit, but parser gives this as tuple
-                2 => Known.Con.Tuple2,
-                3 => Known.Con.Tuple3,
-                4 => Known.Con.Tuple4,
-                5 => Known.Con.Tuple5,
-                else => blk2: {
-                    // For tuples larger than 5, fall back to fresh meta (M1 limitation)
-                    break :blk2 null;
-                },
-            };
+            // Arity 1 is the unit type (the parser hands a 1-tuple here);
+            // arities 2..max_tuple_arity map to their tuple constructor.
+            // Anything wider is not yet wired and falls back to a fresh meta.
+            const tuple_name: ?Name = if (args.len == 1)
+                Known.Type.Unit
+            else
+                Known.Con.tuple(args.len);
 
             if (tuple_name) |name| {
                 break :blk ctx.alloc_ty(HType{ .Con = .{ .name = name, .args = args } });
@@ -1010,8 +1006,8 @@ pub fn inferPat(ctx: *InferCtx, pat: RPat) std.mem.Allocator.Error!*HType {
             break :blk inst_ty;
         },
         .Tuple => |pats| blk: {
-            if (pats.len > 5 or pats.len == 0) {
-                // M1 limitation: fall back to fresh meta for unsupported arities
+            if (pats.len > Known.Con.max_tuple_arity or pats.len == 0) {
+                // Fall back to fresh meta for arities not yet wired.
                 break :blk ctx.freshMeta();
             }
 
@@ -1021,14 +1017,10 @@ pub fn inferPat(ctx: *InferCtx, pat: RPat) std.mem.Allocator.Error!*HType {
                 try elem_tys.append(ctx.alloc, ctx.conArgIndirection(pt));
             }
             const args = try elem_tys.toOwnedSlice(ctx.alloc);
-            const tuple_name = switch (args.len) {
-                1 => Known.Type.Unit,
-                2 => Known.Con.Tuple2,
-                3 => Known.Con.Tuple3,
-                4 => Known.Con.Tuple4,
-                5 => Known.Con.Tuple5,
-                else => unreachable, // Already handled above
-            };
+            const tuple_name: Name = if (args.len == 1)
+                Known.Type.Unit
+            else
+                Known.Con.tuple(args.len).?; // arity in 2..max guaranteed above
             break :blk ctx.alloc_ty(HType{ .Con = .{ .name = tuple_name, .args = args } });
         },
         .List => |pats| blk: {
@@ -1422,8 +1414,8 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
 
         // ── Tuple ─────────────────────────────────────────────────────
         .Tuple => |elems| blk: {
-            if (elems.len > 5 or elems.len == 0) {
-                // M1 limitation: fall back to fresh meta for unsupported arities
+            if (elems.len > Known.Con.max_tuple_arity or elems.len == 0) {
+                // Fall back to fresh meta for arities not yet wired.
                 break :blk ctx.freshMeta();
             }
 
@@ -1433,14 +1425,10 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                 try elem_tys.append(ctx.alloc, ctx.conArgIndirection(et));
             }
             const args = try elem_tys.toOwnedSlice(ctx.alloc);
-            const tuple_name = switch (args.len) {
-                1 => Known.Type.Unit,
-                2 => Known.Con.Tuple2,
-                3 => Known.Con.Tuple3,
-                4 => Known.Con.Tuple4,
-                5 => Known.Con.Tuple5,
-                else => unreachable, // Already handled above
-            };
+            const tuple_name: Name = if (args.len == 1)
+                Known.Type.Unit
+            else
+                Known.Con.tuple(args.len).?; // arity in 2..max guaranteed above
             break :blk ctx.alloc_ty(HType{ .Con = .{ .name = tuple_name, .args = args } });
         },
 

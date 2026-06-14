@@ -24,6 +24,6 @@ in case arg_0_1026 of (arg_0_1026 :: Wrapper_1008 Int_100) {
 }
 
 (sumPair_1006 :: ((,)_209 Int_100 Int_100) -> Int_100) = \(arg_0_1028 :: (,)_209 Int_100 Int_100) -> case arg_0_1028 of (arg_0_1028 :: (,)_209 Int_100 Int_100) {
-  (,) (a_1012 :: Int_100) (_field_0_0_1_1029 :: _t) -> a_1012
+  (,)_209 (a_1012 :: Int_100) (_field_0_0_1_1029 :: _t) -> a_1012
   _ -> error_5 "Non-exhaustive patterns in function"
 }
