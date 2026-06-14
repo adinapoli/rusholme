@@ -252,6 +252,10 @@ test "e2e: e2e_842_data_tuple" {
     try testE2e(std.testing.allocator, "e2e_842_data_tuple");
 }
 
+test "e2e: e2e_843_data_ord" {
+    try testE2e(std.testing.allocator, "e2e_843_data_ord");
+}
+
 test "e2e: ghc_744_let_in_default_body (#744)" {
     try testE2e(std.testing.allocator, "ghc_744_let_in_default_body");
 }
