@@ -126,6 +126,22 @@ fn getDataEitherPath() []const u8 {
     return @embedFile("data_either_path");
 }
 
+/// Get the default package-database path baked in at compile time.
+/// Points at `zig-out/lib/rhc-store/` (or wherever
+/// `-Ddefault-package-db=<path>` was set at build time).  Populated by
+/// the stage-2 bootstrap step in `build.zig` with pre-built boot
+/// module `.rhi`+`.bc` artifacts.  Prepended to the user's
+/// `--package-db` list at startup so user `rhc build` invocations
+/// resolve imports through cached interfaces.
+///
+/// At runtime the directory may not exist (clean tree, no
+/// `zig build bootstrap` yet) — `tryLoadFromPackageDbs` swallows
+/// missing-file errors as cache misses and falls back to the
+/// auto-prepended source compilation path.
+fn getDefaultPackageDb() []const u8 {
+    return @embedFile("default_package_db");
+}
+
 /// Boot modules that the driver auto-prepends, in dependency order.
 ///
 /// Mirror the layered Prelude per `docs/plans/2026-06-13-ghc-internal-base-split.md`:
@@ -1052,6 +1068,16 @@ fn cmdBuild(
     const compile_env_mod = rusholme.modules.compile_env;
     var source_modules: std.ArrayListUnmanaged(compile_env_mod.SourceModule) = .empty;
 
+    // Prepend the baked-in default package db so user `rhc build` picks up
+    // pre-built boot artifacts without needing an explicit
+    // `--package-db zig-out/lib/rhc-store` flag.  User-supplied
+    // `--package-db` paths still take precedence on lookup ties because the
+    // default is searched last (first-match-wins in tryLoadFromPackageDbs).
+    var effective_pkg_dbs: std.ArrayListUnmanaged([]const u8) = .empty;
+    try effective_pkg_dbs.appendSlice(arena_alloc, package_dbs);
+    const default_db = getDefaultPackageDb();
+    if (default_db.len > 0) try effective_pkg_dbs.append(arena_alloc, default_db);
+
     // ── Auto-prepend boot modules unless the user explicitly passed them ─
     //
     // The boot modules (`RHC.Prim`, `Prelude`, …) form the layered
@@ -1134,7 +1160,7 @@ fn cmdBuild(
         next_file_id += 1;
     }
 
-    var session_result = try compile_env_mod.compileProgram(arena_alloc, io, source_modules.items, package_dbs);
+    var session_result = try compile_env_mod.compileProgram(arena_alloc, io, source_modules.items, effective_pkg_dbs.items);
     var session = &session_result.env;
     defer session.deinit();
 
