@@ -186,6 +186,103 @@ pub const SerialisedCoreType = struct {
     }
 };
 
+/// Walk `ty` and report the maximum `unique` / `binder_unique` value it
+/// references.  Returns 0 for trees that contain no uniques.
+///
+/// Used by `compile_env` after loading an iface from a package-db so the
+/// shared `UniqueSupply` can be advanced past every claim made by the
+/// cached interface, preventing collisions with freshly-allocated uniques
+/// in downstream modules (issue #839).
+pub fn maxUniqueInCoreType(ty: SerialisedCoreType) u64 {
+    var m: u64 = 0;
+    if (ty.unique) |u| if (u > m) {
+        m = u;
+    };
+    if (ty.binder_unique) |u| if (u > m) {
+        m = u;
+    };
+    if (ty.args) |args| for (args) |a| {
+        const c = maxUniqueInCoreType(a);
+        if (c > m) m = c;
+    };
+    if (ty.arg) |p| {
+        const c = maxUniqueInCoreType(p.*);
+        if (c > m) m = c;
+    }
+    if (ty.res) |p| {
+        const c = maxUniqueInCoreType(p.*);
+        if (c > m) m = c;
+    }
+    if (ty.body) |p| {
+        const c = maxUniqueInCoreType(p.*);
+        if (c > m) m = c;
+    }
+    return m;
+}
+
+/// Maximum `unique` value claimed anywhere inside `iface`.  Walks every
+/// exported value, data declaration, constructor, class info, instance
+/// info, dictionary entry, and the type schemes referenced by them.
+///
+/// Returns 0 for an empty iface.
+pub fn maxUniqueInIface(iface: ModIface) u64 {
+    var m: u64 = 0;
+    for (iface.values) |ev| {
+        if (ev.unique > m) m = ev.unique;
+        for (ev.scheme.binder_uniques) |u| if (u > m) {
+            m = u;
+        };
+        for (ev.scheme.constraints) |cn| {
+            if (cn.class_unique > m) m = cn.class_unique;
+            if (cn.tyvar_unique > m) m = cn.tyvar_unique;
+        }
+        const c = maxUniqueInCoreType(ev.scheme.body);
+        if (c > m) m = c;
+    }
+    for (iface.data_decls) |dd| {
+        if (dd.unique > m) m = dd.unique;
+        for (dd.tyvar_uniques) |u| if (u > m) {
+            m = u;
+        };
+        for (dd.constructors) |c| {
+            if (c.unique > m) m = c.unique;
+            const ct = maxUniqueInCoreType(c.ty);
+            if (ct > m) m = ct;
+        }
+    }
+    for (iface.class_infos) |ci| {
+        if (ci.name.unique > m) m = ci.name.unique;
+        if (ci.tyvar > m) m = ci.tyvar;
+        for (ci.superclasses) |s| if (s.unique > m) {
+            m = s.unique;
+        };
+        for (ci.methods) |mi| {
+            if (mi.name.unique > m) m = mi.name.unique;
+            const mt = maxUniqueInCoreType(mi.ty);
+            if (mt > m) m = mt;
+            if (mi.default_name) |dn| if (dn.unique > m) {
+                m = dn.unique;
+            };
+        }
+        if (ci.dict_con_name.unique > m) m = ci.dict_con_name.unique;
+    }
+    for (iface.instance_infos) |ii| {
+        if (ii.class_name.unique > m) m = ii.class_name.unique;
+        const ht = maxUniqueInCoreType(ii.head);
+        if (ht > m) m = ht;
+        for (ii.context) |cc| {
+            if (cc.class_name.unique > m) m = cc.class_name.unique;
+            const ct = maxUniqueInCoreType(cc.ty);
+            if (ct > m) m = ct;
+        }
+    }
+    for (iface.dict_entries) |de| {
+        if (de.class_unique > m) m = de.class_unique;
+        if (de.name_unique > m) m = de.name_unique;
+    }
+    return m;
+}
+
 // ── SerialisedScheme ────────────────────────────────────────────────────
 
 /// A serialisable class constraint: `ClassName tyvar`.

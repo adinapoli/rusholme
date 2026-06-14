@@ -775,6 +775,14 @@ pub fn compileProgram(
         if (src_map.get(mod_name) == null) {
             // Module not provided as source: try to resolve via package-dbs.
             if (try tryLoadFromPackageDbs(alloc, io, mod_name, package_dbs)) |iface| {
+                // Advance the shared `UniqueSupply` past every unique the
+                // cached interface lays claim to.  Without this, a
+                // downstream module compiled from source would fresh-
+                // allocate uniques starting at 1000 and collide with the
+                // upstream's exports (issue #839).
+                const claimed = mod_iface.maxUniqueInIface(iface);
+                if (claimed >= env.u_supply.next) env.u_supply.next = claimed + 1;
+
                 const ce = try deserialiseClassEnvFromIface(alloc, iface);
                 const owned_name = try alloc.dupe(u8, mod_name);
                 try env.class_envs.put(alloc, owned_name, ce);

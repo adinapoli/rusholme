@@ -1120,7 +1120,12 @@ fn cmdBuild(
             try stderr.flush();
             std.process.exit(1);
         };
-        const mod_name = try rusholme.modules.module_graph.inferModuleName(arena_alloc, fp);
+        // Prefer the source-declared `module Foo where` name over the
+        // path-inferred one so a file whose path doesn't mirror its module
+        // (e.g. `lib/base/Data/List.hs` declaring `module Data.List where`)
+        // still topo-sorts and resolves imports correctly.
+        const mod_name = extractSourceModuleName(source) orelse
+            try rusholme.modules.module_graph.inferModuleName(arena_alloc, fp);
         try source_modules.append(arena_alloc, .{
             .module_name = mod_name,
             .source = source,
@@ -2081,6 +2086,30 @@ test "artifactStem: dots become path separators under artifact_dir" {
     try testing.expectEqualStrings(expected, got);
 }
 
+test "extractSourceModuleName: basic header" {
+    const got = extractSourceModuleName("module Foo.Bar where\n").?;
+    try std.testing.expectEqualStrings("Foo.Bar", got);
+}
+
+test "extractSourceModuleName: pragma + comments before header" {
+    const src =
+        \\{-# LANGUAGE NoImplicitPrelude #-}
+        \\-- top of file
+        \\{- block comment -}
+        \\
+        \\module Data.List
+        \\    ( map, filter
+        \\    ) where
+        \\
+    ;
+    const got = extractSourceModuleName(src).?;
+    try std.testing.expectEqualStrings("Data.List", got);
+}
+
+test "extractSourceModuleName: missing header returns null" {
+    try std.testing.expect(extractSourceModuleName("x = 42\n") == null);
+}
+
 test "artifactStem: top-level module name has no subdir" {
     const testing = std.testing;
     const got = try artifactStem(testing.allocator, "/tmp/store", "Main");
@@ -2089,6 +2118,59 @@ test "artifactStem: top-level module name has no subdir" {
     const expected = try std.fmt.allocPrint(testing.allocator, "/tmp/store{c}Main", .{sep});
     defer testing.allocator.free(expected);
     try testing.expectEqualStrings(expected, got);
+}
+
+/// Lexical scan of `source` for the first `module Foo.Bar` declaration.
+/// Returns a borrowed sub-slice of `source` containing the dotted name, or
+/// null if no module header is present (top-level `Main` style file).
+///
+/// Skips `--` line comments and `{- … -}` block comments before each
+/// non-whitespace token, mirroring the lexer's prefix scanner.  Does not
+/// validate that the identifier is well-formed beyond the first-character
+/// class; the downstream parser will diagnose any malformed header.
+fn extractSourceModuleName(source: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i < source.len) {
+        // Skip whitespace.
+        while (i < source.len and (source[i] == ' ' or source[i] == '\t' or source[i] == '\n' or source[i] == '\r')) i += 1;
+        if (i >= source.len) return null;
+
+        // Skip `-- …` line comments.
+        if (i + 1 < source.len and source[i] == '-' and source[i + 1] == '-') {
+            while (i < source.len and source[i] != '\n') i += 1;
+            continue;
+        }
+        // Skip `{- … -}` block comments (no nesting — Haskell allows
+        // nesting but for the header scan we don't bother).
+        if (i + 1 < source.len and source[i] == '{' and source[i + 1] == '-') {
+            i += 2;
+            while (i + 1 < source.len and !(source[i] == '-' and source[i + 1] == '}')) i += 1;
+            if (i + 1 < source.len) i += 2;
+            continue;
+        }
+        // Skip `{-# … #-}` pragmas — caught by the block-comment branch above.
+        break;
+    }
+
+    // Expect literal "module" followed by whitespace.
+    const kw = "module";
+    if (i + kw.len > source.len) return null;
+    if (!std.mem.eql(u8, source[i .. i + kw.len], kw)) return null;
+    i += kw.len;
+    if (i >= source.len) return null;
+    if (!(source[i] == ' ' or source[i] == '\t' or source[i] == '\n' or source[i] == '\r')) return null;
+    while (i < source.len and (source[i] == ' ' or source[i] == '\t' or source[i] == '\n' or source[i] == '\r')) i += 1;
+
+    // Read dotted identifier: start with [A-Z], continue with [A-Za-z0-9_'.].
+    if (i >= source.len or !std.ascii.isUpper(source[i])) return null;
+    const start = i;
+    while (i < source.len) : (i += 1) {
+        const c = source[i];
+        if (std.ascii.isAlphanumeric(c) or c == '_' or c == '\'' or c == '.') continue;
+        break;
+    }
+    if (i == start) return null;
+    return source[start..i];
 }
 
 fn readSourceFile(allocator: std.mem.Allocator, io: Io, path: []const u8) ![]u8 {
