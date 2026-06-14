@@ -1460,6 +1460,53 @@ test "rhiPath: handles file with no directory component" {
     try testing.expectEqualStrings("Main.rhi", path);
 }
 
+test "maxUniqueInIface: empty iface returns 0" {
+    const iface = ModIface{
+        .module_name = "Empty",
+        .values = &.{},
+        .data_decls = &.{},
+    };
+    try testing.expectEqual(@as(u64, 0), maxUniqueInIface(iface));
+}
+
+test "maxUniqueInIface: scans value uniques and embedded scheme uniques" {
+    const iface = ModIface{
+        .module_name = "ValueScan",
+        .values = &[_]ExportedValue{
+            .{
+                .name = "low",
+                .unique = 7,
+                .scheme = .{
+                    .binder_uniques = &.{},
+                    .binder_names = &.{},
+                    .constraints = &.{},
+                    .body = .{ .tag = "TyCon", .name = "Int", .unique = 100, .args = &.{} },
+                },
+            },
+            .{
+                .name = "high",
+                .unique = 9999,
+                .scheme = .{
+                    .binder_uniques = &.{12345},
+                    .binder_names = &[_][]const u8{"a"},
+                    .constraints = &.{},
+                    .body = .{ .tag = "TyVar", .name = "a", .unique = 12345 },
+                },
+            },
+        },
+        .data_decls = &.{},
+    };
+    // 12345 (binder unique embedded in scheme) is the highest.
+    try testing.expectEqual(@as(u64, 12345), maxUniqueInIface(iface));
+}
+
+test "maxUniqueInCoreType: walks nested FunTy and TyCon args" {
+    var arg = SerialisedCoreType{ .tag = "TyCon", .name = "Int", .unique = 50, .args = &.{} };
+    var res = SerialisedCoreType{ .tag = "TyCon", .name = "Bool", .unique = 75, .args = &.{} };
+    const fun = SerialisedCoreType{ .tag = "FunTy", .arg = &arg, .res = &res };
+    try testing.expectEqual(@as(u64, 75), maxUniqueInCoreType(fun));
+}
+
 test "ModIface: fingerprint survives writeRhi / readRhi round-trip" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

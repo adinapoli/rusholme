@@ -1106,9 +1106,14 @@ fn preloadSingleRhi(
     const iface = mod_iface.readRhi(alloc, data) catch return;
     if (iface.format_version != mod_iface.rhi_format_version) return;
 
-    const claimed = mod_iface.maxUniqueInIface(iface);
-    if (claimed >= env.u_supply.next) env.u_supply.next = claimed + 1;
-
+    // NOTE: deliberately do NOT advance `env.u_supply.next` here.  The
+    // topo-time package-db branch in `compileProgram` already does that
+    // for the cached modules that get actually imported.  Bumping at
+    // preload time advances the supply past *every* `.rhi` in the db
+    // — even modules not imported by this build — which shifts the
+    // uniques allocated to user code upward and produces measurably
+    // different LLVM symbol names and inlining choices vs main, with
+    // no functional benefit when the cached interface is unused.
     const ce = try deserialiseClassEnvFromIface(alloc, iface);
     const owned = try alloc.dupe(u8, mod_name);
     try env.class_envs.put(alloc, owned, ce);
@@ -2162,6 +2167,123 @@ test "tryLoadFromPackageDbs: returns null when no .rhi file exists" {
     const tmp_path = try std.Io.Dir.realPathFileAlloc(tmp.dir, io, ".", alloc);
     const result = try tryLoadFromPackageDbs(alloc, io, "NoSuchModule", &.{tmp_path});
     try testing.expect(result == null);
+}
+
+// Helper: write a minimal `ModIface` for `mod_name` to `<dir>/<rel>.rhi`
+// (creating intermediate subdirs).  Optionally also writes a sibling
+// `.bc` file with `bc_contents`.  Used by the preload-cache tests
+// below to fabricate a synthetic package-db on disk.
+fn writeFakeRhi(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    rel: []const u8,
+    mod_name: []const u8,
+    value_unique: u64,
+    bc_contents: ?[]const u8,
+) !void {
+    const stem_len = rel.len - ".rhi".len;
+    if (std.fs.path.dirname(rel)) |sub| {
+        try dir.createDirPath(io, sub);
+    }
+    const iface = mod_iface.ModIface{
+        .module_name = mod_name,
+        .values = &[_]mod_iface.ExportedValue{.{
+            .name = "x",
+            .unique = value_unique,
+            .scheme = .{
+                .binder_uniques = &.{},
+                .binder_names = &.{},
+                .constraints = &.{},
+                .body = .{ .tag = "TyCon", .name = "Int", .unique = 100, .args = &.{} },
+            },
+        }},
+        .data_decls = &.{},
+    };
+    const json = try mod_iface.writeRhi(alloc, iface);
+    defer alloc.free(json);
+    const rhi_file = try std.Io.Dir.createFile(.cwd(), io, blk: {
+        const tmp_root = try std.Io.Dir.realPathFileAlloc(dir, io, ".", alloc);
+        defer alloc.free(tmp_root);
+        break :blk try std.fs.path.join(alloc, &.{ tmp_root, rel });
+    }, .{ .truncate = true });
+    defer rhi_file.close(io);
+    try rhi_file.writeStreamingAll(io, json);
+
+    if (bc_contents) |bc| {
+        const bc_rel = try std.fmt.allocPrint(alloc, "{s}.bc", .{rel[0..stem_len]});
+        defer alloc.free(bc_rel);
+        const tmp_root = try std.Io.Dir.realPathFileAlloc(dir, io, ".", alloc);
+        defer alloc.free(tmp_root);
+        const bc_path = try std.fs.path.join(alloc, &.{ tmp_root, bc_rel });
+        defer alloc.free(bc_path);
+        const bc_file = try std.Io.Dir.createFile(.cwd(), io, bc_path, .{ .truncate = true });
+        defer bc_file.close(io);
+        try bc_file.writeStreamingAll(io, bc);
+    }
+}
+
+test "preloadPackageDb: registers nested .rhi as cached iface" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const io = testing.io;
+
+    try writeFakeRhi(alloc, io, tmp.dir, "RHC" ++ &[_]u8{std.fs.path.sep} ++ "Prim.rhi", "RHC.Prim", 1234, null);
+
+    const tmp_root = try std.Io.Dir.realPathFileAlloc(tmp.dir, io, ".", alloc);
+    var env = CompileEnv.init(alloc);
+    defer env.deinit();
+    try preloadPackageDb(alloc, io, &env, tmp_root);
+
+    try testing.expect(env.ifaces.contains("RHC.Prim"));
+    // No sibling .bc → cached_bc_paths must be empty.
+    try testing.expectEqual(@as(usize, 0), env.cached_bc_paths.count());
+}
+
+test "preloadPackageDb: sibling .bc populates cached_bc_paths" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const io = testing.io;
+
+    try writeFakeRhi(alloc, io, tmp.dir, "GHC" ++ &[_]u8{std.fs.path.sep} ++ "Base.rhi", "GHC.Base", 2222, "dummy-bc");
+
+    const tmp_root = try std.Io.Dir.realPathFileAlloc(tmp.dir, io, ".", alloc);
+    var env = CompileEnv.init(alloc);
+    defer env.deinit();
+    try preloadPackageDb(alloc, io, &env, tmp_root);
+
+    try testing.expect(env.ifaces.contains("GHC.Base"));
+    try testing.expectEqual(@as(usize, 1), env.cached_bc_paths.count());
+    const bc = env.cached_bc_paths.get("GHC.Base") orelse return error.TestExpectedSetEntry;
+    try testing.expect(std.mem.endsWith(u8, bc, ".bc"));
+}
+
+test "preloadPackageDb: skips non-.rhi files and missing dirs" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const io = testing.io;
+
+    // No .rhi files in the tmp dir — preload should be a clean no-op.
+    const tmp_root = try std.Io.Dir.realPathFileAlloc(tmp.dir, io, ".", alloc);
+    var env = CompileEnv.init(alloc);
+    defer env.deinit();
+    try preloadPackageDb(alloc, io, &env, tmp_root);
+    try testing.expectEqual(@as(usize, 0), env.ifaces.count());
+
+    // Nonexistent root → still no error, still no entries.
+    var env2 = CompileEnv.init(alloc);
+    defer env2.deinit();
+    try preloadPackageDb(alloc, io, &env2, "/this/path/does/not/exist");
+    try testing.expectEqual(@as(usize, 0), env2.ifaces.count());
 }
 
 test "compileProgram: missing import emits module_not_found diagnostic" {
