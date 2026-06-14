@@ -153,6 +153,9 @@ pub fn build(b: *std.Build) void {
     mod.addAnonymousImport("data_tuple_source", .{
         .root_source_file = b.path("lib/base/Data/Tuple.hs"),
     });
+    mod.addAnonymousImport("data_ord_source", .{
+        .root_source_file = b.path("lib/base/Data/Ord.hs"),
+    });
 
     // Runtime module - for LLVM-based runtime tests
     const runtime_mod = b.addModule("runtime", .{
@@ -430,6 +433,15 @@ pub fn build(b: *std.Build) void {
     const data_tuple_path_wf = b.addNamedWriteFiles("data_tuple_path");
     const data_tuple_path_file = data_tuple_path_wf.add("path.txt", data_tuple_path_option);
 
+    // Data.Ord source path.
+    const data_ord_path_option = b.option(
+        []const u8,
+        "data-ord-path",
+        "Path to lib/base/Data/Ord.hs",
+    ) orelse b.getInstallPath(.@"prefix", "lib/base/Data/Ord.hs");
+    const data_ord_path_wf = b.addNamedWriteFiles("data_ord_path");
+    const data_ord_path_file = data_ord_path_wf.add("path.txt", data_ord_path_option);
+
     // ── Default package database path ──────────────────────────────────────
     // Baked into the rhc binary via @embedFile and prepended to the user's
     // `--package-db` list at startup, so `rhc build` consults the pre-built
@@ -532,6 +544,9 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addAnonymousImport("data_tuple_path", .{
         .root_source_file = data_tuple_path_file,
     });
+    exe.root_module.addAnonymousImport("data_ord_path", .{
+        .root_source_file = data_ord_path_file,
+    });
     exe.root_module.addAnonymousImport("default_package_db", .{
         .root_source_file = default_pkg_db_file,
     });
@@ -557,6 +572,7 @@ pub fn build(b: *std.Build) void {
         b.addInstallFile(b.path("lib/base/Data/Either.hs"), "lib/base/Data/Either.hs"),
         b.addInstallFile(b.path("lib/base/Data/Char.hs"), "lib/base/Data/Char.hs"),
         b.addInstallFile(b.path("lib/base/Data/Tuple.hs"), "lib/base/Data/Tuple.hs"),
+        b.addInstallFile(b.path("lib/base/Data/Ord.hs"), "lib/base/Data/Ord.hs"),
     };
     for (boot_source_installs) |s| b.getInstallStep().dependOn(&s.step);
 
@@ -903,6 +919,9 @@ pub fn build(b: *std.Build) void {
     });
     repl_wasm.root_module.addAnonymousImport("data_tuple_source", .{
         .root_source_file = b.path("lib/base/Data/Tuple.hs"),
+    });
+    repl_wasm.root_module.addAnonymousImport("data_ord_source", .{
+        .root_source_file = b.path("lib/base/Data/Ord.hs"),
     });
     // Reactor mode: the REPL is a long-lived module with exported functions,
     // not a command that runs once and exits. In reactor mode the entry point

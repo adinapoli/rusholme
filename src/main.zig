@@ -134,6 +134,10 @@ fn getDataTuplePath() []const u8 {
     return @embedFile("data_tuple_path");
 }
 
+fn getDataOrdPath() []const u8 {
+    return @embedFile("data_ord_path");
+}
+
 /// Get the default package-database path baked in at compile time.
 /// Points at `zig-out/lib/rhc-store/` (or wherever
 /// `-Ddefault-package-db=<path>` was set at build time).  Populated by
@@ -178,6 +182,10 @@ const boot_modules = [_]BootModule{
     // Data.Tuple: pair accessors + curry/uncurry.  Like Data.Char,
     // not part of implicit Prelude — explicit import required.
     .{ .module_name = "Data.Tuple", .pathFn = getDataTuplePath },
+    // Data.Ord: `clamp`, `Down` wrapper.  Explicit import only,
+    // matching GHC.  `comparing` deferred pending typechecker fix
+    // (#842).
+    .{ .module_name = "Data.Ord", .pathFn = getDataOrdPath },
     .{ .module_name = "Prelude", .pathFn = getPreludePath },
 };
 
