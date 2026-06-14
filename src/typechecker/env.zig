@@ -617,17 +617,41 @@ pub fn initBuiltins(env: *TyEnv, supply: *UniqueSupply, no_implicit_prelude: boo
         try env.bind(Known.Con.Nil, .{ .binders = try dupeIds(alloc, &.{a_id}), .constraints = &.{}, .body = list_a });
     }
 
-    // (,) : forall a b. a -> b -> (a, b)
+    // Tuple constructors (,), (,,), … up to the max wired arity.
+    //   (,)  : forall a b.   a -> b -> (a, b)
+    //   (,,) : forall a b c. a -> b -> c -> (a, b, c)
+    //   …and so on through `Known.Con.max_tuple_arity`.
     {
-        const a_id: u64 = 10002;
-        const b_id: u64 = 10003;
-        const a_name = Name{ .base = "a", .unique = .{ .value = a_id } };
-        const b_name = Name{ .base = "b", .unique = .{ .value = b_id } };
-        const a_ty = rigidTy(a_name);
-        const b_ty = rigidTy(b_name);
-        const pair_ty = try applyTy(Known.Con.Tuple2, &.{ a_ty, b_ty }, alloc);
-        const tuple_ty = try funTy(a_ty, try funTy(b_ty, pair_ty, alloc), alloc);
-        try env.bind(Known.Con.Tuple2, .{ .binders = try dupeIds(alloc, &.{ a_id, b_id }), .constraints = &.{}, .body = tuple_ty });
+        const tv_bases = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g" };
+        var arity: usize = 2;
+        while (arity <= Known.Con.max_tuple_arity) : (arity += 1) {
+            const con_name = Known.Con.tuple(arity).?;
+
+            var binder_ids: [Known.Con.max_tuple_arity]u64 = undefined;
+            var elem_tys: [Known.Con.max_tuple_arity]HType = undefined;
+            for (0..arity) |i| {
+                // IDs are minted in a reserved per-arity band to avoid
+                // colliding with the other wired-in schemes (10000..10005).
+                const id: u64 = 10100 + arity * 10 + i;
+                binder_ids[i] = id;
+                elem_tys[i] = rigidTy(Name{ .base = tv_bases[i], .unique = .{ .value = id } });
+            }
+
+            const result_ty = try applyTy(con_name, elem_tys[0..arity], alloc);
+            // Build the curried function type right-to-left:
+            // a1 -> (a2 -> … -> (an -> (a1, …, an))).
+            var fn_ty = result_ty;
+            var j: usize = arity;
+            while (j > 0) : (j -= 1) {
+                fn_ty = try funTy(elem_tys[j - 1], fn_ty, alloc);
+            }
+
+            try env.bind(con_name, .{
+                .binders = try dupeIds(alloc, binder_ids[0..arity]),
+                .constraints = &.{},
+                .body = fn_ty,
+            });
+        }
     }
 
     if (no_implicit_prelude) return;

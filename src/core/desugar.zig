@@ -2511,22 +2511,15 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
         .Tuple => |elems| {
             // (e1, e2, …, en) desugars to (,) e1 e2 … en — i.e. an
             // App-chain of the appropriate tuple constructor (see
-            // `Known.Con.Tuple{2..5}`). Arity 1 is just a parenthesised
+            // `Known.Con.tuple`). Arity 1 is just a parenthesised
             // expression and never reaches the renamer as a Tuple;
             // arity 0 is the Unit constructor and is parsed separately;
-            // arities > 5 are not yet wired into the typechecker
-            // (`Known.Con.Tuple{2..5}` is the registered set).
+            // arities above `max_tuple_arity` are not yet wired.
             // See issue #572.
-            const tuple_name = switch (elems.len) {
-                2 => Known.Con.Tuple2,
-                3 => Known.Con.Tuple3,
-                4 => Known.Con.Tuple4,
-                5 => Known.Con.Tuple5,
-                else => std.debug.panic(
-                    "desugar: tuple of arity {} is not supported (only 2..5)",
-                    .{elems.len},
-                ),
-            };
+            const tuple_name = Known.Con.tuple(elems.len) orelse std.debug.panic(
+                "desugar: tuple of arity {} is not supported (only 2..{})",
+                .{ elems.len, Known.Con.max_tuple_arity },
+            );
             const tuple_ty = blk: {
                 const scheme = ctx.types.schemes.get(tuple_name.unique) orelse
                     std.debug.panic("Missing type scheme for tuple constructor {s}", .{tuple_name.base});
@@ -3096,10 +3089,18 @@ fn applyPat(
                 }
             }
 
-            // Build the tuple constructor name: "(,)" for 2-tuples, "(,,)" for 3, etc.
-            const tuple_con_name = try buildTupleConName(ctx.alloc, elems.len);
+            // Use the wired-in tuple constructor for this arity so the alt
+            // carries the constructor's *stable* unique.  A placeholder unique
+            // (0) collides in the backend tag registry — every arity would
+            // share key 0, and only the first-registered arity's discriminant
+            // would survive, so wider-tuple patterns silently matched the
+            // 2-tuple tag and fell through to the non-exhaustive default.
+            const tuple_con = Known.Con.tuple(elems.len) orelse std.debug.panic(
+                "desugar: tuple pattern of arity {} is not supported (only 2..{})",
+                .{ elems.len, Known.Con.max_tuple_arity },
+            );
             const alt = ast_mod.Alt{
-                .con = .{ .DataAlt = .{ .base = tuple_con_name, .unique = .{ .value = 0 } } },
+                .con = .{ .DataAlt = .{ .base = tuple_con.base, .unique = tuple_con.unique } },
                 .binders = con_binders,
                 .body = inner_success,
             };
@@ -3515,18 +3516,6 @@ fn registerDeclBinders(ctx: *DesugarCtx, binds: []const renamer_mod.RDecl) std.m
             else => {},
         }
     }
-}
-
-/// Build the tuple constructor name for a tuple of `arity` elements.
-///   arity=2 → "(,)"
-///   arity=3 → "(,,)"
-fn buildTupleConName(alloc: std.mem.Allocator, arity: usize) ![]const u8 {
-    if (arity < 2) return error.OutOfMemory; // degenerate — shouldn't occur
-    var buf = try alloc.alloc(u8, arity + 1); // '(' + (arity-1) commas + ')'
-    buf[0] = '(';
-    for (1..arity) |i| buf[i] = ',';
-    buf[arity] = ')';
-    return buf;
 }
 
 // ── Literal conversions ─────────────────────────────────────────────────────────────

@@ -632,6 +632,8 @@ pub fn translateProgram(
         .{ .unique = known.Con.Tuple3.unique.value, .n_fields = 3 },
         .{ .unique = known.Con.Tuple4.unique.value, .n_fields = 4 },
         .{ .unique = known.Con.Tuple5.unique.value, .n_fields = 5 },
+        .{ .unique = known.Con.Tuple6.unique.value, .n_fields = 6 },
+        .{ .unique = known.Con.Tuple7.unique.value, .n_fields = 7 },
     };
     for (builtin_cons) |b| {
         const gop = try ctx.con_map.getOrPut(alloc, b.unique);

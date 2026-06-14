@@ -1,10 +1,10 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 -- | Data.Tuple — pair accessors and combinators.
 --
--- Mirrors GHC's `base:Data.Tuple` for the 2-tuple subset.  Wider
--- tuples (3-tuple, 4-tuple, …) are not yet exported here because
--- Rusholme's tuple syntax currently produces only `(a, b)`.  When
--- larger tuples land, add the obvious analogues alongside.
+-- Mirrors GHC's `base:Data.Tuple` for the 2-tuple subset.  The
+-- compiler now wires tuples of arity 3..7 (construction, pattern
+-- matching, codegen — see #846), but GHC's `Data.Tuple` only exports
+-- the pair combinators below, so we match that surface here.
 --
 -- Pure Haskell, no primops, no foreign decls.
 module Data.Tuple
