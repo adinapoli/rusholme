@@ -147,6 +147,9 @@ pub fn build(b: *std.Build) void {
     mod.addAnonymousImport("data_either_source", .{
         .root_source_file = b.path("lib/base/Data/Either.hs"),
     });
+    mod.addAnonymousImport("data_char_source", .{
+        .root_source_file = b.path("lib/base/Data/Char.hs"),
+    });
 
     // Runtime module - for LLVM-based runtime tests
     const runtime_mod = b.addModule("runtime", .{
@@ -406,6 +409,15 @@ pub fn build(b: *std.Build) void {
     const data_either_path_wf = b.addNamedWriteFiles("data_either_path");
     const data_either_path_file = data_either_path_wf.add("path.txt", data_either_path_option);
 
+    // Data.Char source path.
+    const data_char_path_option = b.option(
+        []const u8,
+        "data-char-path",
+        "Path to lib/base/Data/Char.hs",
+    ) orelse b.getInstallPath(.@"prefix", "lib/base/Data/Char.hs");
+    const data_char_path_wf = b.addNamedWriteFiles("data_char_path");
+    const data_char_path_file = data_char_path_wf.add("path.txt", data_char_path_option);
+
     // ── Default package database path ──────────────────────────────────────
     // Baked into the rhc binary via @embedFile and prepended to the user's
     // `--package-db` list at startup, so `rhc build` consults the pre-built
@@ -502,6 +514,9 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addAnonymousImport("data_either_path", .{
         .root_source_file = data_either_path_file,
     });
+    exe.root_module.addAnonymousImport("data_char_path", .{
+        .root_source_file = data_char_path_file,
+    });
     exe.root_module.addAnonymousImport("default_package_db", .{
         .root_source_file = default_pkg_db_file,
     });
@@ -525,6 +540,7 @@ pub fn build(b: *std.Build) void {
         b.addInstallFile(b.path("lib/base/Data/List.hs"), "lib/base/Data/List.hs"),
         b.addInstallFile(b.path("lib/base/Data/Maybe.hs"), "lib/base/Data/Maybe.hs"),
         b.addInstallFile(b.path("lib/base/Data/Either.hs"), "lib/base/Data/Either.hs"),
+        b.addInstallFile(b.path("lib/base/Data/Char.hs"), "lib/base/Data/Char.hs"),
     };
     for (boot_source_installs) |s| b.getInstallStep().dependOn(&s.step);
 
@@ -865,6 +881,9 @@ pub fn build(b: *std.Build) void {
     });
     repl_wasm.root_module.addAnonymousImport("data_either_source", .{
         .root_source_file = b.path("lib/base/Data/Either.hs"),
+    });
+    repl_wasm.root_module.addAnonymousImport("data_char_source", .{
+        .root_source_file = b.path("lib/base/Data/Char.hs"),
     });
     // Reactor mode: the REPL is a long-lived module with exported functions,
     // not a command that runs once and exits. In reactor mode the entry point

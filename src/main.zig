@@ -126,6 +126,10 @@ fn getDataEitherPath() []const u8 {
     return @embedFile("data_either_path");
 }
 
+fn getDataCharPath() []const u8 {
+    return @embedFile("data_char_path");
+}
+
 /// Get the default package-database path baked in at compile time.
 /// Points at `zig-out/lib/rhc-store/` (or wherever
 /// `-Ddefault-package-db=<path>` was set at build time).  Populated by
@@ -163,6 +167,10 @@ const boot_modules = [_]BootModule{
     .{ .module_name = "Data.List", .pathFn = getDataListPath },
     .{ .module_name = "Data.Maybe", .pathFn = getDataMaybePath },
     .{ .module_name = "Data.Either", .pathFn = getDataEitherPath },
+    // Data.Char is not in the implicit Prelude (matches GHC: `Data.Char` is
+    // explicit-import only).  We still source-prepend it so cross-references
+    // and topo can resolve cleanly when user code does `import Data.Char`.
+    .{ .module_name = "Data.Char", .pathFn = getDataCharPath },
     .{ .module_name = "Prelude", .pathFn = getPreludePath },
 };
 
