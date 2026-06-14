@@ -1103,6 +1103,15 @@ fn cmdBuild(
     if (!no_boot) {
         for (boot_modules) |boot| {
         if (user_module_names.contains(boot.module_name)) continue;
+        // NOTE: even when `effective_pkg_dbs` carries a full set of
+        // boot-module `.rhi`+`.bc` artifacts, we currently still
+        // source-prepend the boot stack.  Skipping the prepend lets
+        // the cached code path provide the interfaces, but the LLVM
+        // tag registry and `__rhc_force` module are built from the
+        // *fresh* per-module GRIN — cached modules contribute no
+        // GRIN to that registry, so the resulting force module is
+        // incomplete and the link fails.  Full cache-only codegen is
+        // tracked separately (see PR-C scope notes in the issue).
         const boot_path = boot.pathFn();
         if (readSourceFile(arena_alloc, io, boot_path)) |boot_source| {
             try source_modules.append(arena_alloc, .{
@@ -1467,6 +1476,36 @@ fn emitNative(
         };
 
         try llvm_modules.append(arena_alloc, llvm_mod);
+    }
+
+    // ── Pull cached-module bitcode into the link ─────────────────────────
+    // For every module that was resolved through `--package-db` *and*
+    // was NOT also source-compiled (so `session.programs` has no
+    // bindings for it), parse its sibling `.bc` and append to the
+    // link set.  When source-prepend is active for a boot module its
+    // fresh `.bc` already provides the symbols, so loading the cached
+    // copy would yield "multiple definition" errors.  This filter
+    // matters when the user explicitly opts out of source-prepend
+    // (e.g. `rhc build --no-boot --package-db <store> …`).
+    var bc_it = session.cached_bc_paths.iterator();
+    while (bc_it.next()) |entry| {
+        const mod_name = entry.key_ptr.*;
+        if (session.programs.get(mod_name)) |prog| {
+            if (prog.binds.len > 0 or prog.data_decls.len > 0) continue;
+        }
+        const bc_path = entry.value_ptr.*;
+        const cached_mod = llvm.parseBitcodeFile(bc_path) catch |err| {
+            var stderr_buf: [4096]u8 = undefined;
+            var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+            const stderr = &stderr_fw.interface;
+            try stderr.print(
+                "rhc: failed to parse cached bitcode for module '{s}' at '{s}': {}\n",
+                .{ mod_name, bc_path, err },
+            );
+            try stderr.flush();
+            std.process.exit(1);
+        };
+        try llvm_modules.append(arena_alloc, cached_mod);
     }
 
     // `--no-link` mode: per-module `.bc` artifacts are the only output.

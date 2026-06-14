@@ -134,6 +134,18 @@ pub const CompileEnv = struct {
     /// for imported type class instances.
     dict_names_map: std.StringHashMapUnmanaged(DictNameMap),
 
+    /// Map: cached module name → absolute path of the sibling `.bc`
+    /// artifact discovered alongside its `.rhi` in a `--package-db`.
+    ///
+    /// Populated by the cached-load branch in `compileProgram` when
+    /// `tryLoadFromPackageDbs` finds both files.  Consumed by
+    /// downstream codegen (the LLVM emitter in `main.zig`) so cached
+    /// modules can contribute their code to the final binary without
+    /// being re-source-compiled.  An entry is present only when a
+    /// usable sibling `.bc` exists — callers must still handle the
+    /// missing case (fall back to source).
+    cached_bc_paths: std.StringHashMapUnmanaged([]const u8),
+
     /// Package-database search paths for pre-built `.rhi` interfaces.
     ///
     /// When resolving an import whose source is not in the current build,
@@ -159,6 +171,7 @@ pub const CompileEnv = struct {
             .diags = DiagnosticCollector.init(),
             .class_envs = .{},
             .dict_names_map = .{},
+            .cached_bc_paths = .{},
             .package_dbs = &.{},
         };
     }
@@ -170,6 +183,7 @@ pub const CompileEnv = struct {
         self.diags.deinit(self.alloc);
         self.class_envs.deinit(self.alloc);
         self.dict_names_map.deinit(self.alloc);
+        self.cached_bc_paths.deinit(self.alloc);
         self.* = undefined;
     }
 
@@ -665,6 +679,29 @@ pub fn compileProgram(
     env.package_dbs = package_dbs;
     errdefer env.deinit();
 
+    // ── Phase 0: Eagerly preload every cached module from every db ──
+    //
+    // `ModIface` does not yet serialise its imports, so when a downstream
+    // module resolves `import Prelude` via package-db we cannot follow
+    // Prelude's transitive imports (GHC.Base, Data.List, …).  Their
+    // `.rhi`s would never be visited by the topo loop and their `.bc`s
+    // would never get into the link set — yielding `undefined reference`
+    // errors at the linker step.
+    //
+    // Walk every `--package-db` recursively for `*.rhi` files, register
+    // each interface (with the same unique-supply bump and bc-path
+    // stash logic as the topo-time package-db hit), and let the rest
+    // of the pipeline find them already-loaded.
+    //
+    // The preload is best-effort: any I/O / parse failure on a single
+    // file is silently treated as a miss (matches `tryLoadFromPackageDbs`
+    // semantics).  A future refactor that adds `imports` to `ModIface`
+    // (issue: TBD) would let us drop this and walk only the needed
+    // subgraph.
+    for (package_dbs) |db| {
+        preloadPackageDb(alloc, io, &env, db) catch {};
+    }
+
     // ── Phase 1: Parse all modules once and cache ──────────────────────────
     for (modules) |m| {
         var dummy_diags = DiagnosticCollector.init();
@@ -690,7 +727,25 @@ pub fn compileProgram(
     // topological sort may place a user module before the Prelude, causing
     // cross-module seeding to find no registered interfaces.
     {
-        const has_prelude = env.parsed_modules.contains("Prelude");
+        // Treat the Prelude as "available" if either:
+        //   * its source is in this build (`parsed_modules`), OR
+        //   * any `--package-db` ships a `Prelude.rhi` we'd be able to
+        //     load.  The package-db probe lets the implicit-Prelude
+        //     injection run when boot modules are served entirely from
+        //     the cache (e.g. via the baked-in `default_package_db`).
+        const prelude_in_source = env.parsed_modules.contains("Prelude");
+        const prelude_in_db = blk: {
+            for (package_dbs) |db| {
+                const rel = moduleNameToRhiRelPath(alloc, "Prelude") catch break :blk false;
+                defer alloc.free(rel);
+                const abs = std.fs.path.join(alloc, &.{ db, rel }) catch break :blk false;
+                defer alloc.free(abs);
+                std.Io.Dir.access(.cwd(), io, abs, .{}) catch continue;
+                break :blk true;
+            }
+            break :blk false;
+        };
+        const has_prelude = prelude_in_source or prelude_in_db;
         var inject_iter = env.parsed_modules.iterator();
         while (inject_iter.next()) |entry| {
             const parsed = entry.value_ptr.*;
@@ -774,7 +829,8 @@ pub fn compileProgram(
     for (topo.order) |mod_name| {
         if (src_map.get(mod_name) == null) {
             // Module not provided as source: try to resolve via package-dbs.
-            if (try tryLoadFromPackageDbs(alloc, io, mod_name, package_dbs)) |iface| {
+            if (try tryLoadFromPackageDbs(alloc, io, mod_name, package_dbs)) |hit| {
+                const iface = hit.iface;
                 // Advance the shared `UniqueSupply` past every unique the
                 // cached interface lays claim to.  Without this, a
                 // downstream module compiled from source would fresh-
@@ -790,6 +846,15 @@ pub fn compileProgram(
                 try env.dict_names_map.put(alloc, owned_name, dict_names);
                 const empty_core = CoreProgram{ .data_decls = &.{}, .binds = &.{} };
                 try env.register(mod_name, iface, empty_core);
+
+                // Stash the sibling `.bc` path so the downstream LLVM
+                // link step pulls in the cached module's code instead
+                // of producing an empty module.  When `null`, the
+                // caller is expected to have arranged code via the
+                // source-prepend fallback (typical during bootstrap).
+                if (hit.bc_path) |bcp| {
+                    try env.cached_bc_paths.put(alloc, try alloc.dupe(u8, mod_name), bcp);
+                }
             }
             // Module not found in source or any package-db: emit a structured
             // diagnostic so the user gets a clear "Could not find module" error
@@ -962,12 +1027,123 @@ fn moduleNameToRhiRelPath(
 ///
 /// No fingerprint validation is performed — package-db interfaces are
 /// pre-built and assumed stable.
+/// Recursively walk `<db_root>` for every `*.rhi` and register each
+/// matching interface (plus sibling `.bc`) into `env`.  Errors on
+/// individual files are swallowed and counted as misses so that a
+/// stale or partial store doesn't abort compilation.
+fn preloadPackageDb(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    env: *CompileEnv,
+    db_root: []const u8,
+) !void {
+    try preloadPackageDbDir(alloc, io, env, db_root, "");
+}
+
+fn preloadPackageDbDir(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    env: *CompileEnv,
+    db_root: []const u8,
+    rel: []const u8,
+) !void {
+    const dir_path = if (rel.len == 0)
+        try alloc.dupe(u8, db_root)
+    else
+        try std.fs.path.join(alloc, &.{ db_root, rel });
+    defer alloc.free(dir_path);
+
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        const child_rel = if (rel.len == 0)
+            try alloc.dupe(u8, entry.name)
+        else
+            try std.fs.path.join(alloc, &.{ rel, entry.name });
+        defer alloc.free(child_rel);
+
+        switch (entry.kind) {
+            .directory => try preloadPackageDbDir(alloc, io, env, db_root, child_rel),
+            .file => {
+                if (!std.mem.endsWith(u8, child_rel, ".rhi")) continue;
+                try preloadSingleRhi(alloc, io, env, db_root, child_rel);
+            },
+            else => {},
+        }
+    }
+}
+
+fn preloadSingleRhi(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    env: *CompileEnv,
+    db_root: []const u8,
+    rhi_rel: []const u8,
+) !void {
+    // `rhi_rel` is e.g. "GHC/Base.rhi".  Derive module name "GHC.Base".
+    const sep = std.fs.path.sep;
+    const stem_len = rhi_rel.len - ".rhi".len;
+    const mod_name = try alloc.alloc(u8, stem_len);
+    defer alloc.free(mod_name);
+    for (rhi_rel[0..stem_len], 0..) |c, i| {
+        mod_name[i] = if (c == sep) '.' else c;
+    }
+    if (env.ifaces.contains(mod_name)) return; // already registered
+
+    const abs = try std.fs.path.join(alloc, &.{ db_root, rhi_rel });
+    defer alloc.free(abs);
+
+    const data = std.Io.Dir.readFileAlloc(
+        .cwd(),
+        io,
+        abs,
+        alloc,
+        .limited(16 * 1024 * 1024),
+    ) catch return;
+    defer alloc.free(data);
+    const iface = mod_iface.readRhi(alloc, data) catch return;
+    if (iface.format_version != mod_iface.rhi_format_version) return;
+
+    const claimed = mod_iface.maxUniqueInIface(iface);
+    if (claimed >= env.u_supply.next) env.u_supply.next = claimed + 1;
+
+    const ce = try deserialiseClassEnvFromIface(alloc, iface);
+    const owned = try alloc.dupe(u8, mod_name);
+    try env.class_envs.put(alloc, owned, ce);
+    const dict_names = try deserialiseDictNamesFromIface(alloc, iface);
+    try env.dict_names_map.put(alloc, owned, dict_names);
+    const empty_core = CoreProgram{ .data_decls = &.{}, .binds = &.{} };
+    try env.register(mod_name, iface, empty_core);
+
+    // Probe sibling .bc.
+    const bc_rel = try std.fmt.allocPrint(alloc, "{s}.bc", .{rhi_rel[0..stem_len]});
+    defer alloc.free(bc_rel);
+    const bc_abs = try std.fs.path.join(alloc, &.{ db_root, bc_rel });
+    std.Io.Dir.access(.cwd(), io, bc_abs, .{}) catch {
+        alloc.free(bc_abs);
+        return;
+    };
+    try env.cached_bc_paths.put(alloc, try alloc.dupe(u8, mod_name), bc_abs);
+}
+
+/// Hit metadata returned by `tryLoadFromPackageDbs`.
+///
+/// `bc_path` is the path of a sibling `.bc` artifact next to the matching
+/// `.rhi`, or `null` if no such artifact exists.  Caller-owned (allocated
+/// in the same allocator passed to `tryLoadFromPackageDbs`).
+pub const PkgDbHit = struct {
+    iface: mod_iface.ModIface,
+    bc_path: ?[]const u8 = null,
+};
+
 fn tryLoadFromPackageDbs(
     alloc: std.mem.Allocator,
     io: std.Io,
     module_name: []const u8,
     package_dbs: []const []const u8,
-) std.mem.Allocator.Error!?mod_iface.ModIface {
+) std.mem.Allocator.Error!?PkgDbHit {
     if (package_dbs.len == 0) return null;
 
     const rel = try moduleNameToRhiRelPath(alloc, module_name);
@@ -998,7 +1174,27 @@ fn tryLoadFromPackageDbs(
         // do not silently corrupt the compilation session.
         if (iface.format_version != mod_iface.rhi_format_version) continue;
 
-        return iface;
+        // Probe for a sibling `<module>.bc` so the downstream link step
+        // can pull the cached module's code in instead of having to
+        // re-source-compile it.  The probe is non-fatal: a missing .bc
+        // just means we still skip the frontend but the caller must
+        // arrange code elsewhere (typically: keep source-prepending the
+        // boot modules until the store is fully populated).
+        const stem_len = rel.len - ".rhi".len;
+        const bc_rel = try std.fmt.allocPrint(alloc, "{s}.bc", .{rel[0..stem_len]});
+        defer alloc.free(bc_rel);
+        const bc_abs = try std.fs.path.join(alloc, &.{ db, bc_rel });
+        const bc_exists = blk: {
+            std.Io.Dir.access(.cwd(), io, bc_abs, .{}) catch {
+                break :blk false;
+            };
+            break :blk true;
+        };
+        if (!bc_exists) {
+            alloc.free(bc_abs);
+            return .{ .iface = iface, .bc_path = null };
+        }
+        return .{ .iface = iface, .bc_path = bc_abs };
     }
     return null;
 }
