@@ -382,16 +382,9 @@ pub const RPat = union(enum) {
     InfixCon: struct { left: *const RPat, con: Name, con_span: SourceSpan, right: *const RPat },
     Negate: *const RPat,
     Paren: *const RPat,
-    /// Record pattern: Point { x = a, y = b }
-    /// Field punning is supported: Point { x } is equivalent to Point { x = x }
-    RecPat: struct { con: Name, con_span: SourceSpan, fields: []const RFieldPat, span: SourceSpan },
-};
-
-/// Field pattern in renamed record patterns.
-pub const RFieldPat = struct {
-    field_name: []const u8,
-    /// None for field punning (x -> x = x), Some for explicit pattern (x = p)
-    pat: ?*RPat,
+    // Record patterns (`Con { x = a }`) are desugared into positional
+    // constructor patterns during renaming, so there is no `RecPat` node
+    // here — see the `.RecPat` arm of `renamePat`.
 };
 
 /// Field update in renamed record constructions and updates.
@@ -1764,30 +1757,90 @@ fn renamePat(pat: ast.Pattern, env: *RenameEnv) RenameError!RPat {
             break :blk RPat{ .Var = .{ .name = n, .span = npk.name_span } };
         },
         .RecPat => |rp| blk: {
+            // Desugar a record pattern `Con { f = p, ... }` into a positional
+            // constructor pattern, placing each named field pattern at the
+            // field's declaration index and filling omitted fields with
+            // wildcards.  Field punning (`Con { f }`) binds the field name as a
+            // variable.  Like record construction, this lets the rest of the
+            // pipeline treat it as an ordinary constructor pattern.
             const con_name = try env.resolve(rp.con.name, rp.con.span);
-            var rfields = std.ArrayListUnmanaged(RFieldPat).empty;
-            for (rp.fields) |f| {
-                var rpat: ?*RPat = null;
-                if (f.pat) |p| {
-                    rpat = try env.alloc.create(RPat);
-                    rpat.?.* = try renamePat(p, env);
-                } else {
-                    // Field pun: bind the field name as a variable
-                    // No pattern is created - pat remains null
-                    const n = env.freshName(f.field_name);
-                    try env.scope.bind(f.field_name, n);
-                }
-                try rfields.append(env.alloc, .{
-                    .field_name = f.field_name,
-                    .pat = rpat,
+
+            const field_order = env.con_field_order.get(rp.con.name) orelse {
+                const msg = try std.fmt.allocPrint(
+                    env.alloc,
+                    "`{s}` is not a record constructor",
+                    .{rp.con.name},
+                );
+                try env.diags.emit(env.alloc, .{
+                    .severity = .@"error",
+                    .code = .type_error,
+                    .span = rp.con.span,
+                    .message = msg,
                 });
+                break :blk RPat{ .Con = .{ .name = con_name, .con_span = rp.con.span, .args = &.{} } };
+            };
+
+            // Index the supplied field patterns by name, flagging unknown and
+            // duplicate fields.
+            var provided = std.StringHashMapUnmanaged(ast.FieldPattern){};
+            defer provided.deinit(env.alloc);
+            for (rp.fields) |f| {
+                var known = false;
+                for (field_order) |fo| {
+                    if (std.mem.eql(u8, fo, f.field_name)) {
+                        known = true;
+                        break;
+                    }
+                }
+                if (!known) {
+                    const msg = try std.fmt.allocPrint(
+                        env.alloc,
+                        "`{s}` has no field `{s}`",
+                        .{ rp.con.name, f.field_name },
+                    );
+                    try env.diags.emit(env.alloc, .{
+                        .severity = .@"error",
+                        .code = .type_error,
+                        .span = rp.con.span,
+                        .message = msg,
+                    });
+                    continue;
+                }
+                const gop = try provided.getOrPut(env.alloc, f.field_name);
+                if (gop.found_existing) {
+                    const msg = try std.fmt.allocPrint(
+                        env.alloc,
+                        "duplicate field `{s}` in record pattern",
+                        .{f.field_name},
+                    );
+                    try env.diags.emit(env.alloc, .{
+                        .severity = .@"error",
+                        .code = .type_error,
+                        .span = rp.con.span,
+                        .message = msg,
+                    });
+                }
+                gop.value_ptr.* = f;
             }
-            break :blk RPat{ .RecPat = .{
-                .con = con_name,
-                .con_span = rp.con.span,
-                .fields = try rfields.toOwnedSlice(env.alloc),
-                .span = rp.span,
-            } };
+
+            // Build the positional argument patterns in declaration order.
+            const args = try env.alloc.alloc(RPat, field_order.len);
+            for (field_order, 0..) |fname, i| {
+                if (provided.get(fname)) |fp| {
+                    if (fp.pat) |p| {
+                        args[i] = try renamePat(p, env);
+                    } else {
+                        // Field pun: `Con { f }` is `Con { f = f }`.
+                        const n = env.freshName(fname);
+                        try env.scope.bind(fname, n);
+                        args[i] = RPat{ .Var = .{ .name = n, .span = rp.span } };
+                    }
+                } else {
+                    args[i] = RPat{ .Wild = rp.span };
+                }
+            }
+
+            break :blk RPat{ .Con = .{ .name = con_name, .con_span = rp.con.span, .args = args } };
         },
     };
 }

@@ -190,19 +190,6 @@ pub fn normalize(alloc: std.mem.Allocator, rpat: RPat) NormalizeError!Pat {
             }
             break :blk acc;
         },
-        .RecPat => |rp| blk: {
-            // A record pattern with no sub-patterns matches like `Con _ … _`
-            // would, but we lack field-order metadata to model constrained
-            // fields. Punned/explicit fields therefore bail out.
-            if (rp.fields.len != 0) break :blk error.Unsupported;
-            const info = .{ .unique = rp.con.unique.value, .base = rp.con.base };
-            // Arity unknown here; the matrix ops look it up via SigEnv when
-            // specialising, so store no args and let specialise pad. To keep
-            // the representation uniform we treat it as unsupported when the
-            // arity cannot be resolved — handled in checkMatch.
-            _ = info;
-            break :blk error.Unsupported;
-        },
     };
 }
 

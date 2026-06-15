@@ -3204,16 +3204,6 @@ fn applyPat(
 
             break :blk try applyPat(ctx, scrut_expr, scrut_id, scrut_ty, right_pat.*, success, failure, arg_idx, depth);
         },
-
-        // ── Not yet implemented ───────────────────────────────────────────
-        //
-        // IMPORTANT: Each unsupported case MUST have a tracking issue.
-        .RecPat => {
-            // Record pattern desugaring requires the record type to be fully
-            // in scope; tracked as part of the record support work.
-            // tracked in: https://github.com/adinapoli/rusholme/issues/418
-            std.debug.panic("Record patterns not yet supported in match compiler: {}", .{pat});
-        },
     };
 }
 
@@ -3361,11 +3351,6 @@ fn registerPatBindersRec(
             for (elems) |sub| try registerPatBindersRec(ctx, sub, dummy);
         },
         .Negate => |inner| try registerPatBindersRec(ctx, inner.*, ty),
-        .RecPat => |rp| {
-            for (rp.fields) |f| {
-                if (f.pat) |sub| try registerPatBindersRec(ctx, sub.*, dummy);
-            }
-        },
         .Lit, .Wild => {},
     }
 }
