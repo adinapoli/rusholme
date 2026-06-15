@@ -424,6 +424,7 @@
 | [#850](https://github.com/adinapoli/rusholme/issues/850) | Renamer drops newtype declarations — lower to single-constructor data (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :yellow_circle: |
 | [#855](https://github.com/adinapoli/rusholme/issues/855) | Desugar record construction into positional constructor application (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :yellow_circle: |
 | [#857](https://github.com/adinapoli/rusholme/issues/857) | Desugar record patterns into positional constructor patterns (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#855](https://github.com/adinapoli/rusholme/issues/855) | :yellow_circle: |
+| [#859](https://github.com/adinapoli/rusholme/issues/859) | Desugar record update into a field-copying case (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#855](https://github.com/adinapoli/rusholme/issues/855) | :yellow_circle: |
 | [#573](https://github.com/adinapoli/rusholme/issues/573) | GRIN backend: polymorphic Prelude functions produce broken codegen | [#529](https://github.com/adinapoli/rusholme/issues/529) | :green_circle: |
 | [#569](https://github.com/adinapoli/rusholme/issues/569) | GRIN/LLVM backend: support dictionary-passing in codegen | [#556](https://github.com/adinapoli/rusholme/issues/556) | :green_circle: |
 | [#583](https://github.com/adinapoli/rusholme/issues/583) | Implement VarTagNode handling in LLVM backend for partial applications | — | :green_circle: |
