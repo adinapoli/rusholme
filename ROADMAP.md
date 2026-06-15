@@ -420,6 +420,7 @@
 | [#381](https://github.com/adinapoli/rusholme/issues/381) | Epic: GRIN to LLVM Translation - Compiler Path to M1 | [#55](https://github.com/adinapoli/rusholme/issues/55) | :white_circle: |
 | [#396](https://github.com/adinapoli/rusholme/issues/396) | Research: Zig LLVM bitcode compatibility with llvm-link | [#57](https://github.com/adinapoli/rusholme/issues/57) | :white_circle: |
 | [#572](https://github.com/adinapoli/rusholme/issues/572) | Implement tuple codegen in GRIN-to-LLVM backend | [#381](https://github.com/adinapoli/rusholme/issues/381) | :white_circle: |
+| [#846](https://github.com/adinapoli/rusholme/issues/846) | Wire tuples of arity 3..7 end-to-end (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#572](https://github.com/adinapoli/rusholme/issues/572) | :yellow_circle: |
 | [#850](https://github.com/adinapoli/rusholme/issues/850) | Renamer drops newtype declarations — lower to single-constructor data (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :yellow_circle: |
 | [#573](https://github.com/adinapoli/rusholme/issues/573) | GRIN backend: polymorphic Prelude functions produce broken codegen | [#529](https://github.com/adinapoli/rusholme/issues/529) | :green_circle: |
 | [#569](https://github.com/adinapoli/rusholme/issues/569) | GRIN/LLVM backend: support dictionary-passing in codegen | [#556](https://github.com/adinapoli/rusholme/issues/556) | :green_circle: |
