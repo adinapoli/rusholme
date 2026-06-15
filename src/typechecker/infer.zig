@@ -1652,12 +1652,6 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
         // Record type checking is a future milestone. For now, we return fresh
         // meta types to allow the renamer to work while record type checking
         // can be implemented later (tracked in follow-up issues).
-        .RecordCon => |rc| blk: {
-            _ = rc; // Record constructor name for future type checking
-            // Infer field expressions so any errors in them are caught
-            // TODO: Proper record type checking with type lookup
-            break :blk ctx.freshMeta();
-        },
         .RecordUpdate => |ru| blk: {
             _ = try infer(ctx, ru.expr.*); // Infer base expression
             // Infer field update expressions

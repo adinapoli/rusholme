@@ -276,6 +276,10 @@ test "e2e: e2e_386_constructor_values (#386, #764)" {
     try testE2e(std.testing.allocator, "e2e_386_constructor_values");
 }
 
+test "e2e: e2e_855_record_construction (#855)" {
+    try testE2e(std.testing.allocator, "e2e_855_record_construction");
+}
+
 // ── Optimisation-level smoke tests (#755) ────────────────────────────────────
 //
 // These verify that the `-O<level>` flag actually flows through `rhc build`
