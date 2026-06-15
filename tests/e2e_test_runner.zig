@@ -284,6 +284,10 @@ test "e2e: e2e_857_record_patterns (#857)" {
     try testE2e(std.testing.allocator, "e2e_857_record_patterns");
 }
 
+test "e2e: e2e_859_record_update (#859)" {
+    try testE2e(std.testing.allocator, "e2e_859_record_update");
+}
+
 // ── Optimisation-level smoke tests (#755) ────────────────────────────────────
 //
 // These verify that the `-O<level>` flag actually flows through `rhc build`
