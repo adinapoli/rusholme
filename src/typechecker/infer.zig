@@ -1614,20 +1614,13 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
         // ── Paren ─────────────────────────────────────────────────────
         .Paren => |inner| infer(ctx, inner.*),
 
-        // ── Record expressions ─────────────────────────────────────────
+        // ── Record field access (`p.x`) ────────────────────────────────
         //
-        // Record type checking is a future milestone. For now, we return fresh
-        // meta types to allow the renamer to work while record type checking
-        // can be implemented later (tracked in follow-up issues).
-        .RecordUpdate => |ru| blk: {
-            _ = try infer(ctx, ru.expr.*); // Infer base expression
-            // Infer field update expressions
-            for (ru.fields) |f| {
-                _ = try infer(ctx, f.expr);
-            }
-            // TODO: Proper record type checking with type lookup
-            break :blk ctx.freshMeta();
-        },
+        // Field-access dot syntax is a GHC extension (OverloadedRecordDot),
+        // not Haskell 2010, and is not yet supported; we return a fresh meta
+        // so the renamer keeps working.  (Record construction and update are
+        // desugared in the renamer into ordinary constructor expressions and
+        // never reach here.)
         .Field => |f| blk: {
             _ = try infer(ctx, f.expr.*); // Infer base expression
             // TODO: Proper field selector type checking with type lookup

@@ -2771,10 +2771,10 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                 .span = syntheticSpan(),
             } };
         },
-        .RecordUpdate, .Field => {
-            // Record update and field-access syntax.  (Record *construction*
-            // is desugared to a positional constructor application in the
-            // renamer, so it never reaches here.)
+        .Field => {
+            // Field-access dot syntax (`p.x`) — a GHC extension, not Haskell
+            // 2010.  (Record construction and update are desugared in the
+            // renamer, so they never reach here.)
             // tracked in: https://github.com/adinapoli/rusholme/issues/361
             node.* = .{ .Var = .{
                 .name = Name{ .base = "todo_record", .unique = .{ .value = 0 } },
@@ -3599,10 +3599,6 @@ fn registerExprBinders(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Alloca
         .TypeApp => |ta| try registerExprBinders(ctx, ta.fn_expr.*),
         .Negate => |inner| try registerExprBinders(ctx, inner.*),
         .Paren => |inner| try registerExprBinders(ctx, inner.*),
-        .RecordUpdate => |ru| {
-            try registerExprBinders(ctx, ru.expr.*);
-            for (ru.fields) |f| try registerExprBinders(ctx, f.expr);
-        },
         .Field => |f| try registerExprBinders(ctx, f.expr.*),
     }
 }
