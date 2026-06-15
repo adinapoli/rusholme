@@ -403,6 +403,12 @@ pub fn desugarModule(
                     .constructors = cons,
                     .span = dd.span,
                 });
+
+                // Synthesise a function body for every record field selector
+                // declared by this type.  The renamer bound the selector names
+                // and the typechecker assigned them schemes, but neither emits
+                // an implementation — see #853.
+                try synthRecordSelectors(&ctx, dd, &binds);
             },
             .ForeignPrim => |fp| {
                 // Validate the imported name at compile time.
@@ -865,6 +871,128 @@ fn desugarClassDecl(
     // Store the dictionary constructor name in ClassEnv so that instance
     // declarations can reuse it (issue #569).
     ctx.types.class_env.setDictConName(cd.name.unique.value, dict_con_name);
+}
+
+/// Synthesise a Core binding for every record field selector of a data
+/// declaration (#853).
+///
+/// For `data Point = Point { px :: Int, py :: Int }` this emits
+///
+///   px = \rec -> case rec of { Point f0 f1 -> f0 }
+///   py = \rec -> case rec of { Point f0 f1 -> f1 }
+///
+/// mirroring the dictionary-method selectors built by `desugarClassDecl`.
+/// The renamer already bound each selector name and recorded it in
+/// `dd.selectors`; the typechecker assigned the selector a scheme.  Here we
+/// only supply the implementation.
+///
+/// The selector is arity-1 (no eta-expansion).  Over-applying a selector whose
+/// field is itself a function (`getCallback x arg`) is the general
+/// over-application case, not specific to selectors — see #853.
+fn synthRecordSelectors(
+    ctx: *DesugarCtx,
+    dd: renamer_mod.RDataDecl,
+    binds: *std.ArrayListUnmanaged(ast_mod.Bind),
+) std.mem.Allocator.Error!void {
+    if (dd.selectors.count() == 0) return;
+    const alloc = ctx.alloc;
+
+    for (dd.constructors) |con| {
+        const arity = con.fields.len;
+        if (arity == 0) continue;
+
+        // Recover per-field Core types and the result (data) type by peeling
+        // the constructor's scheme: `forall vs. t0 -> .. -> t{n-1} -> T vs`.
+        const con_scheme = ctx.types.schemes.get(con.name.unique) orelse continue;
+        var peeled = try schemeToCore(alloc, con_scheme);
+        while (peeled == .ForAllTy) peeled = peeled.ForAllTy.body.*;
+
+        const field_tys = try alloc.alloc(ast_mod.CoreType, arity);
+        var ok = true;
+        for (0..arity) |j| {
+            switch (peeled) {
+                .FunTy => |f| {
+                    field_tys[j] = f.arg.*;
+                    peeled = f.res.*;
+                },
+                else => {
+                    ok = false;
+                    break;
+                },
+            }
+        }
+        // Defensive: a constructor scheme that does not match the field count
+        // (should not happen) — skip rather than emit a malformed selector.
+        if (!ok) continue;
+        const result_ty = peeled;
+
+        for (con.fields, 0..) |field, idx| {
+            if (field != .Record) continue;
+            const sel_info = dd.selectors.get(field.Record.name) orelse continue;
+            const sel_name = sel_info.name;
+
+            // Field binders f0 .. f{arity-1} for the constructor alternative.
+            const field_binders = try alloc.alloc(ast_mod.Id, arity);
+            for (0..arity) |j| {
+                field_binders[j] = .{
+                    .name = .{
+                        .base = try std.fmt.allocPrint(alloc, "f{d}", .{j}),
+                        .unique = ctx.u_supply.fresh(),
+                    },
+                    .ty = field_tys[j],
+                    .span = con.span,
+                };
+            }
+
+            // Body: the binder for the selected field.
+            const body = try alloc.create(ast_mod.Expr);
+            body.* = .{ .Var = field_binders[idx] };
+
+            const alt = ast_mod.Alt{
+                .con = .{ .DataAlt = con.name },
+                .binders = field_binders,
+                .body = body,
+            };
+
+            // The lambda/scrutinee binder, of the data type.
+            const rec_id = ast_mod.Id{
+                .name = .{ .base = "rec", .unique = ctx.u_supply.fresh() },
+                .ty = result_ty,
+                .span = con.span,
+            };
+            const scrutinee = try alloc.create(ast_mod.Expr);
+            scrutinee.* = .{ .Var = rec_id };
+
+            const case_expr = try alloc.create(ast_mod.Expr);
+            case_expr.* = .{ .Case = .{
+                .scrutinee = scrutinee,
+                .binder = rec_id,
+                .ty = field_tys[idx],
+                .alts = try alloc.dupe(ast_mod.Alt, &.{alt}),
+                .span = con.span,
+            } };
+
+            const lam = try alloc.create(ast_mod.Expr);
+            lam.* = .{ .Lam = .{ .binder = rec_id, .body = case_expr, .span = con.span } };
+
+            // Prefer the precise scheme the typechecker assigned; otherwise
+            // fall back to `result_ty -> field_ty`.
+            const sel_ty = if (ctx.types.schemes.get(sel_name.unique)) |s|
+                try schemeToCore(alloc, s)
+            else blk: {
+                const a_ptr = try alloc.create(ast_mod.CoreType);
+                a_ptr.* = result_ty;
+                const r_ptr = try alloc.create(ast_mod.CoreType);
+                r_ptr.* = field_tys[idx];
+                break :blk ast_mod.CoreType{ .FunTy = .{ .arg = a_ptr, .res = r_ptr } };
+            };
+
+            try binds.append(alloc, .{ .NonRec = .{
+                .binder = .{ .name = sel_name, .ty = sel_ty, .span = con.span },
+                .rhs = lam,
+            } });
+        }
+    }
 }
 
 /// Desugar an instance declaration into a dictionary value binding.
