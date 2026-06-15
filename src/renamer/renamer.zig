@@ -176,6 +176,12 @@ pub const RenameEnv = struct {
     supply: *UniqueSupply,
     scope: Scope,
     diags: *DiagnosticCollector,
+    /// Maps a record constructor's source name to its field names in
+    /// declaration order.  Populated in Pass 1 and consulted in Pass 2 to
+    /// desugar record-construction syntax (`Con { f = e, ... }`) into a
+    /// positional constructor application.  Only constructors declared with
+    /// record fields appear here.
+    con_field_order: std.StringHashMapUnmanaged([]const []const u8) = .empty,
 
     pub fn init(
         alloc: std.mem.Allocator,
@@ -196,6 +202,7 @@ pub const RenameEnv = struct {
 
     pub fn deinit(self: *RenameEnv) void {
         self.scope.deinit();
+        self.con_field_order.deinit(self.alloc);
     }
 
     /// Allocate a fresh `Name` for a new binding site.
@@ -352,8 +359,9 @@ pub const RExpr = union(enum) {
     TypeApp: struct { fn_expr: *const RExpr, type: ast.Type, span: SourceSpan },
     Negate: *const RExpr,
     Paren: *const RExpr,
-    /// Record construction: Point { x = 1, y = 2 }
-    RecordCon: struct { con: Name, fields: []const RFieldUpdate },
+    // Record construction (`Con { x = 1 }`) is desugared into a positional
+    // constructor application during renaming, so there is no `RecordCon`
+    // node here — see the `.RecordCon` arm of `renameExpr`.
     /// Record update: p { x = 5 }
     RecordUpdate: struct { expr: *const RExpr, fields: []const RFieldUpdate, span: SourceSpan },
     /// Field selector: x .point (GHC extension, not in Haskell 2010)
@@ -705,15 +713,27 @@ fn collectConstructorBinders(
         // Register record field selectors for this constructor
         // For data Point = Point { x :: Int }, register 'x' in scope
         // See Haskell 2010 §4.2.1 and issue #310
+        var field_order = std.ArrayListUnmanaged([]const u8).empty;
         for (con.fields) |field| {
             if (field == .Record) {
                 const field_name = field.Record.name;
+                try field_order.append(env.alloc, field_name);
                 if (!env.scope.boundInCurrentFrame(field_name)) {
                     const selector_name = env.freshName(field_name);
                     try env.scope.bind(field_name, selector_name);
                     try top_names.put(env.alloc, field_name, selector_name);
                 }
             }
+        }
+        // Record the field declaration order so Pass 2 can desugar
+        // record construction / update / pattern syntax into positional
+        // constructor applications and patterns.
+        if (field_order.items.len > 0) {
+            try env.con_field_order.put(
+                env.alloc,
+                con.name,
+                try field_order.toOwnedSlice(env.alloc),
+            );
         }
     }
 }
@@ -1367,13 +1387,101 @@ fn renameExpr(expr: ast.Expr, env: *RenameEnv) RenameError!RExpr {
             break :blk RExpr{ .EnumFromThenTo = .{ .from = from_r, .then = then_r, .to = to_r, .fn_name = fn_name, .span = e.span } };
         },
         .RecordCon => |rc| blk: {
+            // Desugar record construction `Con { f = e, ... }` into a
+            // positional constructor application `Con e0 e1 ...`, with the
+            // field expressions reordered into the constructor's declaration
+            // order.  This lets the typechecker and desugarer treat it as an
+            // ordinary constructor application — no record-specific handling
+            // is needed downstream.  Mirrors how list comprehensions are
+            // desugared in the renamer.
             const con_name = try env.resolve(rc.con.name, rc.con.span);
-            var rfields = std.ArrayListUnmanaged(RFieldUpdate).empty;
+
+            const field_order = env.con_field_order.get(rc.con.name) orelse {
+                const msg = try std.fmt.allocPrint(
+                    env.alloc,
+                    "`{s}` is not a record constructor",
+                    .{rc.con.name},
+                );
+                try env.diags.emit(env.alloc, .{
+                    .severity = .@"error",
+                    .code = .type_error,
+                    .span = rc.con.span,
+                    .message = msg,
+                });
+                break :blk RExpr{ .Var = .{ .name = con_name, .span = rc.con.span } };
+            };
+
+            // Map each named field to its provided expression, flagging
+            // unknown and duplicate fields.
+            var provided = std.StringHashMapUnmanaged(ast.Expr){};
+            defer provided.deinit(env.alloc);
             for (rc.fields) |f| {
-                const rexpr = try renameExpr(f.expr, env);
-                try rfields.append(env.alloc, .{ .field_name = f.field_name, .expr = rexpr });
+                var known = false;
+                for (field_order) |fo| {
+                    if (std.mem.eql(u8, fo, f.field_name)) {
+                        known = true;
+                        break;
+                    }
+                }
+                if (!known) {
+                    const msg = try std.fmt.allocPrint(
+                        env.alloc,
+                        "`{s}` has no field `{s}`",
+                        .{ rc.con.name, f.field_name },
+                    );
+                    try env.diags.emit(env.alloc, .{
+                        .severity = .@"error",
+                        .code = .type_error,
+                        .span = rc.con.span,
+                        .message = msg,
+                    });
+                    continue;
+                }
+                const gop = try provided.getOrPut(env.alloc, f.field_name);
+                if (gop.found_existing) {
+                    const msg = try std.fmt.allocPrint(
+                        env.alloc,
+                        "duplicate field `{s}` in record construction",
+                        .{f.field_name},
+                    );
+                    try env.diags.emit(env.alloc, .{
+                        .severity = .@"error",
+                        .code = .type_error,
+                        .span = rc.con.span,
+                        .message = msg,
+                    });
+                }
+                gop.value_ptr.* = f.expr;
             }
-            break :blk RExpr{ .RecordCon = .{ .con = con_name, .fields = try rfields.toOwnedSlice(env.alloc) } };
+
+            // Build the application in declaration order.  A missing field is
+            // an error (partial record construction is not supported); we fill
+            // it with a fresh unbound name so the application stays well-formed
+            // for any further checking.
+            var app: RExpr = .{ .Var = .{ .name = con_name, .span = rc.con.span } };
+            for (field_order) |fname| {
+                const arg_r = try env.alloc.create(RExpr);
+                if (provided.get(fname)) |arg_ast| {
+                    arg_r.* = try renameExpr(arg_ast, env);
+                } else {
+                    const msg = try std.fmt.allocPrint(
+                        env.alloc,
+                        "missing field `{s}` in construction of `{s}`",
+                        .{ fname, rc.con.name },
+                    );
+                    try env.diags.emit(env.alloc, .{
+                        .severity = .@"error",
+                        .code = .type_error,
+                        .span = rc.con.span,
+                        .message = msg,
+                    });
+                    arg_r.* = RExpr{ .Var = .{ .name = env.freshName("_missing_field"), .span = rc.con.span } };
+                }
+                const fn_r = try env.alloc.create(RExpr);
+                fn_r.* = app;
+                app = .{ .App = .{ .fn_expr = fn_r, .arg_expr = arg_r } };
+            }
+            break :blk app;
         },
         .RecordUpdate => |ru| blk: {
             const rec_r = try env.alloc.create(RExpr);
