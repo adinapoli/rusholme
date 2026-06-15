@@ -643,49 +643,11 @@ pub fn rename(module: ast.Module, env: *RenameEnv) !RenamedModule {
                     }
                 }
             },
-            .Data => |dd| {
-                for (dd.constructors) |con| {
-                    if (env.scope.boundInCurrentFrame(con.name)) {
-                        const existing = env.scope.lookup(con.name).?;
-                        const is_builtin = existing.unique.value < Known.reserved_range_end;
-                        if (!is_builtin) {
-                            // Genuine duplicate constructor definition.
-                            const msg = try std.fmt.allocPrint(env.alloc, "duplicate definition: `{s}`", .{con.name});
-                            try env.diags.emit(env.alloc, .{
-                                .severity = .@"error",
-                                .code = .duplicate_definition,
-                                .span = con.span,
-                                .message = msg,
-                            });
-                        } else {
-                            // Shadowing a Prelude built-in constructor — rebind to the
-                            // user's definition (same base name, fresh unique). This
-                            // allows data Bool = False | True to shadow the Prelude's
-                            // True/False built-ins without a duplicate error.
-                            const cn = env.freshName(con.name);
-                            try env.scope.bind(con.name, cn);
-                            try top_names.put(env.alloc, con.name, cn);
-                        }
-                    } else {
-                        const cn = env.freshName(con.name);
-                        try env.scope.bind(con.name, cn);
-                        try top_names.put(env.alloc, con.name, cn);
-                    }
-                    // Register record field selectors for this constructor
-                    // For data Point = Point { x :: Int }, register 'x' in scope
-                    // See Haskell 2010 §4.2.1 and issue #310
-                    for (con.fields) |field| {
-                        if (field == .Record) {
-                            const field_name = field.Record.name;
-                            if (!env.scope.boundInCurrentFrame(field_name)) {
-                                const selector_name = env.freshName(field_name);
-                                try env.scope.bind(field_name, selector_name);
-                                try top_names.put(env.alloc, field_name, selector_name);
-                            }
-                        }
-                    }
-                }
-            },
+            .Data => |dd| try collectConstructorBinders(env, &top_names, dd.constructors),
+            // A `newtype` is, for naming purposes, a single-constructor data
+            // type: bind its one constructor (and any record selector) exactly
+            // as `data` would.  See `renameDecl` for the body lowering.
+            .Newtype => |nd| try collectConstructorBinders(env, &top_names, &.{nd.constructor}),
             else => {}, // type decls: skip binder extraction
         }
     }
@@ -703,6 +665,135 @@ pub fn rename(module: ast.Module, env: *RenameEnv) !RenamedModule {
         .declarations = try rdecls.toOwnedSlice(env.alloc),
         .span = module.span,
     };
+}
+
+/// Pass-1 binder collection shared by `data` and `newtype` declarations:
+/// bind each constructor name (rebinding shadowed Prelude built-ins) and any
+/// record field selectors into the top-level scope.
+fn collectConstructorBinders(
+    env: *RenameEnv,
+    top_names: *std.StringHashMapUnmanaged(Name),
+    constructors: []const ast.ConDecl,
+) RenameError!void {
+    for (constructors) |con| {
+        if (env.scope.boundInCurrentFrame(con.name)) {
+            const existing = env.scope.lookup(con.name).?;
+            const is_builtin = existing.unique.value < Known.reserved_range_end;
+            if (!is_builtin) {
+                // Genuine duplicate constructor definition.
+                const msg = try std.fmt.allocPrint(env.alloc, "duplicate definition: `{s}`", .{con.name});
+                try env.diags.emit(env.alloc, .{
+                    .severity = .@"error",
+                    .code = .duplicate_definition,
+                    .span = con.span,
+                    .message = msg,
+                });
+            } else {
+                // Shadowing a Prelude built-in constructor — rebind to the
+                // user's definition (same base name, fresh unique). This
+                // allows data Bool = False | True to shadow the Prelude's
+                // True/False built-ins without a duplicate error.
+                const cn = env.freshName(con.name);
+                try env.scope.bind(con.name, cn);
+                try top_names.put(env.alloc, con.name, cn);
+            }
+        } else {
+            const cn = env.freshName(con.name);
+            try env.scope.bind(con.name, cn);
+            try top_names.put(env.alloc, con.name, cn);
+        }
+        // Register record field selectors for this constructor
+        // For data Point = Point { x :: Int }, register 'x' in scope
+        // See Haskell 2010 §4.2.1 and issue #310
+        for (con.fields) |field| {
+            if (field == .Record) {
+                const field_name = field.Record.name;
+                if (!env.scope.boundInCurrentFrame(field_name)) {
+                    const selector_name = env.freshName(field_name);
+                    try env.scope.bind(field_name, selector_name);
+                    try top_names.put(env.alloc, field_name, selector_name);
+                }
+            }
+        }
+    }
+}
+
+/// Rename a `data`/`newtype` declaration body into an `RDecl.DataDecl`.
+/// `type_name` is the source name of the type constructor (used for the
+/// duplicate-field diagnostic); `constructors` is its constructor list
+/// (exactly one for a `newtype`).
+fn renameDataLikeDecl(
+    env: *RenameEnv,
+    type_name: []const u8,
+    tyvars: []const []const u8,
+    constructors: []const ast.ConDecl,
+    span: SourceSpan,
+) RenameError!?RDecl {
+    const data_name = env.scope.lookup(type_name) orelse env.freshName(type_name);
+    var rcons = std.ArrayListUnmanaged(RConDecl).empty;
+    var selectors = std.StringHashMapUnmanaged(RSelectorInfo){};
+
+    // Validate that field names are unique across all constructors.
+    // Haskell 2010 §4.2.1: fields with the same name across constructors
+    // of a single type are not allowed.
+    var field_names = std.StringHashMapUnmanaged([]const u8){};
+    defer field_names.deinit(env.alloc);
+    for (constructors) |con| {
+        for (con.fields) |field| {
+            if (field == .Record) {
+                const field_name = field.Record.name;
+                if (field_names.get(field_name)) |_| {
+                    const msg = try std.fmt.allocPrint(
+                        env.alloc,
+                        "duplicate field name `{s}` in data type `{s}`",
+                        .{ field_name, type_name },
+                    );
+                    try env.diags.emit(env.alloc, .{
+                        .severity = .@"error",
+                        .code = .duplicate_definition,
+                        .span = con.span,
+                        .message = msg,
+                    });
+                } else {
+                    try field_names.put(env.alloc, field_name, field_name);
+                }
+            }
+        }
+    }
+
+    for (constructors) |con| {
+        const con_name = env.scope.lookup(con.name) orelse env.freshName(con.name);
+        // We keep field definitions as-is because ast.FieldDecl handles the un-renamable type ASTs
+        // just fine (types are mostly checked dynamically during infer or resolved later).
+        try rcons.append(env.alloc, .{
+            .name = con_name,
+            .fields = con.fields,
+            .span = con.span,
+        });
+
+        // Record record field selectors for the typechecker
+        // For data Point = Point { x :: Int }, record 'x' -> (selector_name, Int)
+        // See Haskell 2010 §4.2.1 and issue #310
+        for (con.fields) |field| {
+            if (field == .Record) {
+                const field_name = field.Record.name;
+                const selector_name = env.scope.lookup(field_name) orelse continue;
+                // Don't overwrite if already present (multiple constructors with same field is invalid)
+                try selectors.put(env.alloc, field_name, .{
+                    .name = selector_name,
+                    .field_type = field.Record.type,
+                });
+            }
+        }
+    }
+
+    return RDecl{ .DataDecl = .{
+        .name = data_name,
+        .tyvars = tyvars,
+        .constructors = try rcons.toOwnedSlice(env.alloc),
+        .span = span,
+        .selectors = selectors,
+    } };
 }
 
 // ── Declaration renaming ───────────────────────────────────────────────
@@ -861,73 +952,13 @@ fn renameDecl(
                 .span = inst.span,
             } };
         },
-        .Data => |dd| blk: {
-            const data_name = env.scope.lookup(dd.name) orelse env.freshName(dd.name);
-            var rcons = std.ArrayListUnmanaged(RConDecl).empty;
-            var selectors = std.StringHashMapUnmanaged(RSelectorInfo){};
-
-            // Validate that field names are unique across all constructors.
-            // Haskell 2010 §4.2.1: fields with the same name across constructors
-            // of a single type are not allowed.
-            var field_names = std.StringHashMapUnmanaged([]const u8){};
-            defer field_names.deinit(env.alloc);
-            for (dd.constructors) |con| {
-                for (con.fields) |field| {
-                    if (field == .Record) {
-                        const field_name = field.Record.name;
-                        if (field_names.get(field_name)) |_| {
-                            const msg = try std.fmt.allocPrint(
-                                env.alloc,
-                                "duplicate field name `{s}` in data type `{s}`",
-                                .{ field_name, dd.name },
-                            );
-                            try env.diags.emit(env.alloc, .{
-                                .severity = .@"error",
-                                .code = .duplicate_definition,
-                                .span = con.span,
-                                .message = msg,
-                            });
-                        } else {
-                            try field_names.put(env.alloc, field_name, field_name);
-                        }
-                    }
-                }
-            }
-
-            for (dd.constructors) |con| {
-                const con_name = env.scope.lookup(con.name) orelse env.freshName(con.name);
-                // We keep field definitions as-is because ast.FieldDecl handles the un-renamable type ASTs
-                // just fine (types are mostly checked dynamically during infer or resolved later).
-                try rcons.append(env.alloc, .{
-                    .name = con_name,
-                    .fields = con.fields,
-                    .span = con.span,
-                });
-
-                // Record record field selectors for the typechecker
-                // For data Point = Point { x :: Int }, record 'x' -> (selector_name, Int)
-                // See Haskell 2010 §4.2.1 and issue #310
-                for (con.fields) |field| {
-                    if (field == .Record) {
-                        const field_name = field.Record.name;
-                        const selector_name = env.scope.lookup(field_name) orelse continue;
-                        // Don't overwrite if already present (multiple constructors with same field is invalid)
-                        try selectors.put(env.alloc, field_name, .{
-                            .name = selector_name,
-                            .field_type = field.Record.type,
-                        });
-                    }
-                }
-            }
-
-            break :blk RDecl{ .DataDecl = .{
-                .name = data_name,
-                .tyvars = dd.tyvars,
-                .constructors = try rcons.toOwnedSlice(env.alloc),
-                .span = dd.span,
-                .selectors = selectors,
-            } };
-        },
+        .Data => |dd| try renameDataLikeDecl(env, dd.name, dd.tyvars, dd.constructors, dd.span),
+        // A `newtype N = C t` is treated as the single-constructor data type
+        // `data N = C t` throughout the rest of the pipeline (typechecker,
+        // desugaring, codegen).  Haskell 2010 distinguishes the two only by
+        // wrapper strictness and `coerce`; modelling that distinction is left
+        // to the newtype-coercion work tracked separately (#705).
+        .Newtype => |nd| try renameDataLikeDecl(env, nd.name, nd.tyvars, &.{nd.constructor}, nd.span),
         .Foreign => |fd| blk: {
             // `prim` (GRIN PrimOps) and `ccall` (RTS C calls, #536) are
             // supported; other conventions (capi, stdcall, …) are deferred.
