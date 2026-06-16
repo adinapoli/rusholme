@@ -35,11 +35,23 @@ pub fn resetOccurrenceSpans() void {
 
 /// Derive a distinct span from `span`, preserving file + line (so diagnostics
 /// still point at the user's `deriving` clause) but assigning a fresh column.
+/// Column base for synthesised occurrence spans. Chosen far above any real
+/// source column so a freshened occurrence span never collides with a *raw*
+/// deriving-clause span (e.g. the instance's own `Show a` method constraint,
+/// which the typechecker keys at the data-declaration span, column 1). Without
+/// the offset the very first freshened occurrence lands at column 1 and
+/// collides — silently masked when another class is derived first (which bumps
+/// the counter past 1), which is exactly why `deriving (Show)` alone
+/// mis-resolved its field dictionary while `deriving (Eq, Show)` did not.
+/// See #863.
+const occ_col_base: u32 = 1_000_000;
+
 fn freshOccSpan(span: SourceSpan) SourceSpan {
     occ_seq += 1;
     const line = if (span.start.line > 0) span.start.line else 1;
-    const start = SourcePos.init(span.start.file_id, line, occ_seq);
-    const end = SourcePos.init(span.start.file_id, line, occ_seq + 1);
+    const col = occ_col_base + occ_seq;
+    const start = SourcePos.init(span.start.file_id, line, col);
+    const end = SourcePos.init(span.start.file_id, line, col + 1);
     return SourceSpan.init(start, end);
 }
 
