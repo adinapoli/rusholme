@@ -128,13 +128,6 @@ fn collectExprVarRefs(
         .TypeApp => |ta| try collectExprVarRefs(ta.fn_expr.*, top_level, refs, alloc),
         .Negate => |e| try collectExprVarRefs(e.*, top_level, refs, alloc),
         .Paren => |e| try collectExprVarRefs(e.*, top_level, refs, alloc),
-        .RecordCon => |rc| {
-            for (rc.fields) |f| try collectExprVarRefs(f.expr, top_level, refs, alloc);
-        },
-        .RecordUpdate => |ru| {
-            try collectExprVarRefs(ru.expr.*, top_level, refs, alloc);
-            for (ru.fields) |f| try collectExprVarRefs(f.expr, top_level, refs, alloc);
-        },
         .Field => |f| try collectExprVarRefs(f.expr.*, top_level, refs, alloc),
     }
 }

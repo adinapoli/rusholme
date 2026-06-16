@@ -176,6 +176,12 @@ pub const RenameEnv = struct {
     supply: *UniqueSupply,
     scope: Scope,
     diags: *DiagnosticCollector,
+    /// Maps a record constructor's source name to its field names in
+    /// declaration order.  Populated in Pass 1 and consulted in Pass 2 to
+    /// desugar record-construction syntax (`Con { f = e, ... }`) into a
+    /// positional constructor application.  Only constructors declared with
+    /// record fields appear here.
+    con_field_order: std.StringHashMapUnmanaged([]const []const u8) = .empty,
 
     pub fn init(
         alloc: std.mem.Allocator,
@@ -196,6 +202,7 @@ pub const RenameEnv = struct {
 
     pub fn deinit(self: *RenameEnv) void {
         self.scope.deinit();
+        self.con_field_order.deinit(self.alloc);
     }
 
     /// Allocate a fresh `Name` for a new binding site.
@@ -352,10 +359,11 @@ pub const RExpr = union(enum) {
     TypeApp: struct { fn_expr: *const RExpr, type: ast.Type, span: SourceSpan },
     Negate: *const RExpr,
     Paren: *const RExpr,
-    /// Record construction: Point { x = 1, y = 2 }
-    RecordCon: struct { con: Name, fields: []const RFieldUpdate },
-    /// Record update: p { x = 5 }
-    RecordUpdate: struct { expr: *const RExpr, fields: []const RFieldUpdate, span: SourceSpan },
+    // Record construction (`Con { x = 1 }`) and record update (`p { x = 5 }`)
+    // are desugared during renaming — into a positional constructor
+    // application and a field-copying case respectively — so there are no
+    // `RecordCon`/`RecordUpdate` nodes here. See the corresponding arms of
+    // `renameExpr`.
     /// Field selector: x .point (GHC extension, not in Haskell 2010)
     Field: struct { expr: *const RExpr, field_name: []const u8, span: SourceSpan },
 };
@@ -374,23 +382,11 @@ pub const RPat = union(enum) {
     InfixCon: struct { left: *const RPat, con: Name, con_span: SourceSpan, right: *const RPat },
     Negate: *const RPat,
     Paren: *const RPat,
-    /// Record pattern: Point { x = a, y = b }
-    /// Field punning is supported: Point { x } is equivalent to Point { x = x }
-    RecPat: struct { con: Name, con_span: SourceSpan, fields: []const RFieldPat, span: SourceSpan },
+    // Record patterns (`Con { x = a }`) are desugared into positional
+    // constructor patterns during renaming, so there is no `RecPat` node
+    // here — see the `.RecPat` arm of `renamePat`.
 };
 
-/// Field pattern in renamed record patterns.
-pub const RFieldPat = struct {
-    field_name: []const u8,
-    /// None for field punning (x -> x = x), Some for explicit pattern (x = p)
-    pat: ?*RPat,
-};
-
-/// Field update in renamed record constructions and updates.
-pub const RFieldUpdate = struct {
-    field_name: []const u8,
-    expr: RExpr,
-};
 
 /// A renamed right-hand side.
 pub const RRhs = union(enum) {
@@ -705,15 +701,27 @@ fn collectConstructorBinders(
         // Register record field selectors for this constructor
         // For data Point = Point { x :: Int }, register 'x' in scope
         // See Haskell 2010 §4.2.1 and issue #310
+        var field_order = std.ArrayListUnmanaged([]const u8).empty;
         for (con.fields) |field| {
             if (field == .Record) {
                 const field_name = field.Record.name;
+                try field_order.append(env.alloc, field_name);
                 if (!env.scope.boundInCurrentFrame(field_name)) {
                     const selector_name = env.freshName(field_name);
                     try env.scope.bind(field_name, selector_name);
                     try top_names.put(env.alloc, field_name, selector_name);
                 }
             }
+        }
+        // Record the field declaration order so Pass 2 can desugar
+        // record construction / update / pattern syntax into positional
+        // constructor applications and patterns.
+        if (field_order.items.len > 0) {
+            try env.con_field_order.put(
+                env.alloc,
+                con.name,
+                try field_order.toOwnedSlice(env.alloc),
+            );
         }
     }
 }
@@ -1367,23 +1375,225 @@ fn renameExpr(expr: ast.Expr, env: *RenameEnv) RenameError!RExpr {
             break :blk RExpr{ .EnumFromThenTo = .{ .from = from_r, .then = then_r, .to = to_r, .fn_name = fn_name, .span = e.span } };
         },
         .RecordCon => |rc| blk: {
+            // Desugar record construction `Con { f = e, ... }` into a
+            // positional constructor application `Con e0 e1 ...`, with the
+            // field expressions reordered into the constructor's declaration
+            // order.  This lets the typechecker and desugarer treat it as an
+            // ordinary constructor application — no record-specific handling
+            // is needed downstream.  Mirrors how list comprehensions are
+            // desugared in the renamer.
             const con_name = try env.resolve(rc.con.name, rc.con.span);
-            var rfields = std.ArrayListUnmanaged(RFieldUpdate).empty;
+
+            const field_order = env.con_field_order.get(rc.con.name) orelse {
+                const msg = try std.fmt.allocPrint(
+                    env.alloc,
+                    "`{s}` is not a record constructor",
+                    .{rc.con.name},
+                );
+                try env.diags.emit(env.alloc, .{
+                    .severity = .@"error",
+                    .code = .type_error,
+                    .span = rc.con.span,
+                    .message = msg,
+                });
+                break :blk RExpr{ .Var = .{ .name = con_name, .span = rc.con.span } };
+            };
+
+            // Map each named field to its provided expression, flagging
+            // unknown and duplicate fields.
+            var provided = std.StringHashMapUnmanaged(ast.Expr){};
+            defer provided.deinit(env.alloc);
             for (rc.fields) |f| {
-                const rexpr = try renameExpr(f.expr, env);
-                try rfields.append(env.alloc, .{ .field_name = f.field_name, .expr = rexpr });
+                var known = false;
+                for (field_order) |fo| {
+                    if (std.mem.eql(u8, fo, f.field_name)) {
+                        known = true;
+                        break;
+                    }
+                }
+                if (!known) {
+                    const msg = try std.fmt.allocPrint(
+                        env.alloc,
+                        "`{s}` has no field `{s}`",
+                        .{ rc.con.name, f.field_name },
+                    );
+                    try env.diags.emit(env.alloc, .{
+                        .severity = .@"error",
+                        .code = .type_error,
+                        .span = rc.con.span,
+                        .message = msg,
+                    });
+                    continue;
+                }
+                const gop = try provided.getOrPut(env.alloc, f.field_name);
+                if (gop.found_existing) {
+                    const msg = try std.fmt.allocPrint(
+                        env.alloc,
+                        "duplicate field `{s}` in record construction",
+                        .{f.field_name},
+                    );
+                    try env.diags.emit(env.alloc, .{
+                        .severity = .@"error",
+                        .code = .type_error,
+                        .span = rc.con.span,
+                        .message = msg,
+                    });
+                }
+                gop.value_ptr.* = f.expr;
             }
-            break :blk RExpr{ .RecordCon = .{ .con = con_name, .fields = try rfields.toOwnedSlice(env.alloc) } };
+
+            // Build the application in declaration order.  A missing field is
+            // an error (partial record construction is not supported); we fill
+            // it with a fresh unbound name so the application stays well-formed
+            // for any further checking.
+            var app: RExpr = .{ .Var = .{ .name = con_name, .span = rc.con.span } };
+            for (field_order) |fname| {
+                const arg_r = try env.alloc.create(RExpr);
+                if (provided.get(fname)) |arg_ast| {
+                    arg_r.* = try renameExpr(arg_ast, env);
+                } else {
+                    const msg = try std.fmt.allocPrint(
+                        env.alloc,
+                        "missing field `{s}` in construction of `{s}`",
+                        .{ fname, rc.con.name },
+                    );
+                    try env.diags.emit(env.alloc, .{
+                        .severity = .@"error",
+                        .code = .type_error,
+                        .span = rc.con.span,
+                        .message = msg,
+                    });
+                    arg_r.* = RExpr{ .Var = .{ .name = env.freshName("_missing_field"), .span = rc.con.span } };
+                }
+                const fn_r = try env.alloc.create(RExpr);
+                fn_r.* = app;
+                app = .{ .App = .{ .fn_expr = fn_r, .arg_expr = arg_r } };
+            }
+            break :blk app;
         },
         .RecordUpdate => |ru| blk: {
+            // Desugar record update `p { f = e, ... }` into a case that
+            // rebuilds the value, copying the unchanged fields from the matched
+            // binders and substituting the updated ones:
+            //
+            //   case p of OwningCon v0 .. vn -> OwningCon v0 .. e .. vn
+            //
+            // A single alternative for the owning constructor is enough:
+            // updating a value built with a different constructor of the same
+            // type is a runtime error in GHC, which the resulting
+            // non-exhaustive case reproduces.
             const rec_r = try env.alloc.create(RExpr);
             rec_r.* = try renameExpr(ru.expr.*, env);
-            var rfields = std.ArrayListUnmanaged(RFieldUpdate).empty;
-            for (ru.fields) |f| {
-                const rexpr = try renameExpr(f.expr, env);
-                try rfields.append(env.alloc, .{ .field_name = f.field_name, .expr = rexpr });
+
+            if (ru.fields.len == 0) {
+                const msg = try std.fmt.allocPrint(env.alloc, "empty record update", .{});
+                try env.diags.emit(env.alloc, .{
+                    .severity = .@"error",
+                    .code = .type_error,
+                    .span = ru.span,
+                    .message = msg,
+                });
+                break :blk rec_r.*;
             }
-            break :blk RExpr{ .RecordUpdate = .{ .expr = rec_r, .fields = try rfields.toOwnedSlice(env.alloc), .span = ru.span } };
+
+            // Find the constructor that owns the first updated field, then map
+            // each updated field to its renamed expression (flagging unknown,
+            // duplicate, and cross-constructor fields).
+            const owner = blk2: {
+                var it = env.con_field_order.iterator();
+                while (it.next()) |entry| {
+                    for (entry.value_ptr.*) |fname| {
+                        if (std.mem.eql(u8, fname, ru.fields[0].field_name)) {
+                            break :blk2 entry.key_ptr.*;
+                        }
+                    }
+                }
+                break :blk2 null;
+            } orelse {
+                const msg = try std.fmt.allocPrint(
+                    env.alloc,
+                    "record update field `{s}` does not belong to any record type",
+                    .{ru.fields[0].field_name},
+                );
+                try env.diags.emit(env.alloc, .{
+                    .severity = .@"error",
+                    .code = .type_error,
+                    .span = ru.span,
+                    .message = msg,
+                });
+                break :blk rec_r.*;
+            };
+            const field_order = env.con_field_order.get(owner).?;
+            const con_name = try env.resolve(owner, ru.span);
+
+            var updates = std.StringHashMapUnmanaged(RExpr){};
+            defer updates.deinit(env.alloc);
+            for (ru.fields) |f| {
+                var owned = false;
+                for (field_order) |fo| {
+                    if (std.mem.eql(u8, fo, f.field_name)) {
+                        owned = true;
+                        break;
+                    }
+                }
+                if (!owned) {
+                    const msg = try std.fmt.allocPrint(
+                        env.alloc,
+                        "record update fields belong to different constructors (`{s}` is not a field of `{s}`)",
+                        .{ f.field_name, owner },
+                    );
+                    try env.diags.emit(env.alloc, .{
+                        .severity = .@"error",
+                        .code = .type_error,
+                        .span = ru.span,
+                        .message = msg,
+                    });
+                    continue;
+                }
+                const gop = try updates.getOrPut(env.alloc, f.field_name);
+                if (gop.found_existing) {
+                    const msg = try std.fmt.allocPrint(
+                        env.alloc,
+                        "duplicate field `{s}` in record update",
+                        .{f.field_name},
+                    );
+                    try env.diags.emit(env.alloc, .{
+                        .severity = .@"error",
+                        .code = .type_error,
+                        .span = ru.span,
+                        .message = msg,
+                    });
+                }
+                gop.value_ptr.* = try renameExpr(f.expr, env);
+            }
+
+            // Pattern binders v0..vn and the rebuilt constructor application.
+            const binders = try env.alloc.alloc(RPat, field_order.len);
+            var rebuilt: RExpr = .{ .Var = .{ .name = con_name, .span = ru.span } };
+            for (field_order, 0..) |fname, i| {
+                const v = env.freshName(fname);
+                binders[i] = RPat{ .Var = .{ .name = v, .span = ru.span } };
+
+                const arg_r = try env.alloc.create(RExpr);
+                if (updates.get(fname)) |upd| {
+                    arg_r.* = upd;
+                } else {
+                    arg_r.* = RExpr{ .Var = .{ .name = v, .span = ru.span } };
+                }
+                const fn_r = try env.alloc.create(RExpr);
+                fn_r.* = rebuilt;
+                rebuilt = .{ .App = .{ .fn_expr = fn_r, .arg_expr = arg_r } };
+            }
+
+            const alt = RAlt{
+                .pattern = RPat{ .Con = .{ .name = con_name, .con_span = ru.span, .args = binders } },
+                .rhs = RRhs{ .UnGuarded = rebuilt },
+                .span = ru.span,
+            };
+            break :blk RExpr{ .Case = .{
+                .scrutinee = rec_r,
+                .alts = try env.alloc.dupe(RAlt, &.{alt}),
+            } };
         },
         .Field => |f| blk: {
             const expr_r = try env.alloc.create(RExpr);
@@ -1656,30 +1866,90 @@ fn renamePat(pat: ast.Pattern, env: *RenameEnv) RenameError!RPat {
             break :blk RPat{ .Var = .{ .name = n, .span = npk.name_span } };
         },
         .RecPat => |rp| blk: {
+            // Desugar a record pattern `Con { f = p, ... }` into a positional
+            // constructor pattern, placing each named field pattern at the
+            // field's declaration index and filling omitted fields with
+            // wildcards.  Field punning (`Con { f }`) binds the field name as a
+            // variable.  Like record construction, this lets the rest of the
+            // pipeline treat it as an ordinary constructor pattern.
             const con_name = try env.resolve(rp.con.name, rp.con.span);
-            var rfields = std.ArrayListUnmanaged(RFieldPat).empty;
-            for (rp.fields) |f| {
-                var rpat: ?*RPat = null;
-                if (f.pat) |p| {
-                    rpat = try env.alloc.create(RPat);
-                    rpat.?.* = try renamePat(p, env);
-                } else {
-                    // Field pun: bind the field name as a variable
-                    // No pattern is created - pat remains null
-                    const n = env.freshName(f.field_name);
-                    try env.scope.bind(f.field_name, n);
-                }
-                try rfields.append(env.alloc, .{
-                    .field_name = f.field_name,
-                    .pat = rpat,
+
+            const field_order = env.con_field_order.get(rp.con.name) orelse {
+                const msg = try std.fmt.allocPrint(
+                    env.alloc,
+                    "`{s}` is not a record constructor",
+                    .{rp.con.name},
+                );
+                try env.diags.emit(env.alloc, .{
+                    .severity = .@"error",
+                    .code = .type_error,
+                    .span = rp.con.span,
+                    .message = msg,
                 });
+                break :blk RPat{ .Con = .{ .name = con_name, .con_span = rp.con.span, .args = &.{} } };
+            };
+
+            // Index the supplied field patterns by name, flagging unknown and
+            // duplicate fields.
+            var provided = std.StringHashMapUnmanaged(ast.FieldPattern){};
+            defer provided.deinit(env.alloc);
+            for (rp.fields) |f| {
+                var known = false;
+                for (field_order) |fo| {
+                    if (std.mem.eql(u8, fo, f.field_name)) {
+                        known = true;
+                        break;
+                    }
+                }
+                if (!known) {
+                    const msg = try std.fmt.allocPrint(
+                        env.alloc,
+                        "`{s}` has no field `{s}`",
+                        .{ rp.con.name, f.field_name },
+                    );
+                    try env.diags.emit(env.alloc, .{
+                        .severity = .@"error",
+                        .code = .type_error,
+                        .span = rp.con.span,
+                        .message = msg,
+                    });
+                    continue;
+                }
+                const gop = try provided.getOrPut(env.alloc, f.field_name);
+                if (gop.found_existing) {
+                    const msg = try std.fmt.allocPrint(
+                        env.alloc,
+                        "duplicate field `{s}` in record pattern",
+                        .{f.field_name},
+                    );
+                    try env.diags.emit(env.alloc, .{
+                        .severity = .@"error",
+                        .code = .type_error,
+                        .span = rp.con.span,
+                        .message = msg,
+                    });
+                }
+                gop.value_ptr.* = f;
             }
-            break :blk RPat{ .RecPat = .{
-                .con = con_name,
-                .con_span = rp.con.span,
-                .fields = try rfields.toOwnedSlice(env.alloc),
-                .span = rp.span,
-            } };
+
+            // Build the positional argument patterns in declaration order.
+            const args = try env.alloc.alloc(RPat, field_order.len);
+            for (field_order, 0..) |fname, i| {
+                if (provided.get(fname)) |fp| {
+                    if (fp.pat) |p| {
+                        args[i] = try renamePat(p, env);
+                    } else {
+                        // Field pun: `Con { f }` is `Con { f = f }`.
+                        const n = env.freshName(fname);
+                        try env.scope.bind(fname, n);
+                        args[i] = RPat{ .Var = .{ .name = n, .span = rp.span } };
+                    }
+                } else {
+                    args[i] = RPat{ .Wild = rp.span };
+                }
+            }
+
+            break :blk RPat{ .Con = .{ .name = con_name, .con_span = rp.con.span, .args = args } };
         },
     };
 }

@@ -2771,8 +2771,10 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                 .span = syntheticSpan(),
             } };
         },
-        .RecordCon, .RecordUpdate, .Field => {
-            // Record syntax
+        .Field => {
+            // Field-access dot syntax (`p.x`) — a GHC extension, not Haskell
+            // 2010.  (Record construction and update are desugared in the
+            // renamer, so they never reach here.)
             // tracked in: https://github.com/adinapoli/rusholme/issues/361
             node.* = .{ .Var = .{
                 .name = Name{ .base = "todo_record", .unique = .{ .value = 0 } },
@@ -3330,16 +3332,6 @@ fn applyPat(
 
             break :blk try applyPat(ctx, scrut_expr, scrut_id, scrut_ty, right_pat.*, success, failure, arg_idx, depth);
         },
-
-        // ── Not yet implemented ───────────────────────────────────────────
-        //
-        // IMPORTANT: Each unsupported case MUST have a tracking issue.
-        .RecPat => {
-            // Record pattern desugaring requires the record type to be fully
-            // in scope; tracked as part of the record support work.
-            // tracked in: https://github.com/adinapoli/rusholme/issues/418
-            std.debug.panic("Record patterns not yet supported in match compiler: {}", .{pat});
-        },
     };
 }
 
@@ -3487,11 +3479,6 @@ fn registerPatBindersRec(
             for (elems) |sub| try registerPatBindersRec(ctx, sub, dummy);
         },
         .Negate => |inner| try registerPatBindersRec(ctx, inner.*, ty),
-        .RecPat => |rp| {
-            for (rp.fields) |f| {
-                if (f.pat) |sub| try registerPatBindersRec(ctx, sub.*, dummy);
-            }
-        },
         .Lit, .Wild => {},
     }
 }
@@ -3612,13 +3599,6 @@ fn registerExprBinders(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Alloca
         .TypeApp => |ta| try registerExprBinders(ctx, ta.fn_expr.*),
         .Negate => |inner| try registerExprBinders(ctx, inner.*),
         .Paren => |inner| try registerExprBinders(ctx, inner.*),
-        .RecordCon => |rc| {
-            for (rc.fields) |f| try registerExprBinders(ctx, f.expr);
-        },
-        .RecordUpdate => |ru| {
-            try registerExprBinders(ctx, ru.expr.*);
-            for (ru.fields) |f| try registerExprBinders(ctx, f.expr);
-        },
         .Field => |f| try registerExprBinders(ctx, f.expr.*),
     }
 }
