@@ -48,6 +48,11 @@ pub fn derive(
 ) DeriveError!void {
     var out: std.ArrayListUnmanaged(ast.Decl) = .empty;
 
+    // Reset the occurrence-span counter so each synthesised class-method call
+    // site gets a distinct span (required for correct dictionary-evidence
+    // keying in the desugarer — see builder.occ_seq / #851).
+    builder.resetOccurrenceSpans();
+
     // Synthesise instances inline, placing the helpers + instance
     // immediately after the data/newtype declaration that triggered them.
     // This keeps each type with its derived machinery together and matches
