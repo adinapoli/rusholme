@@ -621,91 +621,32 @@ fn cmdCheck(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
 /// Parse, check, and desugar a Haskell source file to Core IR.
 /// Prints the resulting Core IR to stdout.
 fn cmdCore(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
-    const source = readSourceFile(allocator, io, file_path) catch |err| {
-        var stderr_buf: [4096]u8 = undefined;
-        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
-        const stderr = &stderr_fw.interface;
-        switch (err) {
-            error.FileNotFound => try stderr.print("rhc: file not found: {s}\n", .{file_path}),
-            error.AccessDenied => try stderr.print("rhc: permission denied: {s}\n", .{file_path}),
-            else => try stderr.print("rhc: cannot read file '{s}': {}\n", .{ file_path, err }),
-        }
-        try stderr.flush();
-        std.process.exit(1);
-    };
-    defer allocator.free(source);
-
-    const file_id: FileId = 1;
-
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    var lexer = Lexer.init(arena_alloc, source, file_id);
-    var layout = LayoutProcessor.init(arena_alloc, &lexer);
-    var diags = DiagnosticCollector.init();
-    defer diags.deinit(arena_alloc);
-    layout.setDiagnostics(&diags);
+    const compile_env_mod = rusholme.modules.compile_env;
 
-    var parser = Parser.init(arena_alloc, &layout, &diags) catch {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
-        std.process.exit(1);
-    };
-    var module = parser.parseModule() catch {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
-        std.process.exit(1);
-    };
-    if (diags.hasErrors()) {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
-        std.process.exit(1);
-    }
+    // Compile the user file against the full boot Prelude stack (same path as
+    // `rhc build`), so Prelude symbols like `show`/`++` resolve and the dumped
+    // Core reflects what the compiler actually produces. `rhc core` assumes the
+    // implicit Prelude; NoImplicitPrelude programs are not specially handled.
+    const source_modules = try assembleSourceModules(arena_alloc, io, &.{file_path}, false, null);
 
-    var u_supply = rusholme.naming.unique.UniqueSupply{};
-    const no_implicit_prelude = module.language_extensions.contains(.NoImplicitPrelude);
-    var rename_env = try renamer_mod.RenameEnv.init(arena_alloc, &u_supply, &diags, no_implicit_prelude);
-    defer rename_env.deinit();
+    var effective_pkg_dbs: std.ArrayListUnmanaged([]const u8) = .empty;
+    const default_db = getDefaultPackageDb();
+    if (default_db.len > 0) try effective_pkg_dbs.append(arena_alloc, default_db);
 
-    // ── Load Prelude before user rename ───────────────────────────────
-    var mv_supply = htype_mod.MetaVarSupply{};
-    var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
-    try rusholme.tc.env.initBuiltins(&ty_env, &u_supply, no_implicit_prelude);
-
-    // Respect the NoImplicitPrelude language extension: only load Prelude
-    // when the user has NOT enabled NoImplicitPrelude.
-    var prelude_result: ?PreludeResult = null;
-    if (!no_implicit_prelude) {
-        var pipeline_core = rusholme.repl.pipeline.Pipeline.init(arena_alloc, io);
-        prelude_result = loadPrelude(arena_alloc, io, &pipeline_core, &u_supply, &rename_env, &ty_env, &mv_supply, &diags) catch null;
-    }
-
-    try deriving_mod.derive(arena_alloc, &module, &diags);
-    const renamed = try renamer_mod.rename(module, &rename_env);
-    if (diags.hasErrors()) {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+    var session_result = try compile_env_mod.compileProgram(arena_alloc, io, source_modules, effective_pkg_dbs.items);
+    var session = &session_result.env;
+    defer session.deinit();
+    if (session_result.result.had_errors) {
+        try renderMultiFileDiagnostics(allocator, io, &session.diags);
         std.process.exit(1);
     }
 
-    var infer_ctx = infer_mod.InferCtx.init(arena_alloc, &ty_env, &mv_supply, &u_supply, &diags);
-    if (prelude_result) |pr| {
-        try infer_ctx.class_env.mergeFrom(&pr.class_env);
-    }
-    var module_types = try infer_mod.inferModule(&infer_ctx, renamed, null);
-    defer module_types.deinit(arena_alloc);
-    if (diags.hasErrors()) {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
-        std.process.exit(1);
-    }
-
-    // ── Desugar ────────────────────────────────────────────────────────
-    const ext_dict_names: ?*const rusholme.core.desugar.DesugarCtx.DictNameMap = if (prelude_result) |*pr| &pr.dict_names else null;
-    const desugar_result = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags, &u_supply, ext_dict_names);
-    const core_prog = desugar_result.program;
-    if (diags.hasErrors()) {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
-        std.process.exit(1);
-    }
-
-    // ── Pretty-print ───────────────────────────────────────────────────
+    // ── Pretty-print the merged whole-program Core ─────────────────────
+    const core_prog = session_result.result.core;
     var stdout_buf: [4096]u8 = undefined;
     var stdout_fw: File.Writer = .init(.stdout(), io, &stdout_buf);
     var stdout = &stdout_fw.interface;
@@ -721,109 +662,34 @@ fn cmdCore(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
 /// Parse, check, desugar, lambda-lift, and translate to GRIN IR.
 /// Prints the resulting GRIN IR to stdout.
 fn cmdGrin(allocator: std.mem.Allocator, io: Io, file_path: []const u8) !void {
-    const source = readSourceFile(allocator, io, file_path) catch |err| {
-        var stderr_buf: [4096]u8 = undefined;
-        var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
-        const stderr = &stderr_fw.interface;
-        switch (err) {
-            error.FileNotFound => try stderr.print("rhc: file not found: {s}\n", .{file_path}),
-            error.AccessDenied => try stderr.print("rhc: permission denied: {s}\n", .{file_path}),
-            else => try stderr.print("rhc: cannot read file '{s}': {}\n", .{ file_path, err }),
-        }
-        try stderr.flush();
-        std.process.exit(1);
-    };
-    defer allocator.free(source);
-
-    const file_id: FileId = 1;
-
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    // ── Parse ──────────────────────────────────────────────────────────
-    var lexer = Lexer.init(arena_alloc, source, file_id);
-    var layout = LayoutProcessor.init(arena_alloc, &lexer);
-    var diags = DiagnosticCollector.init();
-    defer diags.deinit(arena_alloc);
-    layout.setDiagnostics(&diags);
+    const compile_env_mod = rusholme.modules.compile_env;
 
-    var parser = Parser.init(arena_alloc, &layout, &diags) catch {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
-        std.process.exit(1);
-    };
-    var module = parser.parseModule() catch {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
-        std.process.exit(1);
-    };
-    if (diags.hasErrors()) {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
+    // Compile the user file against the full boot Prelude stack so Prelude
+    // symbols resolve (see `cmdCore` / `assembleSourceModules`).
+    const source_modules = try assembleSourceModules(arena_alloc, io, &.{file_path}, false, null);
+
+    var effective_pkg_dbs: std.ArrayListUnmanaged([]const u8) = .empty;
+    const default_db = getDefaultPackageDb();
+    if (default_db.len > 0) try effective_pkg_dbs.append(arena_alloc, default_db);
+
+    var session_result = try compile_env_mod.compileProgram(arena_alloc, io, source_modules, effective_pkg_dbs.items);
+    var session = &session_result.env;
+    defer session.deinit();
+    if (session_result.result.had_errors) {
+        try renderMultiFileDiagnostics(allocator, io, &session.diags);
         std.process.exit(1);
     }
 
-    // ── Rename ─────────────────────────────────────────────────────────
-    var u_supply = rusholme.naming.unique.UniqueSupply{};
-    const no_implicit_prelude = module.language_extensions.contains(.NoImplicitPrelude);
-    var rename_env = try renamer_mod.RenameEnv.init(arena_alloc, &u_supply, &diags, no_implicit_prelude);
-    defer rename_env.deinit();
-
-    // ── Load Prelude before user rename ───────────────────────────────
-    var mv_supply = htype_mod.MetaVarSupply{};
-    var ty_env = try rusholme.tc.env.TyEnv.init(arena_alloc);
-    try rusholme.tc.env.initBuiltins(&ty_env, &u_supply, no_implicit_prelude);
-
-    // Respect the NoImplicitPrelude language extension: only load Prelude
-    // when the user has NOT enabled NoImplicitPrelude.
-    var prelude_result: ?PreludeResult = null;
-    if (!no_implicit_prelude) {
-        var pipeline_grin = rusholme.repl.pipeline.Pipeline.init(arena_alloc, io);
-        prelude_result = loadPrelude(arena_alloc, io, &pipeline_grin, &u_supply, &rename_env, &ty_env, &mv_supply, &diags) catch null;
-    }
-
-    try deriving_mod.derive(arena_alloc, &module, &diags);
-    const renamed = try renamer_mod.rename(module, &rename_env);
-    if (diags.hasErrors()) {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
-        std.process.exit(1);
-    }
-
-    // ── Typecheck ──────────────────────────────────────────────────────
-    var infer_ctx = infer_mod.InferCtx.init(arena_alloc, &ty_env, &mv_supply, &u_supply, &diags);
-    if (prelude_result) |pr| {
-        try infer_ctx.class_env.mergeFrom(&pr.class_env);
-    }
-    var module_types = try infer_mod.inferModule(&infer_ctx, renamed, null);
-    defer module_types.deinit(arena_alloc);
-    if (diags.hasErrors()) {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
-        std.process.exit(1);
-    }
-
-    // ── Desugar ────────────────────────────────────────────────────────
-    const ext_dict_names: ?*const rusholme.core.desugar.DesugarCtx.DictNameMap = if (prelude_result) |*pr| &pr.dict_names else null;
-    const desugar_result = try rusholme.core.desugar.desugarModule(arena_alloc, renamed, &module_types, &diags, &u_supply, ext_dict_names);
-    const core_prog = desugar_result.program;
-    if (diags.hasErrors()) {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
-        std.process.exit(1);
-    }
-
-    // ── Lambda lift ────────────────────────────────────────────────────
-    const ext_scope_1 = try collectExternalScope(arena_alloc, &module_types);
-    const lift_result_1 = try rusholme.core.lift.lambdaLift(arena_alloc, core_prog, ext_scope_1, 0);
-    const core_lifted = lift_result_1.program;
-    if (diags.hasErrors()) {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
-        std.process.exit(1);
-    }
-
-    // ── Translate to GRIN ───────────────────────────────────────────────
-    const grin_result = try rusholme.grin.translate.translateProgram(arena_alloc, core_lifted, null, null, null, null, 0);
+    // ── Lambda lift + translate the merged whole-program Core to GRIN ──
+    // The merged Core is self-contained (boot stack is source-compiled into
+    // it), so there is no external scope.
+    const lift_result = try rusholme.core.lift.lambdaLift(arena_alloc, session_result.result.core, null, 0);
+    const grin_result = try rusholme.grin.translate.translateProgram(arena_alloc, lift_result.program, null, null, null, null, 0);
     const grin_prog = grin_result.program;
-    if (diags.hasErrors()) {
-        try renderDiagnostics(allocator, io, &diags, file_id, file_path, source);
-        std.process.exit(1);
-    }
 
     // ── Pretty-print ───────────────────────────────────────────────────
     var stdout_buf: [4096]u8 = undefined;
@@ -1066,6 +932,86 @@ fn loadPrelude(
 /// - native: compiles to native executable via LLVM
 /// - wasm: compiles to WebAssembly binary (.wasm)
 /// - jit, c: not yet implemented
+/// Assemble the source-module list a multi-module compile needs: the boot
+/// Prelude stack (`RHC.Prim` → … → `Prelude`, in dependency order, skipping any
+/// the user shadows by module name) followed by the user's own files, with
+/// monotonic `file_id`s (boot modules take the low IDs).
+///
+/// Shared by `cmdBuild` and the IR-dump subcommands so they all see the full
+/// layered Prelude — without it, dumps compiled a user file against only
+/// `lib/Prelude.hs`, leaving `show`, `++`, etc. unbound.
+///
+/// `artifact_dir` only affects whether boot modules carry a `source_path` (used
+/// to auto-write `.rhi`); pass `null` for dumps. A missing boot module warns and
+/// is skipped; an unreadable user file is fatal (exits).
+fn assembleSourceModules(
+    arena_alloc: std.mem.Allocator,
+    io: Io,
+    file_paths: []const []const u8,
+    no_boot: bool,
+    artifact_dir: ?[]const u8,
+) std.mem.Allocator.Error![]rusholme.modules.compile_env.SourceModule {
+    const compile_env_mod = rusholme.modules.compile_env;
+    var source_modules: std.ArrayListUnmanaged(compile_env_mod.SourceModule) = .empty;
+
+    var user_module_names: std.StringHashMapUnmanaged(void) = .empty;
+    for (file_paths) |fp| {
+        const mod_name = try rusholme.modules.module_graph.inferModuleName(arena_alloc, fp);
+        try user_module_names.put(arena_alloc, mod_name, {});
+    }
+
+    var next_file_id: u32 = 0;
+    if (!no_boot) {
+        for (boot_modules) |boot| {
+            if (user_module_names.contains(boot.module_name)) continue;
+            const boot_path = boot.pathFn();
+            if (readSourceFile(arena_alloc, io, boot_path)) |boot_source| {
+                try source_modules.append(arena_alloc, .{
+                    .module_name = boot.module_name,
+                    .source = boot_source,
+                    .file_id = next_file_id,
+                    .source_path = if (artifact_dir == null) boot_path else null,
+                });
+                next_file_id += 1;
+            } else |err| {
+                var stderr_buf: [4096]u8 = undefined;
+                var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+                const stderr = &stderr_fw.interface;
+                switch (err) {
+                    error.FileNotFound => stderr.print("rhc: warning: boot module '{s}' not found at '{s}'; using built-in names only\n", .{ boot.module_name, boot_path }) catch {},
+                    else => stderr.print("rhc: warning: cannot read boot module '{s}' at '{s}': {}; using built-in names only\n", .{ boot.module_name, boot_path, err }) catch {},
+                }
+                stderr.flush() catch {};
+            }
+        }
+    }
+
+    for (file_paths) |fp| {
+        const source = readSourceFile(arena_alloc, io, fp) catch |err| {
+            var stderr_buf: [4096]u8 = undefined;
+            var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
+            const stderr = &stderr_fw.interface;
+            switch (err) {
+                error.FileNotFound => stderr.print("rhc: file not found: {s}\n", .{fp}) catch {},
+                error.AccessDenied => stderr.print("rhc: permission denied: {s}\n", .{fp}) catch {},
+                else => stderr.print("rhc: cannot read file '{s}': {}\n", .{ fp, err }) catch {},
+            }
+            stderr.flush() catch {};
+            std.process.exit(1);
+        };
+        const mod_name = extractSourceModuleName(source) orelse
+            try rusholme.modules.module_graph.inferModuleName(arena_alloc, fp);
+        try source_modules.append(arena_alloc, .{
+            .module_name = mod_name,
+            .source = source,
+            .file_id = next_file_id,
+        });
+        next_file_id += 1;
+    }
+
+    return source_modules.toOwnedSlice(arena_alloc);
+}
+
 fn cmdBuild(
     allocator: std.mem.Allocator,
     io: Io,
@@ -1089,7 +1035,6 @@ fn cmdBuild(
     const arena_alloc = arena.allocator();
 
     const compile_env_mod = rusholme.modules.compile_env;
-    var source_modules: std.ArrayListUnmanaged(compile_env_mod.SourceModule) = .empty;
 
     // Prepend the baked-in default package db so user `rhc build` picks up
     // pre-built boot artifacts without needing an explicit
@@ -1101,98 +1046,16 @@ fn cmdBuild(
     const default_db = getDefaultPackageDb();
     if (default_db.len > 0) try effective_pkg_dbs.append(arena_alloc, default_db);
 
-    // ── Auto-prepend boot modules unless the user explicitly passed them ─
-    //
-    // The boot modules (`RHC.Prim`, `Prelude`, …) form the layered
-    // Prelude stack.  We prepend them in declared dependency order so
-    // the module graph topo-sorts them ahead of user code.  An entry is
-    // skipped when the user has already supplied a file whose inferred
-    // module name matches — this lets a test or a custom Prelude shadow
-    // a boot module wholesale.
-    var user_module_names: std.StringHashMapUnmanaged(void) = .empty;
-    for (file_paths) |fp| {
-        const mod_name = try rusholme.modules.module_graph.inferModuleName(arena_alloc, fp);
-        try user_module_names.put(arena_alloc, mod_name, {});
-    }
+    // Boot Prelude stack (unless `--no-boot`) + the user's files, with
+    // monotonic file_ids. See `assembleSourceModules`. We still source-prepend
+    // the boot stack even when `effective_pkg_dbs` carries `.rhi`/`.bc`
+    // artifacts: the LLVM tag registry and `__rhc_force` module are built from
+    // the *fresh* per-module GRIN, and cached modules contribute none, so a
+    // cache-only force module would be incomplete and fail to link (full
+    // cache-only codegen is tracked separately).
+    const source_modules = try assembleSourceModules(arena_alloc, io, file_paths, no_boot, artifact_dir);
 
-    // File IDs are assigned monotonically; boot modules take the low IDs.
-    var next_file_id: u32 = 0;
-
-    // `--no-boot` skips the auto-prepend entirely.  This is the bootstrap
-    // mode used by `build.zig` when compiling the boot packages themselves
-    // — RHC.Prim has nothing to depend on, GHC.Base depends only on
-    // RHC.Prim (resolved via `--package-db`), and so on.  User-mode builds
-    // always want the prepend.
-    if (!no_boot) {
-        for (boot_modules) |boot| {
-        if (user_module_names.contains(boot.module_name)) continue;
-        // NOTE: even when `effective_pkg_dbs` carries a full set of
-        // boot-module `.rhi`+`.bc` artifacts, we currently still
-        // source-prepend the boot stack.  Skipping the prepend lets
-        // the cached code path provide the interfaces, but the LLVM
-        // tag registry and `__rhc_force` module are built from the
-        // *fresh* per-module GRIN — cached modules contribute no
-        // GRIN to that registry, so the resulting force module is
-        // incomplete and the link fails.  Full cache-only codegen is
-        // tracked separately (see PR-C scope notes in the issue).
-        const boot_path = boot.pathFn();
-        if (readSourceFile(arena_alloc, io, boot_path)) |boot_source| {
-            try source_modules.append(arena_alloc, .{
-                .module_name = boot.module_name,
-                .source = boot_source,
-                .file_id = next_file_id,
-                // When emitting to an artifact dir we drop `source_path` so
-                // `compile_env.zig` does NOT auto-write `.rhi` next to the
-                // source.  The store-canonical `.rhi` is written explicitly
-                // below into `<artifact_dir>/<Module/Path>.rhi`.
-                .source_path = if (artifact_dir == null) boot_path else null,
-            });
-            next_file_id += 1;
-        } else |err| {
-            // A missing boot module is non-fatal in development: warn and
-            // continue without it.  User modules still get wired-in names
-            // from `initBuiltins` / `populateWiredIn`.  This matches the
-            // pre-split behaviour for a missing Prelude.
-            var stderr_buf: [4096]u8 = undefined;
-            var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
-            const stderr = &stderr_fw.interface;
-            switch (err) {
-                error.FileNotFound => try stderr.print("rhc: warning: boot module '{s}' not found at '{s}'; using built-in names only\n", .{ boot.module_name, boot_path }),
-                else => try stderr.print("rhc: warning: cannot read boot module '{s}' at '{s}': {}; using built-in names only\n", .{ boot.module_name, boot_path, err }),
-            }
-            try stderr.flush();
-        }
-        }
-    }
-
-    for (file_paths) |fp| {
-        const source = readSourceFile(arena_alloc, io, fp) catch |err| {
-            var stderr_buf: [4096]u8 = undefined;
-            var stderr_fw: File.Writer = .init(.stderr(), io, &stderr_buf);
-            const stderr = &stderr_fw.interface;
-            switch (err) {
-                error.FileNotFound => try stderr.print("rhc: file not found: {s}\n", .{fp}),
-                error.AccessDenied => try stderr.print("rhc: permission denied: {s}\n", .{fp}),
-                else => try stderr.print("rhc: cannot read file '{s}': {}\n", .{ fp, err }),
-            }
-            try stderr.flush();
-            std.process.exit(1);
-        };
-        // Prefer the source-declared `module Foo where` name over the
-        // path-inferred one so a file whose path doesn't mirror its module
-        // (e.g. `lib/base/Data/List.hs` declaring `module Data.List where`)
-        // still topo-sorts and resolves imports correctly.
-        const mod_name = extractSourceModuleName(source) orelse
-            try rusholme.modules.module_graph.inferModuleName(arena_alloc, fp);
-        try source_modules.append(arena_alloc, .{
-            .module_name = mod_name,
-            .source = source,
-            .file_id = next_file_id,
-        });
-        next_file_id += 1;
-    }
-
-    var session_result = try compile_env_mod.compileProgram(arena_alloc, io, source_modules.items, effective_pkg_dbs.items);
+    var session_result = try compile_env_mod.compileProgram(arena_alloc, io, source_modules, effective_pkg_dbs.items);
     var session = &session_result.env;
     defer session.deinit();
 

@@ -91,6 +91,49 @@ fn runRepl(allocator: std.mem.Allocator, input: []const u8) !ReplResult {
     };
 }
 
+/// Spawn `rhc <args...>` (no interactive stdin) and return collected output
+/// after the process exits. Used for the non-interactive IR-dump subcommands.
+fn runRhc(allocator: std.mem.Allocator, args: []const []const u8) !ReplResult {
+    const io = testing.io;
+
+    var argv: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, "zig-out/bin/rhc");
+    try argv.appendSlice(allocator, args);
+
+    var child = try process.spawn(io, .{
+        .argv = argv.items,
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
+    errdefer child.kill(io);
+
+    // The dump subcommands read no stdin; close it immediately so they never block.
+    child.stdin.?.close(io);
+    child.stdin = null;
+
+    var multi_reader_buffer: File.MultiReader.Buffer(2) = undefined;
+    var multi_reader: File.MultiReader = undefined;
+    multi_reader.init(allocator, io, multi_reader_buffer.toStreams(), &.{ child.stdout.?, child.stderr.? });
+    defer multi_reader.deinit();
+
+    while (true) {
+        multi_reader.fill(64, .none) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => |e| return e,
+        };
+    }
+    try multi_reader.checkAnyError();
+
+    const term = try child.wait(io);
+    const stdout_slice = try multi_reader.toOwnedSlice(0);
+    errdefer allocator.free(stdout_slice);
+    const stderr_slice = try multi_reader.toOwnedSlice(1);
+
+    return .{ .stdout = stdout_slice, .stderr = stderr_slice, .term = term };
+}
+
 /// Assert that `haystack` contains `needle`. On failure, prints both
 /// for easier debugging.
 fn expectContains(haystack: []const u8, needle: []const u8) !void {
@@ -357,4 +400,25 @@ test "cli e2e: over-saturated application arguments are lazy (#546)" {
     // Blocked on over-saturated application handling in the JIT backend.
     // tracked in: https://github.com/adinapoli/rusholme/issues/546
     return;
+}
+
+// ── IR-dump subcommands load the full boot Prelude (#867) ─────────────────
+
+test "cli e2e: rhc core resolves the full Prelude (show/++) — #867" {
+    // e2e_show_basic uses `show` (defined in GHC.Base, re-exported by Prelude).
+    // Before #867 the dump path only loaded lib/Prelude.hs, leaving `show`
+    // unbound; `rhc core` aborted instead of dumping Core.
+    const result = try runRhc(testing.allocator, &.{ "core", "tests/e2e/e2e_show_basic.hs" });
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+    try expectContains(result.stdout, "Core Program");
+}
+
+test "cli e2e: rhc grin resolves the full Prelude (show/++) — #867" {
+    const result = try runRhc(testing.allocator, &.{ "grin", "tests/e2e/e2e_show_basic.hs" });
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
+    try expectContains(result.stdout, "GRIN Program");
 }
