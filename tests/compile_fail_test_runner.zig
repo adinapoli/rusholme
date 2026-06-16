@@ -226,3 +226,7 @@ test "should_fail_compile: sfc002_unbound_variable" {
 test "should_fail_compile: sfc003_unsupported_ccall_symbol (#536)" {
     try testShouldFailCompile(std.testing.allocator, "sfc003_unsupported_ccall_symbol");
 }
+
+test "should_fail_compile: sfc004_tuple_arity_too_large (#848)" {
+    try testShouldFailCompile(std.testing.allocator, "sfc004_tuple_arity_too_large");
+}
