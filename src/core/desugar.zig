@@ -2107,117 +2107,7 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
         },
         .Let => |let_blk| {
             const body = try desugarExpr(ctx, let_blk.body.*);
-
-            // Nested lets: in functional languages, `let x = ...; y = ... in body`
-            // desugars to either Rec binds or nested NonRec binds.
-            // For M1, we'll assume mutually recursive and build a Rec block for all FunBinds.
-            // Real desugarer would dependency-analyse.
-            var pairs = std.ArrayListUnmanaged(ast_mod.BindPair).empty;
-            defer pairs.deinit(alloc);
-
-            for (let_blk.binds) |bd| {
-                switch (bd) {
-                    .FunBind => |fb| {
-                        if (fb.equations.len > 0) {
-                            const ty_ptr = ctx.types.local_binders.get(fb.name.unique) orelse {
-                                std.debug.panic("Missing type for let funbind {s}", .{fb.name.base});
-                            };
-                            const ty = try htypeToCore(alloc, ty_ptr);
-
-                            // Check if this let-bound function needs the match compiler
-                            // (multiple equations or non-Var patterns).
-                            var needs_match_compiler = fb.equations.len > 1;
-                            if (!needs_match_compiler) {
-                                for (fb.equations[0].patterns) |pat| {
-                                    if (pat != .Var) {
-                                        needs_match_compiler = true;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            const rhs = try alloc.create(ast_mod.Expr);
-                            if (needs_match_compiler) {
-                                rhs.* = (try desugarMatch(ctx, fb.equations, ty)).*;
-                            } else {
-                                const eq = fb.equations[0];
-                                var body_expr = try desugarRhs(ctx, eq.rhs);
-
-                                // Wrap body in lambdas for parameters (right-to-left).
-                                var i = eq.patterns.len;
-                                while (i > 0) {
-                                    i -= 1;
-                                    const pat = eq.patterns[i];
-                                    switch (pat) {
-                                        .Var => |v| {
-                                            const p_body = try alloc.create(ast_mod.Expr);
-                                            p_body.* = body_expr;
-
-                                            const p_ty_ptr = ctx.types.local_binders.get(v.name.unique) orelse {
-                                                std.debug.panic("Missing type for let param {s}", .{v.name.base});
-                                            };
-                                            const p_ty = try htypeToCore(alloc, p_ty_ptr);
-
-                                            body_expr = ast_mod.Expr{
-                                                .Lam = .{
-                                                    .binder = ast_mod.Id{ .name = v.name, .ty = p_ty, .span = v.span },
-                                                    .body = p_body,
-                                                    .span = syntheticSpan(),
-                                                },
-                                            };
-                                        },
-                                        else => unreachable, // guarded by needs_match_compiler check
-                                    }
-                                }
-                                rhs.* = body_expr;
-                            }
-
-                            try pairs.append(alloc, .{
-                                .binder = ast_mod.Id{ .name = fb.name, .ty = ty, .span = fb.span },
-                                .rhs = rhs,
-                            });
-                        }
-                    },
-                    .PatBind => |pb| {
-                        if (pb.pattern == .Var) {
-                            const v = pb.pattern.Var;
-                            const rhs = try alloc.create(ast_mod.Expr);
-                            rhs.* = try desugarRhs(ctx, pb.rhs);
-
-                            const ty_ptr = ctx.types.local_binders.get(v.name.unique) orelse {
-                                std.debug.panic("Missing type for let patbind {s}", .{v.name.base});
-                            };
-                            const ty = try htypeToCore(alloc, ty_ptr);
-
-                            try pairs.append(alloc, .{
-                                .binder = ast_mod.Id{ .name = v.name, .ty = ty, .span = v.span },
-                                .rhs = rhs,
-                            });
-                        }
-                    },
-                    else => {},
-                }
-            }
-
-            // Use NonRec for single bindings (avoids unnecessary heap
-            // indirection in the Rec store/update path). A full dependency
-            // analysis (#566) would allow nested NonRec for multiple
-            // independent bindings; for now, multiple bindings still
-            // default to Rec for safety.
-            const owned_pairs = try pairs.toOwnedSlice(alloc);
-            const bind: ast_mod.Bind = if (owned_pairs.len == 1)
-                .{ .NonRec = .{
-                    .binder = owned_pairs[0].binder,
-                    .rhs = owned_pairs[0].rhs,
-                } }
-            else
-                .{ .Rec = owned_pairs };
-
-            node.* = .{ .Let = .{
-                .bind = bind,
-                .body = body,
-                .span = syntheticSpan(),
-            } };
+            node.* = (try buildLetBindings(ctx, let_blk.binds, body)).*;
         },
         .If => {
             // The renamer desugars if-then-else into Case on True/False,
@@ -2522,11 +2412,14 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
 
                         body = app2;
                     },
-                    .LetStmt => {
-                        // let x = v; rest  =>  let x = v in body
-                        // For now, we skip let statements in the reverse loop
-                        // and assume they're at the beginning or already handled
-                        continue;
+                    .LetStmt => |binds| {
+                        // `do { let decls; rest }` ⇒ `let decls in rest`.  The
+                        // remaining statements have already been folded into
+                        // `body`, so wrap them in the let group.  Reuses the
+                        // shared binding desugarer, so pattern bindings such as
+                        // `let (a, b) = e` get the same selector treatment as in
+                        // an expression `let` (#847).
+                        body = try buildLetBindings(ctx, binds, body);
                     },
                 }
             }
@@ -3353,6 +3246,404 @@ fn freshFieldBinder(
         .ty = dummyCoreType(),
         .span = syntheticSpan(),
     };
+}
+
+/// A variable bound by a pattern, paired with its source span.
+const BoundVar = struct { name: Name, span: SourceSpan };
+
+/// Collect every variable bound by `pat`, in left-to-right order.
+///
+/// Used to desugar lazy `let`/`where` pattern bindings: each bound variable
+/// becomes its own selector.  `Wild` and `Lit` bind nothing.
+fn collectPatVars(
+    alloc: std.mem.Allocator,
+    pat: renamer_mod.RPat,
+    out: *std.ArrayListUnmanaged(BoundVar),
+) std.mem.Allocator.Error!void {
+    switch (pat) {
+        .Var => |v| try out.append(alloc, .{ .name = v.name, .span = v.span }),
+        .Wild, .Lit => {},
+        .AsPat => |as_| {
+            try out.append(alloc, .{ .name = as_.name, .span = as_.span });
+            try collectPatVars(alloc, as_.pat.*, out);
+        },
+        .Con => |c| for (c.args) |arg| try collectPatVars(alloc, arg, out),
+        .Tuple => |elems| for (elems) |e| try collectPatVars(alloc, e, out),
+        .List => |elems| for (elems) |e| try collectPatVars(alloc, e, out),
+        .InfixCon => |inf| {
+            try collectPatVars(alloc, inf.left.*, out);
+            try collectPatVars(alloc, inf.right.*, out);
+        },
+        .Negate => |inner| try collectPatVars(alloc, inner.*, out),
+        .Paren => |inner| try collectPatVars(alloc, inner.*, out),
+    }
+}
+
+/// Return a copy of `pat` with every bound variable's `Name` replaced by a
+/// fresh unique.  If a variable whose original unique is `target` is
+/// encountered, its fresh `Name` is written to `found`.
+///
+/// Alpha-renaming the pattern lets a selector `v = case t of { p' -> v' }`
+/// reuse `applyPat` without the selector's outer binder (`v`) and the case's
+/// field binder (`v'`) ever sharing a unique — a downstream invariant the
+/// GRIN translator and backend rely on.
+fn freshenPattern(
+    ctx: *DesugarCtx,
+    pat: renamer_mod.RPat,
+    target: u64,
+    found: *?Name,
+) std.mem.Allocator.Error!renamer_mod.RPat {
+    const alloc = ctx.alloc;
+    switch (pat) {
+        .Var => |v| {
+            const fresh = ctx.u_supply.freshName(v.name.base);
+            if (v.name.unique.value == target) found.* = fresh;
+            return .{ .Var = .{ .name = fresh, .span = v.span } };
+        },
+        .Wild, .Lit => return pat,
+        .AsPat => |as_| {
+            const fresh = ctx.u_supply.freshName(as_.name.base);
+            if (as_.name.unique.value == target) found.* = fresh;
+            const inner = try alloc.create(renamer_mod.RPat);
+            inner.* = try freshenPattern(ctx, as_.pat.*, target, found);
+            return .{ .AsPat = .{ .name = fresh, .span = as_.span, .pat = inner } };
+        },
+        .Con => |c| {
+            const args = try alloc.alloc(renamer_mod.RPat, c.args.len);
+            for (c.args, 0..) |arg, i| args[i] = try freshenPattern(ctx, arg, target, found);
+            return .{ .Con = .{ .name = c.name, .con_span = c.con_span, .args = args } };
+        },
+        .Tuple => |elems| {
+            const out = try alloc.alloc(renamer_mod.RPat, elems.len);
+            for (elems, 0..) |e, i| out[i] = try freshenPattern(ctx, e, target, found);
+            return .{ .Tuple = out };
+        },
+        .List => |elems| {
+            const out = try alloc.alloc(renamer_mod.RPat, elems.len);
+            for (elems, 0..) |e, i| out[i] = try freshenPattern(ctx, e, target, found);
+            return .{ .List = out };
+        },
+        .InfixCon => |inf| {
+            const left = try alloc.create(renamer_mod.RPat);
+            left.* = try freshenPattern(ctx, inf.left.*, target, found);
+            const right = try alloc.create(renamer_mod.RPat);
+            right.* = try freshenPattern(ctx, inf.right.*, target, found);
+            return .{ .InfixCon = .{ .left = left, .con = inf.con, .con_span = inf.con_span, .right = right } };
+        },
+        .Negate => |inner| {
+            const out = try alloc.create(renamer_mod.RPat);
+            out.* = try freshenPattern(ctx, inner.*, target, found);
+            return .{ .Negate = out };
+        },
+        .Paren => |inner| {
+            const out = try alloc.create(renamer_mod.RPat);
+            out.* = try freshenPattern(ctx, inner.*, target, found);
+            return .{ .Paren = out };
+        },
+    }
+}
+
+/// Desugar a group of `let`/`where` declarations wrapping `body` into a Core
+/// `Let` expression.  Shared by the `.Let` expression arm and the do-notation
+/// `LetStmt` desugaring so both treat function, simple-variable and pattern
+/// bindings identically.
+///
+/// Returns `body` unchanged when the group binds nothing.
+fn buildLetBindings(
+    ctx: *DesugarCtx,
+    binds: []const renamer_mod.RDecl,
+    body: *ast_mod.Expr,
+) std.mem.Allocator.Error!*ast_mod.Expr {
+    const alloc = ctx.alloc;
+
+    // Nested lets: `let x = ...; y = ... in body` desugars to either Rec binds
+    // or nested NonRec binds.  We assume mutual recursion and build a Rec block
+    // for all FunBinds (a full dependency analysis is #566).
+    var pairs = std.ArrayListUnmanaged(ast_mod.BindPair).empty;
+    defer pairs.deinit(alloc);
+
+    for (binds) |bd| {
+        switch (bd) {
+            .FunBind => |fb| {
+                if (fb.equations.len > 0) {
+                    const ty_ptr = ctx.types.local_binders.get(fb.name.unique) orelse {
+                        std.debug.panic("Missing type for let funbind {s}", .{fb.name.base});
+                    };
+                    const ty = try htypeToCore(alloc, ty_ptr);
+
+                    // Check if this let-bound function needs the match compiler
+                    // (multiple equations or non-Var patterns).
+                    var needs_match_compiler = fb.equations.len > 1;
+                    if (!needs_match_compiler) {
+                        for (fb.equations[0].patterns) |pat| {
+                            if (pat != .Var) {
+                                needs_match_compiler = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    const rhs = try alloc.create(ast_mod.Expr);
+                    if (needs_match_compiler) {
+                        rhs.* = (try desugarMatch(ctx, fb.equations, ty)).*;
+                    } else {
+                        const eq = fb.equations[0];
+                        var body_expr = try desugarRhs(ctx, eq.rhs);
+
+                        // Wrap body in lambdas for parameters (right-to-left).
+                        var i = eq.patterns.len;
+                        while (i > 0) {
+                            i -= 1;
+                            const pat = eq.patterns[i];
+                            switch (pat) {
+                                .Var => |v| {
+                                    const p_body = try alloc.create(ast_mod.Expr);
+                                    p_body.* = body_expr;
+
+                                    const p_ty_ptr = ctx.types.local_binders.get(v.name.unique) orelse {
+                                        std.debug.panic("Missing type for let param {s}", .{v.name.base});
+                                    };
+                                    const p_ty = try htypeToCore(alloc, p_ty_ptr);
+
+                                    body_expr = ast_mod.Expr{
+                                        .Lam = .{
+                                            .binder = ast_mod.Id{ .name = v.name, .ty = p_ty, .span = v.span },
+                                            .body = p_body,
+                                            .span = syntheticSpan(),
+                                        },
+                                    };
+                                },
+                                else => unreachable, // guarded by needs_match_compiler check
+                            }
+                        }
+                        rhs.* = body_expr;
+                    }
+
+                    try pairs.append(alloc, .{
+                        .binder = ast_mod.Id{ .name = fb.name, .ty = ty, .span = fb.span },
+                        .rhs = rhs,
+                    });
+                }
+            },
+            .PatBind => |pb| {
+                var pat = pb.pattern;
+                while (pat == .Paren) pat = pat.Paren.*;
+                if (pat == .Var) {
+                    const v = pat.Var;
+                    const rhs = try alloc.create(ast_mod.Expr);
+                    rhs.* = try desugarRhs(ctx, pb.rhs);
+
+                    const ty_ptr = ctx.types.local_binders.get(v.name.unique) orelse {
+                        std.debug.panic("Missing type for let patbind {s}", .{v.name.base});
+                    };
+                    const ty = try htypeToCore(alloc, ty_ptr);
+
+                    try pairs.append(alloc, .{
+                        .binder = ast_mod.Id{ .name = v.name, .ty = ty, .span = v.span },
+                        .rhs = rhs,
+                    });
+                } else {
+                    // Lazy `let`/`where` pattern binding: desugar into a shared
+                    // RHS thunk plus one lazy selector per bound variable
+                    // (Haskell 2010 §3.12).
+                    try appendPatternBindingSelectors(ctx, pat, pb.rhs, &pairs, alloc);
+                }
+            },
+            else => {},
+        }
+    }
+
+    // No bindings (e.g. a `let` containing only unsupported decls): the body
+    // stands alone.
+    if (pairs.items.len == 0) return body;
+
+    // Use NonRec for single bindings (avoids unnecessary heap indirection in
+    // the Rec store/update path). A full dependency analysis (#566) would allow
+    // nested NonRec for multiple independent bindings; for now, multiple
+    // bindings still default to Rec for safety.
+    const owned_pairs = try pairs.toOwnedSlice(alloc);
+    const bind: ast_mod.Bind = if (owned_pairs.len == 1)
+        .{ .NonRec = .{
+            .binder = owned_pairs[0].binder,
+            .rhs = owned_pairs[0].rhs,
+        } }
+    else
+        .{ .Rec = owned_pairs };
+
+    const result = try alloc.create(ast_mod.Expr);
+    result.* = .{ .Let = .{
+        .bind = bind,
+        .body = body,
+        .span = syntheticSpan(),
+    } };
+    return result;
+}
+
+/// Build an expression that projects the variable `target` out of `scrut`,
+/// assuming `scrut` matches the (irrefutable) pattern `pat`.
+///
+/// Emits single-alternative cases with fresh field binders and *no* failure
+/// branch — exactly GHC's selector desugaring for single-constructor / tuple
+/// patterns, where the constructor tag always matches so a default is dead.
+/// Returns `null` if `target` is not bound by `pat`, or for a shape we decline
+/// to project without a failure branch (currently only tuples whose arity
+/// exceeds the wired maximum, see #848); the caller then falls back to the
+/// general `applyPat` path.
+fn buildSelector(
+    ctx: *DesugarCtx,
+    scrut: *ast_mod.Expr,
+    pat: renamer_mod.RPat,
+    target: u64,
+) std.mem.Allocator.Error!?*ast_mod.Expr {
+    switch (pat) {
+        .Paren => |inner| return buildSelector(ctx, scrut, inner.*, target),
+        .Var => |v| return if (v.name.unique.value == target) scrut else null,
+        .AsPat => |as_| {
+            if (as_.name.unique.value == target) return scrut;
+            return buildSelector(ctx, scrut, as_.pat.*, target);
+        },
+        .Wild, .Lit, .Negate => return null,
+        .Tuple => |elems| {
+            const con = Known.Con.tuple(elems.len) orelse return null;
+            return buildConSelector(ctx, scrut, con, elems, target);
+        },
+        .Con => |c| return buildConSelector(ctx, scrut, c.name, c.args, target),
+        .InfixCon => |inf| {
+            const args = try ctx.alloc.dupe(renamer_mod.RPat, &.{ inf.left.*, inf.right.* });
+            return buildConSelector(ctx, scrut, inf.con, args, target);
+        },
+        .List => |elems| {
+            // `[p1, …, pn]` ≡ `p1 : (… : (pn : []))`.  Re-associate into a
+            // chain of `:` constructor patterns and recurse so the projection
+            // descends through each cons cell.
+            var right = try ctx.alloc.create(renamer_mod.RPat);
+            right.* = .{ .Con = .{ .name = Known.Con.Nil, .con_span = syntheticSpan(), .args = &.{} } };
+            var i: usize = elems.len;
+            while (i > 0) {
+                i -= 1;
+                const elem_ptr = try ctx.alloc.create(renamer_mod.RPat);
+                elem_ptr.* = elems[i];
+                const new_right = try ctx.alloc.create(renamer_mod.RPat);
+                new_right.* = .{ .InfixCon = .{
+                    .left = elem_ptr,
+                    .con = Known.Con.Cons,
+                    .con_span = syntheticSpan(),
+                    .right = right,
+                } };
+                right = new_right;
+            }
+            return buildSelector(ctx, scrut, right.*, target);
+        },
+    }
+}
+
+/// Helper for `buildSelector`: project `target` out of a constructor pattern
+/// `con args` applied to `scrut`.  Binds every field to a fresh binder and
+/// recurses into the one field that binds `target`.
+fn buildConSelector(
+    ctx: *DesugarCtx,
+    scrut: *ast_mod.Expr,
+    con: Name,
+    args: []const renamer_mod.RPat,
+    target: u64,
+) std.mem.Allocator.Error!?*ast_mod.Expr {
+    const binders = try ctx.alloc.alloc(ast_mod.Id, args.len);
+    var inner: ?*ast_mod.Expr = null;
+    for (args, 0..) |arg, i| {
+        binders[i] = try freshFieldBinder(ctx.alloc, ctx.u_supply, 0, 0, i);
+        if (inner != null) continue; // target already located in an earlier field
+        const field_scrut = try ctx.alloc.create(ast_mod.Expr);
+        field_scrut.* = .{ .Var = binders[i] };
+        inner = try buildSelector(ctx, field_scrut, arg, target);
+    }
+    const body = inner orelse return null; // target not bound by this pattern
+
+    const scrut_id = ast_mod.Id{
+        .name = ctx.u_supply.freshName("_sel"),
+        .ty = dummyCoreType(),
+        .span = syntheticSpan(),
+    };
+    const alt = ast_mod.Alt{ .con = .{ .DataAlt = con }, .binders = binders, .body = body };
+    const result = try ctx.alloc.create(ast_mod.Expr);
+    result.* = .{ .Case = .{
+        .scrutinee = scrut,
+        .binder = scrut_id,
+        .ty = dummyCoreType(),
+        .alts = try ctx.alloc.dupe(ast_mod.Alt, &.{alt}),
+        .span = syntheticSpan(),
+    } };
+    return result;
+}
+
+/// Desugar a lazy `let`/`where` pattern binding `p = rhs` (where `p` is not a
+/// bare variable) into Core selector bindings, appending them to `pairs`.
+///
+/// Following Haskell 2010 §3.12, the RHS is bound once to a fresh shared thunk
+/// `t`, and each variable `v` bound by `p` becomes a lazy selector
+/// `v = case t of { p' -> v' }` that re-matches `t`.  The pattern's binders are
+/// alpha-renamed to fresh names (`p'`/`v'`) so a selector's outer binder never
+/// collides with the case's field binders.  Laziness is preserved: `t` and
+/// every selector are independent thunks, so an unforced or divergent
+/// component is never evaluated.
+fn appendPatternBindingSelectors(
+    ctx: *DesugarCtx,
+    pat: renamer_mod.RPat,
+    rhs: renamer_mod.RRhs,
+    pairs: *std.ArrayListUnmanaged(ast_mod.BindPair),
+    alloc: std.mem.Allocator,
+) !void {
+    // `let (_, _) = e` binds nothing and is a no-op in a lazy language, so
+    // there is no selector — and therefore no reason to bind the RHS either.
+    var vars = std.ArrayListUnmanaged(BoundVar).empty;
+    defer vars.deinit(alloc);
+    try collectPatVars(alloc, pat, &vars);
+    if (vars.items.len == 0) return;
+
+    // Bind the RHS to a single fresh thunk shared by every selector so the
+    // RHS is evaluated at most once regardless of how many variables `p` binds.
+    const t_id = ast_mod.Id{
+        .name = ctx.u_supply.freshName("_patbind"),
+        .ty = dummyCoreType(),
+        .span = syntheticSpan(),
+    };
+    const rhs_expr = try alloc.create(ast_mod.Expr);
+    rhs_expr.* = try desugarRhs(ctx, rhs);
+    try pairs.append(alloc, .{ .binder = t_id, .rhs = rhs_expr });
+
+    // One lazy selector per bound variable.
+    for (vars.items, 0..) |v, sel_idx| {
+        const scrut = try alloc.create(ast_mod.Expr);
+        scrut.* = .{ .Var = t_id };
+
+        const selector = (try buildSelector(ctx, scrut, pat, v.name.unique.value)) orelse blk: {
+            // Fallback for pattern shapes `buildSelector` declines to project
+            // without a failure branch (e.g. tuples of arity > 7, #848).
+            // Re-match the whole pattern with `applyPat`, alpha-renaming its
+            // binders so the selector's outer binder never shares a unique with
+            // the case's field binders.
+            var found: ?Name = null;
+            const fresh_pat = try freshenPattern(ctx, pat, v.name.unique.value, &found);
+            const fresh_target = found orelse unreachable; // `v` is in `pat` by construction.
+
+            const success = try alloc.create(ast_mod.Expr);
+            success.* = .{ .Var = .{ .name = fresh_target, .ty = dummyCoreType(), .span = v.span } };
+
+            const failure = try patternMatchError(alloc, "irrefutable pattern binding failed");
+
+            break :blk try applyPat(ctx, scrut, t_id, dummyCoreType(), fresh_pat, success, failure, sel_idx, 0);
+        };
+
+        // The selector's outer binder keeps the original variable name and its
+        // real type, so the body of the `let` resolves `v` exactly as before.
+        const v_ty: ast_mod.CoreType = if (ctx.types.local_binders.get(v.name.unique)) |ty_ptr|
+            try htypeToCore(alloc, ty_ptr)
+        else
+            dummyCoreType();
+        try pairs.append(alloc, .{
+            .binder = ast_mod.Id{ .name = v.name, .ty = v_ty, .span = v.span },
+            .rhs = selector,
+        });
+    }
 }
 
 /// A placeholder CoreType used for fresh binders whose precise type we do not
