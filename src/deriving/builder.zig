@@ -9,7 +9,39 @@ const ast = @import("../frontend/ast.zig");
 const span_mod = @import("../diagnostics/span.zig");
 
 pub const SourceSpan = span_mod.SourceSpan;
+pub const SourcePos = span_mod.SourcePos;
 pub const Allocator = std.mem.Allocator;
+
+/// Monotonic counter giving every synthesised *expression* occurrence of a
+/// variable or operator a distinct column.
+///
+/// The desugarer's dictionary-evidence map is keyed by
+/// `(var_unique, span_start_line, span_start_col, class_unique)`.  All nodes a
+/// deriving builder emits share one source span — the `deriving (...)` clause.
+/// Without distinct spans the many class-method call sites in a single derived
+/// instance collapse onto one key, so e.g. the field comparison `x == y`
+/// (needing `Eq Int`) and `(/=)`'s own `x == y` (needing `Eq <T>`) overwrite
+/// each other; the field comparison is then handed the instance's *own*
+/// dictionary and dispatches on the wrong constructor, crashing at runtime with
+/// "Non-exhaustive patterns in case".  Giving each occurrence a unique column
+/// keeps the evidence keys distinct.  See #851.
+var occ_seq: u32 = 0;
+
+/// Reset the occurrence-span counter. Called at the start of each deriving
+/// pass so span assignment is deterministic per compile / REPL input.
+pub fn resetOccurrenceSpans() void {
+    occ_seq = 0;
+}
+
+/// Derive a distinct span from `span`, preserving file + line (so diagnostics
+/// still point at the user's `deriving` clause) but assigning a fresh column.
+fn freshOccSpan(span: SourceSpan) SourceSpan {
+    occ_seq += 1;
+    const line = if (span.start.line > 0) span.start.line else 1;
+    const start = SourcePos.init(span.start.file_id, line, occ_seq);
+    const end = SourcePos.init(span.start.file_id, line, occ_seq + 1);
+    return SourceSpan.init(start, end);
+}
 
 pub fn alloc(arena: Allocator, comptime T: type, value: T) Allocator.Error!*const T {
     const ptr = try arena.create(T);
@@ -22,7 +54,9 @@ pub fn mkQName(name: []const u8, span: SourceSpan) ast.QName {
 }
 
 pub fn mkVar(name: []const u8, span: SourceSpan) ast.Expr {
-    return .{ .Var = mkQName(name, span) };
+    // A variable *occurrence* may carry a class-method constraint, so it needs
+    // a unique span for evidence keying (see `occ_seq`).
+    return .{ .Var = mkQName(name, freshOccSpan(span)) };
 }
 
 pub fn mkVarPat(name: []const u8, span: SourceSpan) ast.Pattern {
@@ -88,7 +122,9 @@ pub fn mkInfix(
 ) Allocator.Error!ast.Expr {
     return .{ .InfixApp = .{
         .left = try alloc(arena, ast.Expr, left),
-        .op = mkQName(op, span),
+        // The operator occurrence carries the class-method constraint, so it
+        // needs a unique span for evidence keying (see `occ_seq`).
+        .op = mkQName(op, freshOccSpan(span)),
         .right = try alloc(arena, ast.Expr, right),
     } };
 }

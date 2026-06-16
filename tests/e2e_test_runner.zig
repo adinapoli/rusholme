@@ -232,6 +232,10 @@ test "e2e: e2e_679_deriving_eq (#679)" {
     try testE2e(std.testing.allocator, "e2e_679_deriving_eq");
 }
 
+test "e2e: e2e_851_deriving_fields (#851)" {
+    try testE2e(std.testing.allocator, "e2e_851_deriving_fields");
+}
+
 test "e2e: e2e_605_zero_field_thunk (#605)" {
     try testE2e(std.testing.allocator, "e2e_605_zero_field_thunk");
 }
