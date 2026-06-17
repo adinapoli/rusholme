@@ -240,6 +240,10 @@ test "e2e: e2e_863_deriving_show_fields (#863)" {
     try testE2e(std.testing.allocator, "e2e_863_deriving_show_fields");
 }
 
+test "e2e: e2e_765_nullary_method_caf (#765)" {
+    try testE2e(std.testing.allocator, "e2e_765_nullary_method_caf");
+}
+
 test "e2e: e2e_605_zero_field_thunk (#605)" {
     try testE2e(std.testing.allocator, "e2e_605_zero_field_thunk");
 }
