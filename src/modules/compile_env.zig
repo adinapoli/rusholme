@@ -345,6 +345,40 @@ pub const CompileEnv = struct {
         return merged;
     }
 
+    /// Collect type-constructor name → renamed `Name` mappings from every
+    /// module the current module imports.  The typechecker uses this to
+    /// resolve type-constructor names appearing in user type signatures
+    /// (e.g. `:: Ordering`) to the *same* unique the type's data declaration
+    /// — and therefore its class instances — were registered under.
+    ///
+    /// Without this, an imported non-builtin type constructor used in a
+    /// signature falls back to `unique = 0` (see `astTypeToHTypeWithScope`),
+    /// which fails to unify with the real type and makes its instances
+    /// (`Show Ordering`, `Bounded Ordering`, …) appear missing.  Builtin types
+    /// (`Int`, `Bool`, `Char`, `Maybe`, …) escape this because they are
+    /// special-cased in `knownTypeByName`.
+    pub fn collectTypeConNamesFromImports(
+        self: *const CompileEnv,
+        alloc: std.mem.Allocator,
+        imports: []const ast_mod.ImportDecl,
+    ) std.mem.Allocator.Error!infer_mod.TypeConNames {
+        var merged: infer_mod.TypeConNames = .empty;
+        for (imports) |imp| {
+            const iface = self.ifaces.get(imp.module_name) orelse continue;
+            for (iface.data_decls) |dd| {
+                // First binding wins; current module's own decls override
+                // later inside `inferModule`.
+                if (!merged.contains(dd.name)) {
+                    try merged.put(alloc, dd.name, Name{
+                        .base = dd.name,
+                        .unique = .{ .value = dd.unique },
+                    });
+                }
+            }
+        }
+        return merged;
+    }
+
     /// Seed a `RenameEnv` from a single module interface.
     fn seedRenamerFromIface(
         env: *renamer_mod.RenameEnv,
@@ -513,7 +547,13 @@ pub const CompileEnv = struct {
         // so that the typechecker can resolve class constraints (e.g. Show).
         try self.seedClassEnvFromImports(&infer_ctx.class_env, module.imports);
 
-        var module_types = try infer_mod.inferModule(&infer_ctx, renamed, null);
+        // Seed type-constructor names from imports so signatures referencing
+        // imported non-builtin types (e.g. `:: Ordering`) resolve to the same
+        // unique their instances were registered under.
+        var ext_type_con_names = try self.collectTypeConNamesFromImports(self.alloc, module.imports);
+        defer ext_type_con_names.deinit(self.alloc);
+
+        var module_types = try infer_mod.inferModule(&infer_ctx, renamed, &ext_type_con_names);
         defer module_types.deinit(self.alloc);
         if (self.diags.hasErrors()) return null;
 

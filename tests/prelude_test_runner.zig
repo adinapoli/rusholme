@@ -67,6 +67,6 @@ test "prelude: p013_hof_prelude_arg (xfail #764)" {
     try testPrelude(std.testing.allocator, "p013_hof_prelude_arg");
 }
 
-test "prelude: p014_bounded (xfail #765)" {
+test "prelude: p014_bounded" {
     try testPrelude(std.testing.allocator, "p014_bounded");
 }

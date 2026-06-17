@@ -133,7 +133,27 @@ pub const TyScheme = struct {
             subst[i] = .{ .id = id, .node = node };
         }
 
-        const ty = (try instantiateType(self.body, subst, alloc, supply)).*;
+        const body_ptr = try instantiateType(self.body, subst, alloc, supply);
+        // If the body *is* a substituted binder node — e.g. a nullary class
+        // method `minBound :: Bounded a => a` whose body is the bare class
+        // tyvar — copying it by value below would sever the alias with the
+        // instantiated constraints (which keep the shared pointer in
+        // `wanted[].ty`).  A later `unifyNow(inst.ty, Bool)` would then solve
+        // only the value copy, leaving the constraint's metavar unsolved and
+        // producing no dictionary evidence.  Wrap it in a Meta indirection so
+        // the by-value `ty` still chases to the shared cell — mirroring the
+        // `Con`-argument handling in `instantiateType`.
+        var aliases_binder = false;
+        for (subst) |s| {
+            if (body_ptr == s.node) {
+                aliases_binder = true;
+                break;
+            }
+        }
+        const ty = if (aliases_binder)
+            HType{ .Meta = .{ .id = supply.fresh().id, .ref = body_ptr } }
+        else
+            body_ptr.*;
 
         // Instantiate constraints: substitute binders with fresh metas.
         // IMPORTANT: we store the pointer returned by instantiateType, not
