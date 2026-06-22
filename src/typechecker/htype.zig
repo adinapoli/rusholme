@@ -148,6 +148,63 @@ pub const HType = union(enum) {
         return cycle_detection.chaseValue(self);
     }
 
+    /// Canonical, alpha-invariant, symbol-safe key for an instance head, used
+    /// to tell overlapping instances that share a head constructor apart (e.g.
+    /// `[a]` vs `[Bool]`, which yield `List__` and `List_Bool`).  Concrete
+    /// constructors contribute their (sanitised) names; type variables and
+    /// metavariables collapse to `_`, so `[a]` and `[b]` map to the same key.
+    /// The result contains only `[A-Za-z0-9_]`, so it is safe to embed in a
+    /// generated dictionary symbol name.  The caller owns the returned slice.
+    pub fn canonicalHeadKey(self: HType, alloc: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+        var buf = std.ArrayListUnmanaged(u8).empty;
+        errdefer buf.deinit(alloc);
+        try writeCanonicalHeadKey(self, alloc, &buf);
+        return buf.toOwnedSlice(alloc);
+    }
+
+    /// Append a sanitised constructor name: `[]` becomes `List`, otherwise all
+    /// non-alphanumeric characters are dropped (falling back to `Tup` for a
+    /// name that sanitises to nothing, e.g. the tuple constructors).
+    fn appendSanitisedConName(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!void {
+        if (std.mem.eql(u8, name, "[]")) {
+            try buf.appendSlice(alloc, "List");
+            return;
+        }
+        const before = buf.items.len;
+        for (name) |ch| {
+            if (std.ascii.isAlphanumeric(ch)) try buf.append(alloc, ch);
+        }
+        if (buf.items.len == before) try buf.appendSlice(alloc, "Tup");
+    }
+
+    fn writeCanonicalHeadKey(
+        self: HType,
+        alloc: std.mem.Allocator,
+        buf: *std.ArrayListUnmanaged(u8),
+    ) std.mem.Allocator.Error!void {
+        switch (self.chase()) {
+            .Con => |c| {
+                try appendSanitisedConName(buf, alloc, c.name.base);
+                for (c.args) |arg| {
+                    try buf.append(alloc, '_');
+                    try writeCanonicalHeadKey(arg, alloc, buf);
+                }
+            },
+            .AppTy => |a| {
+                try writeCanonicalHeadKey(a.head.*, alloc, buf);
+                try buf.append(alloc, '_');
+                try writeCanonicalHeadKey(a.arg.*, alloc, buf);
+            },
+            .Fun => |f| {
+                try writeCanonicalHeadKey(f.arg.*, alloc, buf);
+                try buf.appendSlice(alloc, "Fun");
+                try writeCanonicalHeadKey(f.res.*, alloc, buf);
+            },
+            .ForAll => |fa| try writeCanonicalHeadKey(fa.body.*, alloc, buf),
+            .Rigid, .Meta => try buf.append(alloc, '_'),
+        }
+    }
+
     // ── Predicates ─────────────────────────────────────────────────────
 
     /// True iff the type is monomorphic: contains no `Meta` or `ForAll`.

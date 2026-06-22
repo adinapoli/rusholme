@@ -27,6 +27,7 @@ const std = @import("std");
 const htype_mod = @import("htype.zig");
 const span_mod = @import("../diagnostics/span.zig");
 const naming_mod = @import("../naming/unique.zig");
+const ast_mod = @import("../frontend/ast.zig");
 
 pub const HType = htype_mod.HType;
 pub const Name = naming_mod.Name;
@@ -130,6 +131,8 @@ pub const InstanceInfo = struct {
     /// inferring instance method bodies, ensuring Rigid unique IDs match
     /// those in `head` and `context`.
     rigid_scope: []const RigidBinding = &.{},
+    /// Overlap pragma controlling tie-breaking when several instances match.
+    overlap: ast_mod.OverlapMode = .none,
 };
 
 /// The unique of the outermost type constructor of an instance head.
@@ -241,6 +244,25 @@ pub const ClassEnv = struct {
     /// Look up a class by its unique ID.
     pub fn lookupClass(self: *const ClassEnv, unique: u64) ?ClassInfo {
         return self.classes.get(unique);
+    }
+
+    /// Whether `head` belongs to an *overlap group*: two or more registered
+    /// instances of `class_unique` whose heads share the same outermost type
+    /// constructor (e.g. both `Describe [a]` and `Describe [Bool]`).  Members
+    /// of such a group need full-head dictionary keying so codegen can tell
+    /// the overlapping instances apart; non-members keep the simpler
+    /// head-constructor keying.  The solver and the desugarer call this to
+    /// agree on which keying scheme an instance uses.
+    pub fn inOverlapGroup(self: *const ClassEnv, class_unique: u64, head: HType) bool {
+        const key = instanceHeadKey(head);
+        var count: usize = 0;
+        for (self.lookupInstances(class_unique)) |inst| {
+            if (instanceHeadKey(inst.head) == key) {
+                count += 1;
+                if (count > 1) return true;
+            }
+        }
+        return false;
     }
 
     /// Look up all instances for a class by its unique ID.

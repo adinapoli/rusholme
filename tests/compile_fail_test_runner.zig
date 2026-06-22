@@ -230,3 +230,7 @@ test "should_fail_compile: sfc003_unsupported_ccall_symbol (#536)" {
 test "should_fail_compile: sfc004_tuple_arity_too_large (#848)" {
     try testShouldFailCompile(std.testing.allocator, "sfc004_tuple_arity_too_large");
 }
+
+test "should_fail_compile: sfc005_overlapping_instances_no_pragma (#872)" {
+    try testShouldFailCompile(std.testing.allocator, "sfc005_overlapping_instances_no_pragma");
+}

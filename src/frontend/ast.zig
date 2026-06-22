@@ -224,11 +224,40 @@ pub const ClassMethod = struct {
     default_implementation: ?[]const Match,
 };
 
+/// Instance overlap pragma (GHC's `{-# OVERLAPPING #-}` family).
+///
+/// These control how the constraint solver breaks a tie when more than one
+/// instance matches a target constraint (see `solver.zig`).  In Haskell 2010
+/// proper there are no overlapping instances; the pragmas are the GHC
+/// extension that the epic-#845 surface needs for real Hackage code.
+pub const OverlapMode = enum {
+    /// No pragma — overlap is a hard error (Haskell 2010 default).
+    none,
+    /// `{-# OVERLAPPING #-}` — this instance may overlap more general ones.
+    overlapping,
+    /// `{-# OVERLAPPABLE #-}` — more specific instances may overlap this one.
+    overlappable,
+    /// `{-# OVERLAPS #-}` — both `OVERLAPPING` and `OVERLAPPABLE`.
+    overlaps,
+
+    /// Whether this instance is allowed to override a strictly more general one.
+    pub fn canOverlap(self: OverlapMode) bool {
+        return self == .overlapping or self == .overlaps;
+    }
+
+    /// Whether this instance may be overridden by a strictly more specific one.
+    pub fn canBeOverlapped(self: OverlapMode) bool {
+        return self == .overlappable or self == .overlaps;
+    }
+};
+
 /// Type class instance: `instance Eq Bool where`
 pub const InstanceDecl = struct {
     context: ?Context,
     constructor_type: Type,
     bindings: []const FunBinding,
+    /// Overlap pragma preceding the `instance` keyword, if any.
+    overlap: OverlapMode = .none,
     span: SourceSpan,
 };
 

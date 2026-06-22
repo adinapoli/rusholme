@@ -2094,6 +2094,7 @@ pub fn inferModule(
                     .context = context,
                     .span = id_decl.span,
                     .rigid_scope = rigid_bindings,
+                    .overlap = id_decl.overlap,
                 });
             },
             else => {},

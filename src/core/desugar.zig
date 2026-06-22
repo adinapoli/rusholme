@@ -1011,8 +1011,36 @@ fn desugarInstanceDecl(
     // This ensures all instances use the same constructor unique (issue #569).
     const dict_con_name = class_info.dict_con_name;
 
+    // Find the InstanceInfo (matched by source span) so we can read its
+    // HType head — needed both for the Rigid context lookup below and to
+    // decide the dictionary keying scheme.
+    var matched_inst: ?class_env_mod.InstanceInfo = null;
+    {
+        const instances_for_class = class_env.lookupInstances(id_decl.class_name.unique.value);
+        for (instances_for_class) |inst| {
+            if (inst.span.start.line == id_decl.span.start.line and
+                inst.span.start.column == id_decl.span.start.column)
+            {
+                matched_inst = inst;
+                break;
+            }
+        }
+    }
+
     // Build an instance dictionary name.  Convention: dict$<ClassName>$<HeadType>.
-    const head_name = try instanceHeadName(alloc, id_decl.instance_type);
+    // Instances that belong to an overlap group (e.g. `Describe [a]` and
+    // `Describe {-# OVERLAPPING #-} [Bool]`) key by full head (`List__`,
+    // `List_Bool`) so each overlapping instance gets a distinct dictionary;
+    // every other instance keeps the simpler head-constructor name, leaving
+    // non-overlapping programs byte-identical.
+    const head_name = if (matched_inst) |mi|
+        (if (class_env.inOverlapGroup(id_decl.class_name.unique.value, mi.head))
+            try mi.head.canonicalHeadKey(alloc)
+        else
+            try instanceHeadName(alloc, id_decl.instance_type))
+    else
+        try instanceHeadName(alloc, id_decl.instance_type);
+
     const dict_name = Name{
         .base = try std.fmt.allocPrint(alloc, "dict${s}${s}", .{ id_decl.class_name.base, head_name }),
         .unique = ctx.u_supply.fresh(),
@@ -1040,18 +1068,8 @@ fn desugarInstanceDecl(
     // To obtain the Rigid unique, we look up the InstanceInfo from the
     // ClassEnv (which stores the HType context with Rigid references) and
     // match it to our current instance declaration by source span.
-    var inst_context: []const class_env_mod.ClassConstraint = &.{};
-    {
-        const instances_for_class = ctx.types.class_env.lookupInstances(id_decl.class_name.unique.value);
-        for (instances_for_class) |inst| {
-            if (inst.span.start.line == id_decl.span.start.line and
-                inst.span.start.column == id_decl.span.start.column)
-            {
-                inst_context = inst.context;
-                break;
-            }
-        }
-    }
+    const inst_context: []const class_env_mod.ClassConstraint =
+        if (matched_inst) |mi| mi.context else &.{};
 
     var context_param_names = try alloc.alloc(Name, id_decl.context.len);
     if (id_decl.context.len > 0) {
@@ -1449,8 +1467,11 @@ fn buildDictExpr(
     const alloc = ctx.alloc;
     switch (evidence.*) {
         .instance => |inst| {
-            // Look up the dictionary name by (class, head_type_name).
-            const head_name = htypeHeadName(inst.head_ty);
+            // Look up the dictionary name.  For an instance in an overlap
+            // group the solver supplies the selected instance's full-head key
+            // (e.g. `List_Bool`); otherwise fall back to the head-constructor
+            // name of the target type.
+            const head_name = inst.inst_head_key orelse htypeHeadName(inst.head_ty);
             const dict_name = lookupDictName(&ctx.dict_names, inst.class_name.unique.value, head_name);
 
             if (dict_name) |dn| {
