@@ -642,7 +642,21 @@ pub fn initBuiltins(env: *TyEnv, supply: *UniqueSupply, no_implicit_prelude: boo
     //   (,,) : forall a b c. a -> b -> c -> (a, b, c)
     //   …and so on through `Known.Con.max_tuple_arity`.
     {
-        const tv_bases = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g" };
+        // Tyvar display names: a..z for the first 26 elements (so existing
+        // 2..7 tuple schemes still read `a b c …`), then `t26`, `t27`, …
+        // for the wider arities. Names are cosmetic; uniqueness comes from
+        // the per-element id minted below.
+        const tv_bases: [Known.Con.max_tuple_arity][]const u8 = comptime blk: {
+            @setEvalBranchQuota(50_000);
+            var arr: [Known.Con.max_tuple_arity][]const u8 = undefined;
+            for (&arr, 0..) |*s, i| {
+                s.* = if (i < 26)
+                    &[_]u8{@as(u8, 'a') + @as(u8, @intCast(i))}
+                else
+                    std.fmt.comptimePrint("t{d}", .{i});
+            }
+            break :blk arr;
+        };
         var arity: usize = 2;
         while (arity <= Known.Con.max_tuple_arity) : (arity += 1) {
             const con_name = Known.Con.tuple(arity).?;

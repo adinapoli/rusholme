@@ -269,7 +269,13 @@ pub const RenameEnv = struct {
         // Since we have a unified namespace, we prefer the data constructor for (:)
         try self.scope.bind("(:)", Known.Con.Cons);
         try self.scope.bind(":", Known.Con.Cons);
-        try self.scope.bind("(,)", Known.Con.Tuple2);
+        // Tuple constructors as identifiers: `(,)`, `(,,)`, … up to the max
+        // wired arity.
+        var tuple_arity: usize = 2;
+        while (tuple_arity <= Known.Con.max_tuple_arity) : (tuple_arity += 1) {
+            const t = Known.Con.tuple(tuple_arity).?;
+            try self.scope.bind(t.base, t);
+        }
 
         // Type classes (stable IDs for dictionary-passing translation)
         try self.scope.bind("Eq", Known.Class.Eq);

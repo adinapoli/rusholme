@@ -1,8 +1,8 @@
 === GRIN Program (3 definitions) ===
 describeColor_1003 c_1007 =
   isRed_1004 c_1007 ;
-  \scrut ->
-    case scrut of
+  \scrut_2199023255552 ->
+    case scrut_2199023255552 of
       CTrue_200 ->
         pure #"red"
       _ ->

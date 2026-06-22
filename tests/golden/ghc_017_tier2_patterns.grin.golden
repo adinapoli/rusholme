@@ -27,8 +27,8 @@ wrapOrDefault_1005 arg_0_1026 =
         pure w_1011
       _ ->
         store (CWrap_1002 #0) ;
-        \node ->
-          pure node
+        \node_2199023255552 ->
+          pure node_2199023255552
 
 sumPair_1006 arg_0_1028 =
   case arg_0_1028 of
