@@ -88,24 +88,14 @@ pub const SigEnv = struct {
         try self.addType(alloc, &.{
             .{ .unique = known.Con.Unit.unique.value, .base = "()", .arity = 0 },
         });
-        try self.addType(alloc, &.{
-            .{ .unique = known.Con.Tuple2.unique.value, .base = "(,)", .arity = 2 },
-        });
-        try self.addType(alloc, &.{
-            .{ .unique = known.Con.Tuple3.unique.value, .base = "(,,)", .arity = 3 },
-        });
-        try self.addType(alloc, &.{
-            .{ .unique = known.Con.Tuple4.unique.value, .base = "(,,,)", .arity = 4 },
-        });
-        try self.addType(alloc, &.{
-            .{ .unique = known.Con.Tuple5.unique.value, .base = "(,,,,)", .arity = 5 },
-        });
-        try self.addType(alloc, &.{
-            .{ .unique = known.Con.Tuple6.unique.value, .base = "(,,,,,)", .arity = 6 },
-        });
-        try self.addType(alloc, &.{
-            .{ .unique = known.Con.Tuple7.unique.value, .base = "(,,,,,,)", .arity = 7 },
-        });
+        // Each tuple arity is its own single-constructor type.
+        var arity: usize = 2;
+        while (arity <= known.Con.max_tuple_arity) : (arity += 1) {
+            const t = known.Con.tuple(arity).?;
+            try self.addType(alloc, &.{
+                .{ .unique = t.unique.value, .base = t.base, .arity = @intCast(arity) },
+            });
+        }
     }
 };
 

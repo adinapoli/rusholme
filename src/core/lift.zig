@@ -36,6 +36,23 @@ const BindPair = core.BindPair;
 const Id = core.Id;
 const CoreType = core.CoreType;
 const CoreLiteral = core.Literal;
+
+/// High base offset for lambda-lifted function unique IDs.
+///
+/// Lifted helpers need globally-unique IDs that collide with *neither* the
+/// compiler's reserved wired-in range (`0..known.reserved_range_end`, where
+/// type/constructor/class uniques live — including the tuple constructors
+/// `(,)`..`(,,,…)`) *nor* the renamer's user-name range (which starts at
+/// `reserved_range_end` and climbs into the thousands/millions).  Minting
+/// lifted IDs from a low counter (as before) let them drift into the
+/// wired-in constructor range and be mis-identified as data constructors by
+/// the GRIN translator's `con_map` membership test — e.g. a `lifted_231`
+/// colliding with the 24-tuple constructor (unique `207 + 24 = 231`).
+///
+/// `1 << 40` sits far above any realistic renamer/typechecker unique while
+/// leaving ample headroom below `u64` for the monotonically-increasing
+/// per-link-unit counter.
+pub const lifted_id_base: u64 = 1 << 40;
 const SourceSpan = core.SourceSpan;
 
 // ── Lambda Information ─────────────────────────────────────────────────────
@@ -237,7 +254,11 @@ pub const LambdaLifter = struct {
     fn completeLambda(self: *LambdaLifter, lambda_id: u64, free_vars: []const u64, params: []const Id, body: *const Expr, ty: CoreType, needs_lifting: bool) !void {
         const lifted_name = Name{
             .base = "lifted",
-            .unique = Unique{ .value = self.lifted_id_counter },
+            // Offset by `lifted_id_base` so lifted IDs never collide with
+            // wired-in (reserved-range) or renamer-assigned uniques.  The
+            // counter itself stays 0-relative so cross-module threading via
+            // `next_lifted_id` keeps working unchanged.
+            .unique = Unique{ .value = lifted_id_base + self.lifted_id_counter },
         };
         self.lifted_id_counter += 1;
 

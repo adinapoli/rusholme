@@ -24,6 +24,19 @@ const PrimOp = @import("primop.zig").PrimOp;
 const FieldType = grin.FieldType;
 const known = @import("../naming/known.zig");
 
+/// High base offset for freshly-generated GRIN temporary names (`freshName`).
+///
+/// These temporaries (`scrut`, `eta`, `_thunk`, constructor-wrapper params,
+/// …) must carry uniques that collide with neither the reserved wired-in
+/// range (`0..known.reserved_range_end` — where the tuple/list/unit
+/// constructors live and are looked up via `con_map`) nor the renamer's
+/// user-name range nor the lambda-lifter's range (`lift.lifted_id_base`).
+/// Minting them from a low counter let them drift into the constructor
+/// range and be mis-identified as data constructors by `conFieldCount`.
+/// `1 << 41` keeps them disjoint from all of the above (lifted IDs use
+/// `1 << 40`).
+const fresh_name_base: u64 = 1 << 41;
+
 const CoreExpr = core.Expr;
 const CoreBind = core.Bind;
 const CoreBindPair = core.BindPair;
@@ -210,7 +223,11 @@ const TranslateCtx = struct {
     fn freshName(self: *TranslateCtx, base: []const u8) !GrinName {
         const name = GrinName{
             .base = base,
-            .unique = .{ .value = self.name_counter },
+            // Offset by `fresh_name_base` so generated temporaries never
+            // collide with wired-in constructor uniques (consulted via
+            // `con_map`/`conFieldCount`).  The counter stays 0-relative so
+            // cross-module threading via `next_name_counter` is unaffected.
+            .unique = .{ .value = fresh_name_base + self.name_counter },
         };
         self.name_counter += 1;
         return name;
@@ -628,17 +645,20 @@ pub fn translateProgram(
         .{ .unique = known.Con.Unit.unique.value, .n_fields = 0 },
         .{ .unique = known.Con.Nil.unique.value, .n_fields = 0 },
         .{ .unique = known.Con.Cons.unique.value, .n_fields = 2 },
-        .{ .unique = known.Con.Tuple2.unique.value, .n_fields = 2 },
-        .{ .unique = known.Con.Tuple3.unique.value, .n_fields = 3 },
-        .{ .unique = known.Con.Tuple4.unique.value, .n_fields = 4 },
-        .{ .unique = known.Con.Tuple5.unique.value, .n_fields = 5 },
-        .{ .unique = known.Con.Tuple6.unique.value, .n_fields = 6 },
-        .{ .unique = known.Con.Tuple7.unique.value, .n_fields = 7 },
     };
     for (builtin_cons) |b| {
         const gop = try ctx.con_map.getOrPut(alloc, b.unique);
         if (!gop.found_existing) {
             gop.value_ptr.* = b.n_fields;
+        }
+    }
+    // Tuple constructors (,), (,,), … up to the max wired arity.
+    var tuple_arity: usize = 2;
+    while (tuple_arity <= known.Con.max_tuple_arity) : (tuple_arity += 1) {
+        const t = known.Con.tuple(tuple_arity).?;
+        const gop = try ctx.con_map.getOrPut(alloc, t.unique.value);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = @intCast(tuple_arity);
         }
     }
 

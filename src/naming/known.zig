@@ -88,22 +88,45 @@ pub const Con = struct {
     pub const Tuple7 = name("(,,,,,,)", 214);
 
     /// Highest tuple arity wired end-to-end (constructor, scheme, GRIN,
-    /// match-check). Arities above this are not yet supported.
-    pub const max_tuple_arity: usize = 7;
+    /// match-check). Matches GHC's boxed-tuple limit. Arities above this
+    /// are not yet supported.
+    pub const max_tuple_arity: usize = 62;
+
+    /// Comptime table of tuple constructor name strings indexed by arity:
+    /// index 2 → "(,)", index 3 → "(,,)", … up to `max_tuple_arity`.
+    /// Indices 0 and 1 are unused (arity 0 is the unit `()` constructor;
+    /// arity 1 is a parenthesised expression, not a tuple).
+    const tuple_name_table: [max_tuple_arity + 1][]const u8 = blk: {
+        @setEvalBranchQuota(10_000);
+        var table: [max_tuple_arity + 1][]const u8 = undefined;
+        for (&table, 0..) |*slot, arity| {
+            if (arity < 2) {
+                slot.* = "";
+            } else {
+                var buf: [arity + 1]u8 = undefined;
+                buf[0] = '(';
+                for (1..arity) |i| buf[i] = ',';
+                buf[arity] = ')';
+                const frozen = buf;
+                slot.* = &frozen;
+            }
+        }
+        break :blk table;
+    };
 
     /// Return the well-known tuple constructor `Name` for the given arity,
-    /// or `null` if the arity is outside the supported range (2..=7).
+    /// or `null` if the arity is outside the supported range (2..=62).
     /// Arity 1 is a parenthesised expression, not a tuple, and arity 0 is
     /// the `Unit` constructor — neither is handled here.
+    ///
+    /// Uniques are laid out contiguously after `Cons` (207), so arity `n`
+    /// maps to `207 + n` (arity 2 → 209, matching `Tuple2`, … arity 62 →
+    /// 269).  The range 215..269 is otherwise unused (classes start at 300).
     pub fn tuple(arity: usize) ?Name {
-        return switch (arity) {
-            2 => Tuple2,
-            3 => Tuple3,
-            4 => Tuple4,
-            5 => Tuple5,
-            6 => Tuple6,
-            7 => Tuple7,
-            else => null,
+        if (arity < 2 or arity > max_tuple_arity) return null;
+        return .{
+            .base = tuple_name_table[arity],
+            .unique = .{ .value = 207 + arity },
         };
     }
 };

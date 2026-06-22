@@ -1402,17 +1402,27 @@ pub const GrinTranslator = struct {
         return dm.cpr;
     }
 
+    /// Allocate a slice of `n` LLVM `ptr` parameter types. The caller owns
+    /// the slice. Used to build function types of arbitrary arity without a
+    /// fixed-size argument buffer.
+    fn ptrParams(self: *GrinTranslator, n: usize) TranslationError![]llvm.Type {
+        const buf = try self.allocator.alloc(llvm.Type, n);
+        for (buf) |*t| t.* = ptrType();
+        return buf;
+    }
+
     /// LLVM function type of a worker: raw i64 at unboxed positions,
     /// ptr elsewhere; returns raw i64 when the result is unboxed
     /// (`cpr`), ptr otherwise.
-    fn workerFnType(unbox_mask: u64, arity: usize, cpr: bool) llvm.Type {
-        var param_types: [8]llvm.Type = undefined;
+    fn workerFnType(self: *GrinTranslator, unbox_mask: u64, arity: usize, cpr: bool) TranslationError!llvm.Type {
+        const param_types = try self.allocator.alloc(llvm.Type, arity);
+        defer self.allocator.free(param_types);
         for (0..arity) |i| {
             const unboxed = (unbox_mask >> @as(u6, @intCast(i))) & 1 == 1;
             param_types[i] = if (unboxed) llvm.i64Type() else ptrType();
         }
         const ret_ty = if (cpr) llvm.i64Type() else ptrType();
-        return llvm.functionType(ret_ty, param_types[0..arity], false);
+        return llvm.functionType(ret_ty, param_types, false);
     }
 
     fn translateDef(self: *GrinTranslator, def: grin.Def) TranslationError!void {
@@ -1437,12 +1447,11 @@ pub const GrinTranslator = struct {
         const ret_type = if (is_entry) value_type else ptrType();
 
         // Parameter types: i32 for main (no params), ptr for all others.
-        var param_types: [8]llvm.Type = undefined;
-        for (def.params[0..@min(def.params.len, 8)], 0..) |_, i| {
-            param_types[i] = value_type;
-        }
+        const param_types = try self.allocator.alloc(llvm.Type, def.params.len);
+        defer self.allocator.free(param_types);
+        for (param_types) |*pt| pt.* = value_type;
 
-        const fn_type = llvm.functionType(ret_type, param_types[0..def.params.len], false);
+        const fn_type = llvm.functionType(ret_type, param_types, false);
         const fn_name_z = self.formatName(def.name);
         // Check if function was already forward-declared; if so, reuse it.
         // This prevents LLVM from adding .1 suffix due to name collision.
@@ -1464,7 +1473,7 @@ pub const GrinTranslator = struct {
         const body_func = if (unbox_mask == 0) func else blk: {
             var wsym_buf: [300]u8 = undefined;
             const wsym = self.workerSymbol(def.name, &wsym_buf);
-            const w_type = workerFnType(unbox_mask, def.params.len, worker_cpr);
+            const w_type = try self.workerFnType(unbox_mask, def.params.len, worker_cpr);
             const worker = c.LLVMGetNamedFunction(self.module, wsym.ptr) orelse
                 llvm.addFunction(self.module, wsym, w_type);
 
@@ -1475,7 +1484,8 @@ pub const GrinTranslator = struct {
             self.current_func = func;
             const wrap_entry = llvm.appendBasicBlock(func, "entry");
             llvm.positionBuilderAtEnd(self.builder, wrap_entry);
-            var call_args: [8]llvm.Value = undefined;
+            const call_args = try self.allocator.alloc(llvm.Value, def.params.len);
+            defer self.allocator.free(call_args);
             for (0..def.params.len) |i| {
                 const p = c.LLVMGetParam(func, @intCast(i));
                 if ((unbox_mask >> @as(u6, @intCast(i))) & 1 == 1) {
@@ -1489,7 +1499,7 @@ pub const GrinTranslator = struct {
                 self.builder,
                 w_type,
                 worker,
-                @ptrCast(&call_args),
+                @ptrCast(call_args.ptr),
                 @intCast(def.params.len),
                 "worker.result",
             );
@@ -2130,9 +2140,10 @@ pub const GrinTranslator = struct {
         }
 
         // User-defined function call.
-        var llvm_args: [8]llvm.Value = undefined;
-        const arg_count = @min(args.len, 8);
-        for (args[0..arg_count], 0..) |val, i| {
+        const arg_count = args.len;
+        const llvm_args = try self.allocator.alloc(llvm.Value, arg_count);
+        defer self.allocator.free(llvm_args);
+        for (args, 0..) |val, i| {
             llvm_args[i] = try self.translateValToLlvm(val);
         }
 
@@ -2153,10 +2164,11 @@ pub const GrinTranslator = struct {
                 if (unbox_mask != 0) {
                     var wsym_buf: [300]u8 = undefined;
                     const wsym = self.workerSymbol(name, &wsym_buf);
-                    const w_type = workerFnType(unbox_mask, args.len, self.workerCpr(name.unique.value));
+                    const w_type = try self.workerFnType(unbox_mask, args.len, self.workerCpr(name.unique.value));
                     const worker = c.LLVMGetNamedFunction(self.module, wsym.ptr) orelse
                         llvm.addFunction(self.module, wsym, w_type);
-                    var w_args: [8]llvm.Value = undefined;
+                    const w_args = try self.allocator.alloc(llvm.Value, arg_count);
+                    defer self.allocator.free(w_args);
                     for (0..arg_count) |i| {
                         const raw = llvm_args[i];
                         const is_ptr_arg = c.LLVMGetTypeKind(c.LLVMTypeOf(raw)) == c.LLVMPointerTypeKind;
@@ -2175,7 +2187,7 @@ pub const GrinTranslator = struct {
                         self.builder,
                         w_type,
                         worker,
-                        @ptrCast(&w_args),
+                        @ptrCast(w_args.ptr),
                         @intCast(arg_count),
                         nullTerminate(result_name).ptr,
                     );
@@ -2203,7 +2215,7 @@ pub const GrinTranslator = struct {
                 self.builder,
                 main_fn_type,
                 func,
-                @ptrCast(&llvm_args),
+                @ptrCast(llvm_args.ptr),
                 @intCast(arg_count),
                 "",
             );
@@ -2211,9 +2223,9 @@ pub const GrinTranslator = struct {
         }
 
         // Build a ptr-returning function type for indirect/forward calls.
-        var param_types: [8]llvm.Type = undefined;
-        for (0..arg_count) |i| param_types[i] = ptrType();
-        const fn_type = llvm.functionType(ptrType(), param_types[0..arg_count], false);
+        const param_types = try self.ptrParams(arg_count);
+        defer self.allocator.free(param_types);
+        const fn_type = llvm.functionType(ptrType(), param_types, false);
 
         // Coerce i64 arguments to ptr: integer literals (e.g., #1, #2) are
         // translated to i64 by translateValToLlvm, but GRIN functions use
@@ -2303,7 +2315,7 @@ pub const GrinTranslator = struct {
             self.builder,
             fn_type,
             func,
-            @ptrCast(&llvm_args),
+            @ptrCast(llvm_args.ptr),
             @intCast(arg_count),
             res_z,
         );
@@ -2383,13 +2395,14 @@ pub const GrinTranslator = struct {
 
         // bb_direct: full-arity call through the raw function pointer.
         llvm.positionBuilderAtEnd(self.builder, bb_direct);
-        var direct_args: [8]llvm.Value = undefined;
-        @memcpy(direct_args[0..args.len], args);
+        const direct_args = try self.allocator.alloc(llvm.Value, args.len);
+        defer self.allocator.free(direct_args);
+        @memcpy(direct_args, args);
         const direct = c.LLVMBuildCall2(
             self.builder,
             fn_type,
             func,
-            @ptrCast(&direct_args),
+            @ptrCast(direct_args.ptr),
             @intCast(args.len),
             "pap_direct_call",
         );
@@ -2442,15 +2455,16 @@ pub const GrinTranslator = struct {
         }
 
         // User-defined function call (result discarded).
-        var llvm_args: [8]llvm.Value = undefined;
-        const arg_count = @min(args.len, 8);
-        for (args[0..arg_count], 0..) |val, i| {
+        const arg_count = args.len;
+        const llvm_args = try self.allocator.alloc(llvm.Value, arg_count);
+        defer self.allocator.free(llvm_args);
+        for (args, 0..) |val, i| {
             llvm_args[i] = try self.translateValToLlvm(val);
         }
 
-        var param_types: [8]llvm.Type = undefined;
-        for (0..arg_count) |i| param_types[i] = ptrType();
-        const fn_type = llvm.functionType(ptrType(), param_types[0..arg_count], false);
+        const param_types = try self.ptrParams(arg_count);
+        defer self.allocator.free(param_types);
+        const fn_type = llvm.functionType(ptrType(), param_types, false);
 
         // Coerce i64 arguments to ptr (same logic as translateAppToValue).
         for (0..arg_count) |i| {
@@ -2512,7 +2526,7 @@ pub const GrinTranslator = struct {
             self.builder,
             fn_type,
             func,
-            @ptrCast(&llvm_args),
+            @ptrCast(llvm_args.ptr),
             @intCast(arg_count),
             "",
         );
@@ -2868,9 +2882,9 @@ pub const GrinTranslator = struct {
                     // external so the ORC linker can resolve it from a
                     // previously-loaded module. This mirrors the pattern
                     // used by translateApp for unknown function calls.
-                    var param_types: [8]llvm.Type = undefined;
-                    for (0..arity) |i| param_types[i] = ptrType();
-                    const ext_fn_type = llvm.functionType(ptrType(), param_types[0..arity], false);
+                    const param_types = try self.ptrParams(arity);
+                    defer self.allocator.free(param_types);
+                    const ext_fn_type = llvm.functionType(ptrType(), param_types, false);
                     break :blk2 llvm.addFunction(self.module, fn_name_z, ext_fn_type);
                 };
 
@@ -3816,8 +3830,9 @@ pub const GrinTranslator = struct {
             llvm.positionBuilderAtEnd(self.builder, ftag_bb);
 
             // Load captured arguments from thunk fields.
-            var call_args: [8]llvm.Value = undefined;
-            const n_args = @min(ftag_n_fields, 8);
+            const n_args = ftag_n_fields;
+            const call_args = try self.allocator.alloc(llvm.Value, n_args);
+            defer self.allocator.free(call_args);
             for (0..n_args) |fi| {
                 var fld_args = [_]llvm.Value{
                     phi,
@@ -3836,16 +3851,17 @@ pub const GrinTranslator = struct {
 
             // Call the thunk's function.
             const fn_name_z = self.formatName(ftag_name);
-            var fn_param_types: [8]llvm.Type = undefined;
+            const fn_param_types = try self.allocator.alloc(llvm.Type, n_args);
+            defer self.allocator.free(fn_param_types);
             for (0..n_args) |pi| fn_param_types[pi] = ptr_ty;
-            const callee_type = llvm.functionType(ptr_ty, fn_param_types[0..n_args], false);
+            const callee_type = llvm.functionType(ptr_ty, fn_param_types, false);
             const callee = c.LLVMGetNamedFunction(self.module, fn_name_z) orelse
                 llvm.addFunction(self.module, fn_name_z, callee_type);
             const result = c.LLVMBuildCall2(
                 self.builder,
                 callee_type,
                 callee,
-                @ptrCast(&call_args),
+                @ptrCast(call_args.ptr),
                 @intCast(n_args),
                 "result",
             );
@@ -3896,9 +3912,9 @@ pub const GrinTranslator = struct {
             llvm.positionBuilderAtEnd(self.builder, ptag_bb);
 
             const fn_name_z = self.formatName(ptag_info.name);
-            const n_fields = ptag_info.n_fields;
-            var call_args: [8]llvm.Value = undefined;
-            const n_args = @min(n_fields, 8);
+            const n_args = ptag_info.n_fields;
+            const call_args = try self.allocator.alloc(llvm.Value, n_args);
+            defer self.allocator.free(call_args);
             for (0..n_args) |fi| {
                 var fld_args = [_]llvm.Value{
                     phi,
@@ -3915,16 +3931,17 @@ pub const GrinTranslator = struct {
                 call_args[fi] = c.LLVMBuildIntToPtr(self.builder, loaded, ptr_ty, "pap_ptr");
             }
 
-            var fn_param_types: [8]llvm.Type = undefined;
+            const fn_param_types = try self.allocator.alloc(llvm.Type, n_args);
+            defer self.allocator.free(fn_param_types);
             for (0..n_args) |pi| fn_param_types[pi] = ptr_ty;
-            const callee_type = llvm.functionType(ptr_ty, fn_param_types[0..n_args], false);
+            const callee_type = llvm.functionType(ptr_ty, fn_param_types, false);
             const callee = c.LLVMGetNamedFunction(self.module, fn_name_z) orelse
                 llvm.addFunction(self.module, fn_name_z, callee_type);
             const result = c.LLVMBuildCall2(
                 self.builder,
                 callee_type,
                 callee,
-                @ptrCast(&call_args),
+                @ptrCast(call_args.ptr),
                 @intCast(n_args),
                 "pap_result",
             );
@@ -4142,8 +4159,9 @@ pub const GrinTranslator = struct {
             llvm.positionBuilderAtEnd(self.builder, ftag_bb);
 
             // Load captured arguments from thunk fields.
-            var call_args: [8]llvm.Value = undefined;
-            const n_args = @min(ftag_n_fields, 8);
+            const n_args = ftag_n_fields;
+            const call_args = try self.allocator.alloc(llvm.Value, n_args);
+            defer self.allocator.free(call_args);
             for (0..n_args) |fi| {
                 var fld_args = [_]llvm.Value{
                     phi,
@@ -4162,16 +4180,17 @@ pub const GrinTranslator = struct {
 
             // Call the thunk's function.
             const fn_name_z = self.formatName(ftag_name);
-            var param_types: [8]llvm.Type = undefined;
+            const param_types = try self.allocator.alloc(llvm.Type, n_args);
+            defer self.allocator.free(param_types);
             for (0..n_args) |pi| param_types[pi] = ptr_ty;
-            const fn_type = llvm.functionType(ptr_ty, param_types[0..n_args], false);
+            const fn_type = llvm.functionType(ptr_ty, param_types, false);
             const func = c.LLVMGetNamedFunction(self.module, fn_name_z) orelse
                 llvm.addFunction(self.module, fn_name_z, fn_type);
             const result = c.LLVMBuildCall2(
                 self.builder,
                 fn_type,
                 func,
-                @ptrCast(&call_args),
+                @ptrCast(call_args.ptr),
                 @intCast(n_args),
                 "force.result",
             );
@@ -4366,9 +4385,10 @@ pub const GrinTranslator = struct {
                 // ── Saturated (missing == 1): call func(captured_args..., x) ──
                 const total_args = ptag_info.n_fields + 1; // captured + x
 
-                // Load captured arguments.
-                var call_args: [8]llvm.Value = undefined;
-                const n_cap = @min(ptag_info.n_fields, 7); // leave room for x
+                // Load captured arguments, then append the new argument `x`.
+                const call_args = try self.allocator.alloc(llvm.Value, total_args);
+                defer self.allocator.free(call_args);
+                const n_cap = ptag_info.n_fields;
                 for (0..n_cap) |fi| {
                     var load_args = [_]llvm.Value{
                         f_param,
@@ -4388,17 +4408,18 @@ pub const GrinTranslator = struct {
 
                 // Call the function.
                 const fn_name_z = self.formatName(ptag_info.name);
-                const n_call_args: u32 = @intCast(@min(total_args, 8));
-                var fn_param_types: [8]llvm.Type = undefined;
+                const n_call_args: u32 = @intCast(total_args);
+                const fn_param_types = try self.allocator.alloc(llvm.Type, total_args);
+                defer self.allocator.free(fn_param_types);
                 for (0..n_call_args) |pi| fn_param_types[pi] = ptr_ty;
-                const callee_type = llvm.functionType(ptr_ty, fn_param_types[0..n_call_args], false);
+                const callee_type = llvm.functionType(ptr_ty, fn_param_types, false);
                 const callee = c.LLVMGetNamedFunction(self.module, fn_name_z) orelse
                     llvm.addFunction(self.module, fn_name_z, callee_type);
                 const result = c.LLVMBuildCall2(
                     self.builder,
                     callee_type,
                     callee,
-                    @ptrCast(&call_args),
+                    @ptrCast(call_args.ptr),
                     n_call_args,
                     "sat_result",
                 );
