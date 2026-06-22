@@ -536,6 +536,8 @@ pub const RInstanceDecl = struct {
     instance_type: ast.Type,
     context: []const RAssertion,
     bindings: []const RInstanceBinding,
+    /// Overlap pragma carried over from the surface AST.
+    overlap: ast.OverlapMode = .none,
     span: SourceSpan,
 };
 
@@ -963,6 +965,7 @@ fn renameDecl(
                 .instance_type = instance_type,
                 .context = try ras.toOwnedSlice(env.alloc),
                 .bindings = try rbs.toOwnedSlice(env.alloc),
+                .overlap = inst.overlap,
                 .span = inst.span,
             } };
         },

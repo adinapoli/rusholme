@@ -119,6 +119,12 @@ pub const DictEvidence = union(enum) {
         /// Sub-evidence for instance context constraints.
         /// E.g., `instance Eq a => Eq [a]` needs evidence for `Eq a`.
         context_evidence: []const DictEvidence,
+        /// Full-head dictionary key when the selected instance belongs to an
+        /// overlap group (e.g. `List_Bool` for `Describe [Bool]`).  `null`
+        /// for ordinary instances, which the desugarer keys by head
+        /// constructor as before.  Set from the *selected instance's* head so
+        /// it agrees with the desugarer's registration key.
+        inst_head_key: ?[]const u8 = null,
     },
     /// Satisfied by a dictionary parameter of the enclosing function.
     /// E.g., in `elem :: Eq a => ...`, the `Eq a` constraint is a parameter.
@@ -256,18 +262,18 @@ fn solveClassConstraintWithDepth(
 
     // Concrete type: look up matching instances.
     const instances = env.lookupInstances(cc.class_name.unique.value);
-    var match_count: usize = 0;
-    var matched_instance: ?class_env_mod.InstanceInfo = null;
-    var matched_subst: ?RigidSubst = null;
+
+    // Collect every instance whose head matches the (chased) target type,
+    // along with the rigid substitution that made it match.
+    var candidates = std.ArrayListUnmanaged(InstanceCandidate).empty;
+    defer candidates.deinit(alloc);
     for (instances) |inst| {
         if (matchInstanceHead(alloc, chased, inst.head)) |subst| {
-            match_count += 1;
-            matched_instance = inst;
-            matched_subst = subst;
+            try candidates.append(alloc, .{ .inst = inst, .subst = subst });
         }
     }
 
-    if (match_count == 0) {
+    if (candidates.items.len == 0) {
         const te = TypeError{ .missing_instance = .{
             .class_name = cc.class_name,
             .ty = chased,
@@ -283,7 +289,16 @@ fn solveClassConstraintWithDepth(
         return;
     }
 
-    if (match_count > 1) {
+    // More than one instance matches: apply GHC's overlapping-instance
+    // resolution (`OVERLAPPING`/`OVERLAPPABLE`/`OVERLAPS` pragmas).  If a
+    // single winner survives the pruning, use it; otherwise the overlap is a
+    // genuine error.
+    const winner: ?InstanceCandidate = if (candidates.items.len == 1)
+        candidates.items[0]
+    else
+        resolveOverlap(alloc, candidates.items);
+
+    if (winner == null) {
         const te = TypeError{ .overlapping_instances = .{
             .class_name = cc.class_name,
             .ty = chased,
@@ -298,6 +313,9 @@ fn solveClassConstraintWithDepth(
         });
         return;
     }
+
+    const matched_instance: ?class_env_mod.InstanceInfo = winner.?.inst;
+    const matched_subst: ?RigidSubst = winner.?.subst;
 
     // Exactly one match — resolve context constraints and record evidence.
     if (matched_instance) |inst| {
@@ -340,11 +358,20 @@ fn solveClassConstraintWithDepth(
             context_evidence = ctx_ev;
         }
 
+        // When the selected instance is part of an overlap group, record its
+        // full-head key so the desugarer can pick the matching dictionary
+        // (head-constructor keying alone cannot tell `[a]` from `[Bool]`).
+        const inst_head_key: ?[]const u8 = if (env.inOverlapGroup(cc.class_name.unique.value, inst.head))
+            try inst.head.canonicalHeadKey(alloc)
+        else
+            null;
+
         const ev = try alloc.create(DictEvidence);
         ev.* = .{ .instance = .{
             .class_name = cc.class_name,
             .head_ty = chased,
             .context_evidence = context_evidence,
+            .inst_head_key = inst_head_key,
         } };
         cc.evidence = ev;
     }
@@ -359,6 +386,48 @@ const RigidSubstEntry = struct {
     ty: HType,
 };
 const RigidSubst = []const RigidSubstEntry;
+
+/// An instance that matched a target constraint, paired with the rigid
+/// substitution that made its head unify with the target.
+const InstanceCandidate = struct {
+    inst: class_env_mod.InstanceInfo,
+    subst: RigidSubst,
+};
+
+/// GHC overlapping-instance resolution.  Given every instance that matches a
+/// target constraint, return the unique winner, or `null` if the set remains
+/// ambiguous (which the caller reports as an overlap error).
+///
+/// Pruning rule (GHC user guide, "Overlapping instances"): discard a candidate
+/// `IY` when another candidate `IX` is *strictly more specific* **and** the
+/// overlap pragmas permit it — `IX` is `OVERLAPPING`/`OVERLAPS`, or `IY` is
+/// `OVERLAPPABLE`/`OVERLAPS`.  If exactly one candidate survives, it wins.
+fn resolveOverlap(alloc: std.mem.Allocator, candidates: []const InstanceCandidate) ?InstanceCandidate {
+    var winner: ?InstanceCandidate = null;
+    outer: for (candidates, 0..) |cy, yi| {
+        for (candidates, 0..) |cx, xi| {
+            if (xi == yi) continue;
+            if (strictlyMoreSpecific(alloc, cx.inst.head, cy.inst.head) and
+                (cx.inst.overlap.canOverlap() or cy.inst.overlap.canBeOverlapped()))
+            {
+                // `cy` is overridden by the more specific `cx`.
+                continue :outer;
+            }
+        }
+        // `cy` is not overridden by any other candidate.
+        if (winner != null) return null; // two survivors → still ambiguous
+        winner = cy;
+    }
+    return winner;
+}
+
+/// True if instance head `specific` is strictly more specific than `general`:
+/// `general` subsumes `specific` (specific is a substitution instance of
+/// general) but `specific` does not subsume `general`.
+fn strictlyMoreSpecific(alloc: std.mem.Allocator, specific: HType, general: HType) bool {
+    if (matchInstanceHead(alloc, specific, general) == null) return false;
+    return matchInstanceHead(alloc, general, specific) == null;
+}
 
 /// Match a constraint type against an instance head, returning the rigid
 /// variable substitution if they match.

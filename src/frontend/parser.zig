@@ -573,6 +573,32 @@ pub const Parser = struct {
         }
     }
 
+    /// If the upcoming pragma is an instance overlap pragma
+    /// (`{-# OVERLAPPING #-}`, `{-# OVERLAPPABLE #-}`, `{-# OVERLAPS #-}`),
+    /// consume the whole pragma and return its mode.  Otherwise leave the
+    /// token stream untouched and return `null` (the caller then handles the
+    /// pragma generically via `skipPragma`).
+    fn tryParseOverlapPragma(self: *Parser) ParseError!?ast_mod.OverlapMode {
+        if (!try self.check(.pragma_open)) return null;
+        // The pragma keyword (`OVERLAPPING` etc.) lexes as a `conid`.
+        const kw_tok = try self.peekAt(1);
+        const kw = switch (std.meta.activeTag(kw_tok.token)) {
+            .conid => kw_tok.token.conid,
+            else => return null,
+        };
+        const mode: ast_mod.OverlapMode = if (std.mem.eql(u8, kw, "OVERLAPPING"))
+            .overlapping
+        else if (std.mem.eql(u8, kw, "OVERLAPPABLE"))
+            .overlappable
+        else if (std.mem.eql(u8, kw, "OVERLAPS"))
+            .overlaps
+        else
+            return null;
+        // Consume `{-# OVERLAPPING ... #-}` in full.
+        try self.skipPragma();
+        return mode;
+    }
+
     /// Parse a single `{-# LANGUAGE Ext1, Ext2 ... #-}` pragma.
     ///
     /// Returns an EnumSet with the recognised extensions. Emits a warning
@@ -1855,6 +1881,10 @@ pub const Parser = struct {
     fn parseInstanceDecl(self: *Parser) ParseError!?ast_mod.Decl {
         const start = (try self.expect(.kw_instance)).span;
 
+        // Optional overlap pragma between `instance` and the head, e.g.
+        // `instance {-# OVERLAPPING #-} Show [Bool] where …`.
+        const overlap = (try self.tryParseOverlapPragma()) orelse .none;
+
         // Parse optional context from the instance head
         const context = try self.parseContextOptional();
 
@@ -1905,6 +1935,7 @@ pub const Parser = struct {
             .context = context,
             .constructor_type = ty,
             .bindings = try bindings.toOwnedSlice(self.allocator),
+            .overlap = overlap,
             .span = self.spanFrom(start),
         } };
     }
