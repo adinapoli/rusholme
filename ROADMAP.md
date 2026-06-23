@@ -430,6 +430,7 @@
 | [#872](https://github.com/adinapoli/rusholme/issues/872) | Support `{-# OVERLAPPING #-}` / `{-# OVERLAPS #-}` instance pragmas (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :yellow_circle: |
 | [#873](https://github.com/adinapoli/rusholme/issues/873) | Support overlapping instances with bare type-variable catch-all heads in codegen (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#872](https://github.com/adinapoli/rusholme/issues/872) | :white_circle: |
 | [#875](https://github.com/adinapoli/rusholme/issues/875) | Thread dictionaries for signature-less generalised bindings (numeric-tower prerequisite, epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :yellow_circle: |
+| [#877](https://github.com/adinapoli/rusholme/issues/877) | Infer class default/instance method bodies so foreign class-method dictionaries resolve (numeric-tower prerequisite, epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :yellow_circle: |
 | [#573](https://github.com/adinapoli/rusholme/issues/573) | GRIN backend: polymorphic Prelude functions produce broken codegen | [#529](https://github.com/adinapoli/rusholme/issues/529) | :green_circle: |
 | [#569](https://github.com/adinapoli/rusholme/issues/569) | GRIN/LLVM backend: support dictionary-passing in codegen | [#556](https://github.com/adinapoli/rusholme/issues/556) | :green_circle: |
 | [#583](https://github.com/adinapoli/rusholme/issues/583) | Implement VarTagNode handling in LLVM backend for partial applications | — | :green_circle: |
