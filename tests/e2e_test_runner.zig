@@ -188,6 +188,10 @@ test "e2e: e2e_660_class_after_default_method (#660)" {
     try testE2e(std.testing.allocator, "e2e_660_class_after_default_method");
 }
 
+test "e2e: e2e_877_default_body_foreign_dict (#877)" {
+    try testE2e(std.testing.allocator, "e2e_877_default_body_foreign_dict");
+}
+
 test "e2e: e2e_019_where_local_function (#623)" {
     try testE2e(std.testing.allocator, "e2e_019_where_local_function");
 }

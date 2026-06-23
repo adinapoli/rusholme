@@ -2439,6 +2439,77 @@ pub fn inferModule(
         }
     }
 
+    // ── Class default method body inference (#877) ───────────────────────
+    //
+    // Default method bodies live in the ClassDecl and are inherited by
+    // instances that don't override them.  They were never type-checked, so
+    // no evidence was recorded for the class-method calls inside them; the
+    // desugarer's `applyDictToClassMethods` threads the class's OWN methods
+    // through the dictionary parameter, but a call to a DIFFERENT class's
+    // method at a concrete type (e.g. `compare (measure x) (measure x)`,
+    // where `compare` is `Ord Int`) got no dictionary at all and dispatched
+    // through garbage at runtime.
+    //
+    // Infer each default body so the foreign concrete-type constraints
+    // (here `Ord Int`) are recorded and solved → the desugarer's evidence
+    // path then supplies the real `dict$Ord$Int`.  Constraints over the
+    // class's OWN type variable (e.g. `Measure a` for `measure`) are dropped
+    // afterwards: those remain the province of `applyDictToClassMethods`,
+    // and recording them would make the desugarer apply a second, bogus
+    // dictionary on top of the threaded one.  Runs late so module/Prelude
+    // values referenced by the body are fully generalised and visible.
+    for (module.declarations) |decl| {
+        switch (decl) {
+            .ClassDecl => |cd| {
+                for (cd.methods) |method| {
+                    const default_impl = method.default_impl orelse continue;
+                    if (default_impl.len == 0) continue;
+
+                    var method_scope = TypeVarMap{};
+                    defer method_scope.deinit(ctx.alloc);
+                    const tyvar_node = try ctx.alloc_ty(.{
+                        .Rigid = ctx.u_supply.freshName(cd.tyvar.base),
+                    });
+                    try method_scope.put(ctx.alloc, cd.tyvar.base, tyvar_node);
+                    const method_htype = try astTypeToHTypeWithScope(method.type, ctx, &method_scope);
+
+                    const start = ctx.wanted_constraints.items.len;
+
+                    try ctx.env.push();
+                    for (default_impl) |eq| {
+                        const eq_ty = try inferMatch(ctx, eq);
+                        try ctx.unifyNow(eq_ty, method_htype, cd.span);
+                    }
+                    ctx.env.pop();
+
+                    // Drop constraints over the class's own type variable: those
+                    // are threaded by `applyDictToClassMethods`, not the evidence
+                    // path.  Keep everything else (the foreign concrete-type
+                    // constraints we are here to resolve).
+                    var w = start;
+                    var r = start;
+                    while (r < ctx.wanted_constraints.items.len) : (r += 1) {
+                        const wc = ctx.wanted_constraints.items[r];
+                        const drop = switch (wc) {
+                            .Class => |cc| cc.class_name.unique.value == cd.name.unique.value and
+                                switch (cc.ty.*.chase()) {
+                                    .Rigid => true,
+                                    else => false,
+                                },
+                            .Eq => false,
+                        };
+                        if (!drop) {
+                            ctx.wanted_constraints.items[w] = ctx.wanted_constraints.items[r];
+                            w += 1;
+                        }
+                    }
+                    ctx.wanted_constraints.items.len = w;
+                }
+            },
+            else => {},
+        }
+    }
+
     // ── Solve class constraints ──────────────────────────────────────────
     //
     // After all expression types have been inferred (Pass 2), solve the
