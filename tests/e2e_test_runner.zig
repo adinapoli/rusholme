@@ -316,6 +316,10 @@ test "e2e: e2e_859_record_update (#859)" {
     try testE2e(std.testing.allocator, "e2e_859_record_update");
 }
 
+test "e2e: e2e_875_local_dict_threading (#875)" {
+    try testE2e(std.testing.allocator, "e2e_875_local_dict_threading");
+}
+
 // ── Optimisation-level smoke tests (#755) ────────────────────────────────────
 //
 // These verify that the `-O<level>` flag actually flows through `rhc build`

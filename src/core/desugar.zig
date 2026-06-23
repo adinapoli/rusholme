@@ -3392,6 +3392,40 @@ fn buildLetBindings(
                     };
                     const ty = try htypeToCore(alloc, ty_ptr);
 
+                    // If this local (`let`/`where`) binding was generalised over
+                    // class constraints, abstract its dictionaries exactly as the
+                    // top-level FunBind path does (#875): register a fresh dict
+                    // parameter per constraint BEFORE desugaring the body so
+                    // `buildDictExpr`'s `.param` case resolves the body's method
+                    // uses to them, then wrap the desugared RHS in the matching
+                    // dict lambdas.  Call sites supply the resolved dictionary via
+                    // the evidence path in `desugarExpr`'s `Var` handler.
+                    const local_scheme: ?env_mod.TyScheme = blk: {
+                        const s = ctx.types.schemes.get(fb.name.unique) orelse break :blk null;
+                        break :blk if (s.constraints.len > 0) s else null;
+                    };
+                    var added_dict_keys = std.ArrayListUnmanaged(DesugarCtx.DictParamKey).empty;
+                    defer added_dict_keys.deinit(alloc);
+                    if (local_scheme) |s| {
+                        for (s.constraints) |constraint| {
+                            const chased = constraint.ty.*.chase();
+                            const tyvar_unique: u64 = switch (chased) {
+                                .Rigid => |r| r.unique.value,
+                                else => 0,
+                            };
+                            const key = DesugarCtx.DictParamKey{
+                                .class_unique = constraint.class_name.unique.value,
+                                .tyvar_unique = tyvar_unique,
+                            };
+                            const dpn = Name{
+                                .base = try std.fmt.allocPrint(alloc, "dict${s}", .{constraint.class_name.base}),
+                                .unique = ctx.u_supply.fresh(),
+                            };
+                            try ctx.dict_param_names.put(alloc, key, dpn);
+                            try added_dict_keys.append(alloc, key);
+                        }
+                    }
+
                     // Check if this let-bound function needs the match compiler
                     // (multiple equations or non-Var patterns).
                     var needs_match_compiler = fb.equations.len > 1;
@@ -3440,9 +3474,20 @@ fn buildLetBindings(
                         rhs.* = body_expr;
                     }
 
+                    // Wrap the body in the constraint dict lambdas (if any), then
+                    // drop this binding's dict parameters so sibling/enclosing
+                    // bindings don't see them.
+                    const final_rhs: *ast_mod.Expr = if (local_scheme) |s|
+                        @constCast(try wrapWithDictLambdas(ctx, s, rhs, fb.span))
+                    else
+                        rhs;
+                    for (added_dict_keys.items) |key| {
+                        _ = ctx.dict_param_names.remove(key);
+                    }
+
                     try pairs.append(alloc, .{
                         .binder = ast_mod.Id{ .name = fb.name, .ty = ty, .span = fb.span },
-                        .rhs = rhs,
+                        .rhs = final_rhs,
                     });
                 }
             },

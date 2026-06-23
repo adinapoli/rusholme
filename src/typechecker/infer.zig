@@ -148,6 +148,15 @@ pub const InferCtx = struct {
     /// Filled during inference (Var case) and solved at the end of `inferModule`.
     wanted_constraints: std.ArrayListUnmanaged(solver_mod.Constraint) = .empty,
 
+    /// Generalised schemes for LOCAL (`let`/`where`) bindings.  These live in
+    /// `ctx.env` only while their scope is active (it is pushed/popped per
+    /// `let`), so they are gone by the time `inferModule` snapshots `ctx.env`
+    /// into `ModuleTypes`.  We persist them here so the desugarer can retrieve
+    /// a local binding's constraints to abstract and thread its dictionary
+    /// (issue #875).  Keyed by the binding's unique, which is globally fresh,
+    /// so there is no collision with top-level schemes.
+    local_schemes: std.AutoHashMapUnmanaged(naming_mod.Unique, TyScheme) = .empty,
+
     pub fn init(
         alloc: std.mem.Allocator,
         env: *TyEnv,
@@ -382,6 +391,14 @@ pub fn generalisePtr(
     var meta_to_rigid = std.AutoHashMapUnmanaged(u32, *HType){};
     defer meta_to_rigid.deinit(ctx.alloc);
 
+    // First, decide which metas generalise and allocate a rigid for each,
+    // WITHOUT yet rewriting the type.  Constraint collection below must run
+    // while the generalised variables are still `Meta`s so it can match them
+    // by id; rewriting the type to rigids first (the previous behaviour) made
+    // `chase()` land on a `Rigid`, silently dropping every constraint —
+    // signature-carrying bindings escaped because they take the explicit
+    // `s.constraints` path, but signature-less ones lost their `=>` context
+    // and emitted unbound `dict$<Class>` placeholders (#875).
     var it = ty_metas.keyIterator();
     while (it.next()) |meta_id_ptr| {
         const meta_id = meta_id_ptr.*;
@@ -391,18 +408,21 @@ pub fn generalisePtr(
         const rigid_ty = try ctx.alloc.create(HType);
         rigid_ty.* = HType{ .Rigid = rigid_name };
 
-        solveMetaInTree(ty_node, meta_id, rigid_ty);
         try binder_ids.append(ctx.alloc, rigid_name.unique.value);
         try meta_to_rigid.put(ctx.alloc, meta_id, rigid_ty);
     }
 
     // Collect class constraints that mention generalised variables.
     // When a polymorphic scheme is instantiated (Var case in infer), the
-    // constraints are accumulated in ctx.wanted_constraints with fresh
-    // metavar copies. Those copies share the same .id as the metas in
-    // the type, but are separate structs — solveMetaInTree doesn't reach
-    // them. We match by meta ID and substitute the rigid type.
+    // constraints are accumulated in ctx.wanted_constraints. We match each
+    // constraint's type (chased to its root Meta) by id against the metas we
+    // are generalising and substitute the corresponding rigid type.  A
+    // `seen` set deduplicates constraints that arise more than once over the
+    // same variable (e.g. a body that uses `==` twice).
+    const SeenKey = struct { c: u64, v: u64 };
     var constraints = std.ArrayListUnmanaged(ClassConstraint).empty;
+    var seen = std.AutoHashMapUnmanaged(SeenKey, void){};
+    defer seen.deinit(ctx.alloc);
     for (ctx.wanted_constraints.items) |wc| {
         switch (wc) {
             .Class => |cc| {
@@ -410,6 +430,9 @@ pub fn generalisePtr(
                 switch (chased) {
                     .Meta => |mv| {
                         if (meta_to_rigid.get(mv.id)) |rigid_ty| {
+                            const key = SeenKey{ .c = cc.class_name.unique.value, .v = rigid_ty.Rigid.unique.value };
+                            if (seen.contains(key)) continue;
+                            try seen.put(ctx.alloc, key, {});
                             try constraints.append(ctx.alloc, .{
                                 .class_name = cc.class_name,
                                 .ty = rigid_ty,
@@ -422,6 +445,12 @@ pub fn generalisePtr(
             },
             .Eq => {},
         }
+    }
+
+    // Now rewrite the generalised metas in the type to their rigid variables.
+    var mr_it = meta_to_rigid.iterator();
+    while (mr_it.next()) |entry| {
+        solveMetaInTree(ty_node, entry.key_ptr.*, entry.value_ptr.*);
     }
 
     const binders = try binder_ids.toOwnedSlice(ctx.alloc);
@@ -1294,10 +1323,18 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                                 .body = s.ty.*,
                             };
                             try ctx.env.bind(fb.name, scheme);
+                            // Persist for the desugarer so a constrained local
+                            // binding gets its dictionary threaded (#875).
+                            if (scheme.constraints.len > 0)
+                                try ctx.local_schemes.put(ctx.alloc, fb.name.unique, scheme);
                         } else {
                             // For bindings without signatures, generalise the inferred type.
                             const scheme = try generalisePtr(ctx, fun_node, &env_metas);
                             try ctx.env.bind(fb.name, scheme);
+                            // Persist for the desugarer so a constrained local
+                            // binding gets its dictionary threaded (#875).
+                            if (scheme.constraints.len > 0)
+                                try ctx.local_schemes.put(ctx.alloc, fb.name.unique, scheme);
                         }
                     },
                     .PatBind => |pb| {
@@ -2458,6 +2495,19 @@ pub fn inferModule(
         }
         try result.schemes.put(ctx.alloc, entry.key_ptr.*, entry.value_ptr.*);
     }
+
+    // Generalised schemes for constrained LOCAL (`let`/`where`) bindings, whose
+    // scope was already popped from `ctx.env`.  The desugarer needs these to
+    // abstract and thread each local binding's dictionary (#875).
+    var local_it = ctx.local_schemes.iterator();
+    while (local_it.next()) |entry| {
+        if (result.schemes.contains(entry.key_ptr.*)) continue;
+        try result.schemes.put(ctx.alloc, entry.key_ptr.*, entry.value_ptr.*);
+    }
+    // The scheme values are copied into `result.schemes`; only the map's own
+    // backing buffer is freed here.
+    ctx.local_schemes.deinit(ctx.alloc);
+    ctx.local_schemes = .empty;
 
     return result;
 }
