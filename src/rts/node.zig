@@ -67,6 +67,10 @@ pub const Tag = enum(u64) {
     Int = 1,         // Unboxed integer — n_fields = 1, field[0] = i64 bits
     Char = 2,        // Unboxed character — n_fields = 1, field[0] = u8
     String = 3,      // String literal — n_fields = 1, field[0] = ptr
+    Float = 4,       // Boxed double — n_fields = 1, field[0] = f64 bit-pattern.
+                     // Unlike Int, a Double cannot be a tagged immediate (an
+                     // f64 needs all 64 bits), so every Double value is a heap
+                     // node carrying the raw f64 bits in field[0] (#880).
 
     // ── Thunks and Indirections ────────────────────────────────────────
     //
@@ -172,6 +176,17 @@ pub fn createInt(value: i64) *Node {
     return n;
 }
 
+/// Allocate a Float node holding the double `value`.
+///
+/// The f64 is stored as its raw bit-pattern in field[0]; readers recover it
+/// with `@bitCast`.  See `floatValue`.
+pub fn createFloat(value: f64) *Node {
+    const n = allocNode(1);
+    n.* = .{ .tag = .Float, .n_fields = 1 };
+    fields(n)[0] = @bitCast(value);
+    return n;
+}
+
 /// Allocate a Char node holding `value`.
 pub fn createChar(value: u8) *Node {
     const n = allocNode(1);
@@ -223,6 +238,12 @@ pub fn indTarget(n: *const Node) *Node {
 /// Read the integer value from an Int node.
 pub fn intValue(n: *const Node) i64 {
     std.debug.assert(n.tag == .Int and n.n_fields >= 1);
+    return @bitCast(fieldsConst(n)[0]);
+}
+
+/// Read the double value from a Float node.
+pub fn floatValue(n: *const Node) f64 {
+    std.debug.assert(n.tag == .Float and n.n_fields >= 1);
     return @bitCast(fieldsConst(n)[0]);
 }
 
@@ -344,6 +365,24 @@ test "alloc negative integer node" {
 
     const n = createInt(-7);
     try std.testing.expectEqual(-7, intValue(n));
+}
+
+test "alloc float node and read back" {
+    heap.init();
+    defer heap.deinit();
+
+    const n = createFloat(3.14);
+    try std.testing.expectEqual(Tag.Float, n.tag);
+    try std.testing.expectEqual(1, n.n_fields);
+    try std.testing.expectEqual(@as(f64, 3.14), floatValue(n));
+}
+
+test "alloc negative and zero float nodes" {
+    heap.init();
+    defer heap.deinit();
+
+    try std.testing.expectEqual(@as(f64, -2.5), floatValue(createFloat(-2.5)));
+    try std.testing.expectEqual(@as(f64, 0.0), floatValue(createFloat(0.0)));
 }
 
 test "alloc character node and read back" {

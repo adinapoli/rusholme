@@ -221,6 +221,22 @@ const PrimOpMapping = struct {
         if (std.mem.eql(u8, name.base, "gt_Int")) return .{ .instruction = .{ .sgt = {} } };
         if (std.mem.eql(u8, name.base, "ge_Int")) return .{ .instruction = .{ .sge = {} } };
 
+        // Floating-point (Double) PrimOp mappings (#880). Operands are boxed
+        // Float nodes; see `emitFloatInstruction`.
+        if (std.mem.eql(u8, name.base, "add_Double")) return .{ .float_instruction = .fadd };
+        if (std.mem.eql(u8, name.base, "sub_Double")) return .{ .float_instruction = .fsub };
+        if (std.mem.eql(u8, name.base, "mul_Double")) return .{ .float_instruction = .fmul };
+        if (std.mem.eql(u8, name.base, "div_Double")) return .{ .float_instruction = .fdiv };
+        if (std.mem.eql(u8, name.base, "neg_Double")) return .{ .float_instruction = .fneg };
+        if (std.mem.eql(u8, name.base, "eq_Double")) return .{ .float_instruction = .feq };
+        if (std.mem.eql(u8, name.base, "ne_Double")) return .{ .float_instruction = .fne };
+        if (std.mem.eql(u8, name.base, "lt_Double")) return .{ .float_instruction = .flt };
+        if (std.mem.eql(u8, name.base, "le_Double")) return .{ .float_instruction = .fle };
+        if (std.mem.eql(u8, name.base, "gt_Double")) return .{ .float_instruction = .fgt };
+        if (std.mem.eql(u8, name.base, "ge_Double")) return .{ .float_instruction = .fge };
+        if (std.mem.eql(u8, name.base, "intToDouble")) return .{ .float_instruction = .i2d };
+        if (std.mem.eql(u8, name.base, "doubleToInt")) return .{ .float_instruction = .d2i };
+
         // Monad operations for IO (do-notation desugaring, issue #464)
         // In M1, >> and >>= are no-ops that return unit. The actual sequencing
         // is handled by the GRIN bind structure which evaluates actions in order.
@@ -309,10 +325,34 @@ const LLVMInstruction = union(enum) {
     identity: void,
 };
 
+/// Floating-point (`Double`) primop instructions.  Unlike `LLVMInstruction`,
+/// these operate on boxed `Float` heap nodes: operands are unboxed to LLVM
+/// `double`, the op runs, and arithmetic results are re-boxed (#880).
+const FloatOp = enum {
+    // Binary arithmetic → fadd/fsub/fmul/fdiv, result re-boxed as Float.
+    fadd,
+    fsub,
+    fmul,
+    fdiv,
+    // Unary → fneg, result re-boxed as Float.
+    fneg,
+    // Ordered comparisons → fcmp, result is i1 (caller wraps as Bool).
+    feq,
+    fne,
+    flt,
+    fle,
+    fgt,
+    fge,
+    // Conversions between the boxed representations.
+    i2d, // intToDouble : Int -> Double  (sitofp, re-boxed as Float)
+    d2i, // doubleToInt : Double -> Int  (fptosi, tagged immediate)
+};
+
 /// A translated PrimOp result
 const PrimOpResult = union(enum) {
     libcall: LibcFunction,
     instruction: LLVMInstruction,
+    float_instruction: FloatOp,
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1890,7 +1930,9 @@ pub const GrinTranslator = struct {
                 if (std.mem.eql(u8, app.name.base, "pure"))
                     break :blk app.args.len > 0 and self.valYieldsWhnf(app.args[0]);
                 if (PrimOpMapping.lookup(app.name)) |m|
-                    break :blk m == .instruction;
+                    // Integer instructions yield a tagged immediate; float
+                    // instructions yield a boxed Float node — both are WHNF.
+                    break :blk m == .instruction or m == .float_instruction;
                 // Direct call (or apply): result forced at the callee's
                 // return site per the calling convention above.
                 break :blk true;
@@ -2139,6 +2181,17 @@ pub const GrinTranslator = struct {
                         if (c.LLVMGetTypeKind(c.LLVMTypeOf(val)) == c.LLVMIntegerTypeKind) {
                             return tagInt(self.builder, val);
                         }
+                        return val;
+                    }
+                    return c.LLVMConstPointerNull(ptrType());
+                },
+                .float_instruction => |op| {
+                    const raw = try self.emitFloatInstruction(op, args);
+                    if (raw) |val| {
+                        // Comparisons yield i1 → wrap as a Bool node; every
+                        // other float op already returns a ptr (boxed Float)
+                        // or a tagged Int immediate (doubleToInt).
+                        if (isFloatComparison(op)) return try self.wrapComparisonAsBool(val);
                         return val;
                     }
                     return c.LLVMConstPointerNull(ptrType());
@@ -2456,6 +2509,9 @@ pub const GrinTranslator = struct {
                 .libcall => |libc_fn| try self.emitLibcCall(libc_fn, args),
                 .instruction => |instr| {
                     _ = try self.emitInstruction(instr, args);
+                },
+                .float_instruction => |op| {
+                    _ = try self.emitFloatInstruction(op, args);
                 },
             }
             return;
@@ -2783,6 +2839,122 @@ pub const GrinTranslator = struct {
         };
     }
 
+    /// Whether a float primop is an ordered comparison (result is i1, wrapped
+    /// as a Bool node by the caller — the same path integer comparisons use).
+    fn isFloatComparison(op: FloatOp) bool {
+        return switch (op) {
+            .feq, .fne, .flt, .fle, .fgt, .fge => true,
+            else => false,
+        };
+    }
+
+    /// Unbox a `Double` operand to an LLVM `double`.  A Double is a boxed
+    /// `Float` node, so a variable/forced operand arrives as a pointer whose
+    /// field[0] holds the f64 bit-pattern; a `Double` *literal* arrives as a
+    /// raw `double` constant.  Handle both.
+    fn unboxFloatOperand(self: *GrinTranslator, val: grin.Val) TranslationError!llvm.Value {
+        const raw = try self.translateValToLlvm(val);
+        const kind = c.LLVMGetTypeKind(c.LLVMTypeOf(raw));
+        if (kind == c.LLVMDoubleTypeKind) return raw; // already a double literal
+        if (kind == c.LLVMPointerTypeKind) {
+            const forced = self.forceOperandIfNeeded(raw, val);
+            // Load field[0] (raw f64 bits) and bitcast back to double.
+            const rts_load_fn = declareRtsLoadField(self.module);
+            var load_args = [_]llvm.Value{ forced, c.LLVMConstInt(llvm.i32Type(), 0, 0) };
+            const bits = c.LLVMBuildCall2(
+                self.builder,
+                llvm.getFunctionType(rts_load_fn),
+                rts_load_fn,
+                &load_args,
+                2,
+                "float.bits",
+            );
+            return c.LLVMBuildBitCast(self.builder, bits, c.LLVMDoubleType(), "as_f64");
+        }
+        // Fallback: an i64 slot holding f64 bits (defensive; not expected).
+        return c.LLVMBuildBitCast(self.builder, raw, c.LLVMDoubleType(), "i64_as_f64");
+    }
+
+    /// Box an LLVM `double` into a fresh `Float` heap node, returning the
+    /// node pointer.  The f64 is stored as its i64 bit-pattern in field[0].
+    fn boxFloat(self: *GrinTranslator, d: llvm.Value) TranslationError!llvm.Value {
+        const bits = c.LLVMBuildBitCast(self.builder, d, llvm.i64Type(), "f2i");
+        const float_tag: i64 = @intFromEnum(rts_node.Tag.Float);
+        const node = self.emitAllocConst(float_tag, 1, "float");
+        const rts_store_fn = declareRtsStoreField(self.module);
+        var store_args = [_]llvm.Value{ node, c.LLVMConstInt(llvm.i32Type(), 0, 0), bits };
+        _ = c.LLVMBuildCall2(
+            self.builder,
+            llvm.getFunctionType(rts_store_fn),
+            rts_store_fn,
+            &store_args,
+            3,
+            "",
+        );
+        return node;
+    }
+
+    /// Unbox an `Int` operand to an LLVM `i64` (for `intToDouble`).  Mirrors
+    /// the integer operand coercion in `emitInstruction`: force a pointer
+    /// operand, then untag a tagged immediate.
+    fn unboxIntOperand(self: *GrinTranslator, val: grin.Val) TranslationError!llvm.Value {
+        const raw = try self.translateValToLlvm(val);
+        const forced = if (c.LLVMGetTypeKind(c.LLVMTypeOf(raw)) == c.LLVMPointerTypeKind)
+            self.forceOperandIfNeeded(raw, val)
+        else
+            raw;
+        return if (c.LLVMGetTypeKind(c.LLVMTypeOf(forced)) == c.LLVMPointerTypeKind)
+            untagInt(self.builder, forced)
+        else
+            forced;
+    }
+
+    /// Emit a `Double` primop.  Arithmetic results are re-boxed as `Float`
+    /// nodes (returned as pointers); `doubleToInt` returns a tagged Int
+    /// immediate; comparisons return an i1 the caller wraps as a Bool node.
+    fn emitFloatInstruction(self: *GrinTranslator, op: FloatOp, args: []const grin.Val) TranslationError!?llvm.Value {
+        // Unary / conversions.
+        switch (op) {
+            .fneg => {
+                if (args.len < 1) return error.UnsupportedGrinVal;
+                const x = try self.unboxFloatOperand(args[0]);
+                return try self.boxFloat(c.LLVMBuildFNeg(self.builder, x, "fneg"));
+            },
+            .d2i => {
+                if (args.len < 1) return error.UnsupportedGrinVal;
+                const x = try self.unboxFloatOperand(args[0]);
+                const i = c.LLVMBuildFPToSI(self.builder, x, llvm.i64Type(), "d2i");
+                return tagInt(self.builder, i);
+            },
+            .i2d => {
+                if (args.len < 1) return error.UnsupportedGrinVal;
+                const iv = try self.unboxIntOperand(args[0]);
+                const d = c.LLVMBuildSIToFP(self.builder, iv, c.LLVMDoubleType(), "i2d");
+                return try self.boxFloat(d);
+            },
+            else => {},
+        }
+
+        // Binary arithmetic and comparisons.
+        if (args.len < 2) return error.UnsupportedGrinVal;
+        const lhs = try self.unboxFloatOperand(args[0]);
+        const rhs = try self.unboxFloatOperand(args[1]);
+        switch (op) {
+            .fadd => return try self.boxFloat(c.LLVMBuildFAdd(self.builder, lhs, rhs, "fadd")),
+            .fsub => return try self.boxFloat(c.LLVMBuildFSub(self.builder, lhs, rhs, "fsub")),
+            .fmul => return try self.boxFloat(c.LLVMBuildFMul(self.builder, lhs, rhs, "fmul")),
+            .fdiv => return try self.boxFloat(c.LLVMBuildFDiv(self.builder, lhs, rhs, "fdiv")),
+            // Ordered comparisons (LLVMRealOEQ etc.): NaN compares false.
+            .feq => return c.LLVMBuildFCmp(self.builder, @as(c_uint, @bitCast(c.LLVMRealOEQ)), lhs, rhs, "feq"),
+            .fne => return c.LLVMBuildFCmp(self.builder, @as(c_uint, @bitCast(c.LLVMRealONE)), lhs, rhs, "fne"),
+            .flt => return c.LLVMBuildFCmp(self.builder, @as(c_uint, @bitCast(c.LLVMRealOLT)), lhs, rhs, "flt"),
+            .fle => return c.LLVMBuildFCmp(self.builder, @as(c_uint, @bitCast(c.LLVMRealOLE)), lhs, rhs, "fle"),
+            .fgt => return c.LLVMBuildFCmp(self.builder, @as(c_uint, @bitCast(c.LLVMRealOGT)), lhs, rhs, "fgt"),
+            .fge => return c.LLVMBuildFCmp(self.builder, @as(c_uint, @bitCast(c.LLVMRealOGE)), lhs, rhs, "fge"),
+            .fneg, .d2i, .i2d => unreachable, // handled above
+        }
+    }
+
     /// Wrap an i1 comparison result in a Bool constructor heap node.
     /// Produces: select i1 %cmp, i64 <true_disc>, i64 <false_disc> → rts_alloc(tag, 0)
     fn wrapComparisonAsBool(self: *GrinTranslator, cmp_i1: llvm.Value) TranslationError!llvm.Value {
@@ -2834,7 +3006,11 @@ pub const GrinTranslator = struct {
                     break :blk self.emitCstringToCharlist(str_ptr);
                 },
                 .Int => |i| c.LLVMConstInt(llvm.i64Type(), @bitCast(@as(i64, i)), 1),
-                .Float => |f| c.LLVMConstReal(c.LLVMDoubleType(), f),
+                // A `Double` value is always a boxed `Float` node (a raw f64
+                // can't be a tagged immediate), so box the literal here — this
+                // is what lets it flow as a function argument, a bound value,
+                // or a primop operand uniformly (#880).
+                .Float => |f| try self.boxFloat(c.LLVMConstReal(c.LLVMDoubleType(), f)),
                 .Bool => |b| c.LLVMConstInt(c.LLVMInt1Type(), @intFromBool(b), 0),
                 .Char => |ch| c.LLVMConstInt(llvm.i64Type(), ch, 0),
             },
@@ -4492,6 +4668,37 @@ test "PrimOpMapping: ccall rts_ symbols map directly (#536)" {
         try std.testing.expectEqualStrings(case.sym, std.mem.span(result.?.libcall.name));
         try std.testing.expectEqual(case.param, result.?.libcall.param_kinds[0]);
     }
+}
+
+test "PrimOpMapping: Double primops map to float_instruction (#880)" {
+    const cases = [_]struct { sym: []const u8, op: FloatOp }{
+        .{ .sym = "add_Double", .op = .fadd },
+        .{ .sym = "sub_Double", .op = .fsub },
+        .{ .sym = "mul_Double", .op = .fmul },
+        .{ .sym = "div_Double", .op = .fdiv },
+        .{ .sym = "neg_Double", .op = .fneg },
+        .{ .sym = "eq_Double", .op = .feq },
+        .{ .sym = "ne_Double", .op = .fne },
+        .{ .sym = "lt_Double", .op = .flt },
+        .{ .sym = "le_Double", .op = .fle },
+        .{ .sym = "gt_Double", .op = .fgt },
+        .{ .sym = "ge_Double", .op = .fge },
+        .{ .sym = "intToDouble", .op = .i2d },
+        .{ .sym = "doubleToInt", .op = .d2i },
+    };
+    for (cases) |case| {
+        const result = PrimOpMapping.lookup(.{ .base = case.sym, .unique = .{ .value = 7777 } });
+        try std.testing.expect(result != null);
+        try std.testing.expectEqual(case.op, result.?.float_instruction);
+    }
+}
+
+test "isFloatComparison: only ordered comparisons wrap as Bool (#880)" {
+    try std.testing.expect(GrinTranslator.isFloatComparison(.feq));
+    try std.testing.expect(GrinTranslator.isFloatComparison(.fge));
+    try std.testing.expect(!GrinTranslator.isFloatComparison(.fadd));
+    try std.testing.expect(!GrinTranslator.isFloatComparison(.i2d));
+    try std.testing.expect(!GrinTranslator.isFloatComparison(.fneg));
 }
 
 test "PrimOpMapping: unknown function returns null" {
