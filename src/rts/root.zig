@@ -30,6 +30,7 @@ comptime {
     _ = &io_module.rts_putChar;
     _ = &io_module.rts_charlist_to_cstring;
     _ = &io_module.rts_cstring_to_charlist;
+    _ = &io_module.rts_show_double;
     _ = &io_module.rts_error;
     _ = &heap.init;
     _ = &heap.deinit;

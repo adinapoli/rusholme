@@ -376,7 +376,10 @@ pub const PrimOp = enum(u16) {
             std.mem.eql(u8, str, "div#") or
             std.mem.eql(u8, str, "mod#") or
             std.mem.eql(u8, str, "quot#") or
-            std.mem.eql(u8, str, "rem#");
+            std.mem.eql(u8, str, "rem#") or
+            // showDouble : Double -> [Char] — backend renders via
+            // rts_show_double + cstring→charlist (#883).
+            std.mem.eql(u8, str, "showDouble");
     }
 
     /// RTS symbols reachable via `foreign import ccall` (#536).
