@@ -68,6 +68,14 @@ pub fn typeOf(
     session.pipeline.enable_show_wrapping = false;
     defer session.pipeline.enable_show_wrapping = saved_show_wrapping;
 
+    // A `:type` query reports the principal type of the expression, so the
+    // monomorphism restriction must not apply to the synthetic `replExpr__`
+    // binding — otherwise `:t (+)` would show a monomorphic/defaulted type
+    // instead of `Num a => a -> a -> a`.
+    const saved_mr = session.pipeline.apply_monomorphism_restriction;
+    session.pipeline.apply_monomorphism_restriction = false;
+    defer session.pipeline.apply_monomorphism_restriction = saved_mr;
+
     var diags = DiagnosticCollector.init();
     defer diags.deinit(session.allocator);
 
@@ -259,4 +267,32 @@ test "typequery: class method shows constraint (#582)" {
     const type_str = try htype_mod.prettyScheme(scheme, alloc);
     defer alloc.free(type_str);
     try testing.expectEqualStrings("forall a. ShowIt a => a -> [Char]", type_str);
+}
+
+test "typequery: class methods report principal type, no MR (#879, #844)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var session = try Session.init(alloc, testing.io);
+    defer session.deinit();
+
+    // `:t (+)` must report the principal type `Num a => a -> a -> a`.  The
+    // synthetic `replExpr__ = (+)` binding is a simple pattern binding, so the
+    // monomorphism restriction would otherwise pin it to a monomorphic
+    // (defaulted) `Int -> Int -> Int` (#844).  `typeOf` disables the MR
+    // precisely so the query reports the general type, matching GHCi's
+    // `:type`.  `show` / `compare` are genuinely polymorphic (multiple
+    // instances) and likewise must keep their `Show`/`Ord` context.
+    const cases = [_]struct { expr: []const u8, expected: []const u8 }{
+        .{ .expr = "(+)", .expected = "(+) :: forall a. Num a => a -> a -> a" },
+        .{ .expr = "negate", .expected = "negate :: forall a. Num a => a -> a" },
+        .{ .expr = "show", .expected = "show :: forall a. Show a => a -> [Char]" },
+        .{ .expr = "compare", .expected = "compare :: forall a. Ord a => a -> a -> Ordering" },
+    };
+    for (cases) |c| {
+        const result = try typeOf(alloc, &session, c.expr);
+        defer alloc.free(result.display);
+        try testing.expectEqualStrings(c.expected, result.display);
+    }
 }

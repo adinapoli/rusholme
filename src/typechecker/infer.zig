@@ -148,6 +148,13 @@ pub const InferCtx = struct {
     /// Filled during inference (Var case) and solved at the end of `inferModule`.
     wanted_constraints: std.ArrayListUnmanaged(solver_mod.Constraint) = .empty,
 
+    /// Whether the monomorphism restriction applies to signature-less simple
+    /// bindings (`x = e`).  On by default (Haskell 2010 §4.5.5).  The REPL
+    /// `:type` query disables it: `:t (+)` must report the principal type
+    /// `Num a => a -> a -> a`, not the MR-restricted/defaulted monomorphic
+    /// type a top-level `plus = (+)` binding would receive.
+    apply_monomorphism_restriction: bool = true,
+
     /// Generalised schemes for LOCAL (`let`/`where`) bindings.  These live in
     /// `ctx.env` only while their scope is active (it is pushed/popped per
     /// `let`), so they are gone by the time `inferModule` snapshots `ctx.env`
@@ -380,6 +387,14 @@ pub fn generalisePtr(
     ctx: *InferCtx,
     ty_node: *HType,
     env_metas: *const std.AutoHashMapUnmanaged(u32, void),
+    /// Apply the monomorphism restriction: when this binding has no syntactic
+    /// arguments and no type signature (a simple `x = e`), type variables that
+    /// are constrained by a class do NOT generalise — they stay monomorphic
+    /// and must be fixed by the use site or defaulted.  Without this, after
+    /// #875 a binding like `let y = x * x` (in a list comprehension or
+    /// elsewhere) generalises to `forall a. Num a => a`, and two uses at
+    /// different instantiations then fail to unify (Haskell 2010 §4.5.5).
+    restrict: bool,
 ) std.mem.Allocator.Error!TyScheme {
     var ty_metas = std.AutoHashMapUnmanaged(u32, void){};
     defer ty_metas.deinit(ctx.alloc);
@@ -390,6 +405,22 @@ pub fn generalisePtr(
     // Map from meta ID → rigid type, so we can substitute in constraints.
     var meta_to_rigid = std.AutoHashMapUnmanaged(u32, *HType){};
     defer meta_to_rigid.deinit(ctx.alloc);
+
+    // Under the monomorphism restriction, collect the metas that head a wanted
+    // class constraint; those are held back from generalisation below.
+    var constrained_metas = std.AutoHashMapUnmanaged(u32, void){};
+    defer constrained_metas.deinit(ctx.alloc);
+    if (restrict) {
+        for (ctx.wanted_constraints.items) |wc| {
+            switch (wc) {
+                .Class => |cc| switch (cc.ty.*.chase()) {
+                    .Meta => |mv| try constrained_metas.put(ctx.alloc, mv.id, {}),
+                    else => {},
+                },
+                .Eq => {},
+            }
+        }
+    }
 
     // First, decide which metas generalise and allocate a rigid for each,
     // WITHOUT yet rewriting the type.  Constraint collection below must run
@@ -403,6 +434,8 @@ pub fn generalisePtr(
     while (it.next()) |meta_id_ptr| {
         const meta_id = meta_id_ptr.*;
         if (env_metas.contains(meta_id)) continue;
+        // Monomorphism restriction: hold constrained variables monomorphic.
+        if (restrict and constrained_metas.contains(meta_id)) continue;
 
         const rigid_name = ctx.u_supply.freshName("a");
         const rigid_ty = try ctx.alloc.create(HType);
@@ -458,6 +491,30 @@ pub fn generalisePtr(
     // Chase ty_node to the root so that the scheme body does not contain an
     // intermediate Meta that instantiateType would leave unresolved.
     return TyScheme{ .binders = binders, .constraints = scheme_constraints, .body = ty_node.chase() };
+}
+
+/// Haskell 2010 §4.3.4 numeric defaulting.  Any wanted `Num a` constraint
+/// whose type variable is still an unsolved metavariable at the end of module
+/// inference is ambiguous; we default it to `Int` by unifying the meta with
+/// `Int`.  The subsequent `solve` pass then finds `instance Num Int` and fills
+/// in the dictionary evidence as usual.
+///
+/// We default to `Int` rather than the report's `Integer` because `Integer`
+/// is not yet implemented (#212).  Only `Num` participates — a non-numeric
+/// ambiguous constraint (e.g. a lone `Show a`) is intentionally left alone.
+fn defaultNumericConstraints(ctx: *InferCtx) std.mem.Allocator.Error!void {
+    const int_ty = try ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.Int, .args = &.{} } });
+    for (ctx.wanted_constraints.items) |wc| {
+        switch (wc) {
+            .Class => |cc| {
+                if (cc.class_name.unique.value != Known.Class.Num.unique.value) continue;
+                if (cc.ty.*.chase() == .Meta) {
+                    try ctx.unifyNow(@constCast(cc.ty), int_ty, cc.span);
+                }
+            },
+            .Eq => {},
+        }
+    }
 }
 
 /// Mutate every unsolved meta with `id == target_id` in the tree rooted
@@ -1329,7 +1386,9 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                                 try ctx.local_schemes.put(ctx.alloc, fb.name.unique, scheme);
                         } else {
                             // For bindings without signatures, generalise the inferred type.
-                            const scheme = try generalisePtr(ctx, fun_node, &env_metas);
+                            const mr = ctx.apply_monomorphism_restriction and
+                                fb.equations.len == 1 and fb.equations[0].patterns.len == 0;
+                            const scheme = try generalisePtr(ctx, fun_node, &env_metas, mr);
                             try ctx.env.bind(fb.name, scheme);
                             // Persist for the desugarer so a constrained local
                             // binding gets its dictionary threaded (#875).
@@ -1905,7 +1964,9 @@ fn inferLetDecl(
                 };
                 try ctx.env.bind(fb.name, scheme);
             } else {
-                const scheme = try generalisePtr(ctx, fun_node, &env_metas);
+                const mr = ctx.apply_monomorphism_restriction and
+                    fb.equations.len == 1 and fb.equations[0].patterns.len == 0;
+                const scheme = try generalisePtr(ctx, fun_node, &env_metas, mr);
                 try ctx.env.bind(fb.name, scheme);
             }
         },
@@ -2366,7 +2427,9 @@ pub fn inferModule(
                         };
                         try ctx.env.bind(fb.name, scheme);
                     } else {
-                        const scheme = try generalisePtr(ctx, fun_node, &env_metas);
+                        const mr = ctx.apply_monomorphism_restriction and
+                            fb.equations.len == 1 and fb.equations[0].patterns.len == 0;
+                        const scheme = try generalisePtr(ctx, fun_node, &env_metas, mr);
                         try ctx.env.bind(fb.name, scheme);
                     }
                 },
@@ -2509,6 +2572,18 @@ pub fn inferModule(
             else => {},
         }
     }
+
+    // ── Default ambiguous numeric constraints ────────────────────────────
+    //
+    // Haskell 2010 §4.3.4 defaulting: a constraint `Num a` where `a` is an
+    // unsolved metavariable not otherwise determined is ambiguous.  We
+    // resolve it by defaulting `a` to `Int` (Haskell defaults to `Integer`;
+    // we use `Int` until `Integer` lands — see #212).  This runs before
+    // `solve` so the defaulted meta then resolves to `instance Num Int`.
+    //
+    // Only `Num` triggers defaulting: a bare `Show a` with no numeric
+    // constraint stays ambiguous, matching the standard rules.
+    try defaultNumericConstraints(ctx);
 
     // ── Solve class constraints ──────────────────────────────────────────
     //
@@ -3110,7 +3185,7 @@ test "generalisePtr: meta free in env is not generalised" {
     // env_metas must NOT contain ?inner (it is purely local).
     try testing.expect(!env_metas.contains(inner_meta.Meta.id));
 
-    const scheme = try generalisePtr(&ctx, ty_node, &env_metas);
+    const scheme = try generalisePtr(&ctx, ty_node, &env_metas, false);
 
     // Only ?inner should have been generalised — exactly one binder.
     try testing.expectEqual(@as(usize, 1), scheme.binders.len);

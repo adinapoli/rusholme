@@ -228,6 +228,13 @@ pub const Pipeline = struct {
     /// which need the original expression type, not IO ().
     enable_show_wrapping: bool = true,
 
+    /// Whether the monomorphism restriction applies during inference.
+    /// Disabled for type queries (`:type`) so that a bare class method like
+    /// `(+)` reports its principal type `Num a => a -> a -> a` rather than the
+    /// MR-restricted monomorphic type the synthetic `replExpr__ = (+)` binding
+    /// would otherwise get. See `InferCtx.apply_monomorphism_restriction`.
+    apply_monomorphism_restriction: bool = true,
+
     /// Globally-unique counter for GRIN-generated symbol names
     /// (`_thunk_N`, lifted helpers).  Threaded through every
     /// `translateProgram` call so symbols across boot modules and
@@ -355,6 +362,7 @@ pub const Pipeline = struct {
 
         // ── Typecheck ──────────────────────────────────────────────
         var infer_ctx = infer_mod.InferCtx.init(alloc, ty_env, mv_supply, u_supply, diags);
+        infer_ctx.apply_monomorphism_restriction = self.apply_monomorphism_restriction;
 
         // Seed the InferCtx with classes/instances from prior REPL inputs
         // so that instance declarations can reference previously-declared
