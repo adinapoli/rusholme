@@ -17,6 +17,9 @@ module RHC.Prim
     ( primAddInt, primSubInt, primMulInt, primNegInt, primAbsInt
     , primQuotInt, primRemInt
     , primEqInt, primNeInt, primLtInt, primLeInt, primGtInt, primGeInt
+    , primAddDouble, primSubDouble, primMulDouble, primDivDouble, primNegDouble
+    , primEqDouble, primNeDouble, primLtDouble, primLeDouble, primGtDouble, primGeDouble
+    , intToDouble, doubleToInt
     , primPutChar, primPutStr, primPutStrLn
     , primError
     , intToChar, charToInt
@@ -40,6 +43,28 @@ foreign import prim "lt_Int"    primLtInt    :: Int -> Int -> Bool
 foreign import prim "le_Int"    primLeInt    :: Int -> Int -> Bool
 foreign import prim "gt_Int"    primGtInt    :: Int -> Int -> Bool
 foreign import prim "ge_Int"    primGeInt    :: Int -> Int -> Bool
+
+-- ── Double arithmetic ────────────────────────────────────────────────
+
+foreign import prim "add_Double" primAddDouble :: Double -> Double -> Double
+foreign import prim "sub_Double" primSubDouble :: Double -> Double -> Double
+foreign import prim "mul_Double" primMulDouble :: Double -> Double -> Double
+foreign import prim "div_Double" primDivDouble :: Double -> Double -> Double
+foreign import prim "neg_Double" primNegDouble :: Double -> Double
+
+-- ── Double comparisons ───────────────────────────────────────────────
+
+foreign import prim "eq_Double" primEqDouble :: Double -> Double -> Bool
+foreign import prim "ne_Double" primNeDouble :: Double -> Double -> Bool
+foreign import prim "lt_Double" primLtDouble :: Double -> Double -> Bool
+foreign import prim "le_Double" primLeDouble :: Double -> Double -> Bool
+foreign import prim "gt_Double" primGtDouble :: Double -> Double -> Bool
+foreign import prim "ge_Double" primGeDouble :: Double -> Double -> Bool
+
+-- ── Double ↔ Int ─────────────────────────────────────────────────────
+
+foreign import prim "intToDouble" intToDouble :: Int -> Double
+foreign import prim "doubleToInt" doubleToInt :: Double -> Int
 
 -- ── Character ↔ Int ──────────────────────────────────────────────────
 

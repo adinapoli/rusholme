@@ -18,6 +18,7 @@ module Prelude
     , putChar, putStr, putStrLn
     , error
     , intToChar, charToInt
+    , intToDouble, doubleToInt
     , Num(..)
     , Eq(..)
     , Ord(..)

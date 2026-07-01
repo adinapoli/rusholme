@@ -22,6 +22,8 @@ module GHC.Base
     -- Arithmetic
     , div, mod
     , max, min, even, odd
+    -- Double ↔ Int conversions (numeric tower, #880)
+    , intToDouble, doubleToInt
     -- Classes
     , Num(..)
     , Eq(..)
@@ -145,6 +147,23 @@ instance Num Int where
           True  -> 1
           False -> primNegInt 1
 
+instance Num Double where
+  (+) = primAddDouble
+  (-) = primSubDouble
+  (*) = primMulDouble
+  negate = primNegDouble
+  -- Self-contained via `Double` primops and `Double` literals — same
+  -- rationale as `instance Num Int` above (#881).  `fromInteger` is not yet
+  -- available, so `0.0`/`1.0` are written as floating literals.
+  abs x = case primLtDouble x 0.0 of
+      True  -> primNegDouble x
+      False -> x
+  signum x = case primEqDouble x 0.0 of
+      True  -> 0.0
+      False -> case primGtDouble x 0.0 of
+          True  -> 1.0
+          False -> primNegDouble 1.0
+
 -- ========================================================================
 -- Integral / ordering helpers (still monomorphic on Int, pending the
 -- Integral class and Ord-method defaults)
@@ -210,6 +229,10 @@ instance Eq Char where
   (==) = eqChar
   (/=) = neChar
 
+instance Eq Double where
+  (==) = primEqDouble
+  (/=) = primNeDouble
+
 -- ========================================================================
 -- Ord type class
 -- ========================================================================
@@ -256,6 +279,20 @@ instance Ord Char where
   (<=) = leChar
   (>)  = gtChar
   (>=) = geChar
+
+compareDouble :: Double -> Double -> Ordering
+compareDouble x y = case primLtDouble x y of
+    True  -> LT
+    False -> case primEqDouble x y of
+        True  -> EQ
+        False -> GT
+
+instance Ord Double where
+  compare = compareDouble
+  (<)  = primLtDouble
+  (<=) = primLeDouble
+  (>)  = primGtDouble
+  (>=) = primGeDouble
 
 -- ========================================================================
 -- Bounded type class
