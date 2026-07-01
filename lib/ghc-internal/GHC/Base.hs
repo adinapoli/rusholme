@@ -20,9 +20,10 @@ module GHC.Base
     -- Boolean
     , not, (&&), (||), otherwise
     -- Arithmetic
-    , (+), (-), (*), negate, abs, div, mod
-    , max, min, signum, even, odd
+    , div, mod
+    , max, min, even, odd
     -- Classes
+    , Num(..)
     , Eq(..)
     , Ord(..)
     , Bounded(..)
@@ -107,23 +108,47 @@ otherwise :: Bool
 otherwise = True
 
 -- ========================================================================
--- Arithmetic (monomorphic on Int, pending type classes #531)
+-- Num type class
 -- ========================================================================
+--
+-- The arithmetic operators are dictionary-dispatched class methods, so a
+-- value of any `Num` instance shares one `(+)` / `(-)` / `(*)`.  At a
+-- monomorphic call site (`x + y :: Int`) the solver picks `instance Num
+-- Int` statically and the backend devirtualises the dictionary down to a
+-- direct primop call, so this is as cheap as the previous monomorphic
+-- definitions.  `fromInteger` is intentionally omitted until overloaded
+-- literals and `Integer` land (see #140 / #212).
 
-(+) :: Int -> Int -> Int
-(+) = primAddInt
+class Num a where
+  (+)    :: a -> a -> a
+  (-)    :: a -> a -> a
+  (*)    :: a -> a -> a
+  negate :: a -> a
+  abs    :: a -> a
+  signum :: a -> a
 
-(-) :: Int -> Int -> Int
-(-) = primSubInt
+instance Num Int where
+  (+) = primAddInt
+  (-) = primSubInt
+  (*) = primMulInt
+  negate = primNegInt
+  abs = primAbsInt
+  -- Written with primops rather than `==`/`>`/`negate` so the instance is
+  -- self-contained: a primitive instance must not depend on another
+  -- instance's dictionary (`Eq Int`, `Ord Int`) being registered first,
+  -- which is source-order-dependent in the desugarer.  Same style as the
+  -- `Eq Int` / `Ord Int` instances below.  Tracked in
+  -- https://github.com/adinapoli/rusholme/issues/881.
+  signum n = case primEqInt n 0 of
+      True  -> 0
+      False -> case primGtInt n 0 of
+          True  -> 1
+          False -> primNegInt 1
 
-(*) :: Int -> Int -> Int
-(*) = primMulInt
-
-negate :: Int -> Int
-negate = primNegInt
-
-abs :: Int -> Int
-abs = primAbsInt
+-- ========================================================================
+-- Integral / ordering helpers (still monomorphic on Int, pending the
+-- Integral class and Ord-method defaults)
+-- ========================================================================
 
 div :: Int -> Int -> Int
 div = primQuotInt
@@ -140,13 +165,6 @@ min :: Int -> Int -> Int
 min x y = case x <= y of
     True  -> x
     False -> y
-
-signum :: Int -> Int
-signum n = case n == 0 of
-    True  -> 0
-    False -> case n > 0 of
-        True  -> 1
-        False -> negate 1
 
 even :: Int -> Bool
 even n = mod n 2 == 0

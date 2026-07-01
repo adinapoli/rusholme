@@ -12,12 +12,13 @@ module Prelude
       Bool(..), Maybe(..), Either(..), Ordering(..)
     , String
     , not, (&&), (||), otherwise
-    , (+), (-), (*), negate, abs, div, mod
-    , max, min, signum, even, odd
+    , div, mod
+    , max, min, even, odd
     , (==), (/=), (<), (>), (<=), (>=), compare
     , putChar, putStr, putStrLn
     , error
     , intToChar, charToInt
+    , Num(..)
     , Eq(..)
     , Ord(..)
     , Bounded(..)

@@ -1757,11 +1757,18 @@ pub const GrinTranslator = struct {
         if (ctn.tag.tag_type != .Fun) return null;
         if (ctn.fields.len != 2) return null;
         const base = ctn.tag.name.base;
-        const op: SpecArithOp = if (std.mem.eql(u8, base, "+"))
+        // Match both the surface operators and their `Int` primop wrappers.
+        // Whole-program specialisation (#807) devirtualises a monomorphic
+        // `(+) dict$Num$Int x y` down to the instance method `primAddInt x y`,
+        // so after #879 (arithmetic-as-a-class) the thunk tag reaching here is
+        // the wrapper name, not `+`.  Without matching the wrapper the hot
+        // arithmetic loop loses cheap-thunk speculation and regresses badly
+        // (~3× on matmul).
+        const op: SpecArithOp = if (std.mem.eql(u8, base, "+") or std.mem.eql(u8, base, "primAddInt"))
             .add
-        else if (std.mem.eql(u8, base, "-"))
+        else if (std.mem.eql(u8, base, "-") or std.mem.eql(u8, base, "primSubInt"))
             .sub
-        else if (std.mem.eql(u8, base, "*"))
+        else if (std.mem.eql(u8, base, "*") or std.mem.eql(u8, base, "primMulInt"))
             .mul
         else
             return null;
