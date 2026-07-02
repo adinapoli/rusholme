@@ -391,9 +391,14 @@ fn primopArity(name_str: []const u8) u32 {
         .read_stdin => 0,
         // Unary arithmetic: neg_Int, abs_Int, neg_Double
         .neg_Int, .abs_Int, .neg_Double => 1,
+        // Unary transcendentals (#895)
+        .sqrt_Double, .exp_Double, .log_Double => 1,
+        .sin_Double, .cos_Double, .tan_Double => 1,
+        .asin_Double, .acos_Double, .atan_Double => 1,
+        .sinh_Double, .cosh_Double, .tanh_Double => 1,
         // Binary arithmetic
         .add_Int, .sub_Int, .mul_Int, .quot_Int, .rem_Int => 2,
-        .add_Double, .sub_Double, .mul_Double, .div_Double => 2,
+        .add_Double, .sub_Double, .mul_Double, .div_Double, .pow_Double => 2,
         // Comparisons (all binary)
         .eq_Int, .ne_Int, .lt_Int, .le_Int, .gt_Int, .ge_Int => 2,
         .eq_Char => 2,

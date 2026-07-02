@@ -1484,7 +1484,8 @@ fn emitNative(
     const rts_lib_path = getRtsLibPath();
     const linker = rusholme.backend.linker.Linker{
         .objects = &.{obj_path},
-        .system_libs = &.{"c"},
+        // libm for the transcendental Double primops (sqrt, sin, …; #895).
+        .system_libs = &.{ "c", "m" },
         .runtime_objects = &.{rts_lib_path},
         .output_path = output_name,
     };
