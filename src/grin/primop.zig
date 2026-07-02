@@ -117,6 +117,61 @@ pub const PrimOp = enum(u16) {
     /// Type: Double# -> Double#
     neg_Double = 154,
 
+    // Transcendental functions (#895) — lowered as libm calls in the
+    // LLVM backend (`double @sqrt(double)` etc.), linked via `-lm`.
+
+    /// Square root.
+    /// Type: Double# -> Double#
+    sqrt_Double = 155,
+
+    /// Natural exponential.
+    /// Type: Double# -> Double#
+    exp_Double = 156,
+
+    /// Natural logarithm.
+    /// Type: Double# -> Double#
+    log_Double = 157,
+
+    /// Power: base ** exponent.
+    /// Type: Double# -> Double# -> Double#
+    pow_Double = 158,
+
+    /// Sine.
+    /// Type: Double# -> Double#
+    sin_Double = 159,
+
+    /// Cosine.
+    /// Type: Double# -> Double#
+    cos_Double = 160,
+
+    /// Tangent.
+    /// Type: Double# -> Double#
+    tan_Double = 161,
+
+    /// Arc sine.
+    /// Type: Double# -> Double#
+    asin_Double = 162,
+
+    /// Arc cosine.
+    /// Type: Double# -> Double#
+    acos_Double = 163,
+
+    /// Arc tangent.
+    /// Type: Double# -> Double#
+    atan_Double = 164,
+
+    /// Hyperbolic sine.
+    /// Type: Double# -> Double#
+    sinh_Double = 165,
+
+    /// Hyperbolic cosine.
+    /// Type: Double# -> Double#
+    cosh_Double = 166,
+
+    /// Hyperbolic tangent.
+    /// Type: Double# -> Double#
+    tanh_Double = 167,
+
     // ═══════════════════════════════════════════════════════════════════════
     // Comparison (200-249)
     // ═══════════════════════════════════════════════════════════════════════
@@ -274,6 +329,19 @@ pub const PrimOp = enum(u16) {
             .mul_Double => "mul_Double",
             .div_Double => "div_Double",
             .neg_Double => "neg_Double",
+            .sqrt_Double => "sqrt_Double",
+            .exp_Double => "exp_Double",
+            .log_Double => "log_Double",
+            .pow_Double => "pow_Double",
+            .sin_Double => "sin_Double",
+            .cos_Double => "cos_Double",
+            .tan_Double => "tan_Double",
+            .asin_Double => "asin_Double",
+            .acos_Double => "acos_Double",
+            .atan_Double => "atan_Double",
+            .sinh_Double => "sinh_Double",
+            .cosh_Double => "cosh_Double",
+            .tanh_Double => "tanh_Double",
             .eq_Int => "eq_Int",
             .ne_Int => "ne_Int",
             .lt_Int => "lt_Int",
@@ -501,6 +569,10 @@ test "PrimOp: all ops have name mappings" {
         .add_Int,      .sub_Int,      .mul_Int,    .neg_Int,
         .abs_Int,      .quot_Int,     .rem_Int,    .add_Double,
         .sub_Double,   .mul_Double,   .div_Double, .neg_Double,
+        .sqrt_Double,  .exp_Double,   .log_Double, .pow_Double,
+        .sin_Double,   .cos_Double,   .tan_Double, .asin_Double,
+        .acos_Double,  .atan_Double,  .sinh_Double, .cosh_Double,
+        .tanh_Double,
         .eq_Int,       .ne_Int,       .lt_Int,     .le_Int,
         .gt_Int,       .ge_Int,       .eq_Char,    .eq_Double,
         .ne_Double,    .lt_Double,    .le_Double,  .gt_Double,

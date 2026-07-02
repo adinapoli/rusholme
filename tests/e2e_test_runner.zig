@@ -208,6 +208,10 @@ test "e2e: e2e_887_fractional_double (#887)" {
     try testE2e(std.testing.allocator, "e2e_887_fractional_double");
 }
 
+test "e2e: e2e_895_floating_double (#895)" {
+    try testE2e(std.testing.allocator, "e2e_895_floating_double");
+}
+
 test "e2e: e2e_019_where_local_function (#623)" {
     try testE2e(std.testing.allocator, "e2e_019_where_local_function");
 }

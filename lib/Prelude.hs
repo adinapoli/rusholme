@@ -21,6 +21,7 @@ module Prelude
     , intToDouble, doubleToInt
     , Num(..)
     , Fractional(..)
+    , Floating(..)
     , Eq(..)
     , Ord(..)
     , Bounded(..)

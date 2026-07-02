@@ -18,6 +18,10 @@ module RHC.Prim
     , primQuotInt, primRemInt
     , primEqInt, primNeInt, primLtInt, primLeInt, primGtInt, primGeInt
     , primAddDouble, primSubDouble, primMulDouble, primDivDouble, primNegDouble
+    , primSqrtDouble, primExpDouble, primLogDouble, primPowDouble
+    , primSinDouble, primCosDouble, primTanDouble
+    , primAsinDouble, primAcosDouble, primAtanDouble
+    , primSinhDouble, primCoshDouble, primTanhDouble
     , primEqDouble, primNeDouble, primLtDouble, primLeDouble, primGtDouble, primGeDouble
     , intToDouble, doubleToInt
     , primShowDouble
@@ -52,6 +56,22 @@ foreign import prim "sub_Double" primSubDouble :: Double -> Double -> Double
 foreign import prim "mul_Double" primMulDouble :: Double -> Double -> Double
 foreign import prim "div_Double" primDivDouble :: Double -> Double -> Double
 foreign import prim "neg_Double" primNegDouble :: Double -> Double
+
+-- ── Double transcendental functions (libm; #895) ─────────────────────
+
+foreign import prim "sqrt_Double" primSqrtDouble :: Double -> Double
+foreign import prim "exp_Double"  primExpDouble  :: Double -> Double
+foreign import prim "log_Double"  primLogDouble  :: Double -> Double
+foreign import prim "pow_Double"  primPowDouble  :: Double -> Double -> Double
+foreign import prim "sin_Double"  primSinDouble  :: Double -> Double
+foreign import prim "cos_Double"  primCosDouble  :: Double -> Double
+foreign import prim "tan_Double"  primTanDouble  :: Double -> Double
+foreign import prim "asin_Double" primAsinDouble :: Double -> Double
+foreign import prim "acos_Double" primAcosDouble :: Double -> Double
+foreign import prim "atan_Double" primAtanDouble :: Double -> Double
+foreign import prim "sinh_Double" primSinhDouble :: Double -> Double
+foreign import prim "cosh_Double" primCoshDouble :: Double -> Double
+foreign import prim "tanh_Double" primTanhDouble :: Double -> Double
 
 -- ── Double comparisons ───────────────────────────────────────────────
 

@@ -237,6 +237,20 @@ const PrimOpMapping = struct {
         if (std.mem.eql(u8, name.base, "intToDouble")) return .{ .float_instruction = .i2d };
         if (std.mem.eql(u8, name.base, "doubleToInt")) return .{ .float_instruction = .d2i };
         if (std.mem.eql(u8, name.base, "showDouble")) return .{ .show_double = {} };
+        // Transcendental Double primops (#895) — libm calls.
+        if (std.mem.eql(u8, name.base, "sqrt_Double")) return .{ .float_instruction = .fsqrt };
+        if (std.mem.eql(u8, name.base, "exp_Double")) return .{ .float_instruction = .fexp };
+        if (std.mem.eql(u8, name.base, "log_Double")) return .{ .float_instruction = .flog };
+        if (std.mem.eql(u8, name.base, "pow_Double")) return .{ .float_instruction = .fpow };
+        if (std.mem.eql(u8, name.base, "sin_Double")) return .{ .float_instruction = .fsin };
+        if (std.mem.eql(u8, name.base, "cos_Double")) return .{ .float_instruction = .fcos };
+        if (std.mem.eql(u8, name.base, "tan_Double")) return .{ .float_instruction = .ftan };
+        if (std.mem.eql(u8, name.base, "asin_Double")) return .{ .float_instruction = .fasin };
+        if (std.mem.eql(u8, name.base, "acos_Double")) return .{ .float_instruction = .facos };
+        if (std.mem.eql(u8, name.base, "atan_Double")) return .{ .float_instruction = .fatan };
+        if (std.mem.eql(u8, name.base, "sinh_Double")) return .{ .float_instruction = .fsinh };
+        if (std.mem.eql(u8, name.base, "cosh_Double")) return .{ .float_instruction = .fcosh };
+        if (std.mem.eql(u8, name.base, "tanh_Double")) return .{ .float_instruction = .ftanh };
 
         // Monad operations for IO (do-notation desugaring, issue #464)
         // In M1, >> and >>= are no-ops that return unit. The actual sequencing
@@ -347,6 +361,42 @@ const FloatOp = enum {
     // Conversions between the boxed representations.
     i2d, // intToDouble : Int -> Double  (sitofp, re-boxed as Float)
     d2i, // doubleToInt : Double -> Int  (fptosi, tagged immediate)
+    // Transcendental functions (#895) → libm calls (`double @sqrt(double)`
+    // etc., linked via `-lm`), result re-boxed as Float.  `fpow` is the
+    // only binary one.
+    fsqrt,
+    fexp,
+    flog,
+    fpow,
+    fsin,
+    fcos,
+    ftan,
+    fasin,
+    facos,
+    fatan,
+    fsinh,
+    fcosh,
+    ftanh,
+
+    /// The libm symbol for a transcendental op; null for non-libm ops.
+    fn libmName(self: FloatOp) ?[*:0]const u8 {
+        return switch (self) {
+            .fsqrt => "sqrt",
+            .fexp => "exp",
+            .flog => "log",
+            .fpow => "pow",
+            .fsin => "sin",
+            .fcos => "cos",
+            .ftan => "tan",
+            .fasin => "asin",
+            .facos => "acos",
+            .fatan => "atan",
+            .fsinh => "sinh",
+            .fcosh => "cosh",
+            .ftanh => "tanh",
+            else => null,
+        };
+    }
 };
 
 /// A translated PrimOp result
@@ -479,6 +529,16 @@ fn declareRtsSetBackend(module: llvm.Module) llvm.Value {
     if (c.LLVMGetNamedFunction(module, name)) |existing| return existing;
     var params = [_]llvm.Type{llvm.i32Type()};
     const fn_ty = c.LLVMFunctionType(llvm.voidType(), &params, 1, 0);
+    return c.LLVMAddFunction(module, name, fn_ty);
+}
+
+/// Get-or-declare a libm math function `double name(double)` /
+/// `double name(double, double)`.  External — resolved by the system
+/// libm at link time (`-lm`, see `src/backend/linker.zig` callers).
+fn declareLibmFn(module: llvm.Module, name: [*:0]const u8, n_args: u32) llvm.Value {
+    if (c.LLVMGetNamedFunction(module, name)) |existing| return existing;
+    var params = [_]llvm.Type{ c.LLVMDoubleType(), c.LLVMDoubleType() };
+    const fn_ty = c.LLVMFunctionType(c.LLVMDoubleType(), &params, n_args, 0);
     return c.LLVMAddFunction(module, name, fn_ty);
 }
 
@@ -2967,6 +3027,16 @@ pub const GrinTranslator = struct {
                 const d = c.LLVMBuildSIToFP(self.builder, iv, c.LLVMDoubleType(), "i2d");
                 return try self.boxFloat(d);
             },
+            // Unary transcendentals → libm call (#895).
+            .fsqrt, .fexp, .flog, .fsin, .fcos, .ftan, .fasin, .facos, .fatan, .fsinh, .fcosh, .ftanh => {
+                if (args.len < 1) return error.UnsupportedGrinVal;
+                const libm_name = op.libmName().?;
+                const x = try self.unboxFloatOperand(args[0]);
+                const f = declareLibmFn(self.module, libm_name, 1);
+                var call_args = [_]llvm.Value{x};
+                const r = c.LLVMBuildCall2(self.builder, llvm.getFunctionType(f), f, &call_args, 1, libm_name);
+                return try self.boxFloat(r);
+            },
             else => {},
         }
 
@@ -2986,7 +3056,18 @@ pub const GrinTranslator = struct {
             .fle => return c.LLVMBuildFCmp(self.builder, @as(c_uint, @bitCast(c.LLVMRealOLE)), lhs, rhs, "fle"),
             .fgt => return c.LLVMBuildFCmp(self.builder, @as(c_uint, @bitCast(c.LLVMRealOGT)), lhs, rhs, "fgt"),
             .fge => return c.LLVMBuildFCmp(self.builder, @as(c_uint, @bitCast(c.LLVMRealOGE)), lhs, rhs, "fge"),
-            .fneg, .d2i, .i2d => unreachable, // handled above
+            // Binary transcendental → libm call (#895).
+            .fpow => {
+                const f = declareLibmFn(self.module, "pow", 2);
+                var call_args = [_]llvm.Value{ lhs, rhs };
+                const r = c.LLVMBuildCall2(self.builder, llvm.getFunctionType(f), f, &call_args, 2, "pow");
+                return try self.boxFloat(r);
+            },
+            // zig fmt: off
+            .fneg, .d2i, .i2d,
+            .fsqrt, .fexp, .flog, .fsin, .fcos, .ftan,
+            .fasin, .facos, .fatan, .fsinh, .fcosh, .ftanh => unreachable, // handled above
+            // zig fmt: on
         }
     }
 

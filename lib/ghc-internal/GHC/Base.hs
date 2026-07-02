@@ -27,6 +27,7 @@ module GHC.Base
     -- Classes
     , Num(..)
     , Fractional(..)
+    , Floating(..)
     , Eq(..)
     , Ord(..)
     , Bounded(..)
@@ -62,6 +63,7 @@ type String = [Char]
 
 infixl 6 +, -
 infixl 7 *, /, `div`, `mod`
+infixr 8 **
 infix  4 ==, /=, <, >, <=, >=
 infixr 3 &&
 infixr 2 ||
@@ -188,6 +190,53 @@ instance Fractional Double where
   -- self-contained and does not dispatch through its own dictionary
   -- while it is being constructed (#881).
   recip x = primDivDouble 1.0 x
+
+-- ========================================================================
+-- Floating type class
+-- ========================================================================
+--
+-- Haskell 2010 §6.4.3, minus `asinh`/`acosh`/`atanh`: their standard
+-- log-based definitions need `Num a` / `Fractional a` over the class
+-- type variable, which requires superclass contexts (#889).  The
+-- superclass `Fractional a =>` is omitted in the same style as the
+-- other GHC.Base classes (#889).  The Double instance is lowered to
+-- libm calls (#895).
+
+class Floating a where
+  pi      :: a
+  exp     :: a -> a
+  log     :: a -> a
+  sqrt    :: a -> a
+  (**)    :: a -> a -> a
+  logBase :: a -> a -> a
+  sin     :: a -> a
+  cos     :: a -> a
+  tan     :: a -> a
+  asin    :: a -> a
+  acos    :: a -> a
+  atan    :: a -> a
+  sinh    :: a -> a
+  cosh    :: a -> a
+  tanh    :: a -> a
+
+instance Floating Double where
+  pi      = 3.141592653589793
+  exp     = primExpDouble
+  log     = primLogDouble
+  sqrt    = primSqrtDouble
+  (**)    = primPowDouble
+  -- Written with primops so the instance does not dispatch through its
+  -- own dictionary while it is being constructed (#881).
+  logBase b x = primDivDouble (primLogDouble x) (primLogDouble b)
+  sin     = primSinDouble
+  cos     = primCosDouble
+  tan     = primTanDouble
+  asin    = primAsinDouble
+  acos    = primAcosDouble
+  atan    = primAtanDouble
+  sinh    = primSinhDouble
+  cosh    = primCoshDouble
+  tanh    = primTanhDouble
 
 -- ========================================================================
 -- Integral / ordering helpers (still monomorphic on Int, pending the
