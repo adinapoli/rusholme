@@ -1939,6 +1939,12 @@ fn inferLetDecl(
             // Pre-allocate a meta node for the function (enables recursion).
             const fun_node = try ctx.freshMeta();
             try ctx.env.bindMono(fb.name, fun_node.*);
+            // Record the binder in `local_binders` so the desugarer can
+            // resolve later *uses* of it in the do-block.  Without this a
+            // do-`let`-bound value is in neither `local_binders` nor
+            // `schemes` at desugar time and panics the `.Var` arm (#891).
+            // Mirrors Pass 1 of the `.Let` expression arm.
+            try ctx.local_binders.put(ctx.alloc, fb.name.unique, fun_node);
 
             // Infer each equation and unify *through* fun_node.
             for (fb.equations) |eq| {
@@ -1963,11 +1969,19 @@ fn inferLetDecl(
                     .body = s.ty.*,
                 };
                 try ctx.env.bind(fb.name, scheme);
+                // Persist for the desugarer so a constrained local
+                // binding gets its dictionary threaded (#875).
+                if (scheme.constraints.len > 0)
+                    try ctx.local_schemes.put(ctx.alloc, fb.name.unique, scheme);
             } else {
                 const mr = ctx.apply_monomorphism_restriction and
                     fb.equations.len == 1 and fb.equations[0].patterns.len == 0;
                 const scheme = try generalisePtr(ctx, fun_node, &env_metas, mr);
                 try ctx.env.bind(fb.name, scheme);
+                // Persist for the desugarer so a constrained local
+                // binding gets its dictionary threaded (#875).
+                if (scheme.constraints.len > 0)
+                    try ctx.local_schemes.put(ctx.alloc, fb.name.unique, scheme);
             }
         },
         .PatBind => |pb| {
