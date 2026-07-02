@@ -666,57 +666,25 @@ pub const TranslationError = error{
 /// HPT-Lite: Lightweight type propagation environment for LLVM codegen.
 ///
 /// This is a simplified version of full Heap Points-to Analysis.
-/// It tracks the FieldType of each GRIN variable so the LLVM backend
-/// can emit correctly-typed IR (ptr vs i64 vs f64).
+/// It resolves the FieldType of constructor fields so the LLVM backend
+/// can name pattern-match loads by intent (heap pointer vs function
+/// pointer).  Field slots are uniformly boxed — see `grin.FieldType`
+/// (#884) — so there is no i64/f64 slot typing here.
 ///
 /// See: https://github.com/adinapoli/rusholme/issues/449
 /// TODO: Replace with full HPT when implementing M2.4.
 const TypeEnv = struct {
-    /// Maps variable unique IDs to their FieldType.
-    var_types: std.AutoHashMapUnmanaged(u64, FieldType),
     /// Reference to the tag registry for constructor field types.
     registry: *const TagRegistry,
 
     fn init() TypeEnv {
         return .{
-            .var_types = .{},
             .registry = undefined,
         };
     }
 
-    fn deinit(self: *TypeEnv, alloc: std.mem.Allocator) void {
-        self.var_types.deinit(alloc);
-    }
-
     fn setRegistry(self: *TypeEnv, reg: *const TagRegistry) void {
         self.registry = reg;
-    }
-
-    fn setVarType(self: *TypeEnv, alloc: std.mem.Allocator, name: grin.Name, ft: FieldType) !void {
-        try self.var_types.put(alloc, name.unique.value, ft);
-    }
-
-    fn getVarType(self: *const TypeEnv, name: grin.Name) ?FieldType {
-        return self.var_types.get(name.unique.value);
-    }
-
-    /// Get the type of a GRIN value for LLVM codegen.
-    /// Falls back to .ptr (conservative) if type is unknown.
-    fn getValType(self: *const TypeEnv, val: grin.Val) FieldType {
-        return switch (val) {
-            .Lit => |lit| switch (lit) {
-                .Int => .i64,
-                .Float => .f64,
-                .Char => .i64,
-                .String => .ptr,
-                .Bool => .i64,
-            },
-            .Unit => .i64, // Unit is unboxed
-            .Var => |name| self.getVarType(name) orelse .ptr,
-            .ConstTagNode => .ptr, // Allocated node is always a pointer
-            .ValTag => .i64, // Bare tags are i64 discriminants
-            .VarTagNode => .ptr, // Variable-tag nodes are pointers
-        };
     }
 
     /// Get the type of a field at the given index for a constructor.
@@ -862,7 +830,6 @@ pub const GrinTranslator = struct {
         self.imm_vars.deinit();
         self.case_entry_cache.deinit();
         // registry is not owned — do not deinit it.
-        self.type_env.deinit(self.allocator);
         llvm.disposeBuilder(self.builder);
         // Do NOT dispose `self.ctx`: it is the LLVM global context,
         // shared across the whole process.  Modules created within it
@@ -3576,21 +3543,17 @@ pub const GrinTranslator = struct {
                         nullTerminate(field_name.base).ptr,
                     );
 
-                    // Get the expected field type from TypeEnv/TagTable.
+                    // Field slots are uniformly boxed (#884): every slot
+                    // holds a heap-node pointer or a tagged immediate, so
+                    // the load is always an inttoptr — the FieldType only
+                    // picks the SSA name for readability.
                     const field_type = self.type_env.getFieldTagType(np.tag, @intCast(fi));
-
-                    // Convert the loaded i64 to the appropriate type.
                     const final_val: llvm.Value = switch (field_type) {
-                        .i64 => loaded_i64,
-                        .f64 => c.LLVMBuildBitCast(self.builder, loaded_i64, c.LLVMDoubleType(), "as_f64"),
                         .ptr => c.LLVMBuildIntToPtr(self.builder, loaded_i64, ptrType(), "as_ptr"),
                         .fn_ptr => c.LLVMBuildIntToPtr(self.builder, loaded_i64, ptrType(), "as_fn_ptr"),
                     };
 
                     try self.bindAndRoot(field_name.unique.value, final_val);
-
-                    // Record the type in TypeEnv for downstream use.
-                    try self.type_env.setVarType(self.allocator, field_name, field_type);
                 }
             }
 
@@ -3738,16 +3701,14 @@ pub const GrinTranslator = struct {
                         nullTerminate(field_name.base).ptr,
                     );
 
+                    // Uniformly boxed field slots (#884) — see translateCase.
                     const field_type = self.type_env.getFieldTagType(np.tag, @intCast(fi));
                     const final_val: llvm.Value = switch (field_type) {
-                        .i64 => loaded_i64,
-                        .f64 => c.LLVMBuildBitCast(self.builder, loaded_i64, c.LLVMDoubleType(), "as_f64"),
                         .ptr => c.LLVMBuildIntToPtr(self.builder, loaded_i64, ptrType(), "as_ptr"),
                         .fn_ptr => c.LLVMBuildIntToPtr(self.builder, loaded_i64, ptrType(), "as_fn_ptr"),
                     };
 
                     try self.bindAndRoot(field_name.unique.value, final_val);
-                    try self.type_env.setVarType(self.allocator, field_name, field_type);
                 }
             }
 
