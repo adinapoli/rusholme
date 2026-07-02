@@ -171,7 +171,10 @@ instance Num Double where
 --
 -- Haskell 2010 declares `class Num a => Fractional a`; the superclass
 -- context is omitted here in the same style as the other GHC.Base classes
--- (`Ord` carries no `Eq a =>` either).  `fromRational` is intentionally
+-- (`Ord` carries no `Eq a =>` either) — the solver does not consume
+-- superclass contexts yet, tracked in
+-- https://github.com/adinapoli/rusholme/issues/889.
+-- `fromRational` is intentionally
 -- omitted until overloaded literals and `Rational` land (see #140 / #212),
 -- mirroring the `fromInteger` omission in `Num` above.
 
