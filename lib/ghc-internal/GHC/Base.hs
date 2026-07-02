@@ -26,6 +26,7 @@ module GHC.Base
     , intToDouble, doubleToInt
     -- Classes
     , Num(..)
+    , Fractional(..)
     , Eq(..)
     , Ord(..)
     , Bounded(..)
@@ -60,7 +61,7 @@ type String = [Char]
 -- ========================================================================
 
 infixl 6 +, -
-infixl 7 *, `div`, `mod`
+infixl 7 *, /, `div`, `mod`
 infix  4 ==, /=, <, >, <=, >=
 infixr 3 &&
 infixr 2 ||
@@ -163,6 +164,27 @@ instance Num Double where
       False -> case primGtDouble x 0.0 of
           True  -> 1.0
           False -> primNegDouble 1.0
+
+-- ========================================================================
+-- Fractional type class
+-- ========================================================================
+--
+-- Haskell 2010 declares `class Num a => Fractional a`; the superclass
+-- context is omitted here in the same style as the other GHC.Base classes
+-- (`Ord` carries no `Eq a =>` either).  `fromRational` is intentionally
+-- omitted until overloaded literals and `Rational` land (see #140 / #212),
+-- mirroring the `fromInteger` omission in `Num` above.
+
+class Fractional a where
+  (/)   :: a -> a -> a
+  recip :: a -> a
+
+instance Fractional Double where
+  (/) = primDivDouble
+  -- Written with the primop rather than `1.0 / x` so the instance is
+  -- self-contained and does not dispatch through its own dictionary
+  -- while it is being constructed (#881).
+  recip x = primDivDouble 1.0 x
 
 -- ========================================================================
 -- Integral / ordering helpers (still monomorphic on Int, pending the
