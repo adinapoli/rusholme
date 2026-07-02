@@ -244,9 +244,22 @@ pub fn desugarModule(
     var data_decls = std.ArrayListUnmanaged(ast_mod.CoreDataDecl).empty;
     errdefer data_decls.deinit(alloc);
 
-    // Pass 1: Process class and instance declarations first.
-    // This populates ctx.dict_names so that dictionary evidence resolution
-    // in Pass 2 can find the correct dictionary names.
+    // Pass 1a: Register every instance's dictionary name before desugaring
+    // any instance *body*.  An instance method may reference another
+    // instance's dictionary that is declared later in source order (e.g.
+    // `instance Num Int`'s `signum` using `==` from `instance Eq Int`);
+    // resolving evidence against an unregistered instance minted a dangling
+    // placeholder unique and failed at link time (#881).
+    for (module.declarations) |decl| {
+        switch (decl) {
+            .InstanceDecl => |id_decl| try registerInstanceDictName(&ctx, id_decl),
+            else => {},
+        }
+    }
+
+    // Pass 1b: Process class and instance declarations.
+    // This populates the selector functions and dictionary CAF binds; the
+    // dictionary names themselves were registered in Pass 1a.
     for (module.declarations) |decl| {
         switch (decl) {
             .ClassDecl => |cd| {
@@ -996,6 +1009,75 @@ fn synthRecordSelectors(
 }
 
 /// Desugar an instance declaration into a dictionary value binding.
+/// Find the `InstanceInfo` for an instance declaration by source span.
+///
+/// Needed to read the instance's HType head — both for the Rigid context
+/// lookup in `desugarInstanceDecl` and to decide the dictionary keying
+/// scheme (overlap groups key by full head).
+fn findInstanceInfo(
+    ctx: *DesugarCtx,
+    id_decl: renamer_mod.RInstanceDecl,
+) ?class_env_mod.InstanceInfo {
+    const instances_for_class = ctx.types.class_env.lookupInstances(id_decl.class_name.unique.value);
+    for (instances_for_class) |inst| {
+        if (inst.span.start.line == id_decl.span.start.line and
+            inst.span.start.column == id_decl.span.start.column)
+        {
+            return inst;
+        }
+    }
+    return null;
+}
+
+/// Compute the dictionary head-name key for an instance declaration.
+/// Convention: `dict$<ClassName>$<HeadType>` keys on this head name.
+///
+/// Instances that belong to an overlap group (e.g. `Describe [a]` and
+/// `Describe {-# OVERLAPPING #-} [Bool]`) key by full head (`List__`,
+/// `List_Bool`) so each overlapping instance gets a distinct dictionary;
+/// every other instance keeps the simpler head-constructor name, leaving
+/// non-overlapping programs byte-identical.
+fn instanceDictHeadName(
+    ctx: *DesugarCtx,
+    id_decl: renamer_mod.RInstanceDecl,
+    matched_inst: ?class_env_mod.InstanceInfo,
+) std.mem.Allocator.Error![]const u8 {
+    const class_env = &ctx.types.class_env;
+    if (matched_inst) |mi| {
+        if (class_env.inOverlapGroup(id_decl.class_name.unique.value, mi.head))
+            return mi.head.canonicalHeadKey(ctx.alloc);
+    }
+    return instanceHeadName(ctx.alloc, id_decl.instance_type);
+}
+
+/// Register the `dict$Class$Head` name for an instance declaration in
+/// `ctx.dict_names`.  Called for *every* instance in a pre-pass before any
+/// instance method body is desugared, so a body may reference any other
+/// instance's dictionary regardless of declaration order (#881).  Without
+/// the pre-pass, evidence resolution for a not-yet-registered instance
+/// minted a dangling placeholder unique and the program failed at link
+/// time (`undefined reference to dict$Eq$Int_NNNN`).
+fn registerInstanceDictName(
+    ctx: *DesugarCtx,
+    id_decl: renamer_mod.RInstanceDecl,
+) std.mem.Allocator.Error!void {
+    // Skip instances of unknown classes — desugarInstanceDecl ignores them.
+    if (ctx.types.class_env.lookupClass(id_decl.class_name.unique.value) == null) return;
+
+    const matched_inst = findInstanceInfo(ctx, id_decl);
+    const head_name = try instanceDictHeadName(ctx, id_decl, matched_inst);
+    const dict_name = Name{
+        .base = try std.fmt.allocPrint(ctx.alloc, "dict${s}${s}", .{ id_decl.class_name.base, head_name }),
+        .unique = ctx.u_supply.fresh(),
+    };
+    // Overwrites an imported dictionary entry for the same key, matching
+    // the pre-#881 behaviour: a locally-declared instance owns its key.
+    try ctx.dict_names.put(ctx.alloc, .{
+        .class_unique = id_decl.class_name.unique.value,
+        .head_name = head_name,
+    }, dict_name);
+}
+
 fn desugarInstanceDecl(
     ctx: *DesugarCtx,
     id_decl: renamer_mod.RInstanceDecl,
@@ -1011,47 +1093,24 @@ fn desugarInstanceDecl(
     // This ensures all instances use the same constructor unique (issue #569).
     const dict_con_name = class_info.dict_con_name;
 
-    // Find the InstanceInfo (matched by source span) so we can read its
-    // HType head — needed both for the Rigid context lookup below and to
-    // decide the dictionary keying scheme.
-    var matched_inst: ?class_env_mod.InstanceInfo = null;
-    {
-        const instances_for_class = class_env.lookupInstances(id_decl.class_name.unique.value);
-        for (instances_for_class) |inst| {
-            if (inst.span.start.line == id_decl.span.start.line and
-                inst.span.start.column == id_decl.span.start.column)
-            {
-                matched_inst = inst;
-                break;
-            }
-        }
-    }
+    const matched_inst = findInstanceInfo(ctx, id_decl);
 
-    // Build an instance dictionary name.  Convention: dict$<ClassName>$<HeadType>.
-    // Instances that belong to an overlap group (e.g. `Describe [a]` and
-    // `Describe {-# OVERLAPPING #-} [Bool]`) key by full head (`List__`,
-    // `List_Bool`) so each overlapping instance gets a distinct dictionary;
-    // every other instance keeps the simpler head-constructor name, leaving
-    // non-overlapping programs byte-identical.
-    const head_name = if (matched_inst) |mi|
-        (if (class_env.inOverlapGroup(id_decl.class_name.unique.value, mi.head))
-            try mi.head.canonicalHeadKey(alloc)
-        else
-            try instanceHeadName(alloc, id_decl.instance_type))
-    else
-        try instanceHeadName(alloc, id_decl.instance_type);
-
-    const dict_name = Name{
-        .base = try std.fmt.allocPrint(alloc, "dict${s}${s}", .{ id_decl.class_name.base, head_name }),
-        .unique = ctx.u_supply.fresh(),
-    };
-
-    // Register in the dict_names map so call-site evidence resolution can
-    // find the dictionary name for this (class, head_type) pair.
-    try ctx.dict_names.put(alloc, .{
+    // Look up the dictionary name registered by the pre-pass (#881).
+    const head_name = try instanceDictHeadName(ctx, id_decl, matched_inst);
+    const dict_key = DesugarCtx.DictNameKey{
         .class_unique = id_decl.class_name.unique.value,
         .head_name = head_name,
-    }, dict_name);
+    };
+    const dict_name = ctx.dict_names.get(dict_key) orelse blk: {
+        // Defensive: an instance that somehow skipped the pre-pass still
+        // gets a usable dictionary name.
+        const fresh = Name{
+            .base = try std.fmt.allocPrint(alloc, "dict${s}${s}", .{ id_decl.class_name.base, head_name }),
+            .unique = ctx.u_supply.fresh(),
+        };
+        try ctx.dict_names.put(alloc, dict_key, fresh);
+        break :blk fresh;
+    };
 
     // If the instance has context constraints (e.g. `Show a => Show [a]`),
     // pre-populate dict_param_names so that evidence resolution inside method

@@ -138,34 +138,31 @@ instance Num Int where
   (*) = primMulInt
   negate = primNegInt
   abs = primAbsInt
-  -- Written with primops rather than `==`/`>`/`negate` so the instance is
-  -- self-contained: a primitive instance must not depend on another
-  -- instance's dictionary (`Eq Int`, `Ord Int`) being registered first,
-  -- which is source-order-dependent in the desugarer.  Same style as the
-  -- `Eq Int` / `Ord Int` instances below.  Tracked in
-  -- https://github.com/adinapoli/rusholme/issues/881.
-  signum n = case primEqInt n 0 of
+  -- Dictionary references are order-independent (#881), so this may use
+  -- the `Eq Int` / `Ord Int` operators even though those instances are
+  -- declared later in this module.
+  signum n = case n == 0 of
       True  -> 0
-      False -> case primGtInt n 0 of
+      False -> case n > 0 of
           True  -> 1
-          False -> primNegInt 1
+          False -> negate 1
 
 instance Num Double where
   (+) = primAddDouble
   (-) = primSubDouble
   (*) = primMulDouble
   negate = primNegDouble
-  -- Self-contained via `Double` primops and `Double` literals — same
-  -- rationale as `instance Num Int` above (#881).  `fromInteger` is not yet
-  -- available, so `0.0`/`1.0` are written as floating literals.
-  abs x = case primLtDouble x 0.0 of
-      True  -> primNegDouble x
+  -- `fromInteger` is not yet available, so `0.0`/`1.0` are written as
+  -- floating literals.  Uses the `Eq Double` / `Ord Double` operators;
+  -- dictionary references are order-independent (#881).
+  abs x = case x < 0.0 of
+      True  -> negate x
       False -> x
-  signum x = case primEqDouble x 0.0 of
+  signum x = case x == 0.0 of
       True  -> 0.0
-      False -> case primGtDouble x 0.0 of
+      False -> case x > 0.0 of
           True  -> 1.0
-          False -> primNegDouble 1.0
+          False -> negate 1.0
 
 -- ========================================================================
 -- Fractional type class
