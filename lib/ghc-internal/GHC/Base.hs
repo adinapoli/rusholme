@@ -495,6 +495,12 @@ instance Show Int where
       True  -> '-' : showPosInt (0 - n)
       False -> showPosInt n
 
+instance Show Double where
+  -- Rendered by the RTS via Zig's shortest-round-trip formatter (#883).
+  -- Readable, not yet bit-for-bit GHC (scientific-notation thresholds
+  -- differ — tracked as a follow-up).
+  show = primShowDouble
+
 instance Show Bool where
   show b = case b of
       True  -> "True"

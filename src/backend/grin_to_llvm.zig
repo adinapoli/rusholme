@@ -236,6 +236,7 @@ const PrimOpMapping = struct {
         if (std.mem.eql(u8, name.base, "ge_Double")) return .{ .float_instruction = .fge };
         if (std.mem.eql(u8, name.base, "intToDouble")) return .{ .float_instruction = .i2d };
         if (std.mem.eql(u8, name.base, "doubleToInt")) return .{ .float_instruction = .d2i };
+        if (std.mem.eql(u8, name.base, "showDouble")) return .{ .show_double = {} };
 
         // Monad operations for IO (do-notation desugaring, issue #464)
         // In M1, >> and >>= are no-ops that return unit. The actual sequencing
@@ -353,6 +354,10 @@ const PrimOpResult = union(enum) {
     libcall: LibcFunction,
     instruction: LLVMInstruction,
     float_instruction: FloatOp,
+    /// `showDouble : Double -> [Char]` (#883).  Unboxes the Float operand,
+    /// renders it via `rts_show_double`, and converts the C string to a
+    /// `[Char]` heap list.
+    show_double: void,
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1931,8 +1936,9 @@ pub const GrinTranslator = struct {
                     break :blk app.args.len > 0 and self.valYieldsWhnf(app.args[0]);
                 if (PrimOpMapping.lookup(app.name)) |m|
                     // Integer instructions yield a tagged immediate; float
-                    // instructions yield a boxed Float node — both are WHNF.
-                    break :blk m == .instruction or m == .float_instruction;
+                    // instructions yield a boxed Float node; showDouble yields
+                    // a Cons/Nil list head — all are WHNF.
+                    break :blk m == .instruction or m == .float_instruction or m == .show_double;
                 // Direct call (or apply): result forced at the callee's
                 // return site per the calling convention above.
                 break :blk true;
@@ -2196,6 +2202,7 @@ pub const GrinTranslator = struct {
                     }
                     return c.LLVMConstPointerNull(ptrType());
                 },
+                .show_double => return try self.emitShowDouble(args),
             }
         }
 
@@ -2513,6 +2520,10 @@ pub const GrinTranslator = struct {
                 .float_instruction => |op| {
                     _ = try self.emitFloatInstruction(op, args);
                 },
+                .show_double => {
+                    // Pure; a discarded result still evaluates the operand.
+                    _ = try self.emitShowDouble(args);
+                },
             }
             return;
         }
@@ -2712,6 +2723,30 @@ pub const GrinTranslator = struct {
             3,
             "charlist",
         );
+    }
+
+    /// Emit `showDouble : Double -> [Char]` (#883): unbox the Float operand,
+    /// render it via `rts_show_double`, then convert the resulting C string
+    /// to a `[Char]` heap list (reusing the string-literal machinery).
+    fn emitShowDouble(self: *GrinTranslator, args: []const grin.Val) TranslationError!llvm.Value {
+        if (args.len < 1) return error.UnsupportedGrinVal;
+        const d = try self.unboxFloatOperand(args[0]);
+        const show_fn = blk: {
+            if (c.LLVMGetNamedFunction(self.module, "rts_show_double")) |f| break :blk f;
+            var param_types = [_]llvm.Type{c.LLVMDoubleType()};
+            const ft = c.LLVMFunctionType(ptrType(), &param_types, 1, 0);
+            break :blk llvm.addFunction(self.module, "rts_show_double", ft);
+        };
+        var call_args = [_]llvm.Value{d};
+        const cstr = c.LLVMBuildCall2(
+            self.builder,
+            c.LLVMGlobalGetValueType(show_fn),
+            show_fn,
+            &call_args,
+            1,
+            "show_double_cstr",
+        );
+        return self.emitCstringToCharlist(cstr);
     }
 
     /// Emit an LLVM instruction for a GRIN primop application.

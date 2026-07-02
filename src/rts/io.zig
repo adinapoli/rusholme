@@ -177,6 +177,54 @@ pub export fn rts_cstring_to_charlist(str: [*:0]const u8, cons_disc: u64, nil_di
     return tail;
 }
 
+/// Render a `Double` to a heap-allocated null-terminated C string (#883).
+///
+/// Called `rts_show_double` from LLVM-generated code (the `showDouble`
+/// primop backing `instance Show Double`).  Uses Zig's shortest-round-trip
+/// float formatter, then ensures the result is recognisably a `Double` by
+/// appending `.0` when the shortest decimal carries no fractional part or
+/// exponent — so integral values print as `5.0`, matching GHC.
+///
+/// This is a *readable* renderer, not bit-for-bit GHC-compatible: GHC's
+/// scientific-notation thresholds (it switches to `1.0e-2` / `1.0e7`-style
+/// outside `[0.1, 1e7)`) are not reproduced here.  Bit-exact formatting is
+/// tracked as a follow-up to #883.
+pub export fn rts_show_double(value: f64) [*:0]const u8 {
+    const heap_alloc = @import("heap.zig").allocator();
+    if (std.math.isNan(value)) return dupZ(heap_alloc, "NaN");
+    if (std.math.isInf(value)) return dupZ(heap_alloc, if (value < 0) "-Infinity" else "Infinity");
+
+    var buf: [64]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "{d}", .{value}) catch @panic("rts_show_double: format");
+
+    // A fractional/exponent marker means the value already reads as a Double.
+    var has_marker = false;
+    for (s) |ch| {
+        if (ch == '.' or ch == 'e' or ch == 'E') {
+            has_marker = true;
+            break;
+        }
+    }
+
+    const total = if (has_marker) s.len else s.len + 2;
+    const out = heap_alloc.alloc(u8, total + 1) catch @panic("OOM in rts_show_double");
+    @memcpy(out[0..s.len], s);
+    if (!has_marker) {
+        out[s.len] = '.';
+        out[s.len + 1] = '0';
+    }
+    out[total] = 0;
+    return @ptrCast(out.ptr);
+}
+
+/// Duplicate a static string onto the RTS heap as a null-terminated C string.
+fn dupZ(alloc: std.mem.Allocator, s: []const u8) [*:0]const u8 {
+    const out = alloc.alloc(u8, s.len + 1) catch @panic("OOM in dupZ");
+    @memcpy(out[0..s.len], s);
+    out[s.len] = 0;
+    return @ptrCast(out.ptr);
+}
+
 /// Print an error message to stderr and terminate the program with exit code 1.
 ///
 /// Implements the `error :: String -> a` Haskell primitive.  Called
@@ -209,6 +257,33 @@ test "rts_putChar is callable" {
 
 test "rts_cstring_to_charlist is callable" {
     _ = &rts_cstring_to_charlist;
+}
+
+test "rts_show_double renders integral values with .0" {
+    @import("heap.zig").init();
+    defer @import("heap.zig").deinit();
+
+    const cases = [_]struct { v: f64, want: []const u8 }{
+        .{ .v = 5.0, .want = "5.0" },
+        .{ .v = 0.0, .want = "0.0" },
+        .{ .v = -3.25, .want = "-3.25" },
+        .{ .v = 2.5, .want = "2.5" },
+        .{ .v = 100.0, .want = "100.0" },
+        .{ .v = 42.0, .want = "42.0" },
+    };
+    for (cases) |case| {
+        const got = std.mem.span(rts_show_double(case.v));
+        try std.testing.expectEqualStrings(case.want, got);
+    }
+}
+
+test "rts_show_double renders non-finite values GHC-style" {
+    @import("heap.zig").init();
+    defer @import("heap.zig").deinit();
+
+    try std.testing.expectEqualStrings("Infinity", std.mem.span(rts_show_double(std.math.inf(f64))));
+    try std.testing.expectEqualStrings("-Infinity", std.mem.span(rts_show_double(-std.math.inf(f64))));
+    try std.testing.expectEqualStrings("NaN", std.mem.span(rts_show_double(std.math.nan(f64))));
 }
 
 test "rts_error is callable" {

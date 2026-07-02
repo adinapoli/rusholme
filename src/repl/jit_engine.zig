@@ -440,6 +440,7 @@ pub const JitEngine = struct {
             .{ .name = "rts_putChar", .addr = @intFromPtr(&rts_io.rts_putChar) },
             .{ .name = "rts_charlist_to_cstring", .addr = @intFromPtr(&rts_io.rts_charlist_to_cstring) },
             .{ .name = "rts_cstring_to_charlist", .addr = @intFromPtr(&rts_io.rts_cstring_to_charlist) },
+            .{ .name = "rts_show_double", .addr = @intFromPtr(&rts_io.rts_show_double) },
             .{ .name = "rts_error", .addr = @intFromPtr(&rts_io.rts_error) },
         };
 

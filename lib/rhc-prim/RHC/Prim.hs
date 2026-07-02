@@ -20,6 +20,7 @@ module RHC.Prim
     , primAddDouble, primSubDouble, primMulDouble, primDivDouble, primNegDouble
     , primEqDouble, primNeDouble, primLtDouble, primLeDouble, primGtDouble, primGeDouble
     , intToDouble, doubleToInt
+    , primShowDouble
     , primPutChar, primPutStr, primPutStrLn
     , primError
     , intToChar, charToInt
@@ -65,6 +66,12 @@ foreign import prim "ge_Double" primGeDouble :: Double -> Double -> Bool
 
 foreign import prim "intToDouble" intToDouble :: Int -> Double
 foreign import prim "doubleToInt" doubleToInt :: Double -> Int
+
+-- ── Double rendering ─────────────────────────────────────────────────
+-- Renders via the RTS (Zig's shortest-round-trip float formatter); see
+-- `instance Show Double` in GHC.Base (#883).
+
+foreign import prim "showDouble" primShowDouble :: Double -> [Char]
 
 -- ── Character ↔ Int ──────────────────────────────────────────────────
 

@@ -200,6 +200,10 @@ test "e2e: e2e_880_num_double (#880)" {
     try testE2e(std.testing.allocator, "e2e_880_num_double");
 }
 
+test "e2e: e2e_883_show_double (#883)" {
+    try testE2e(std.testing.allocator, "e2e_883_show_double");
+}
+
 test "e2e: e2e_019_where_local_function (#623)" {
     try testE2e(std.testing.allocator, "e2e_019_where_local_function");
 }
