@@ -20,6 +20,7 @@ module Prelude
     , intToChar, charToInt
     , intToDouble, doubleToInt
     , Num(..)
+    , Fractional(..)
     , Eq(..)
     , Ord(..)
     , Bounded(..)
