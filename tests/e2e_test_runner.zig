@@ -220,6 +220,10 @@ test "e2e: e2e_881_forward_dict_ref (#881)" {
     try testE2e(std.testing.allocator, "e2e_881_forward_dict_ref");
 }
 
+test "e2e: e2e_891_do_let_adt (#891)" {
+    try testE2e(std.testing.allocator, "e2e_891_do_let_adt");
+}
+
 test "e2e: e2e_019_where_local_function (#623)" {
     try testE2e(std.testing.allocator, "e2e_019_where_local_function");
 }
