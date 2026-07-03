@@ -212,6 +212,10 @@ test "e2e: e2e_895_floating_double (#895)" {
     try testE2e(std.testing.allocator, "e2e_895_floating_double");
 }
 
+test "e2e: e2e_889_superclass_entailment (#889)" {
+    try testE2e(std.testing.allocator, "e2e_889_superclass_entailment");
+}
+
 test "e2e: e2e_884_double_adt_fields (#884)" {
     try testE2e(std.testing.allocator, "e2e_884_double_adt_fields");
 }

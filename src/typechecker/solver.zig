@@ -137,13 +137,6 @@ pub const DictEvidence = union(enum) {
         /// different tyvar_uniques.  Zero means unknown / not a Rigid.
         tyvar_unique: u64,
     },
-    /// Satisfied by extracting a superclass dictionary.
-    /// E.g., `Eq` from an `Ord` dictionary via a superclass selector.
-    superclass: struct {
-        class_name: class_env_mod.Name,
-        sub_evidence: *const DictEvidence,
-        super_index: u32,
-    },
 };
 
 // ── Solver ─────────────────────────────────────────────────────────────

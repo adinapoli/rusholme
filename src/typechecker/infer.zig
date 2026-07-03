@@ -2213,6 +2213,39 @@ pub fn inferModule(
         }
     }
 
+    // Pass 0a′: superclass obligations for local instance declarations (#889).
+    //
+    // For `instance C τ` where `class S a => C a`, Haskell 2010 requires an
+    // `S τ` instance in scope.  Push one wanted `S τ` per superclass: the
+    // solver resolves it (emitting E002 `missing instance` at the instance
+    // span when absent), and the desugarer consumes the evidence to embed
+    // the superclass dictionary in the instance's dictionary value.  The
+    // entry is keyed for the desugarer by (class unique, instance span,
+    // superclass unique).  Runs after Pass 0a so classes declared later in
+    // the module are already registered.
+    for (module.declarations) |decl| {
+        switch (decl) {
+            .InstanceDecl => |id_decl| {
+                const instances = ctx.class_env.lookupInstances(id_decl.class_name.unique.value);
+                for (instances) |inst| {
+                    if (inst.span.start.line != id_decl.span.start.line or
+                        inst.span.start.column != id_decl.span.start.column) continue;
+                    for (ctx.class_env.superclasses(id_decl.class_name.unique.value)) |sc_name| {
+                        const head_ptr = try ctx.alloc_ty(inst.head);
+                        try ctx.wanted_constraints.append(ctx.alloc, .{ .Class = .{
+                            .class_name = sc_name,
+                            .ty = head_ptr,
+                            .span = id_decl.span,
+                            .var_unique = id_decl.class_name.unique,
+                        } });
+                    }
+                    break;
+                }
+            },
+            else => {},
+        }
+    }
+
     // Pass 0b: Collect type signatures and convert them to HType.
     //
     // Must run after Pass 0a so that class names are in ClassEnv when

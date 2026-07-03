@@ -575,7 +575,11 @@ fn desugarClassDecl(
         },
     };
 
-    // Build constructor type: field1 -> field2 -> ... -> Dict$Class a
+    // Build constructor type: sc1 -> ... -> field1 -> field2 -> ... -> Dict$Class a
+    //
+    // Superclass dictionary fields come FIRST, before the method fields,
+    // mirroring GHC's dictionary layout (#889):
+    //   class Eq a => Ord a  ⇒  MkDict$Ord :: Dict$Eq a -> compare_ty -> ... -> Dict$Ord a
     var con_ty: ast_mod.CoreType = dict_result_ty;
     {
         var i = class_info.methods.len;
@@ -585,6 +589,17 @@ fn desugarClassDecl(
             const method_core_ty = try method_htype.toCore(alloc);
             const p_arg = try alloc.create(ast_mod.CoreType);
             p_arg.* = method_core_ty;
+            const p_res = try alloc.create(ast_mod.CoreType);
+            p_res.* = con_ty;
+            con_ty = ast_mod.CoreType{ .FunTy = .{ .arg = p_arg, .res = p_res } };
+        }
+    }
+    {
+        var i = class_info.superclasses.len;
+        while (i > 0) {
+            i -= 1;
+            const p_arg = try alloc.create(ast_mod.CoreType);
+            p_arg.* = try dictPlaceholderTy(alloc, class_info.superclasses[i].base);
             const p_res = try alloc.create(ast_mod.CoreType);
             p_res.* = con_ty;
             con_ty = ast_mod.CoreType{ .FunTy = .{ .arg = p_arg, .res = p_res } };
@@ -617,15 +632,27 @@ fn desugarClassDecl(
     // The selector uses the ORIGINAL method Name so downstream references
     // (from user code) resolve correctly.
 
+    const num_supers = class_info.superclasses.len;
     for (class_info.methods, 0..) |method, method_idx| {
-        // Build field binders for the case alternative
-        var field_binders = try alloc.alloc(ast_mod.Id, class_info.methods.len);
+        // Build field binders for the case alternative: superclass dictionary
+        // slots first (#889), then one slot per method.
+        var field_binders = try alloc.alloc(ast_mod.Id, num_supers + class_info.methods.len);
+        for (class_info.superclasses, 0..) |sc, j| {
+            field_binders[j] = ast_mod.Id{
+                .name = Name{
+                    .base = try std.fmt.allocPrint(alloc, "sc{d}", .{j}),
+                    .unique = ctx.u_supply.fresh(),
+                },
+                .ty = try dictPlaceholderTy(alloc, sc.base),
+                .span = cd.span,
+            };
+        }
         for (class_info.methods, 0..) |m, j| {
             const field_name = Name{
                 .base = try std.fmt.allocPrint(alloc, "f{d}", .{j}),
                 .unique = ctx.u_supply.fresh(),
             };
-            field_binders[j] = ast_mod.Id{
+            field_binders[num_supers + j] = ast_mod.Id{
                 .name = field_name,
                 .ty = try m.ty.toCore(alloc),
                 .span = cd.span,
@@ -675,7 +702,7 @@ fn desugarClassDecl(
         // `f_i x0 x1 ...`
         var case_body: *const ast_mod.Expr = blk: {
             const v = try alloc.create(ast_mod.Expr);
-            v.* = ast_mod.Expr{ .Var = field_binders[method_idx] };
+            v.* = ast_mod.Expr{ .Var = field_binders[num_supers + method_idx] };
             break :blk v;
         };
         for (eta_binders) |eb| {
@@ -1341,8 +1368,43 @@ fn desugarInstanceDecl(
         }
     }
 
-    // Build: MkDict$Class method1 method2 ...
-    // This is a chain of App nodes: ((MkDict$Class m1) m2) ...
+    // Superclass dictionary arguments (#889): for `instance C τ` where
+    // `class S a => C a`, the dictionary embeds the `S τ` dictionary as its
+    // first field(s).  The evidence was solved during type inference from
+    // the wanted `S τ` pushed at the instance declaration (keyed by the
+    // class unique + instance span); a missing superclass instance already
+    // produced an E002 diagnostic there, so the fallback here only guards
+    // against desugaring after a reported type error.
+    const superclass_names = class_env.superclasses(id_decl.class_name.unique.value);
+    var super_exprs = try alloc.alloc(*const ast_mod.Expr, superclass_names.len);
+    for (superclass_names, 0..) |sc_name, j| {
+        const ev_key = DesugarCtx.EvidenceKey{
+            .var_unique = id_decl.class_name.unique.value,
+            .span_start_line = id_decl.span.start.line,
+            .span_start_col = id_decl.span.start.column,
+            .class_unique = sc_name.unique.value,
+        };
+        if (ctx.evidence_map.get(ev_key)) |ev| {
+            super_exprs[j] = try buildDictExpr(ctx, ev, id_decl.span);
+        } else {
+            // Best-effort fallback: reference the superclass dictionary at
+            // the same head directly.
+            const sc_dict = lookupDictName(&ctx.dict_names, sc_name.unique.value, head_name) orelse Name{
+                .base = try std.fmt.allocPrint(alloc, "dict${s}${s}", .{ sc_name.base, head_name }),
+                .unique = .{ .value = 0 },
+            };
+            const v = try alloc.create(ast_mod.Expr);
+            v.* = .{ .Var = .{
+                .name = sc_dict,
+                .ty = try dictPlaceholderTy(alloc, sc_name.base),
+                .span = id_decl.span,
+            } };
+            super_exprs[j] = v;
+        }
+    }
+
+    // Build: MkDict$Class sc1 ... method1 method2 ...
+    // This is a chain of App nodes: (((MkDict$Class sc1) m1) m2) ...
     const con_ty = ast_mod.CoreType{ .TyCon = .{ .name = dict_con_name, .args = &.{} } };
     var dict_expr: *const ast_mod.Expr = blk: {
         const p = try alloc.create(ast_mod.Expr);
@@ -1355,6 +1417,18 @@ fn desugarInstanceDecl(
         };
         break :blk p;
     };
+
+    for (super_exprs) |sc_expr| {
+        const app = try alloc.create(ast_mod.Expr);
+        app.* = ast_mod.Expr{
+            .App = .{
+                .fn_expr = dict_expr,
+                .arg = sc_expr,
+                .span = id_decl.span,
+            },
+        };
+        dict_expr = app;
+    }
 
     for (method_exprs) |method_expr| {
         const app = try alloc.create(ast_mod.Expr);
@@ -1511,13 +1585,149 @@ fn wrapWithDictLambdas(
     return current;
 }
 
+/// Placeholder Core type for a class dictionary: `Dict$<Class>` with a zero
+/// unique.  Dictionary types are not consulted by GRIN translation, matching
+/// the existing convention throughout this file.
+fn dictPlaceholderTy(alloc: std.mem.Allocator, class_base: []const u8) std.mem.Allocator.Error!ast_mod.CoreType {
+    return .{ .TyCon = .{
+        .name = Name{
+            .base = try std.fmt.allocPrint(alloc, "Dict${s}", .{class_base}),
+            .unique = .{ .value = 0 },
+        },
+        .args = &.{},
+    } };
+}
+
+/// One step of a superclass extraction chain: at class `info`, select the
+/// `super_index`-th superclass dictionary field.
+const SuperStep = struct {
+    info: class_env_mod.ClassInfo,
+    super_index: usize,
+};
+
+/// Depth-first search through the superclass graph from `from_unique` to
+/// `target_unique`, recording the extraction steps in `path`.  The `path`
+/// doubles as the visited set (H2010 forbids superclass cycles, but user
+/// input is untrusted — a cycle must not hang the compiler).
+fn findSuperclassPath(
+    ctx: *DesugarCtx,
+    from_unique: u64,
+    target_unique: u64,
+    path: *std.ArrayListUnmanaged(SuperStep),
+) std.mem.Allocator.Error!bool {
+    for (path.items) |step| {
+        if (step.info.name.unique.value == from_unique) return false;
+    }
+    const info = ctx.types.class_env.lookupClass(from_unique) orelse return false;
+    for (info.superclasses, 0..) |sc, idx| {
+        try path.append(ctx.alloc, .{ .info = info, .super_index = idx });
+        if (sc.unique.value == target_unique) return true;
+        if (try findSuperclassPath(ctx, sc.unique.value, target_unique, path)) return true;
+        _ = path.pop();
+    }
+    return false;
+}
+
+/// Emit `case <dict_expr> of MkDict$C sc0 .. scK f0 .. fN -> sc_<super_index>`
+/// — extract one superclass dictionary field from a dictionary value (#889).
+fn extractSuperclassField(
+    ctx: *DesugarCtx,
+    dict_expr: *const ast_mod.Expr,
+    step: SuperStep,
+    span: SourceSpan,
+) std.mem.Allocator.Error!*const ast_mod.Expr {
+    const alloc = ctx.alloc;
+    const info = step.info;
+    const total_fields = info.superclasses.len + info.methods.len;
+
+    var binders = try alloc.alloc(ast_mod.Id, total_fields);
+    for (0..total_fields) |j| {
+        binders[j] = ast_mod.Id{
+            .name = Name{
+                .base = try std.fmt.allocPrint(alloc, "d{d}", .{j}),
+                .unique = ctx.u_supply.fresh(),
+            },
+            .ty = try dictPlaceholderTy(alloc, info.name.base),
+            .span = span,
+        };
+    }
+
+    const body = try alloc.create(ast_mod.Expr);
+    body.* = ast_mod.Expr{ .Var = binders[step.super_index] };
+
+    const alt = ast_mod.Alt{
+        .con = .{ .DataAlt = info.dict_con_name },
+        .binders = binders,
+        .body = body,
+    };
+
+    const case_binder = ast_mod.Id{
+        .name = Name{ .base = "dict", .unique = ctx.u_supply.fresh() },
+        .ty = try dictPlaceholderTy(alloc, info.name.base),
+        .span = span,
+    };
+
+    const case_expr = try alloc.create(ast_mod.Expr);
+    case_expr.* = ast_mod.Expr{ .Case = .{
+        .scrutinee = dict_expr,
+        .binder = case_binder,
+        .ty = try dictPlaceholderTy(alloc, info.superclasses[step.super_index].base),
+        .alts = try alloc.dupe(ast_mod.Alt, &.{alt}),
+        .span = span,
+    } };
+    return case_expr;
+}
+
+/// Superclass entailment at dictionary-parameter resolution (#889).
+///
+/// A wanted constraint `C a` over a rigid `a` that is NOT one of the
+/// enclosing binding's dictionary parameters may still be entailed by one of
+/// them: for `f :: Ord a => ...` calling `(==)`, the wanted `Eq a` is
+/// satisfied by extracting the Eq dictionary embedded in the Ord dictionary
+/// parameter.  Search the given params for one whose class reaches
+/// `target_class` through the superclass graph and emit the extraction
+/// chain.  Returns null when no given entails the constraint.
+fn buildSuperclassEntailment(
+    ctx: *DesugarCtx,
+    target_class: Name,
+    tyvar_unique: u64,
+    span: SourceSpan,
+) std.mem.Allocator.Error!?*const ast_mod.Expr {
+    const alloc = ctx.alloc;
+    var it = ctx.dict_param_names.iterator();
+    while (it.next()) |entry| {
+        if (entry.key_ptr.tyvar_unique != tyvar_unique) continue;
+        if (entry.key_ptr.class_unique == target_class.unique.value) continue;
+
+        var path = std.ArrayListUnmanaged(SuperStep).empty;
+        defer path.deinit(alloc);
+        if (!try findSuperclassPath(ctx, entry.key_ptr.class_unique, target_class.unique.value, &path)) continue;
+
+        const given_class = ctx.types.class_env.lookupClass(entry.key_ptr.class_unique) orelse continue;
+        var expr: *const ast_mod.Expr = blk: {
+            const v = try alloc.create(ast_mod.Expr);
+            v.* = .{ .Var = .{
+                .name = entry.value_ptr.*,
+                .ty = try dictPlaceholderTy(alloc, given_class.name.base),
+                .span = span,
+            } };
+            break :blk v;
+        };
+        for (path.items) |step| {
+            expr = try extractSuperclassField(ctx, expr, step, span);
+        }
+        return expr;
+    }
+    return null;
+}
+
 /// Convert a `DictEvidence` to a Core expression.
 ///
 /// - `instance`: looks up the dictionary name from `ctx.dict_names` and
 ///   returns a `Var` reference.
 /// - `param`: returns a `Var` referencing the enclosing function's
-///   dictionary parameter (identified by class name).
-/// - `superclass`: not yet implemented (tracked by #558).
+///   dictionary parameter (identified by class name); when the class is not
+///   a direct parameter, falls back to superclass entailment (#889).
 fn buildDictExpr(
     ctx: *DesugarCtx,
     evidence: *const solver_mod.DictEvidence,
@@ -1586,17 +1796,21 @@ fn buildDictExpr(
             // body desugaring.  The compound key (class_unique, tyvar_unique)
             // correctly identifies which parameter to use when the same class
             // appears multiple times, e.g. `(Show a, Show b) =>`.
-            const node = try alloc.create(ast_mod.Expr);
             const dict_param_name = if (ctx.dict_param_names.get(.{
                 .class_unique = p.class_name.unique.value,
                 .tyvar_unique = p.tyvar_unique,
             })) |name|
                 name
+            else if (try buildSuperclassEntailment(ctx, p.class_name, p.tyvar_unique, span)) |extracted|
+                // Not a direct dictionary parameter, but entailed by one
+                // through the superclass graph (#889).
+                return extracted
             else
                 Name{
                     .base = try std.fmt.allocPrint(alloc, "dict${s}", .{p.class_name.base}),
                     .unique = .{ .value = 0 },
                 };
+            const node = try alloc.create(ast_mod.Expr);
             node.* = .{ .Var = .{
                 .name = dict_param_name,
                 .ty = ast_mod.CoreType{ .TyCon = .{
@@ -1604,20 +1818,6 @@ fn buildDictExpr(
                         .base = try std.fmt.allocPrint(alloc, "Dict${s}", .{p.class_name.base}),
                         .unique = .{ .value = 0 },
                     },
-                    .args = &.{},
-                } },
-                .span = span,
-            } };
-            return node;
-        },
-        .superclass => {
-            // tracked in: https://github.com/adinapoli/rusholme/issues/558
-            // For now, emit a placeholder that will fail at a later stage.
-            const node = try alloc.create(ast_mod.Expr);
-            node.* = .{ .Var = .{
-                .name = Name{ .base = "superclass_dict_placeholder", .unique = ctx.u_supply.fresh() },
-                .ty = ast_mod.CoreType{ .TyCon = .{
-                    .name = Name{ .base = "Dict", .unique = .{ .value = 0 } },
                     .args = &.{},
                 } },
                 .span = span,
