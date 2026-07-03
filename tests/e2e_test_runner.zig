@@ -216,6 +216,10 @@ test "e2e: e2e_889_superclass_entailment (#889)" {
     try testE2e(std.testing.allocator, "e2e_889_superclass_entailment");
 }
 
+test "e2e: e2e_901_shared_case_dominance (#901)" {
+    try testE2e(std.testing.allocator, "e2e_901_shared_case_dominance");
+}
+
 test "e2e: e2e_884_double_adt_fields (#884)" {
     try testE2e(std.testing.allocator, "e2e_884_double_adt_fields");
 }

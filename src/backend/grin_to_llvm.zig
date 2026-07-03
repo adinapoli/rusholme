@@ -709,6 +709,13 @@ pub const RtsBackend = enum(u32) {
     }
 };
 
+/// Cache key for translated shared Case blocks: the GRIN node identity plus
+/// the SSA value the scrutinee resolves to at the entry site (#901).
+const CaseCacheKey = struct {
+    node: usize,
+    scrut: usize,
+};
+
 pub const GrinTranslator = struct {
     ctx: llvm.Context,
     module: llvm.Module,
@@ -744,10 +751,19 @@ pub const GrinTranslator = struct {
     /// Per-function cache for translated GRIN Case expressions.  The
     /// sequential pattern-match desugarer creates shared fallback nodes
     /// (a DAG) that would be re-translated exponentially without caching.
-    /// Keyed by the GRIN expression pointer (as usize); value is the LLVM
-    /// basic block where the translated case's dispatch logic starts.
+    ///
+    /// Keyed by the GRIN expression pointer AND the scrutinee's currently
+    /// resolved SSA value (#901): the translated block embeds that value
+    /// (possibly a pre-forced rebinding from `noteForcedScrutinee` that
+    /// only dominates the creating path), so re-entering it from a context
+    /// where the scrutinee resolves differently would use a non-dominating
+    /// SSA value — invalid IR that silently miscompiles.  Sibling
+    /// alternatives of the same enclosing case resolve the same value
+    /// (the rebinding happens at the dispatch, before the alternatives),
+    /// so the exponential fallback-DAG shape still shares.  Value is the
+    /// LLVM basic block where the translated case's dispatch logic starts.
     /// Cleared at the start of each `translateDef` call.
-    case_entry_cache: std.AutoHashMap(usize, llvm.BasicBlock),
+    case_entry_cache: std.AutoHashMap(CaseCacheKey, llvm.BasicBlock),
     /// Persistent tag registry — owned externally (JIT engine or caller).
     registry: *TagRegistry,
     /// HPT-lite type environment for type-correct LLVM codegen.
@@ -817,7 +833,7 @@ pub const GrinTranslator = struct {
             .params = std.AutoHashMap(u64, llvm.Value).init(allocator),
             .whnf_vars = std.AutoHashMap(u64, void).init(allocator),
             .imm_vars = std.AutoHashMap(u64, void).init(allocator),
-            .case_entry_cache = std.AutoHashMap(usize, llvm.BasicBlock).init(allocator),
+            .case_entry_cache = std.AutoHashMap(CaseCacheKey, llvm.BasicBlock).init(allocator),
             .registry = registry,
             .type_env = TypeEnv.init(),
             .current_func = null,
@@ -1785,20 +1801,24 @@ pub const GrinTranslator = struct {
                 // node is re-translated at every occurrence, causing
                 // exponential blowup in basic blocks and compile time.
                 //
-                // Cache by GRIN expression pointer: if we've already
-                // translated this exact Case node, branch to its entry
-                // block instead of re-emitting the dispatch logic.
-                const expr_key = @intFromPtr(expr);
-                if (self.case_entry_cache.get(expr_key)) |cached_entry| {
-                    _ = c.LLVMBuildBr(self.builder, cached_entry);
-                    return;
+                // Cache by (GRIN node, resolved scrutinee value): if we've
+                // already translated this exact Case node against the same
+                // scrutinee SSA value, branch to its entry block instead of
+                // re-emitting the dispatch logic.  A differing scrutinee
+                // value means the cached block would use a non-dominating
+                // SSA value — re-translate instead (#901).
+                if (self.caseCacheKey(expr, case_.scrutinee)) |key| {
+                    if (self.case_entry_cache.get(key)) |cached_entry| {
+                        _ = c.LLVMBuildBr(self.builder, cached_entry);
+                        return;
+                    }
+                    // First encounter: create an entry block, cache it, then
+                    // translate the case normally.
+                    const case_entry = c.LLVMAppendBasicBlock(self.current_func, "case.shared");
+                    _ = c.LLVMBuildBr(self.builder, case_entry);
+                    llvm.positionBuilderAtEnd(self.builder, case_entry);
+                    self.case_entry_cache.put(key, case_entry) catch return error.OutOfMemory;
                 }
-                // First encounter: create an entry block, cache it, then
-                // translate the case normally.
-                const case_entry = c.LLVMAppendBasicBlock(self.current_func, "case.shared");
-                _ = c.LLVMBuildBr(self.builder, case_entry);
-                llvm.positionBuilderAtEnd(self.builder, case_entry);
-                self.case_entry_cache.put(expr_key, case_entry) catch return error.OutOfMemory;
                 try self.translateCase(case_.scrutinee, case_.alts);
             },
             .Store => |val| try self.translateStore(val),
@@ -1895,6 +1915,21 @@ pub const GrinTranslator = struct {
         self.whnf_vars = snap.whnf;
         self.imm_vars = snap.imm;
         snap.* = undefined;
+    }
+
+    /// Compute the case-cache key for a Case node, or null when the case
+    /// must not be cached: only `Var` scrutinees with a resolved SSA
+    /// binding are cacheable, because the key must pin the exact value the
+    /// translated block embeds (#901).  Unbound vars (globals/CAFs) and
+    /// non-Var scrutinees translate fresh at every occurrence.
+    fn caseCacheKey(
+        self: *const GrinTranslator,
+        expr: *const grin.Expr,
+        scrutinee: grin.Val,
+    ) ?CaseCacheKey {
+        if (scrutinee != .Var) return null;
+        const cur = self.params.get(scrutinee.Var.unique.value) orelse return null;
+        return .{ .node = @intFromPtr(expr), .scrut = @intFromPtr(cur) };
     }
 
     /// Record what the case dispatch just established about a variable
@@ -2121,20 +2156,24 @@ pub const GrinTranslator = struct {
                 // re-translating.  The cached code terminates with ret/br so
                 // control never returns — we emit a dead placeholder block for
                 // the caller to continue emitting without LLVM errors.
-                const expr_key = @intFromPtr(expr);
-                if (self.case_entry_cache.get(expr_key)) |cached_entry| {
-                    _ = c.LLVMBuildBr(self.builder, cached_entry);
-                    const dead_bb = c.LLVMAppendBasicBlock(self.current_func, "dead.cached");
-                    llvm.positionBuilderAtEnd(self.builder, dead_bb);
-                    return @as(?llvm.Value, c.LLVMConstPointerNull(ptrType()));
+                // Keyed by (GRIN node, resolved scrutinee value) so a
+                // re-entry with a different scrutinee binding re-translates
+                // instead of using a non-dominating SSA value (#901).
+                if (self.caseCacheKey(expr, case_expr.scrutinee)) |key| {
+                    if (self.case_entry_cache.get(key)) |cached_entry| {
+                        _ = c.LLVMBuildBr(self.builder, cached_entry);
+                        const dead_bb = c.LLVMAppendBasicBlock(self.current_func, "dead.cached");
+                        llvm.positionBuilderAtEnd(self.builder, dead_bb);
+                        return @as(?llvm.Value, c.LLVMConstPointerNull(ptrType()));
+                    }
+                    // First encounter: create an entry block and cache it before
+                    // translating, so that subsequent encounters of this shared
+                    // Case node can branch here directly.
+                    const case_entry = c.LLVMAppendBasicBlock(self.current_func, "caseval.shared");
+                    _ = c.LLVMBuildBr(self.builder, case_entry);
+                    llvm.positionBuilderAtEnd(self.builder, case_entry);
+                    self.case_entry_cache.put(key, case_entry) catch return error.OutOfMemory;
                 }
-                // First encounter: create an entry block and cache it before
-                // translating, so that subsequent encounters of this shared
-                // Case node can branch here directly.
-                const case_entry = c.LLVMAppendBasicBlock(self.current_func, "caseval.shared");
-                _ = c.LLVMBuildBr(self.builder, case_entry);
-                llvm.positionBuilderAtEnd(self.builder, case_entry);
-                self.case_entry_cache.put(expr_key, case_entry) catch return error.OutOfMemory;
                 return try self.translateCaseToValue(case_expr.scrutinee, case_expr.alts, result_name);
             },
             else => {
