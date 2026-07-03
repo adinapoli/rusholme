@@ -234,3 +234,7 @@ test "should_fail_compile: sfc004_tuple_arity_too_large (#848)" {
 test "should_fail_compile: sfc005_overlapping_instances_no_pragma (#872)" {
     try testShouldFailCompile(std.testing.allocator, "sfc005_overlapping_instances_no_pragma");
 }
+
+test "should_fail_compile: sfc006_missing_superclass_instance (#889)" {
+    try testShouldFailCompile(std.testing.allocator, "sfc006_missing_superclass_instance");
+}

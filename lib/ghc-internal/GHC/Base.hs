@@ -168,16 +168,12 @@ instance Num Double where
 -- Fractional type class
 -- ========================================================================
 --
--- Haskell 2010 declares `class Num a => Fractional a`; the superclass
--- context is omitted here in the same style as the other GHC.Base classes
--- (`Ord` carries no `Eq a =>` either) — the solver does not consume
--- superclass contexts yet, tracked in
--- https://github.com/adinapoli/rusholme/issues/889.
+-- Haskell 2010 declares `class Num a => Fractional a` (#889).
 -- `fromRational` is intentionally
 -- omitted until overloaded literals and `Rational` land (see #140 / #212),
 -- mirroring the `fromInteger` omission in `Num` above.
 
-class Fractional a where
+class Num a => Fractional a where
   (/)   :: a -> a -> a
   recip :: a -> a
 
@@ -193,13 +189,13 @@ instance Fractional Double where
 -- ========================================================================
 --
 -- Haskell 2010 §6.4.3, minus `asinh`/`acosh`/`atanh`: their standard
--- log-based definitions need `Num a` / `Fractional a` over the class
--- type variable, which requires superclass contexts (#889).  The
--- superclass `Fractional a =>` is omitted in the same style as the
--- other GHC.Base classes (#889).  The Double instance is lowered to
--- libm calls (#895).
+-- log-based default bodies would call `Num`/`Fractional` methods over the
+-- class type variable from inside a *default method body*, a path the
+-- evidence machinery does not thread superclass dictionaries through yet
+-- (tracked in #898).  The Double instance is lowered to libm calls
+-- (#895).
 
-class Floating a where
+class Fractional a => Floating a where
   pi      :: a
   exp     :: a -> a
   log     :: a -> a
@@ -315,7 +311,7 @@ compareInt x y = case primLtInt x y of
         True  -> EQ
         False -> GT
 
-class Ord a where
+class Eq a => Ord a where
   compare :: a -> a -> Ordering
   (<)     :: a -> a -> Bool
   (<=)    :: a -> a -> Bool
