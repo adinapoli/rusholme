@@ -188,12 +188,12 @@ instance Fractional Double where
 -- Floating type class
 -- ========================================================================
 --
--- Haskell 2010 §6.4.3, minus `asinh`/`acosh`/`atanh`: their standard
--- log-based default bodies would call `Num`/`Fractional` methods over the
--- class type variable from inside a *default method body*, a path the
--- evidence machinery does not thread superclass dictionaries through yet
--- (tracked in #898).  The Double instance is lowered to libm calls
--- (#895).
+-- Haskell 2010 §6.4.3.  The Double instance is lowered to libm calls
+-- (#895).  `asinh`/`acosh`/`atanh` use the Report's log-based default
+-- bodies, which call `Num`/`Fractional` methods over the class type
+-- variable from inside a default method body — the superclass
+-- dictionaries are extracted from the `Floating` dictionary parameter of
+-- the default binding (#898).
 
 class Fractional a => Floating a where
   pi      :: a
@@ -211,6 +211,18 @@ class Fractional a => Floating a where
   sinh    :: a -> a
   cosh    :: a -> a
   tanh    :: a -> a
+  -- The Report bodies spell the constants as integer literals (`1`, `2`),
+  -- which need `fromInteger` — not available yet (#140 / #212).  `pi / pi`
+  -- is the multiplicative unit of `a` computed from class methods alone:
+  -- for IEEE types x/x is exactly 1 for any finite non-zero x, so these
+  -- are bit-for-bit the literal-based bodies.  Rewrite with literals once
+  -- `fromInteger` lands (tracked in #904).
+  asinh   :: a -> a
+  asinh x = log (x + sqrt (x*x + pi/pi))
+  acosh   :: a -> a
+  acosh x = log (x + sqrt (x*x - pi/pi))
+  atanh   :: a -> a
+  atanh x = (log (pi/pi + x) - log (pi/pi - x)) / (pi/pi + pi/pi)
 
 instance Floating Double where
   pi      = 3.141592653589793

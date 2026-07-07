@@ -575,6 +575,15 @@ fn desugarClassDecl(
         },
     };
 
+    // Store the dictionary constructor name in ClassEnv so that instance
+    // declarations can reuse it (issue #569).  Registered BEFORE the method
+    // selectors and default bodies below: a default body whose superclass
+    // extraction chain passes through THIS class needs the constructor name
+    // already resolvable (#898) — with the placeholder name the case
+    // alternative carried unique 0, colliding in the GRIN tag registry and
+    // loading garbage fields at runtime.
+    ctx.types.class_env.setDictConName(cd.name.unique.value, dict_con_name);
+
     // Build constructor type: sc1 -> ... -> field1 -> field2 -> ... -> Dict$Class a
     //
     // Superclass dictionary fields come FIRST, before the method fields,
@@ -860,9 +869,7 @@ fn desugarClassDecl(
             method_core_ty = try method_htype.toCore(alloc);
         }
 
-        const raw_body = try desugarMatch(ctx, default_impl, method_core_ty);
-
-        // Wrap with a dictionary lambda: \dict -> body
+        // The dictionary lambda binder: \dict -> body
         const dict_param_name = Name{
             .base = "dict",
             .unique = ctx.u_supply.fresh(),
@@ -875,6 +882,26 @@ fn desugarClassDecl(
             .ty = dict_param_ty,
             .span = cd.span,
         };
+
+        // Make the default's dictionary parameter visible to evidence
+        // resolution while the body is desugared (#898): a superclass
+        // method call in the body records a `.param` wanted over the class
+        // tyvar (the Pass 0a Rigid, reused by the default-body inference
+        // pass), which buildSuperclassEntailment resolves by extracting
+        // from this parameter.  Scoped put/remove, mirroring the
+        // local-binding dict handling (#875).
+        const default_dict_key = DesugarCtx.DictParamKey{
+            .class_unique = cd.name.unique.value,
+            .tyvar_unique = class_info.tyvar,
+        };
+        const had_prev_entry = ctx.dict_param_names.contains(default_dict_key);
+        if (!had_prev_entry)
+            try ctx.dict_param_names.put(alloc, default_dict_key, dict_param_name);
+        defer if (!had_prev_entry) {
+            _ = ctx.dict_param_names.remove(default_dict_key);
+        };
+
+        const raw_body = try desugarMatch(ctx, default_impl, method_core_ty);
 
         // Thread the dictionary parameter through class method calls in the body.
         // E.g. `doubled x = method1 x + method1 x` becomes
@@ -907,10 +934,6 @@ fn desugarClassDecl(
             .rhs = lam_default,
         } });
     }
-
-    // Store the dictionary constructor name in ClassEnv so that instance
-    // declarations can reuse it (issue #569).
-    ctx.types.class_env.setDictConName(cd.name.unique.value, dict_con_name);
 }
 
 /// Synthesise a Core binding for every record field selector of a data
