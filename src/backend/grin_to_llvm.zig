@@ -709,11 +709,28 @@ pub const RtsBackend = enum(u32) {
     }
 };
 
-/// Cache key for translated shared Case blocks: the GRIN node identity plus
-/// the SSA value the scrutinee resolves to at the entry site (#901).
+/// Cache key for translated shared Case blocks.  Three components (#901,
+/// #907):
+///   * `node`  — the GRIN expression identity (a shared fallback node).
+///   * `scrut` — the SSA value the *immediate* scrutinee resolves to.
+///   * `env`   — a fingerprint of the whole forced/WHNF-variable environment
+///     (`whnf_vars` → their current `params` SSA value).
+///
+/// The `env` component closes a dominance hole in the original #901 key,
+/// which pinned only the immediate scrutinee.  A shared block's body can
+/// embed the forced SSA value of *any* enclosing force-rebound variable
+/// (via the #800 force-elision that reads `params` for a WHNF variable).
+/// Those forced values only dominate the path that created them, so
+/// re-entering the block from a context where a different variable was
+/// force-rebound would reference a non-dominating value — invalid IR that
+/// crashes downstream LLVM passes.  Pinning the full environment means a
+/// cached block is reused only when every value it may embed is identical
+/// (and therefore dominates), while sibling fallbacks reached with the same
+/// environment still share (the exponential-DAG protection is preserved).
 const CaseCacheKey = struct {
     node: usize,
     scrut: usize,
+    env: u64,
 };
 
 pub const GrinTranslator = struct {
@@ -1919,9 +1936,15 @@ pub const GrinTranslator = struct {
 
     /// Compute the case-cache key for a Case node, or null when the case
     /// must not be cached: only `Var` scrutinees with a resolved SSA
-    /// binding are cacheable, because the key must pin the exact value the
+    /// binding are cacheable, because the key must pin the exact values the
     /// translated block embeds (#901).  Unbound vars (globals/CAFs) and
     /// non-Var scrutinees translate fresh at every occurrence.
+    ///
+    /// The `env` component fingerprints every forced/WHNF variable's current
+    /// SSA value (#907): a shared block's body embeds these via #800
+    /// force-elision, and they only dominate the path that created them, so
+    /// the environment must match exactly for a reuse to be sound.  See
+    /// `CaseCacheKey`.
     fn caseCacheKey(
         self: *const GrinTranslator,
         expr: *const grin.Expr,
@@ -1929,7 +1952,35 @@ pub const GrinTranslator = struct {
     ) ?CaseCacheKey {
         if (scrutinee != .Var) return null;
         const cur = self.params.get(scrutinee.Var.unique.value) orelse return null;
-        return .{ .node = @intFromPtr(expr), .scrut = @intFromPtr(cur) };
+        return .{
+            .node = @intFromPtr(expr),
+            .scrut = @intFromPtr(cur),
+            .env = self.forcedEnvFingerprint(),
+        };
+    }
+
+    /// Order-independent fingerprint of the forced/WHNF-variable environment:
+    /// every variable currently known to be in WHNF, paired with the SSA
+    /// value it resolves to in `params`.  Combined commutatively (no sort or
+    /// allocation) so the result is independent of hash-map iteration order.
+    /// Used as the `env` component of `CaseCacheKey` (#907).
+    fn forcedEnvFingerprint(self: *const GrinTranslator) u64 {
+        var acc: u64 = 0;
+        var it = self.whnf_vars.keyIterator();
+        while (it.next()) |u| {
+            const ssa = self.params.get(u.*) orelse continue;
+            var h = std.hash.Wyhash.init(0);
+            const uv: u64 = u.*;
+            h.update(std.mem.asBytes(&uv));
+            const p: usize = @intFromPtr(ssa);
+            h.update(std.mem.asBytes(&p));
+            const hv = h.final();
+            // XOR combines commutatively; the wrapping-add of a mixed term
+            // guards against structured cancellation across entries.
+            acc ^= hv;
+            acc +%= hv *% 0x9E3779B97F4A7C15;
+        }
+        return acc;
     }
 
     /// Record what the case dispatch just established about a variable

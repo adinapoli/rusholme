@@ -2577,8 +2577,19 @@ pub fn inferModule(
 
                     var method_scope = TypeVarMap{};
                     defer method_scope.deinit(ctx.alloc);
+                    // Reuse the class tyvar Rigid registered in Pass 0a
+                    // (ClassInfo.tyvar) rather than minting a fresh one: a
+                    // kept wanted over the class tyvar (e.g. a superclass
+                    // method call in the default body, #898) then carries a
+                    // tyvar_unique the desugarer can map to the default's
+                    // dictionary parameter.  Rigids are skolems, so sharing
+                    // is safe — the method schemes already share this Rigid.
+                    const class_tyvar_unique: naming_mod.Unique = if (ctx.class_env.lookupClass(cd.name.unique.value)) |ci|
+                        .{ .value = ci.tyvar }
+                    else
+                        ctx.u_supply.fresh();
                     const tyvar_node = try ctx.alloc_ty(.{
-                        .Rigid = ctx.u_supply.freshName(cd.tyvar.base),
+                        .Rigid = .{ .base = cd.tyvar.base, .unique = class_tyvar_unique },
                     });
                     try method_scope.put(ctx.alloc, cd.tyvar.base, tyvar_node);
                     const method_htype = try astTypeToHTypeWithScope(method.type, ctx, &method_scope);

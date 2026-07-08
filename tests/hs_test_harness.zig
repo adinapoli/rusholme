@@ -190,7 +190,10 @@ fn runTest(
             return false;
         },
         else => {
-            if (!quiet) std.debug.print("  [e2e] compile terminated abnormally\n", .{});
+            if (!quiet) {
+                std.debug.print("  [e2e] compile terminated abnormally ({any}):\n", .{compile_result.term});
+                printIndented(compile_result.stderr);
+            }
             return false;
         },
     }
@@ -206,7 +209,10 @@ fn runTest(
     const actual_exit: u8 = switch (run_result.term) {
         .exited => |code| @intCast(code),
         else => {
-            if (!quiet) std.debug.print("  [e2e] binary terminated abnormally\n", .{});
+            if (!quiet) {
+                std.debug.print("  [e2e] binary terminated abnormally ({any}):\n", .{run_result.term});
+                printIndented(run_result.stderr);
+            }
             return false;
         },
     };
