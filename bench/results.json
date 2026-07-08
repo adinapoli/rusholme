@@ -5753,6 +5753,203 @@
           "ghc_stddev_ms": 0.07729786326006326
         }
       }
+    },
+    {
+      "commit": "ef27ad986d8838232c70c2f27f5d090738bac19b",
+      "date": "2026-07-08T12:19:48Z",
+      "host": {
+        "os": "Linux 7.1.1-2-cachyos",
+        "cpu_model": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M",
+        "ghc_version": "9.10.3"
+      },
+      "opt_level": 2,
+      "runs": 7,
+      "programs": {
+        "binary_trees": {
+          "rhc_mean_ms": 4.334683000000001,
+          "rhc_stddev_ms": 0.7866968826356607,
+          "rhc_immix_mean_ms": 112.90947214285715,
+          "rhc_immix_stddev_ms": 16.33630081483648,
+          "ghc_mean_ms": 1.9899117142857143,
+          "ghc_stddev_ms": 0.4728884485142749
+        },
+        "build_list": {
+          "rhc_mean_ms": 0.8731821428571429,
+          "rhc_stddev_ms": 0.08401693426016088,
+          "rhc_immix_mean_ms": 0.9330888571428572,
+          "rhc_immix_stddev_ms": 0.03834510125352203,
+          "ghc_mean_ms": 1.184447,
+          "ghc_stddev_ms": 0.1712855630898296
+        },
+        "fannkuch": {
+          "rhc_mean_ms": 1.6423861428571431,
+          "rhc_stddev_ms": 0.15805689927726302,
+          "rhc_immix_mean_ms": 2.808698142857143,
+          "rhc_immix_stddev_ms": 0.3239606602256045,
+          "ghc_mean_ms": 1.2564704285714288,
+          "ghc_stddev_ms": 0.29648925893071704
+        },
+        "fasta": {
+          "rhc_mean_ms": 0.7702217142857143,
+          "rhc_stddev_ms": 0.08077761562610086,
+          "rhc_immix_mean_ms": 0.9958295714285715,
+          "rhc_immix_stddev_ms": 0.13853360427210085,
+          "ghc_mean_ms": 1.099818,
+          "ghc_stddev_ms": 0.330294006825737
+        },
+        "fib_rec": {
+          "rhc_mean_ms": 5.656289857142857,
+          "rhc_stddev_ms": 0.8671030292265212,
+          "rhc_immix_mean_ms": 6.953263571428573,
+          "rhc_immix_stddev_ms": 1.146766819107799,
+          "ghc_mean_ms": 5.852035571428571,
+          "ghc_stddev_ms": 0.5465748771397069
+        },
+        "hanoi": {
+          "rhc_mean_ms": 86.96914371428572,
+          "rhc_stddev_ms": 14.551237991434233,
+          "rhc_immix_mean_ms": 145.4414967142857,
+          "rhc_immix_stddev_ms": 6.358714926438482,
+          "ghc_mean_ms": 110.92832085714286,
+          "ghc_stddev_ms": 5.982361688310796
+        },
+        "hof_chain": {
+          "rhc_mean_ms": 24.56737785714286,
+          "rhc_stddev_ms": 2.95924850157403,
+          "rhc_immix_mean_ms": 9082.00644742857,
+          "rhc_immix_stddev_ms": 1544.55175937634,
+          "ghc_mean_ms": 10.246850428571431,
+          "ghc_stddev_ms": 1.5806698186360593
+        },
+        "knucleotide": {
+          "rhc_mean_ms": 17.28900142857143,
+          "rhc_stddev_ms": 3.1828991447076915,
+          "rhc_immix_mean_ms": 23.580424714285712,
+          "rhc_immix_stddev_ms": 4.785371217570961,
+          "ghc_mean_ms": 7.864313857142858,
+          "ghc_stddev_ms": 1.2981930813474845
+        },
+        "lazy": {
+          "rhc_mean_ms": 0.7033157142857143,
+          "rhc_stddev_ms": 0.0397815186810588,
+          "rhc_immix_mean_ms": 0.8806252857142858,
+          "rhc_immix_stddev_ms": 0.1193634801753511,
+          "ghc_mean_ms": 1.098564,
+          "ghc_stddev_ms": 0.16124372450734323
+        },
+        "mandelbrot": {
+          "rhc_mean_ms": 0.8122375714285714,
+          "rhc_stddev_ms": 0.10055388128901696,
+          "rhc_immix_mean_ms": 0.974823,
+          "rhc_immix_stddev_ms": 0.09572210116442983,
+          "ghc_mean_ms": 1.5542402857142859,
+          "ghc_stddev_ms": 0.25153754900393055
+        },
+        "matmul": {
+          "rhc_mean_ms": 146.12597157142855,
+          "rhc_stddev_ms": 12.04845587254302,
+          "rhc_immix_mean_ms": 154.42393314285712,
+          "rhc_immix_stddev_ms": 15.08635759627466,
+          "ghc_mean_ms": 49.12802257142857,
+          "ghc_stddev_ms": 4.608206583826902
+        },
+        "mergesort": {
+          "rhc_mean_ms": 1.008795,
+          "rhc_stddev_ms": 0.13181004283058254,
+          "rhc_immix_mean_ms": 1.0614837142857143,
+          "rhc_immix_stddev_ms": 0.09902705305574208,
+          "ghc_mean_ms": 1.2115971428571428,
+          "ghc_stddev_ms": 0.1013279140504211
+        },
+        "nbody_simple": {
+          "rhc_mean_ms": 14.500726285714286,
+          "rhc_stddev_ms": 3.908079449210816,
+          "rhc_immix_mean_ms": 90.52167442857144,
+          "rhc_immix_stddev_ms": 12.085025227322573,
+          "ghc_mean_ms": 11.516082857142857,
+          "ghc_stddev_ms": 2.0619153649121515
+        },
+        "nsieve": {
+          "rhc_mean_ms": 5.736436428571428,
+          "rhc_stddev_ms": 0.39359786777278877,
+          "rhc_immix_mean_ms": 11.584607857142856,
+          "rhc_immix_stddev_ms": 1.8124587709633042,
+          "ghc_mean_ms": 3.681065714285715,
+          "ghc_stddev_ms": 0.3188999018457644
+        },
+        "pidigits": {
+          "rhc_mean_ms": 0.8406184285714288,
+          "rhc_stddev_ms": 0.09739049856438281,
+          "rhc_immix_mean_ms": 1.5164624285714288,
+          "rhc_immix_stddev_ms": 0.3318030457921572,
+          "ghc_mean_ms": 1.1073897142857143,
+          "ghc_stddev_ms": 0.07828593705069105
+        },
+        "queens": {
+          "rhc_mean_ms": 545.3931812857144,
+          "rhc_stddev_ms": 28.575565781541805,
+          "rhc_immix_mean_ms": 533.1816738571429,
+          "rhc_immix_stddev_ms": 36.543932882341984,
+          "ghc_mean_ms": 121.7333662857143,
+          "ghc_stddev_ms": 10.716540633232475
+        },
+        "regex_dna": {
+          "rhc_mean_ms": 89.69354671428573,
+          "rhc_stddev_ms": 16.853777136534696,
+          "rhc_immix_mean_ms": 647.91639,
+          "rhc_immix_stddev_ms": 44.75023842176504,
+          "ghc_mean_ms": 95.11561085714285,
+          "ghc_stddev_ms": 14.07152246216505
+        },
+        "reverse_complement": {
+          "rhc_mean_ms": 0.7937404285714286,
+          "rhc_stddev_ms": 0.1482692616276855,
+          "rhc_immix_mean_ms": 0.7902332857142859,
+          "rhc_immix_stddev_ms": 0.10739738435628418,
+          "ghc_mean_ms": 1.1712137142857142,
+          "ghc_stddev_ms": 0.14974261773869885
+        },
+        "rose_tree": {
+          "rhc_mean_ms": 0.7700627142857143,
+          "rhc_stddev_ms": 0.20325936258117305,
+          "rhc_immix_mean_ms": 0.6440727142857144,
+          "rhc_immix_stddev_ms": 0.07652915106832231,
+          "ghc_mean_ms": 1.0083907142857143,
+          "ghc_stddev_ms": 0.15397694436799542
+        },
+        "spectral_norm": {
+          "rhc_mean_ms": 0.7677337142857142,
+          "rhc_stddev_ms": 0.03811528439578314,
+          "rhc_immix_mean_ms": 1.3199105714285717,
+          "rhc_immix_stddev_ms": 0.1329960230355995,
+          "ghc_mean_ms": 1.0820445714285714,
+          "ghc_stddev_ms": 0.10802599361551386
+        },
+        "sum_to": {
+          "rhc_mean_ms": 0.6345741428571429,
+          "rhc_stddev_ms": 0.04976087889573689,
+          "rhc_immix_mean_ms": 2.0237461428571426,
+          "rhc_immix_stddev_ms": 0.4714847871435615,
+          "ghc_mean_ms": 1.2690424285714288,
+          "ghc_stddev_ms": 0.14331642613561685
+        },
+        "tak": {
+          "rhc_mean_ms": 0.708313,
+          "rhc_stddev_ms": 0.08821982898796994,
+          "rhc_immix_mean_ms": 0.9395312857142858,
+          "rhc_immix_stddev_ms": 0.15687094302399693,
+          "ghc_mean_ms": 1.2653205714285716,
+          "ghc_stddev_ms": 0.14850893109490879
+        },
+        "tree_sum": {
+          "rhc_mean_ms": 2.6853014285714285,
+          "rhc_stddev_ms": 0.2448385758779698,
+          "rhc_immix_mean_ms": 3.2339655714285716,
+          "rhc_immix_stddev_ms": 0.4925774789705194,
+          "ghc_mean_ms": 1.7397755714285716,
+          "ghc_stddev_ms": 0.22184949202094736
+        }
+      }
     }
   ]
 }
