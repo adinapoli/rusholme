@@ -507,7 +507,14 @@ fn defaultNumericConstraints(ctx: *InferCtx) std.mem.Allocator.Error!void {
     for (ctx.wanted_constraints.items) |wc| {
         switch (wc) {
             .Class => |cc| {
-                if (cc.class_name.unique.value != Known.Class.Num.unique.value) continue;
+                // Identify the `Num` class by name rather than by its wired-in
+                // unique: the renamer does not always assign the reserved
+                // `Known.Class.Num` unique (e.g. the incremental REPL renamer
+                // mints a fresh one), so a hardcoded unique comparison would
+                // silently skip defaulting in those contexts.  Matching the
+                // class name is robust across compilation modes and aligns
+                // with moving off hardcoded known-entity uniques.
+                if (!std.mem.eql(u8, cc.class_name.base, "Num")) continue;
                 if (cc.ty.*.chase() == .Meta) {
                     try ctx.unifyNow(@constCast(cc.ty), int_ty, cc.span);
                 }

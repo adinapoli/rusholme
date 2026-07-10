@@ -692,8 +692,13 @@ test "pipeline: compile simple literal expression" {
     try env_mod.initBuiltins(&ty_env, &u_supply, false);
     var mv_supply = htype_mod.MetaVarSupply{};
 
+    // A `Char` literal, not an integer literal: this pipeline is set up with no
+    // boot environment, and an integer literal now desugars to `fromInteger`
+    // (#140), which requires the `Num` class / `instance Num Int` from the boot
+    // Prelude.  A `Char` literal exercises the same "simple literal expression"
+    // path without that dependency.
     const result = try pipeline.compileInput(
-        "42",
+        "'x'",
         &u_supply,
         &rename_env,
         &ty_env,

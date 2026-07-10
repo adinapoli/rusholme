@@ -182,6 +182,17 @@ pub const RenameEnv = struct {
     /// positional constructor application.  Only constructors declared with
     /// record fields appear here.
     con_field_order: std.StringHashMapUnmanaged([]const []const u8) = .empty,
+    /// Whether integer literals are rewritten into `fromInteger n` (#140).
+    ///
+    /// This is only sound when the boot `Prelude` is in scope: the rewrite
+    /// references the wired-in `fromInteger` (a `Num` class method) whose
+    /// *type* comes from `GHC.Base`.  Under `NoImplicitPrelude` the boot
+    /// module is not loaded, so that name would be untyped in the
+    /// typechecker; there we leave the literal monomorphic (`Int`), matching
+    /// pre-#140 behaviour.  A `NoImplicitPrelude` module that genuinely wants
+    /// overloaded literals (by importing its own `fromInteger`) is out of
+    /// scope for now — tracked in #912.
+    overload_int_literals: bool,
 
     pub fn init(
         alloc: std.mem.Allocator,
@@ -194,6 +205,7 @@ pub const RenameEnv = struct {
             .supply = supply,
             .scope = try Scope.init(alloc),
             .diags = diags,
+            .overload_int_literals = !no_implicit_prelude,
         };
         try env.populateWiredIn();
         if (!no_implicit_prelude) try env.populatePreludeFns();
@@ -1181,7 +1193,35 @@ fn renameExpr(expr: ast.Expr, env: *RenameEnv) RenameError!RExpr {
             const n = try env.resolve(qn.name, qn.span);
             break :blk RExpr{ .Var = .{ .name = n, .span = qn.span } };
         },
-        .Lit => |l| RExpr{ .Lit = l },
+        .Lit => |l| switch (l) {
+            // Overloaded integer literals (Haskell 2010 §6.4.1): a literal `n`
+            // denotes `fromInteger n`, giving it type `Num a => a` rather than
+            // a monomorphic `Int`.  We rewrite it here into an application of
+            // the `fromInteger` class method; the typechecker then emits the
+            // `Num a` constraint (keyed to this span) and defaults / solves it,
+            // and the desugarer threads the resulting dictionary — all reusing
+            // the ordinary class-method machinery, no special cases downstream.
+            //
+            // Only expression literals are rewritten: literal *patterns* keep
+            // their plain `Int` match (overloaded literal patterns tracked in
+            // #909), and floating literals stay monomorphic `Double` (#910).
+            // The literal argument keeps its `Int` carrier until `Integer`
+            // lands (#212); see `fromInteger :: Int -> a` in GHC.Base.
+            //
+            // Suppressed under `NoImplicitPrelude` (see `overload_int_literals`):
+            // there is no boot `Num`/`fromInteger` to type against, so the
+            // literal stays a monomorphic `Int` exactly as before #140.
+            .Int => |iv| blk: {
+                if (!env.overload_int_literals) break :blk RExpr{ .Lit = l };
+                const from_integer = try env.resolve("fromInteger", iv.span);
+                const fn_r = try env.alloc.create(RExpr);
+                fn_r.* = RExpr{ .Var = .{ .name = from_integer, .span = iv.span } };
+                const arg_r = try env.alloc.create(RExpr);
+                arg_r.* = RExpr{ .Lit = l };
+                break :blk RExpr{ .App = .{ .fn_expr = fn_r, .arg_expr = arg_r } };
+            },
+            else => RExpr{ .Lit = l },
+        },
         .App => |a| blk: {
             const fn_r = try env.alloc.create(RExpr);
             fn_r.* = try renameExpr(a.fn_expr.*, env);

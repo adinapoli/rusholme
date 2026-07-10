@@ -4,7 +4,7 @@ unwrapNode_1003 arg_0_1015 =
     (CNode_1001 _field_0_0_0_1018 x_1009 _field_0_0_2_1016) ->
       pure x_1009
     CLeaf_1000 ->
-      pure #0
+      pure False_201
     _ ->
       error_5 #"Non-exhaustive patterns in function"
 
@@ -15,9 +15,9 @@ leftValue_1004 arg_0_1019 =
         (CNode_1001 _field_0_1_0_1025 x_1010 _field_0_1_2_1023) ->
           pure x_1010
         _ ->
-          pure #0
+          pure False_201
     _ ->
-      pure #0
+      pure False_201
 
 wrapOrDefault_1005 arg_0_1026 =
   pure arg_0_1026 ;
@@ -26,11 +26,11 @@ wrapOrDefault_1005 arg_0_1026 =
       (CWrap_1002 _field_0_0_0_1027) ->
         pure w_1011
       _ ->
-        store (CWrap_1002 #0) ;
+        store (CWrap_1002 False_201) ;
         \node_2199023255552 ->
           pure node_2199023255552
 
-sumPair_1006 arg_0_1028 =
+firstOfPair_1006 arg_0_1028 =
   case arg_0_1028 of
     (C(,)_209 a_1012 _field_0_0_1_1029) ->
       pure a_1012

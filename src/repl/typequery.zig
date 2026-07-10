@@ -63,7 +63,7 @@ pub fn typeOf(
 
     // 2. Compile the expression through the pipeline.
     // Disable show-wrapping so we get the original expression type
-    // (e.g. `42 :: Int`) rather than the wrapped IO type.
+    // (e.g. `42 :: Num a => a`) rather than the wrapped IO type.
     const saved_show_wrapping = session.pipeline.enable_show_wrapping;
     session.pipeline.enable_show_wrapping = false;
     defer session.pipeline.enable_show_wrapping = saved_show_wrapping;
@@ -175,7 +175,11 @@ test "typequery: simple literal" {
     const result = try typeOf(alloc, &session, "42");
     defer alloc.free(result.display);
 
-    try testing.expectEqualStrings("42 :: Int", result.display);
+    // Overloaded integer literals (#140): a bare literal has the principal
+    // type `Num a => a`, not a monomorphic `Int`.  `typeOf` disables the
+    // monomorphism restriction (see #844), so the query reports the general
+    // type just as GHCi's `:type 42` does.
+    try testing.expectEqualStrings("42 :: forall a. Num a => a", result.display);
 }
 
 test "typequery: session state unchanged after query" {

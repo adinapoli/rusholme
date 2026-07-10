@@ -1734,8 +1734,8 @@ test "CompileEnv: compileSingle compiles a trivial module" {
     const source =
         \\module Trivial where
         \\
-        \\answer :: Int
-        \\answer = 42
+        \\answer :: Char
+        \\answer = 'x'
         \\
     ;
 
@@ -1834,8 +1834,8 @@ test "compileSingle: module without explicit Prelude gets implicit Prelude in im
     const source =
         \\module NoPrelude where
         \\
-        \\answer :: Int
-        \\answer = 42
+        \\answer :: Char
+        \\answer = 'x'
         \\
     ;
 
@@ -1862,8 +1862,8 @@ test "compileSingle: module with NoImplicitPrelude compiles without Prelude inje
         \\{-# LANGUAGE NoImplicitPrelude #-}
         \\module WithNoPrelude where
         \\
-        \\answer :: Int
-        \\answer = 42
+        \\answer :: Char
+        \\answer = 'x'
         \\
     ;
 
@@ -1905,14 +1905,16 @@ test "compileSingle: NoImplicitPrelude still allows wired-in types and construct
     var env = CompileEnv.init(alloc);
     defer env.deinit();
 
-    // Int, Bool, and True/False are wired-in and must remain available even
-    // when the module opts out of the implicit Prelude.
+    // Char, Bool, and True/False are wired-in and must remain available even
+    // when the module opts out of the implicit Prelude.  (A bare integer
+    // literal would now require `Num`/`fromInteger` in scope — #140 — which
+    // NoImplicitPrelude withholds, so `Char` is used here instead of `Int`.)
     const source =
         \\{-# LANGUAGE NoImplicitPrelude #-}
         \\module WiredIn where
         \\
-        \\answer :: Int
-        \\answer = 42
+        \\answer :: Char
+        \\answer = 'x'
         \\
         \\flag :: Bool
         \\flag = True
@@ -1937,8 +1939,8 @@ test "compileProgram: .rhi cache hit — second invocation loads cached interfac
     const hs_path = try std.fmt.allocPrint(alloc, "{s}/CacheHit.hs", .{tmp_path});
     const source =
         \\module CacheHit where
-        \\answer :: Int
-        \\answer = 42
+        \\answer :: Char
+        \\answer = 'x'
         \\
     ;
 
@@ -1998,14 +2000,14 @@ test "compileProgram: .rhi cache miss — changed source produces new fingerprin
 
     const source_v1 =
         \\module CacheChanged where
-        \\answer :: Int
-        \\answer = 1
+        \\answer :: Char
+        \\answer = 'a'
         \\
     ;
     const source_v2 =
         \\module CacheChanged where
-        \\answer :: Int
-        \\answer = 2
+        \\answer :: Char
+        \\answer = 'b'
         \\
     ;
 
@@ -2055,21 +2057,21 @@ test "compileProgram: .rhi cache miss — changed dependency propagates new fing
 
     const lib_v1 =
         \\module CacheLib where
-        \\libVal :: Int
-        \\libVal = 10
+        \\libVal :: Char
+        \\libVal = 'a'
         \\
     ;
     const lib_v2 =
         \\module CacheLib where
-        \\libVal :: Int
-        \\libVal = 20
+        \\libVal :: Char
+        \\libVal = 'b'
         \\
     ;
     const app_src =
         \\module CacheApp where
         \\import CacheLib
-        \\appVal :: Int
-        \\appVal = 99
+        \\appVal :: Char
+        \\appVal = 'z'
         \\
     ;
 
@@ -2118,8 +2120,8 @@ test "compileProgram: package-db — import resolved via .rhi in package-db path
     // typechecker in the downstream module have something to seed from.
     const lib_source =
         \\module PkgLib where
-        \\libAnswer :: Int
-        \\libAnswer = 42
+        \\libAnswer :: Char
+        \\libAnswer = 'x'
         \\
     ;
     const lib_iface: mod_iface.ModIface = blk: {
@@ -2146,7 +2148,7 @@ test "compileProgram: package-db — import resolved via .rhi in package-db path
         \\{-# LANGUAGE NoImplicitPrelude #-}
         \\module PkgApp where
         \\import PkgLib
-        \\answer :: Int
+        \\answer :: Char
         \\answer = libAnswer
         \\
     ;
@@ -2336,8 +2338,8 @@ test "compileProgram: missing import emits module_not_found diagnostic" {
     const source =
         \\module App where
         \\import MissingLib
-        \\answer :: Int
-        \\answer = 42
+        \\answer :: Char
+        \\answer = 'x'
         \\
     ;
     var r = try compileProgram(alloc, io, &.{.{
@@ -2384,8 +2386,8 @@ test "compileProgram: Var re-export — Main resolves a name defined upstream an
     const a_src =
         \\{-# LANGUAGE NoImplicitPrelude #-}
         \\module A (foo) where
-        \\foo :: Int
-        \\foo = 42
+        \\foo :: Char
+        \\foo = 'x'
         \\
     ;
     const b_src =
@@ -2398,7 +2400,7 @@ test "compileProgram: Var re-export — Main resolves a name defined upstream an
         \\{-# LANGUAGE NoImplicitPrelude #-}
         \\module Main where
         \\import B (foo)
-        \\answer :: Int
+        \\answer :: Char
         \\answer = foo
         \\
     ;
@@ -2430,10 +2432,10 @@ test "compileProgram: module re-export — `module B` propagates all of B's expo
     const a_src =
         \\{-# LANGUAGE NoImplicitPrelude #-}
         \\module A (foo, bar) where
-        \\foo :: Int
-        \\foo = 1
-        \\bar :: Int
-        \\bar = 2
+        \\foo :: Char
+        \\foo = 'a'
+        \\bar :: Char
+        \\bar = 'b'
         \\
     ;
     // Wrapper module that imports A and re-exports the entire A surface.
@@ -2447,9 +2449,9 @@ test "compileProgram: module re-export — `module B` propagates all of B's expo
         \\{-# LANGUAGE NoImplicitPrelude #-}
         \\module Main where
         \\import Wrap
-        \\answer :: Int
+        \\answer :: Char
         \\answer = foo
-        \\other :: Int
+        \\other :: Char
         \\other = bar
         \\
     ;
