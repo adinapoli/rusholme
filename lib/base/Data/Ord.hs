@@ -6,15 +6,18 @@
 -- does not yet accept `newtype`.  Runtime representation is one node
 -- deeper than GHC's; semantics match.
 --
--- `comparing :: Ord b => (a -> b) -> a -> a -> Ordering` is omitted
--- pending a typechecker fix — see issue #842.  Once that lands, add
--- `comparing` here and the e2e test will pick it up.
 module Data.Ord
-    ( clamp
+    ( comparing
+    , clamp
     , Down(..)
     ) where
 
 import GHC.Base
+
+-- | Compare two values by a projection, e.g. @sortBy (comparing snd)@.
+-- Mirrors GHC's @base:Data.Ord.comparing@.
+comparing :: Ord b => (a -> b) -> a -> a -> Ordering
+comparing p x y = compare (p x) (p y)
 
 clamp :: Ord a => (a, a) -> a -> a
 clamp p x = case x < fst' p of
