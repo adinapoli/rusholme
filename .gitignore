@@ -17,7 +17,6 @@ Thumbs.db
 # AI agent internals
 .gemini/
 .agent/
-.claude
 tags
 website/logo.png
 website/index.html
@@ -67,3 +66,4 @@ zig-pkg
 bench/*.o
 bench/*.hi
 .bench-tmp/
+.cc-scratch
