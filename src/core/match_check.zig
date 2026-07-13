@@ -117,7 +117,10 @@ pub const Pat = union(enum) {
 };
 
 /// Returned when a pattern uses a feature the checker does not model
-/// (currently: record patterns with sub-patterns).
+/// (currently: negation of a non-literal, or a tuple wider than the maximum
+/// wired arity).  Record patterns are *not* among these: the renamer lowers
+/// them to positional constructor patterns before the checker runs (#774), so
+/// they normalise like any other `.Con`.
 pub const NormalizeError = error{Unsupported} || std.mem.Allocator.Error;
 
 /// Lower an RPat into the checker's pattern language.
@@ -421,8 +424,10 @@ pub const CheckResult = struct {
 /// Check one match group (function equations or case alternatives).
 ///
 /// `equations[i]` is equation i's pattern row; `guarded[i]` marks rows
-/// whose RHS has guards. Returns null when the group uses unsupported
-/// patterns (record sub-patterns) — no warnings should be emitted then.
+/// whose RHS has guards. Returns null when the group uses a pattern the
+/// checker cannot model (see `NormalizeError`) — no warnings are emitted
+/// then. Record patterns are already lowered to positional constructor
+/// patterns by the renamer (#774), so they are checked normally.
 ///
 /// All allocations come from `alloc`; pass an arena.
 pub fn checkMatch(
@@ -765,4 +770,80 @@ test "checkMatch: unknown constructors keep the signature open" {
     try testing.expect(result.missing != null);
     const txt = try formatWitness(alloc, result.missing.?);
     try testing.expectEqualStrings("_", txt);
+}
+
+test "checkMatch: record pattern (lowered to positional Con) is checked — missing sibling (#774)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // data Shape = Circle { radius :: Int } | Square { side :: Int }
+    var sig = SigEnv{};
+    try sig.addBuiltins(alloc);
+    try sig.addType(alloc, &.{
+        .{ .unique = 9101, .base = "Circle", .arity = 1 },
+        .{ .unique = 9102, .base = "Square", .arity = 1 },
+    });
+    defer sig.deinit(alloc);
+
+    // area (Circle { radius = r }) = …
+    // The renamer lowers the record pattern to the positional `Circle r`
+    // (#857), so by the time the checker runs there is no `RecPat` — a
+    // constructor pattern with a sub-pattern, checked like any other. The
+    // sibling `Square` is unmatched, so the group is non-exhaustive.
+    const r = RPat{ .Var = .{ .name = .{ .base = "r", .unique = .{ .value = 7101 } }, .span = testSpan() } };
+    const circle_args = [_]RPat{r};
+    const circle = RPat{ .Con = .{
+        .name = .{ .base = "Circle", .unique = .{ .value = 9101 } },
+        .con_span = testSpan(),
+        .args = &circle_args,
+    } };
+    const eq0 = [_]RPat{circle};
+    const eqs = [_][]const RPat{&eq0};
+    const guards = [_]bool{false};
+
+    const result = (try checkMatch(alloc, &sig, &eqs, &guards)).?;
+    try testing.expect(result.missing != null);
+    const txt = try formatWitness(alloc, result.missing.?);
+    try testing.expectEqualStrings("Square _", txt);
+    try testing.expectEqual(@as(usize, 0), result.redundant.len);
+}
+
+test "checkMatch: record patterns over all constructors are exhaustive (#774)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var sig = SigEnv{};
+    try sig.addBuiltins(alloc);
+    try sig.addType(alloc, &.{
+        .{ .unique = 9101, .base = "Circle", .arity = 1 },
+        .{ .unique = 9102, .base = "Square", .arity = 1 },
+    });
+    defer sig.deinit(alloc);
+
+    // area (Circle { radius = r }) = …; area (Square { side = s }) = …
+    // Both constructors covered via record patterns → no missing witness.
+    const r = RPat{ .Var = .{ .name = .{ .base = "r", .unique = .{ .value = 7101 } }, .span = testSpan() } };
+    const s = RPat{ .Var = .{ .name = .{ .base = "s", .unique = .{ .value = 7102 } }, .span = testSpan() } };
+    const circle_args = [_]RPat{r};
+    const square_args = [_]RPat{s};
+    const circle = RPat{ .Con = .{
+        .name = .{ .base = "Circle", .unique = .{ .value = 9101 } },
+        .con_span = testSpan(),
+        .args = &circle_args,
+    } };
+    const square = RPat{ .Con = .{
+        .name = .{ .base = "Square", .unique = .{ .value = 9102 } },
+        .con_span = testSpan(),
+        .args = &square_args,
+    } };
+    const eq0 = [_]RPat{circle};
+    const eq1 = [_]RPat{square};
+    const eqs = [_][]const RPat{ &eq0, &eq1 };
+    const guards = [_]bool{ false, false };
+
+    const result = (try checkMatch(alloc, &sig, &eqs, &guards)).?;
+    try testing.expect(result.missing == null);
+    try testing.expectEqual(@as(usize, 0), result.redundant.len);
 }
