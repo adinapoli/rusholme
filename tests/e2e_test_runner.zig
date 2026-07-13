@@ -360,6 +360,10 @@ test "e2e: e2e_872_overlapping_instances (#872)" {
     try testE2e(std.testing.allocator, "e2e_872_overlapping_instances");
 }
 
+test "e2e: e2e_873_overlap_catchall (#873)" {
+    try testE2e(std.testing.allocator, "e2e_873_overlap_catchall");
+}
+
 test "e2e: e2e_855_record_construction (#855)" {
     try testE2e(std.testing.allocator, "e2e_855_record_construction");
 }

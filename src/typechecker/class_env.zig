@@ -255,13 +255,27 @@ pub const ClassEnv = struct {
     /// agree on which keying scheme an instance uses.
     pub fn inOverlapGroup(self: *const ClassEnv, class_unique: u64, head: HType) bool {
         const key = instanceHeadKey(head);
+        const instances = self.lookupInstances(class_unique);
         var count: usize = 0;
-        for (self.lookupInstances(class_unique)) |inst| {
+        var has_catch_all = false;
+        for (instances) |inst| {
             if (instanceHeadKey(inst.head) == key) {
                 count += 1;
                 if (count > 1) return true;
             }
+            // A head with no outermost constructor (a bare type-variable
+            // catch-all, e.g. `instance C a`) has `instanceHeadKey == null`.
+            if (instanceHeadKey(inst.head) == null) has_catch_all = true;
         }
+        // A bare-tyvar catch-all overlaps *every* concrete sibling (it matches
+        // any target the specific instances also match), yet shares no head
+        // constructor with them, so head-constructor keying cannot tell the
+        // catch-all dictionary apart from a specific one — the catch-all would
+        // be keyed on the target's own constructor and never found (#873).
+        // When such a catch-all coexists with any other instance, put the whole
+        // class on full-head keying so `canonicalHeadKey` gives the catch-all a
+        // stable `_` slot distinct from each concrete sibling's key.
+        if (has_catch_all and instances.len > 1) return true;
         return false;
     }
 
