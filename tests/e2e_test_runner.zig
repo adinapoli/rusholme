@@ -260,6 +260,10 @@ test "e2e: e2e_022_declaration_order (#566)" {
     try testE2e(std.testing.allocator, "e2e_022_declaration_order");
 }
 
+test "e2e: e2e_842_comparing (#842)" {
+    try testE2e(std.testing.allocator, "e2e_842_comparing");
+}
+
 test "e2e: e2e_023_mutual_recursion (#566)" {
     try testE2e(std.testing.allocator, "e2e_023_mutual_recursion");
 }
