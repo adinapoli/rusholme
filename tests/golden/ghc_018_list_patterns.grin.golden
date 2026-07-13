@@ -15,11 +15,11 @@ firstOfTwo_1001 arg_0_1007 =
             C[]_207 ->
               pure a_1003
             _ ->
-              pure #0
+              pure False_201
         _ ->
-          pure #0
+          pure False_201
     _ ->
-      pure #0
+      pure False_201
 
 singleton_1002 arg_0_1012 =
   case arg_0_1012 of
@@ -28,6 +28,6 @@ singleton_1002 arg_0_1012 =
         C[]_207 ->
           pure x_1005
         _ ->
-          pure #0
+          pure False_201
     _ ->
-      pure #0
+      pure False_201

@@ -1906,6 +1906,54 @@ fn findEvidenceForVar(
     return try result.toOwnedSlice(ctx.alloc);
 }
 
+/// Peephole for #140: fold `fromInteger @Int <IntLit>` to the bare literal.
+///
+/// At the `Int` instance `fromInteger` is the identity (`instance Num Int`
+/// defines `fromInteger = intIdentity`), so `fromInteger n :: Int` ≡ `n`.
+/// Beyond removing a redundant dictionary call, this keeps an integer literal
+/// an *atomic* operand instead of a nested application `fromInteger n`: the
+/// GRIN lazy-argument lowering suspends atomic-argument calls as thunks but
+/// evaluates nested-application arguments eagerly, so without this fold a
+/// lazily-demanded literal argument (e.g. `myConst x (loop 0)`) would be
+/// forced and could diverge.  That general nested-application laziness gap is
+/// pre-existing and tracked in #913.
+///
+/// Only the concrete `Num Int` *instance* is folded.  A polymorphic `Num a =>`
+/// use resolves to `.param` evidence and is left untouched; `Num Double`
+/// widens through `intToDouble` (not the identity) and is never folded.
+/// Returns the desugared literal on a hit, `null` otherwise.
+fn tryFoldFromIntegerAtInt(
+    ctx: *DesugarCtx,
+    fn_expr: *const renamer_mod.RExpr,
+    arg_expr: *const renamer_mod.RExpr,
+) std.mem.Allocator.Error!?*ast_mod.Expr {
+    const fn_var = switch (fn_expr.*) {
+        .Var => |v| v,
+        else => return null,
+    };
+    if (fn_var.name.unique.value != Known.Fn.fromInteger.unique.value) return null;
+    switch (arg_expr.*) {
+        .Lit => |l| switch (l) {
+            .Int => {},
+            else => return null,
+        },
+        else => return null,
+    }
+    const scheme = ctx.types.schemes.get(fn_var.name.unique) orelse return null;
+    const evidences = try findEvidenceForVar(ctx, fn_var.name.unique.value, fn_var.span, scheme);
+    for (evidences) |ev| {
+        switch (ev.*) {
+            .instance => |inst| {
+                if (std.mem.eql(u8, htypeHeadName(inst.head_ty), "Int")) {
+                    return try desugarExpr(ctx, arg_expr.*);
+                }
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
 /// Wrap the hidden `enumFrom*` function reference behind arithmetic-
 /// sequence sugar (`[n..]`, `[n..m]`, …) with its solved dictionary
 /// evidence, mirroring what `desugarExpr` does for ordinary
@@ -2376,13 +2424,19 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
             node.* = .{ .Lit = .{ .val = desugarLiteral(l), .span = l.getSpan() } };
         },
         .App => |a| {
-            node.* = .{
-                .App = .{
-                    .fn_expr = try desugarExpr(ctx, a.fn_expr.*),
-                    .arg = try desugarExpr(ctx, a.arg_expr.*),
-                    .span = syntheticSpan(), // Can improve span tracking
-                },
-            };
+            // #140 peephole: `fromInteger @Int <IntLit>` folds to the bare
+            // literal (see `tryFoldFromIntegerAtInt`).
+            if (try tryFoldFromIntegerAtInt(ctx, a.fn_expr, a.arg_expr)) |folded| {
+                node.* = folded.*;
+            } else {
+                node.* = .{
+                    .App = .{
+                        .fn_expr = try desugarExpr(ctx, a.fn_expr.*),
+                        .arg = try desugarExpr(ctx, a.arg_expr.*),
+                        .span = syntheticSpan(), // Can improve span tracking
+                    },
+                };
+            }
         },
         .Lambda => |lam| {
             var body = (try desugarExpr(ctx, lam.body.*)).*;

@@ -121,16 +121,32 @@ otherwise = True
 -- monomorphic call site (`x + y :: Int`) the solver picks `instance Num
 -- Int` statically and the backend devirtualises the dictionary down to a
 -- direct primop call, so this is as cheap as the previous monomorphic
--- definitions.  `fromInteger` is intentionally omitted until overloaded
--- literals and `Integer` land (see #140 / #212).
+-- definitions.
+--
+-- `fromInteger` is the desugaring target of overloaded integer literals
+-- (#140): the renamer rewrites a literal `n` into `fromInteger n`, so an
+-- integer literal has type `Num a => a`.  Its argument keeps the machine
+-- `Int` carrier until arbitrary-precision `Integer` lands (#212) — the
+-- Report signature is `Integer -> a`; `Int -> a` is the interim.
 
 class Num a where
-  (+)    :: a -> a -> a
-  (-)    :: a -> a -> a
-  (*)    :: a -> a -> a
-  negate :: a -> a
-  abs    :: a -> a
-  signum :: a -> a
+  (+)         :: a -> a -> a
+  (-)         :: a -> a -> a
+  (*)         :: a -> a -> a
+  negate      :: a -> a
+  abs         :: a -> a
+  signum      :: a -> a
+  fromInteger :: Int -> a
+
+-- Identity on the machine `Int` carrier.  `fromInteger` at the `Int`
+-- instance is the identity, but it must be written *point-free* (a bare
+-- `Var`, not a `\x -> x` lambda) so whole-program dictionary specialisation
+-- (#807) rewrites `fromInteger dict$Num$Int` into a direct call — exactly
+-- as `(+) = primAddInt` is.  A lambda dictionary field instead survives as a
+-- runtime dictionary dispatch, which the REPL's incremental codegen cannot
+-- resolve for boot-defined dictionaries (tracked in #908).
+intIdentity :: Int -> Int
+intIdentity x = x
 
 instance Num Int where
   (+) = primAddInt
@@ -138,6 +154,8 @@ instance Num Int where
   (*) = primMulInt
   negate = primNegInt
   abs = primAbsInt
+  -- Point-free (see `intIdentity`) so it specialises to a direct call.
+  fromInteger = intIdentity
   -- Dictionary references are order-independent (#881), so this may use
   -- the `Eq Int` / `Ord Int` operators even though those instances are
   -- declared later in this module.
@@ -152,9 +170,11 @@ instance Num Double where
   (-) = primSubDouble
   (*) = primMulDouble
   negate = primNegDouble
-  -- `fromInteger` is not yet available, so `0.0`/`1.0` are written as
-  -- floating literals.  Uses the `Eq Double` / `Ord Double` operators;
-  -- dictionary references are order-independent (#881).
+  -- An integer literal used at `Double` widens through the `intToDouble`
+  -- primop (e.g. `2 :: Double` == `intToDouble 2`).  Uses the
+  -- `Eq Double` / `Ord Double` operators; dictionary references are
+  -- order-independent (#881).
+  fromInteger = intToDouble
   abs x = case x < 0.0 of
       True  -> negate x
       False -> x
