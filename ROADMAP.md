@@ -601,7 +601,7 @@ These existing issues must be resolved before any Phase 1 work begins:
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#658](https://github.com/adinapoli/rusholme/issues/658) | Epic: Phase 4 — Cabal compatibility (long-term north star) | Phase 3 complete | :white_circle: |
-| [#920](https://github.com/adinapoli/rusholme/issues/920) | build.zig bootstrap step does not track boot .hs sources — stale rhc-store after editing lib/ | [#837](https://github.com/adinapoli/rusholme/issues/837) | :white_circle: |
+| [#920](https://github.com/adinapoli/rusholme/issues/920) | build.zig bootstrap step does not track boot .hs sources — stale rhc-store after editing lib/ | [#837](https://github.com/adinapoli/rusholme/issues/837) | :yellow_circle: |
 
 ---
 

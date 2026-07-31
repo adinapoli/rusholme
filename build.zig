@@ -605,6 +605,28 @@ pub fn build(b: *std.Build) void {
     // the full install step — `b.getInstallStep()` will depend on the
     // bootstrap below, and a cycle would arise if it pointed back.
     for (boot_source_installs) |s| bootstrap_run.step.dependOn(&s.step);
+    // Cache relationship (#920).  This step declares no output arguments, so
+    // `Step.Run` infers that it has side effects and re-runs on *every*
+    // `zig build` — the store therefore cannot go stale behind an edit to a
+    // boot source.  Two properties keep it that way, and both must hold:
+    //
+    //   1. No output args here.  Adding `addOutputDirectoryArg` (the
+    //      idiomatic way to make the store a cached, hermetic artifact)
+    //      makes the step cacheable, at which point the file inputs
+    //      declared below become load-bearing: without them Zig would not
+    //      know the run reads `zig-out/lib/*.hs` and would reuse a store
+    //      built from older sources.  They are declared now so that
+    //      refactor cannot silently reintroduce the staleness.
+    //   2. Boot modules are always source-prepended, and source modules
+    //      take precedence over package-db lookups (see
+    //      `compile_env.zig`, `tryLoadFromPackageDbs` call site).  A stale
+    //      `.rhi` in the store can therefore never shadow a fresh boot
+    //      source at user-`rhc build` time either.
+    //
+    // The trap that remains: `rhc` reads the *installed* copies under
+    // `zig-out/lib/`, so running `zig-out/bin/rhc` after editing `lib/`
+    // without re-running `zig build` compiles against the old sources.
+    for (boot_source_installs) |s| bootstrap_run.addFileInput(s.source);
     // Expose as a named step so users can rebuild just the store.
     // Also wired into the default install step so `zig build` populates
     // the store as part of the normal build.
