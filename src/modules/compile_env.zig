@@ -412,6 +412,10 @@ pub const CompileEnv = struct {
         // in scope (e.g. `minBound`, `succ`), which then diverge from the
         // class method's unique recorded in ClassEnv.
         for (iface.class_infos) |ci| {
+            // Record imported class names so the renamer can detect a
+            // visible `Num` under `NoImplicitPrelude` and enable the
+            // `fromInteger` literal rewrite (#904).
+            try env.visible_class_names.put(env.alloc, ci.name.base, {});
             for (ci.methods) |m| {
                 const method_name = Name{
                     .base = m.name.base,
@@ -527,6 +531,13 @@ pub const CompileEnv = struct {
         defer rename_env.deinit();
         // Seed with names from imported modules only (not all compiled modules).
         try self.seedRenamerFromImports(&rename_env, module.imports);
+        // Under `NoImplicitPrelude` the `fromInteger` literal rewrite (#140)
+        // is suppressed — unless a `Num` class is visible anyway: declared by
+        // this very module (as `GHC.Base` does) or imported.  In that case the
+        // rewrite is sound and required for the numeric class's own default
+        // bodies (#904).
+        if (no_implicit_prelude and rename_env.hasVisibleNumClass(module.declarations))
+            rename_env.enableOverloadedIntLiterals();
         const renamed = try renamer_mod.rename(module, &rename_env);
         if (self.diags.hasErrors()) return null;
 

@@ -189,10 +189,18 @@ pub const RenameEnv = struct {
     /// *type* comes from `GHC.Base`.  Under `NoImplicitPrelude` the boot
     /// module is not loaded, so that name would be untyped in the
     /// typechecker; there we leave the literal monomorphic (`Int`), matching
-    /// pre-#140 behaviour.  A `NoImplicitPrelude` module that genuinely wants
-    /// overloaded literals (by importing its own `fromInteger`) is out of
-    /// scope for now — tracked in #912.
+    /// pre-#140 behaviour — UNLESS the module itself declares or imports a
+    /// `Num` class (e.g. `GHC.Base`, which *defines* the wired-in
+    /// `Num`/`fromInteger` under `NoImplicitPrelude`).  That visibility
+    /// refinement is #904's enabling change; arbitrary `NoImplicitPrelude`
+    /// modules importing a differently-named `fromInteger` remain out of
+    /// scope — tracked in #912.
     overload_int_literals: bool,
+    /// Set of class type names declared by (or imported into) the module
+    /// being renamed.  Consulted only under `NoImplicitPrelude` to decide
+    /// whether `overload_int_literals` may flip on: the rewrite needs a
+    /// visible `Num` class to type `fromInteger` against (#904).
+    visible_class_names: std.StringHashMapUnmanaged(void) = .empty,
 
     pub fn init(
         alloc: std.mem.Allocator,
@@ -215,6 +223,34 @@ pub const RenameEnv = struct {
     pub fn deinit(self: *RenameEnv) void {
         self.scope.deinit();
         self.con_field_order.deinit(self.alloc);
+        self.visible_class_names.deinit(self.alloc);
+    }
+
+    /// Enable the `fromInteger` literal rewrite (#140) for a
+    /// `NoImplicitPrelude` module that nevertheless has a `Num` class in
+    /// scope — either because the module *is* the boot module that defines
+    /// it (`GHC.Base`), or because it imports one.  Without this, integer
+    /// literals in such modules stay monomorphic `Int`, which breaks the
+    /// numeric class's own default bodies (`asinh`/`acosh`/`atanh`, #904).
+    ///
+    /// No-op for ordinary modules (the rewrite is already on whenever the
+    /// implicit Prelude is in scope).
+    pub fn enableOverloadedIntLiterals(self: *RenameEnv) void {
+        self.overload_int_literals = true;
+    }
+
+    /// Whether the module being renamed has a `Num` class in scope despite
+    /// `NoImplicitPrelude`: declared by the module itself (as `GHC.Base`
+    /// does) or imported (seeded into `visible_class_names` by the driver).
+    pub fn hasVisibleNumClass(self: *const RenameEnv, decls: []const ast.Decl) bool {
+        if (self.visible_class_names.contains("Num")) return true;
+        for (decls) |d| {
+            switch (d) {
+                .Class => |cd| if (std.mem.eql(u8, cd.class_name, "Num")) return true,
+                else => {},
+            }
+        }
+        return false;
     }
 
     /// Allocate a fresh `Name` for a new binding site.
@@ -643,6 +679,10 @@ pub fn rename(module: ast.Module, env: *RenameEnv) !RenamedModule {
                 try top_names.put(env.alloc, fd.binding_name, n);
             },
             .Class => |cd| {
+                // Record the declared class so the `fromInteger` literal
+                // rewrite can detect a visible `Num` even under
+                // `NoImplicitPrelude` (#904).
+                try env.visible_class_names.put(env.alloc, cd.class_name, {});
                 // Register class name in scope, reusing the existing
                 // name if already bound (e.g. from populateBuiltins for
                 // well-known classes like Eq, Ord, Show).
@@ -3026,4 +3066,100 @@ test "rename #736: Negate desugars to App(negate, e)" {
     try testing.expect(body == .App);
     try testing.expect(body.App.fn_expr.* == .Var);
     try testing.expectEqualStrings("negate", body.App.fn_expr.Var.name.base);
+}
+
+test "rename #904: literal stays monomorphic Int under NoImplicitPrelude without Num" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var supply = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var env = try RenameEnv.init(alloc, &supply, &diags, true);
+    defer env.deinit();
+
+    // NoImplicitPrelude, no Num declared or imported → no rewrite.
+    try testing.expect(!env.hasVisibleNumClass(&.{}));
+    try testing.expect(!env.overload_int_literals);
+
+    const lit = ast.Expr{ .Lit = .{ .Int = .{ .value = 1, .span = testSpan() } } };
+    const decls = [_]ast.Decl{.{ .FunBind = .{
+        .name = "f",
+        .equations = &.{.{
+            .patterns = &.{},
+            .rhs = .{ .UnGuarded = lit },
+            .where_clause = null,
+            .span = testSpan(),
+        }},
+        .span = testSpan(),
+    } }};
+    const module = makeModule(&decls);
+    const rm = try rename(module, &env);
+    try testing.expect(!diags.hasErrors());
+
+    const body = rm.declarations[0].FunBind.equations[0].rhs.UnGuarded;
+    try testing.expect(body == .Lit);
+}
+
+test "rename #904: literal rewrites to fromInteger under NoImplicitPrelude when Num is declared" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var supply = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var env = try RenameEnv.init(alloc, &supply, &diags, true);
+    defer env.deinit();
+
+    // The module declares its own `Num` class (as GHC.Base does), so the
+    // driver enables the rewrite even under NoImplicitPrelude.
+    const num_decl = ast.Decl{ .Class = .{
+        .context = null,
+        .class_name = "Num",
+        .tyvars = &.{"a"},
+        .fundeps = &.{},
+        .methods = &.{},
+        .span = testSpan(),
+    } };
+    try testing.expect(env.hasVisibleNumClass(&.{num_decl}));
+    env.enableOverloadedIntLiterals();
+
+    const lit = ast.Expr{ .Lit = .{ .Int = .{ .value = 1, .span = testSpan() } } };
+    const decls = [_]ast.Decl{ num_decl, .{ .FunBind = .{
+        .name = "f",
+        .equations = &.{.{
+            .patterns = &.{},
+            .rhs = .{ .UnGuarded = lit },
+            .where_clause = null,
+            .span = testSpan(),
+        }},
+        .span = testSpan(),
+    } } };
+    const module = makeModule(&decls);
+    const rm = try rename(module, &env);
+    try testing.expect(!diags.hasErrors());
+
+    const body = rm.declarations[1].FunBind.equations[0].rhs.UnGuarded;
+    try testing.expect(body == .App);
+    try testing.expect(body.App.fn_expr.* == .Var);
+    try testing.expectEqualStrings("fromInteger", body.App.fn_expr.Var.name.base);
+}
+
+test "rename #904: imported Num class enables the literal rewrite" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var supply = UniqueSupply{};
+    var diags = DiagnosticCollector.init();
+    defer diags.deinit(alloc);
+
+    var env = try RenameEnv.init(alloc, &supply, &diags, true);
+    defer env.deinit();
+
+    // Simulates the driver seeding class names from an imported module's
+    // interface (seedRenamerFromIface).
+    try env.visible_class_names.put(alloc, "Num", {});
+    try testing.expect(env.hasVisibleNumClass(&.{}));
 }
