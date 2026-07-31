@@ -264,6 +264,10 @@ test "e2e: e2e_842_comparing (#842)" {
     try testE2e(std.testing.allocator, "e2e_842_comparing");
 }
 
+test "e2e: e2e_923_constrained_tree (#923)" {
+    try testE2e(std.testing.allocator, "e2e_923_constrained_tree");
+}
+
 test "e2e: e2e_023_mutual_recursion (#566)" {
     try testE2e(std.testing.allocator, "e2e_023_mutual_recursion");
 }
