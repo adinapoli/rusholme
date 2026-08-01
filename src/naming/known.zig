@@ -129,6 +129,70 @@ pub const Con = struct {
             .unique = .{ .value = 207 + arity },
         };
     }
+
+    /// Comptime table of instance-dictionary head names for tuple type
+    /// constructors, indexed by arity: 2 → "Tuple2", 3 → "Tuple3", …
+    ///
+    /// Instance dictionaries are keyed by a head-name string, and the name is
+    /// derived along two independent paths: from the surface AST at the
+    /// declaration site and from the inferred `HType` at each use site.  Both
+    /// must agree or the reference dangles until link time.  The names are
+    /// arity-qualified so that `Show (a, b)` and `Show (a, b, c)` occupy
+    /// distinct keys rather than colliding on a single "Tuple" (#927).
+    const tuple_head_name_table: [max_tuple_arity + 1][]const u8 = blk: {
+        @setEvalBranchQuota(10_000);
+        var table: [max_tuple_arity + 1][]const u8 = undefined;
+        const prefix = "Tuple";
+        for (&table, 0..) |*slot, arity| {
+            if (arity < 2) {
+                slot.* = "";
+                continue;
+            }
+            // Decimal digits of `arity`, most significant first.  Hand-rolled
+            // because this file deliberately imports no std (see the header).
+            const digits = if (arity < 10) 1 else 2;
+            var buf: [prefix.len + digits]u8 = undefined;
+            for (prefix, 0..) |c, i| buf[i] = c;
+            var rest = arity;
+            var i = digits;
+            while (i > 0) : (i -= 1) {
+                buf[prefix.len + i - 1] = '0' + @as(u8, @intCast(rest % 10));
+                rest /= 10;
+            }
+            const frozen = buf;
+            slot.* = &frozen;
+        }
+        break :blk table;
+    };
+
+    /// Instance-dictionary head name for a tuple of the given arity, or
+    /// `null` if the arity is outside the supported range (2..=62).
+    pub fn tupleHeadName(arity: usize) ?[]const u8 {
+        if (arity < 2 or arity > max_tuple_arity) return null;
+        return tuple_head_name_table[arity];
+    }
+
+    /// Arity of a tuple *constructor* name, or `null` if `base` is not one.
+    /// The inverse of `tuple_name_table`: `"(,)"` → 2, `"(,,)"` → 3, …
+    ///
+    /// Recognises exactly `(` followed by `n - 1` commas and `)`, so it cannot
+    /// be fooled by an unrelated operator name.
+    pub fn tupleArity(base: []const u8) ?usize {
+        if (base.len < 3) return null;
+        if (base[0] != '(' or base[base.len - 1] != ')') return null;
+        for (base[1 .. base.len - 1]) |c| {
+            if (c != ',') return null;
+        }
+        const arity = base.len - 1;
+        if (arity > max_tuple_arity) return null;
+        return arity;
+    }
+
+    /// Instance-dictionary head name for a tuple *constructor* name, or `null`
+    /// if `base` is not one: `"(,)"` → "Tuple2", `"(,,)"` → "Tuple3", …
+    pub fn tupleHeadNameForCon(base: []const u8) ?[]const u8 {
+        return tupleHeadName(tupleArity(base) orelse return null);
+    }
 };
 
 /// The start of the non-reserved unique ID range.
@@ -140,4 +204,50 @@ fn name(base: []const u8, value: u64) Name {
         .base = base,
         .unique = .{ .value = value },
     };
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────
+
+const testing = @import("std").testing;
+
+test "Con.tupleArity: recognises tuple constructor names" {
+    try testing.expectEqual(@as(?usize, 2), Con.tupleArity("(,)"));
+    try testing.expectEqual(@as(?usize, 3), Con.tupleArity("(,,)"));
+    try testing.expectEqual(@as(?usize, 10), Con.tupleArity("(,,,,,,,,,)"));
+    try testing.expectEqual(Con.max_tuple_arity, Con.tupleArity(Con.tuple(Con.max_tuple_arity).?.base).?);
+}
+
+test "Con.tupleArity: rejects names that are not tuple constructors" {
+    // `()` is the unit constructor and `(a)` is a parenthesised type; neither
+    // is a tuple.  The scan must also not be fooled by other operator names.
+    try testing.expectEqual(@as(?usize, null), Con.tupleArity("()"));
+    try testing.expectEqual(@as(?usize, null), Con.tupleArity("[]"));
+    try testing.expectEqual(@as(?usize, null), Con.tupleArity("(:)"));
+    try testing.expectEqual(@as(?usize, null), Con.tupleArity("(+)"));
+    try testing.expectEqual(@as(?usize, null), Con.tupleArity("(,a)"));
+    try testing.expectEqual(@as(?usize, null), Con.tupleArity("Int"));
+    try testing.expectEqual(@as(?usize, null), Con.tupleArity(""));
+}
+
+test "Con.tupleHeadName: arity-qualified, and agrees with tupleHeadNameForCon" {
+    // The two derivation paths for an instance-dictionary head name must
+    // produce identical strings or the reference dangles until link time
+    // (#927).  This pins both spellings against each other for every
+    // supported arity.
+    try testing.expectEqualStrings("Tuple2", Con.tupleHeadName(2).?);
+    try testing.expectEqualStrings("Tuple3", Con.tupleHeadName(3).?);
+    try testing.expectEqualStrings("Tuple10", Con.tupleHeadName(10).?);
+
+    var arity: usize = 2;
+    while (arity <= Con.max_tuple_arity) : (arity += 1) {
+        const con_name = Con.tuple(arity).?.base;
+        try testing.expectEqualStrings(
+            Con.tupleHeadName(arity).?,
+            Con.tupleHeadNameForCon(con_name).?,
+        );
+    }
+
+    // Out-of-range arities have no head name rather than a wrong one.
+    try testing.expectEqual(@as(?[]const u8, null), Con.tupleHeadName(1));
+    try testing.expectEqual(@as(?[]const u8, null), Con.tupleHeadName(Con.max_tuple_arity + 1));
 }

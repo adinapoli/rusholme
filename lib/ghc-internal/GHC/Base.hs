@@ -35,6 +35,7 @@ module GHC.Base
     , Show(..)
     -- Show helpers
     , showString, showLitChar, showListWith, showListTail
+    , showTupleWith, showTupleTail
     , intToDigit
     -- Enum helpers used by class defaults
     , enumFrom, enumFromTo, enumFromThen, enumFromThenTo
@@ -560,6 +561,21 @@ showListWith :: Show a => [a] -> String
 showListWith []     = "[]"
 showListWith (x:xs) = '[' : appendStr (show x) (showListTail xs)
 
+-- ── Show helpers for tuples ─────────────────────────────────────────
+--
+-- The components of a tuple have different types, so unlike the list
+-- helpers above these take components that have *already* been shown.
+-- Each `Show (a, b, …)` instance renders its fields and hands the strings
+-- over, which keeps the per-arity instance bodies to one line each.
+
+showTupleTail :: [String] -> String
+showTupleTail []     = ")"
+showTupleTail (s:ss) = ',' : appendStr s (showTupleTail ss)
+
+showTupleWith :: [String] -> String
+showTupleWith []     = "()"
+showTupleWith (s:ss) = '(' : appendStr s (showTupleTail ss)
+
 showLitChar :: Char -> String -> String
 showLitChar '\\'  rest = '\\' : '\\' : rest
 showLitChar '\''  rest = '\\' : '\'' : rest
@@ -621,3 +637,17 @@ instance Show a => Show (Maybe a) where
 instance (Show a, Show b) => Show (Either a b) where
   show (Left x)  = appendStr "Left " (show x)
   show (Right y) = appendStr "Right " (show y)
+
+-- Tuple instances, rendered GHC-style with no space after the comma.
+-- Widths 6..15 are not yet provided — tracked separately.
+instance (Show a, Show b) => Show (a, b) where
+  show (a, b) = showTupleWith (show a : show b : [])
+
+instance (Show a, Show b, Show c) => Show (a, b, c) where
+  show (a, b, c) = showTupleWith (show a : show b : show c : [])
+
+instance (Show a, Show b, Show c, Show d) => Show (a, b, c, d) where
+  show (a, b, c, d) = showTupleWith (show a : show b : show c : show d : [])
+
+instance (Show a, Show b, Show c, Show d, Show e) => Show (a, b, c, d, e) where
+  show (a, b, c, d, e) = showTupleWith (show a : show b : show c : show d : show e : [])

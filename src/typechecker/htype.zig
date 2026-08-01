@@ -29,6 +29,7 @@
 
 const std = @import("std");
 const naming = @import("../naming/unique.zig");
+const Known = @import("../naming/known.zig");
 const core = @import("../core/ast.zig");
 const cycle_detection = @import("cycle_detection.zig");
 
@@ -419,11 +420,20 @@ fn prettyPrecSubst(
                 const arg_str = try prettyPrecSubst(c.args[0], alloc, PREC_TOP, subst);
                 return std.fmt.allocPrint(alloc, "[{s}]", .{arg_str});
             }
-            // Special-case 2-tuple: `(,) a b` → `(a, b)`
-            if (std.mem.eql(u8, c.name.base, "(,)") and c.args.len == 2) {
-                const a_str = try prettyPrecSubst(c.args[0], alloc, PREC_TOP, subst);
-                const b_str = try prettyPrecSubst(c.args[1], alloc, PREC_TOP, subst);
-                return std.fmt.allocPrint(alloc, "({s}, {s})", .{ a_str, b_str });
+            // Special-case saturated tuples: `(,,) a b c` → `(a, b, c)`.  An
+            // unsaturated tuple constructor falls through to the general case
+            // and prints in prefix form, which is the honest rendering.
+            if (Known.Con.tupleArity(c.name.base)) |arity| {
+                if (arity == c.args.len) {
+                    var tup = std.ArrayListUnmanaged(u8).empty;
+                    try tup.append(alloc, '(');
+                    for (c.args, 0..) |arg, i| {
+                        if (i > 0) try tup.appendSlice(alloc, ", ");
+                        try tup.appendSlice(alloc, try prettyPrecSubst(arg, alloc, PREC_TOP, subst));
+                    }
+                    try tup.append(alloc, ')');
+                    return tup.toOwnedSlice(alloc);
+                }
             }
             // General applied Con: `F a b …` — each arg at CON_ARG prec
             var buf = std.ArrayListUnmanaged(u8).empty;
@@ -1021,6 +1031,34 @@ test "pretty: 2-tuple type" {
     const ty = HType{ .Con = .{ .name = testName("(,)", 99), .args = &args } };
     const s = try ty.pretty(alloc);
     try testing.expectEqualStrings("(Int, Bool)", s);
+}
+
+test "pretty: tuple types wider than a pair (#927)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Only the pair case used to be special-cased, so a wider tuple printed in
+    // prefix form — `no instance for Show (,,) Int Int Int`.
+    const args3 = [_]HType{ con0("Int", 0), con0("Bool", 1), con0("Char", 2) };
+    const ty3 = HType{ .Con = .{ .name = testName("(,,)", 99), .args = &args3 } };
+    try testing.expectEqualStrings("(Int, Bool, Char)", try ty3.pretty(alloc));
+
+    const args4 = [_]HType{ con0("Int", 0), con0("Int", 0), con0("Int", 0), con0("Int", 0) };
+    const ty4 = HType{ .Con = .{ .name = testName("(,,,)", 99), .args = &args4 } };
+    try testing.expectEqualStrings("(Int, Int, Int, Int)", try ty4.pretty(alloc));
+}
+
+test "pretty: unsaturated tuple constructor keeps prefix form (#927)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // A partially applied tuple constructor is not a tuple type, so rendering
+    // it as `(Int)` would be a lie.  Prefix form is the honest output.
+    const args = [_]HType{con0("Int", 0)};
+    const ty = HType{ .Con = .{ .name = testName("(,,)", 99), .args = &args } };
+    try testing.expectEqualStrings("(,,) Int", try ty.pretty(alloc));
 }
 
 test "pretty: forall with single binder" {
