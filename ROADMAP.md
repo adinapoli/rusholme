@@ -451,7 +451,7 @@
 | [#589](https://github.com/adinapoli/rusholme/issues/589) | LLVM backend: ptr/i64 return type confusion causes segfaults | [#573](https://github.com/adinapoli/rusholme/issues/573) | :green_circle: |
 | [#925](https://github.com/adinapoli/rusholme/issues/925) | Higher-kinded user class: showing a method result fails to link (`dict$Show_0`) (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :white_circle: |
 | [#926](https://github.com/adinapoli/rusholme/issues/926) | Expose the Functor/Applicative/Monad hierarchy — `>>=` not in scope, `do` only works for IO (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#889](https://github.com/adinapoli/rusholme/issues/889) | :white_circle: |
-| [#927](https://github.com/adinapoli/rusholme/issues/927) | No `Show` instance for tuples — `print (x, y)` does not compile (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :white_circle: |
+| [#927](https://github.com/adinapoli/rusholme/issues/927) | No `Show` instance for tuples — `print (x, y)` does not compile (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :yellow_circle: |
 | [#928](https://github.com/adinapoli/rusholme/issues/928) | Prelude/`Data.List` gaps: `maximum`, `minimum`, `sort`, `sortBy`, `nub`, `foldl'` (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :white_circle: |
 
 ### Epic [#515](https://github.com/adinapoli/rusholme/issues/515): Support Laziness (Call-by-Need Evaluation)
