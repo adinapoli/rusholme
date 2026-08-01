@@ -1515,7 +1515,10 @@ fn instanceHeadName(alloc: std.mem.Allocator, ty: @import("../frontend/ast.zig")
         .Con => |qname| try alloc.dupe(u8, qname.name),
         .App => |parts| if (parts.len > 0) instanceHeadName(alloc, parts[0].*) else try alloc.dupe(u8, "Unknown"),
         .List => try alloc.dupe(u8, "List"),
-        .Tuple => try alloc.dupe(u8, "Tuple"),
+        // Arity-qualified so distinct tuple widths get distinct dictionaries.
+        // Must match `htypeHeadName`'s spelling for the corresponding tuple
+        // type constructor (#927).
+        .Tuple => |parts| try alloc.dupe(u8, Known.Con.tupleHeadName(parts.len) orelse "Tuple"),
         .Paren => |inner| instanceHeadName(alloc, inner.*),
         .Var => |name| try alloc.dupe(u8, name),
         .Fun, .Forall, .IParam => try alloc.dupe(u8, "Unknown"),
@@ -1869,7 +1872,16 @@ fn lookupDictName(map: *const DesugarCtx.DictNameMap, class_unique: u64, head_na
 fn htypeHeadName(ty: htype_mod.HType) []const u8 {
     const chased = ty.chase();
     return switch (chased) {
-        .Con => |c| if (std.mem.eql(u8, c.name.base, "[]")) "List" else c.name.base,
+        // `[]` and the tuple constructors are written in surface syntax that
+        // is not a legal identifier, so both name-derivation paths agree on a
+        // spelled-out stand-in.  `instanceHeadName` produces the same strings
+        // from the AST side; they must not drift apart (#927).
+        .Con => |c| if (std.mem.eql(u8, c.name.base, "[]"))
+            "List"
+        else if (Known.Con.tupleHeadNameForCon(c.name.base)) |head|
+            head
+        else
+            c.name.base,
         .Rigid => |r| r.base,
         .AppTy => |a| htypeHeadName(a.head.*),
         .Meta => "Meta",
