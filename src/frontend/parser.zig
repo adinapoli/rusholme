@@ -2341,9 +2341,29 @@ pub const Parser = struct {
             switch (std.meta.activeTag(tok.token)) {
                 .darrow => return true,
                 // Tokens that terminate the bare constraint scan without darrow.
-                .arrow_right, .equals, .kw_where, .open_brace, .v_open_brace, .close_brace, .v_close_brace, .semi, .v_semi, .eof => return false,
+                //
+                // An *unbalanced* closer means the scan has walked out of the
+                // syntactic unit a constraint could occupy.  Balanced groups
+                // never reach here; they are skipped wholesale below.  Without
+                // the two closers the scan escapes its enclosing parentheses
+                // and can reach a `=>` belonging to an outer context, so the
+                // inner `(Maybe a)` of `instance Foo (Maybe a) => …` is itself
+                // mistaken for a context (#923).
+                .close_paren,
+                .close_bracket,
+                .arrow_right,
+                .equals,
+                .kw_where,
+                .open_brace,
+                .v_open_brace,
+                .close_brace,
+                .v_close_brace,
+                .semi,
+                .v_semi,
+                .eof,
+                => return false,
                 .open_paren => {
-                    // Skip balanced parens (e.g. Monad (m a) =>)
+                    // Skip balanced parens (e.g. Monad (m a) =>).
                     offset += 1;
                     var depth: u32 = 1;
                     while (depth > 0) {
@@ -2356,9 +2376,13 @@ pub const Parser = struct {
                             else => {},
                         }
                     }
+                    // `offset` already sits past the matching `)`; skipping the
+                    // shared advance below is what keeps this scan from
+                    // swallowing the following token (#923).
+                    continue;
                 },
                 .open_bracket => {
-                    // Skip balanced brackets (e.g. Container [] =>)
+                    // Skip balanced brackets (e.g. Container [] =>).
                     offset += 1;
                     var depth: u32 = 1;
                     while (depth > 0) {
@@ -2371,6 +2395,8 @@ pub const Parser = struct {
                             else => {},
                         }
                     }
+                    // See the `.open_paren` note above.
+                    continue;
                 },
                 else => {}, // varid, conid, etc. — part of constraint
             }
@@ -5048,6 +5074,99 @@ test "decl: instance with context" {
     const ctx = inst_decl.context.?;
     try std.testing.expectEqual(1, ctx.constraints.len);
     try std.testing.expectEqualStrings("Eq", ctx.constraints[0].class_name);
+}
+
+// ── #923: bare-context lookahead must not escape its syntactic unit ────────
+//
+// `lookaheadBareContext` scans forward from a conid for `=>`.  Two defects let
+// it run past the unit a constraint can occupy: the balanced-group skips
+// double-advanced (swallowing the following token), and unbalanced closers
+// were not treated as terminators.  Both made a `=>` belonging to a *later*
+// declaration, or to an *outer* context, capture an unrelated conid.
+
+test "decl: constructor with two parenthesised fields, then a constrained signature" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // The `=>` on the *signature* line must not make the field list of `Node`
+    // look like a class context.  Before the fix the balanced-paren skip
+    // stepped over the declaration-separating `v_semi`, so the scan reached
+    // that `=>` and the whole `data` declaration failed to parse.
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\data Tree a = Leaf | Node (Tree a) a (Tree a)
+        \\ins :: Ord a => a -> Tree a -> Tree a
+        \\ins x Leaf = Node Leaf x Leaf
+    );
+
+    try std.testing.expect(mod.declarations[0] == .Data);
+    const data_decl = mod.declarations[0].Data;
+    try std.testing.expectEqualStrings("Tree", data_decl.name);
+    try std.testing.expectEqual(2, data_decl.constructors.len);
+    try std.testing.expectEqualStrings("Leaf", data_decl.constructors[0].name);
+    try std.testing.expectEqualStrings("Node", data_decl.constructors[1].name);
+    try std.testing.expectEqual(3, data_decl.constructors[1].fields.len);
+}
+
+test "decl: class head whose constraint takes a parenthesised argument" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // `Monad (m a) =>` is the example in `lookaheadBareContext`'s own comment.
+    // The double advance skipped the `=>` itself, so the context went
+    // unrecognised and the head failed to parse.
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\class Monad (m a) => Foo m a where
+        \\  foo :: m a -> Int
+    );
+
+    const class_decl = mod.declarations[0].Class;
+    try std.testing.expectEqualStrings("Foo", class_decl.class_name);
+    const ctx = class_decl.context.?;
+    try std.testing.expectEqual(1, ctx.constraints.len);
+    try std.testing.expectEqualStrings("Monad", ctx.constraints[0].class_name);
+    try std.testing.expectEqual(1, ctx.constraints[0].types.len);
+}
+
+test "decl: bare instance context whose constraint takes a parenthesised argument" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Parsing the inner `(Maybe a)` re-enters the type parser at `Maybe`.  That
+    // nested scan must stop at the unbalanced `)` rather than reaching the
+    // outer `=>` and mistaking `Maybe a` for a context of its own.
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\instance Foo (Maybe a) => Foo [a] where
+        \\  foo x = 0
+    );
+
+    const inst_decl = mod.declarations[0].Instance;
+    const ctx = inst_decl.context.?;
+    try std.testing.expectEqual(1, ctx.constraints.len);
+    try std.testing.expectEqualStrings("Foo", ctx.constraints[0].class_name);
+    try std.testing.expectEqual(1, ctx.constraints[0].types.len);
+}
+
+test "type: tuple type whose first component is a constructor application" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // The tuple's closing paren terminates the scan: `Maybe a` here is a type,
+    // not a constraint, even though a `=>` follows later in the module.
+    const mod = try parseTestModule(allocator,
+        \\module M where
+        \\f :: (Maybe a, Int) -> Int
+        \\g :: Ord a => a -> Int
+    );
+
+    try std.testing.expect(mod.declarations[0] == .TypeSig);
+    try std.testing.expect(mod.declarations[0].TypeSig.type == .Fun);
 }
 
 test "decl: deriving clause with single class" {
