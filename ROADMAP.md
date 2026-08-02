@@ -443,15 +443,15 @@
 | [#898](https://github.com/adinapoli/rusholme/issues/898) | Thread superclass dictionaries into class default-method bodies (unblocks `asinh`/`acosh`/`atanh`) (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#889](https://github.com/adinapoli/rusholme/issues/889) | :green_circle: |
 | [#901](https://github.com/adinapoli/rusholme/issues/901) | Backend: case-block cache re-entry uses non-dominating pre-forced scrutinee — silent wrong code for multi-equation constructor patterns | — | :green_circle: |
 | [#907](https://github.com/adinapoli/rusholme/issues/907) | Shared-case cache key misses non-scrutinee forced vars → non-dominating IR | [#901](https://github.com/adinapoli/rusholme/issues/901) | :green_circle: |
-| [#904](https://github.com/adinapoli/rusholme/issues/904) | Rewrite `asinh`/`acosh`/`atanh` default bodies with integer literals once `fromInteger` lands | [#898](https://github.com/adinapoli/rusholme/issues/898), [#140](https://github.com/adinapoli/rusholme/issues/140), [#212](https://github.com/adinapoli/rusholme/issues/212) | :yellow_circle: |
-| [#923](https://github.com/adinapoli/rusholme/issues/923) | Parser: bare-context lookahead escapes its syntactic unit — constrained sigs after multi-paren constructors fail to parse (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :yellow_circle: |
+| [#904](https://github.com/adinapoli/rusholme/issues/904) | Rewrite `asinh`/`acosh`/`atanh` default bodies with integer literals once `fromInteger` lands | [#898](https://github.com/adinapoli/rusholme/issues/898), [#140](https://github.com/adinapoli/rusholme/issues/140), [#212](https://github.com/adinapoli/rusholme/issues/212) | :green_circle: |
+| [#923](https://github.com/adinapoli/rusholme/issues/923) | Parser: bare-context lookahead escapes its syntactic unit — constrained sigs after multi-paren constructors fail to parse (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :green_circle: |
 | [#573](https://github.com/adinapoli/rusholme/issues/573) | GRIN backend: polymorphic Prelude functions produce broken codegen | [#529](https://github.com/adinapoli/rusholme/issues/529) | :green_circle: |
 | [#569](https://github.com/adinapoli/rusholme/issues/569) | GRIN/LLVM backend: support dictionary-passing in codegen | [#556](https://github.com/adinapoli/rusholme/issues/556) | :green_circle: |
 | [#583](https://github.com/adinapoli/rusholme/issues/583) | Implement VarTagNode handling in LLVM backend for partial applications | — | :green_circle: |
 | [#589](https://github.com/adinapoli/rusholme/issues/589) | LLVM backend: ptr/i64 return type confusion causes segfaults | [#573](https://github.com/adinapoli/rusholme/issues/573) | :green_circle: |
 | [#925](https://github.com/adinapoli/rusholme/issues/925) | Higher-kinded user class: showing a method result fails to link (`dict$Show_0`) (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :white_circle: |
 | [#926](https://github.com/adinapoli/rusholme/issues/926) | Expose the Functor/Applicative/Monad hierarchy — `>>=` not in scope, `do` only works for IO (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#889](https://github.com/adinapoli/rusholme/issues/889) | :white_circle: |
-| [#927](https://github.com/adinapoli/rusholme/issues/927) | No `Show` instance for tuples — `print (x, y)` does not compile (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :yellow_circle: |
+| [#927](https://github.com/adinapoli/rusholme/issues/927) | No `Show` instance for tuples — `print (x, y)` does not compile (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :green_circle: |
 | [#928](https://github.com/adinapoli/rusholme/issues/928) | Prelude/`Data.List` gaps: `maximum`, `minimum`, `sort`, `sortBy`, `nub`, `foldl'` (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :white_circle: |
 
 ### Epic [#515](https://github.com/adinapoli/rusholme/issues/515): Support Laziness (Call-by-Need Evaluation)
@@ -602,7 +602,7 @@ These existing issues must be resolved before any Phase 1 work begins:
 | # | Issue | Deps | Status |
 |---|-------|------|--------|
 | [#658](https://github.com/adinapoli/rusholme/issues/658) | Epic: Phase 4 — Cabal compatibility (long-term north star) | Phase 3 complete | :white_circle: |
-| [#920](https://github.com/adinapoli/rusholme/issues/920) | build.zig bootstrap step does not track boot .hs sources — stale rhc-store after editing lib/ | [#837](https://github.com/adinapoli/rusholme/issues/837) | :yellow_circle: |
+| [#920](https://github.com/adinapoli/rusholme/issues/920) | build.zig bootstrap step does not track boot .hs sources — stale rhc-store after editing lib/ | [#837](https://github.com/adinapoli/rusholme/issues/837) | :green_circle: |
 
 ---
 
