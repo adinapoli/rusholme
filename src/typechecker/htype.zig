@@ -325,13 +325,27 @@ pub const HType = union(enum) {
                         combined_args[tc.args.len] = arg_core.*;
                         break :blk CoreType{ .TyCon = .{ .name = tc.name, .args = combined_args } };
                     },
-                    .TyVar => {
-                        // Type variable applied to argument - this could happen if
-                        // the monad type wasn't solved. For now, error out.
-                        std.debug.panic(
-                            "HType.toCore: unsolved monad type variable {s} — cannot apply to argument",
-                            .{head_core.TyVar.base},
-                        );
+                    .TyVar => |tv| {
+                        // A *rigid* type variable applied to arguments is a
+                        // legitimate higher-kinded method type (`f a` in
+                        // `class Container f where ctoL :: f a -> [a]`).
+                        // CoreType has no AppTy node, so keep the application
+                        // by reusing the rigid's name as the head of a TyCon —
+                        // dictionary layout/codegen only relies on field
+                        // positions, not on this being a real tycon (#925).
+                        // An *unsolved meta* head is still a compiler bug
+                        // (e.g. an unresolved monad in do-notation).
+                        switch (at.head.chase()) {
+                            .Rigid => {
+                                const args = try alloc.alloc(CoreType, 1);
+                                args[0] = arg_core.*;
+                                break :blk CoreType{ .TyCon = .{ .name = tv, .args = args } };
+                            },
+                            else => std.debug.panic(
+                                "HType.toCore: unsolved monad type variable {s} — cannot apply to argument",
+                                .{tv.base},
+                            ),
+                        }
                     },
                     else => {
                         std.debug.panic(

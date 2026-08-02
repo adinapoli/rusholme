@@ -611,22 +611,32 @@ fn astTypeToHTypeWithScope(
         },
         .App => |parts| blk: {
             if (parts.len == 0) break :blk ctx.freshMeta();
-            // Head of the application - should be a type constructor (or variable)
             const head = try astTypeToHTypeWithScope(parts[0].*, ctx, scope);
-            if (head.* != .Con) {
-                // For M1, fall back to fresh meta if head is not a constructor
-                break :blk ctx.freshMeta();
+
+            if (head.* == .Con) {
+                // Saturated type-constructor application: `Maybe Int`, `IO ()`, …
+                var args = std.ArrayListUnmanaged(HType).empty;
+                for (parts[1..]) |arg| {
+                    const arg_p = try astTypeToHTypeWithScope(arg.*, ctx, scope);
+                    try args.append(ctx.alloc, ctx.conArgIndirection(arg_p));
+                }
+
+                const args_slice = try args.toOwnedSlice(ctx.alloc);
+                break :blk ctx.alloc_ty(HType{ .Con = .{ .name = head.Con.name, .args = args_slice } });
             }
 
-            // Convert remaining parts as arguments
-            var args = std.ArrayListUnmanaged(HType).empty;
+            // Type-variable application: `f a` in a higher-kinded class method
+            // (`class Container f where ctoL :: f a -> [a]`).  This must stay
+            // an `AppTy` so unification can decompose `f a ~ Stack [Int]` into
+            // `f ~ Stack` and `a ~ Int`; collapsing it to a fresh meta severs
+            // that link and leaves the method result's element type ambiguous
+            // (#925).
+            var result = head;
             for (parts[1..]) |arg| {
                 const arg_p = try astTypeToHTypeWithScope(arg.*, ctx, scope);
-                try args.append(ctx.alloc, ctx.conArgIndirection(arg_p));
+                result = try ctx.alloc_ty(HType{ .AppTy = .{ .head = result, .arg = arg_p } });
             }
-
-            const args_slice = try args.toOwnedSlice(ctx.alloc);
-            break :blk ctx.alloc_ty(HType{ .Con = .{ .name = head.Con.name, .args = args_slice } });
+            break :blk result;
         },
         .List => |inner| blk: {
             const inner_p = try astTypeToHTypeWithScope(inner.*, ctx, scope);
@@ -1617,8 +1627,7 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                     } });
                 }
                 break :blk2 try ctx.alloc_ty(inst.ty);
-            } else
-                try ctx.freshMeta();
+            } else try ctx.freshMeta();
 
             const expr_ty = try infer(ctx, ls.expr.*);
             const right_ty = try ctx.freshMeta();
@@ -1643,8 +1652,7 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                     } });
                 }
                 break :blk2 try ctx.alloc_ty(inst.ty);
-            } else
-                try ctx.freshMeta();
+            } else try ctx.freshMeta();
 
             const expr_ty = try infer(ctx, rs.expr.*);
             const left_ty = try ctx.freshMeta();
@@ -2107,6 +2115,29 @@ pub fn inferModule(
                     var method_scope = TypeVarMap{};
                     defer method_scope.deinit(ctx.alloc);
                     try method_scope.put(ctx.alloc, cd.tyvar.base, tyvar_node);
+
+                    // Method-local type variables are implicitly quantified:
+                    // `class Container f where ctoL :: f a -> [a]` means
+                    // `forall a. Container f => f a -> [a]`.  Give each such
+                    // variable a rigid of its own and include it in the scheme
+                    // binders so instantiation shares one fresh meta across all
+                    // occurrences (#925).
+                    var method_tyvars = std.ArrayListUnmanaged([]const u8).empty;
+                    defer method_tyvars.deinit(ctx.alloc);
+                    try collectFreeTypeVars(method.type, &method_tyvars, ctx.alloc);
+
+                    var binder_ids = std.ArrayListUnmanaged(u64).empty;
+                    defer binder_ids.deinit(ctx.alloc);
+                    try binder_ids.append(ctx.alloc, tyvar_id);
+
+                    for (method_tyvars.items) |tv| {
+                        if (std.mem.eql(u8, tv, cd.tyvar.base)) continue;
+                        const rigid_name = ctx.u_supply.freshName(tv);
+                        const rigid_node = try ctx.alloc_ty(.{ .Rigid = rigid_name });
+                        try method_scope.put(ctx.alloc, tv, rigid_node);
+                        try binder_ids.append(ctx.alloc, rigid_name.unique.value);
+                    }
+
                     const method_htype = try astTypeToHTypeWithScope(method.type, ctx, &method_scope);
 
                     method_infos[i] = .{
@@ -2116,7 +2147,7 @@ pub fn inferModule(
                     };
 
                     // Register the method in TyEnv with a constrained TyScheme.
-                    // The scheme is: forall a. ClassName a => method_type
+                    // The scheme is: forall f a…. ClassName f => method_type
                     const constraint = try ctx.alloc.alloc(ClassConstraint, 1);
                     const constraint_ty = try ctx.alloc.create(HType);
                     constraint_ty.* = .{ .Rigid = tyvar_rigid_name };
@@ -2125,8 +2156,7 @@ pub fn inferModule(
                         .ty = constraint_ty,
                         .span = cd.span,
                     };
-                    const binders = try ctx.alloc.alloc(u64, 1);
-                    binders[0] = tyvar_id;
+                    const binders = try binder_ids.toOwnedSlice(ctx.alloc);
                     const scheme = TyScheme{
                         .binders = binders,
                         .constraints = constraint,
@@ -3602,7 +3632,7 @@ test "skolemiseSignature: explicit forall a. a -> a creates 1 skolem" {
 
     const body_type = AstType{ .Fun = fun_args };
     const forall_type = AstType{ .Forall = .{
-        .tyvars = &.{ "a" },
+        .tyvars = &.{"a"},
         .context = null,
         .type = &body_type,
     } };
@@ -3862,7 +3892,7 @@ test "signature checking: rank-1 signature a -> a with matching body" {
 
     const body_type = AstType{ .Fun = fun_args };
     const forall_type = AstType{ .Forall = .{
-        .tyvars = &.{ "a" },
+        .tyvars = &.{"a"},
         .context = null,
         .type = &body_type,
     } };
