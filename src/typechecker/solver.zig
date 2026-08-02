@@ -77,7 +77,6 @@ pub const ClassConstraint = class_env_mod.ClassConstraint;
 /// through those pointers.  Callers must ensure that any `HType` nodes
 /// referenced transitively are allocated on an arena that outlives the
 /// solve call.
-
 /// Payload for equality constraints: `lhs ~ rhs`.
 pub const EqConstraint = struct {
     lhs: HType,
@@ -181,6 +180,26 @@ pub fn solve(
 /// superclass constraints or pathological instance chains).
 const max_context_depth: u32 = 64;
 
+/// Reduce `f a` to `F a` when the head of an `AppTy` has been solved to a
+/// type constructor.  Unification records `f ~ Maybe` inside the AppTy head
+/// but leaves the node itself as `AppTy(?f, a)`; instance matching must see
+/// the head-normal form `Maybe a` or a user higher-kinded class method result
+/// fails to find even a directly-declared instance (#925).
+fn headNormal(alloc: std.mem.Allocator, ty: HType) std.mem.Allocator.Error!HType {
+    var current = ty.chase();
+    while (current == .AppTy) {
+        const app = current.AppTy;
+        const head = app.head.chase();
+        if (head != .Con) break;
+
+        const args = try alloc.alloc(HType, head.Con.args.len + 1);
+        for (head.Con.args, 0..) |arg, i| args[i] = arg;
+        args[head.Con.args.len] = app.arg.*;
+        current = HType{ .Con = .{ .name = head.Con.name, .args = args } };
+    }
+    return current;
+}
+
 /// Solve a class constraint by looking up instances in the ClassEnv.
 fn solveClassConstraint(
     cc: *ClassConstraintPayload,
@@ -225,7 +244,7 @@ fn solveClassConstraintWithDepth(
     }
 
     const env = class_env orelse return; // No ClassEnv → cannot resolve
-    const chased = cc.ty.*.chase();
+    const chased = try headNormal(alloc, cc.ty.*);
 
     // If the type is a rigid (polymorphic context), the constraint becomes
     // a dictionary parameter — evidence is recorded as `param`.
@@ -434,7 +453,9 @@ fn strictlyMoreSpecific(alloc: std.mem.Allocator, specific: HType, general: HTyp
 /// Returns `null` if the types don't match.
 fn matchInstanceHead(alloc: std.mem.Allocator, ty: HType, head: HType) ?RigidSubst {
     var subst = std.ArrayListUnmanaged(RigidSubstEntry).empty;
-    if (matchInstanceHeadInner(alloc, ty.chase(), head.chase(), &subst)) {
+    const ty_hn = headNormal(alloc, ty) catch return null;
+    const head_hn = headNormal(alloc, head) catch return null;
+    if (matchInstanceHeadInner(alloc, ty_hn, head_hn, &subst)) {
         return subst.toOwnedSlice(alloc) catch return null;
     } else {
         // Clean up on failure. Since we use an arena allocator in practice,
@@ -583,13 +604,12 @@ fn solveEqConstraint(
             // Extract the metavar from the lhs (should be a Meta)
             const meta = if (c.lhs.chase() == .Meta)
                 c.lhs.Meta
-            else
-                blk: {
-                    // If lhs isn't a Meta, try rhs
-                    if (c.rhs.chase() == .Meta) break :blk c.rhs.Meta;
-                    // Fallback: create a placeholder (this shouldn't happen in normal operation)
-                    break :blk MetaVar{ .id = 0, .ref = null };
-                };
+            else blk: {
+                // If lhs isn't a Meta, try rhs
+                if (c.rhs.chase() == .Meta) break :blk c.rhs.Meta;
+                // Fallback: create a placeholder (this shouldn't happen in normal operation)
+                break :blk MetaVar{ .id = 0, .ref = null };
+            };
             const te = TypeError{ .infinite_type = .{
                 .meta = meta,
                 .ty = c.rhs,
@@ -608,11 +628,10 @@ fn solveEqConstraint(
             // Extract the metavar ID for better error reporting.
             const meta_id = if (c.lhs.chase() == .Meta)
                 c.lhs.Meta.id
-            else
-                blk: {
-                    if (c.rhs.chase() == .Meta) break :blk c.rhs.Meta.id;
-                    break :blk 0;
-                };
+            else blk: {
+                if (c.rhs.chase() == .Meta) break :blk c.rhs.Meta.id;
+                break :blk 0;
+            };
             const te = TypeError{ .infinite_type_cycle = .{
                 .meta_id = meta_id,
             } };
