@@ -267,3 +267,5 @@ a generation.
 ## License
 
 Not yet decided. For now, consider this code available for reading and learning.
+
+moka-coder è operativo dal 2026-08-14
