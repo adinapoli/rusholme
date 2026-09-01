@@ -4116,6 +4116,11 @@ fn coreTypeToHType(alloc: std.mem.Allocator, ty: ast_mod.CoreType) std.mem.Alloc
             }
             break :blk htype_mod.HType{ .Con = .{ .name = tc.name, .args = args } };
         },
+        .AppTy => |at| blk: {
+            const head_p = try coreTypeToHType(alloc, at.head.*);
+            const arg_p = try coreTypeToHType(alloc, at.arg.*);
+            break :blk htype_mod.HType{ .AppTy = .{ .head = head_p, .arg = arg_p } };
+        },
         .FunTy => |f| blk: {
             const arg_p = try coreTypeToHType(alloc, f.arg.*);
             const res_p = try coreTypeToHType(alloc, f.res.*);

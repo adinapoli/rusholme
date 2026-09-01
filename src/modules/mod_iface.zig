@@ -61,6 +61,7 @@ pub const ExportSpec = ast.ExportSpec;
 // Tag variants:
 //   "TyVar"   → { "tag": "TyVar",    "name": "<base>", "unique": <u64> }
 //   "TyCon"   → { "tag": "TyCon",    "name": "<base>", "unique": <u64>, "args": [...] }
+//   "AppTy"   → { "tag": "AppTy",    "head": <SerialisedCoreType>, "arg": <SerialisedCoreType> }
 //   "FunTy"   → { "tag": "FunTy",    "arg": <SerialisedCoreType>, "res": <SerialisedCoreType> }
 //   "ForAllTy"→ { "tag": "ForAllTy", "binder_name": "<base>", "binder_unique": <u64>,
 //                                     "body": <SerialisedCoreType> }
@@ -81,6 +82,9 @@ pub const SerialisedCoreType = struct {
 
     // TyCon: type arguments.
     args: ?[]const SerialisedCoreType = null,
+
+    // AppTy: the applied head (`arg` below carries the argument).
+    head: ?*const SerialisedCoreType = null,
 
     // FunTy: argument and result types.
     arg: ?*const SerialisedCoreType = null,
@@ -113,6 +117,18 @@ pub const SerialisedCoreType = struct {
                     .name = tc.name.base,
                     .unique = tc.name.unique.value,
                     .args = s_args,
+                };
+            },
+
+            .AppTy => |at| {
+                const s_head = try alloc.create(SerialisedCoreType);
+                s_head.* = try fromCoreType(at.head.*, alloc);
+                const s_arg = try alloc.create(SerialisedCoreType);
+                s_arg.* = try fromCoreType(at.arg.*, alloc);
+                return .{
+                    .tag = "AppTy",
+                    .head = s_head,
+                    .arg = s_arg,
                 };
             },
 
@@ -164,6 +180,13 @@ pub const SerialisedCoreType = struct {
                 .args = core_args,
             } };
         }
+        if (std.mem.eql(u8, self.tag, "AppTy")) {
+            const head_ct = try alloc.create(CoreType);
+            head_ct.* = try self.head.?.toCoreType(alloc);
+            const arg_ct = try alloc.create(CoreType);
+            arg_ct.* = try self.arg.?.toCoreType(alloc);
+            return CoreType{ .AppTy = .{ .head = head_ct, .arg = arg_ct } };
+        }
         if (std.mem.eql(u8, self.tag, "FunTy")) {
             const arg_ct = try alloc.create(CoreType);
             arg_ct.* = try self.arg.?.toCoreType(alloc);
@@ -205,6 +228,10 @@ pub fn maxUniqueInCoreType(ty: SerialisedCoreType) u64 {
         const c = maxUniqueInCoreType(a);
         if (c > m) m = c;
     };
+    if (ty.head) |p| {
+        const c = maxUniqueInCoreType(p.*);
+        if (c > m) m = c;
+    }
     if (ty.arg) |p| {
         const c = maxUniqueInCoreType(p.*);
         if (c > m) m = c;
@@ -867,7 +894,7 @@ fn isConExported(con_name: Name, type_name: Name, export_list: ?[]const ExportSp
 /// Version history:
 ///   0 — initial format (values, data_decls, fingerprint only)
 ///   1 — added class_infos, instance_infos, dict_entries (#616)
-pub const rhi_format_version: u32 = 1;
+pub const rhi_format_version: u32 = 2;
 
 /// Serialise a `ModIface` to its JSON `.rhi` representation.
 ///
@@ -1072,6 +1099,11 @@ fn deepCopySerialisedCoreType(alloc: std.mem.Allocator, src: SerialisedCoreType)
         result.args = copied;
     }
 
+    if (src.head) |p| {
+        const copied = try alloc.create(SerialisedCoreType);
+        copied.* = try deepCopySerialisedCoreType(alloc, p.*);
+        result.head = copied;
+    }
     if (src.arg) |p| {
         const copied = try alloc.create(SerialisedCoreType);
         copied.* = try deepCopySerialisedCoreType(alloc, p.*);
@@ -1252,6 +1284,44 @@ test "SerialisedCoreType: FunTy round-trip" {
     try testing.expectEqualStrings("Int", recovered.FunTy.res.TyCon.name.base);
 }
 
+test "SerialisedCoreType: AppTy round-trip (#934)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // `f a` — a rigid head applied to an argument.
+    const head_ptr = try alloc.create(CoreType);
+    head_ptr.* = CoreType{ .TyVar = testName("f", 7) };
+    const arg_ptr = try alloc.create(CoreType);
+    arg_ptr.* = CoreType{ .TyVar = testName("a", 8) };
+    const original = CoreType{ .AppTy = .{ .head = head_ptr, .arg = arg_ptr } };
+
+    const serialised = try SerialisedCoreType.fromCoreType(original, alloc);
+    const recovered = try serialised.toCoreType(alloc);
+
+    try testing.expectEqualStrings("AppTy", serialised.tag);
+    try testing.expect(recovered == .AppTy);
+    try testing.expectEqualStrings("f", recovered.AppTy.head.TyVar.base);
+    try testing.expectEqual(@as(u64, 7), recovered.AppTy.head.TyVar.unique.value);
+    try testing.expectEqualStrings("a", recovered.AppTy.arg.TyVar.base);
+    try testing.expectEqual(@as(u64, 8), recovered.AppTy.arg.TyVar.unique.value);
+}
+
+test "maxUniqueInCoreType: walks an AppTy head (#934)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const head_ptr = try alloc.create(CoreType);
+    head_ptr.* = CoreType{ .TyVar = testName("f", 991) };
+    const arg_ptr = try alloc.create(CoreType);
+    arg_ptr.* = CoreType{ .TyVar = testName("a", 3) };
+    const original = CoreType{ .AppTy = .{ .head = head_ptr, .arg = arg_ptr } };
+
+    const serialised = try SerialisedCoreType.fromCoreType(original, alloc);
+    try testing.expectEqual(@as(u64, 991), maxUniqueInCoreType(serialised));
+}
+
 test "SerialisedCoreType: ForAllTy round-trip" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1368,6 +1438,58 @@ test "ModIface: writeRhi / readRhi round-trip (value binding)" {
     try testing.expectEqual(@as(u64, 5), recovered.values[0].scheme.binder_uniques[0]);
     try testing.expectEqualStrings("a", recovered.values[0].scheme.binder_names[0]);
     try testing.expectEqualStrings("ForAllTy", recovered.values[0].scheme.body.tag);
+}
+
+test "ModIface: writeRhi / readRhi round-trip preserves an AppTy head (#934)" {
+    // A higher-kinded class method — `ctoL :: forall f a. f a -> f a`.
+    // `readRhi` deep-copies out of std.json's arena; the copy must carry
+    // the `head` field or the reader sees a headless AppTy.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const head_ptr = try alloc.create(CoreType);
+    head_ptr.* = CoreType{ .TyVar = testName("f", 5) };
+    const arg_ptr = try alloc.create(CoreType);
+    arg_ptr.* = CoreType{ .TyVar = testName("a", 6) };
+    const app_ty = CoreType{ .AppTy = .{ .head = head_ptr, .arg = arg_ptr } };
+
+    const fn_arg = try alloc.create(CoreType);
+    fn_arg.* = app_ty;
+    const fn_res = try alloc.create(CoreType);
+    fn_res.* = app_ty;
+    const method_ty = CoreType{ .FunTy = .{ .arg = fn_arg, .res = fn_res } };
+    const s_body = try SerialisedCoreType.fromCoreType(method_ty, alloc);
+
+    const original = ModIface{
+        .module_name = "GHC.Base",
+        .values = &.{.{
+            .name = "ctoL",
+            .unique = 77,
+            .scheme = .{
+                .binder_uniques = &.{ 5, 6 },
+                .binder_names = &.{ "f", "a" },
+                .constraints = &.{},
+                .body = s_body,
+            },
+        }},
+        .data_decls = &.{},
+    };
+
+    const json = try writeRhi(alloc, original);
+    const recovered = try readRhi(alloc, json);
+
+    const body = recovered.values[0].scheme.body;
+    try testing.expectEqualStrings("FunTy", body.tag);
+    try testing.expectEqualStrings("AppTy", body.arg.?.tag);
+    try testing.expectEqualStrings("TyVar", body.arg.?.head.?.tag);
+    try testing.expectEqualStrings("f", body.arg.?.head.?.name.?);
+    try testing.expectEqualStrings("a", body.arg.?.arg.?.name.?);
+
+    // And the whole thing still converts back to a CoreType.
+    const core_ty = try body.toCoreType(alloc);
+    try testing.expect(core_ty.FunTy.arg.* == .AppTy);
+    try testing.expectEqualStrings("f", core_ty.FunTy.arg.AppTy.head.TyVar.base);
 }
 
 test "ModIface: writeRhi / readRhi round-trip (data declaration)" {
