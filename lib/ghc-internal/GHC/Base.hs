@@ -33,6 +33,9 @@ module GHC.Base
     , Bounded(..)
     , Enum(..)
     , Show(..)
+    , Functor(..)
+    , Applicative(..)
+    , Monad(..)
     -- Show helpers
     , showString, showLitChar, showListWith, showListTail
     , showTupleWith, showTupleTail
@@ -633,6 +636,107 @@ instance Show a => Show [a] where
 instance Show a => Show (Maybe a) where
   show Nothing  = "Nothing"
   show (Just x) = appendStr "Just " (show x)
+
+-- ========================================================================
+-- Functor / Applicative / Monad
+-- ========================================================================
+--
+-- Haskell 2010 §6.3.  The hierarchy lives in GHC.Base with the other core
+-- classes; #889 supplies superclass dictionary extraction, so
+-- `Applicative` methods can reach `fmap` and `Monad` methods can reach
+-- `pure` through their superclass dictionaries.
+
+class Functor f where
+  fmap :: (a -> b) -> f a -> f b
+
+class Functor f => Applicative f where
+  pure  :: a -> f a
+  (<*>) :: f (a -> b) -> f a -> f b
+
+class Applicative m => Monad m where
+  (>>=)  :: m a -> (a -> m b) -> m b
+  (>>)   :: m a -> m b -> m b
+  return :: a -> m a
+  fail   :: String -> m a
+
+  (>>) m n = m >>= \ignored -> n
+  return = pure
+  fail = error
+
+instance Functor Maybe where
+  fmap _ Nothing  = Nothing
+  fmap f (Just x) = Just (f x)
+
+instance Applicative Maybe where
+  pure = Just
+  Nothing  <*> _  = Nothing
+  (Just f) <*> mx = fmap f mx
+
+instance Monad Maybe where
+  (>>=) Nothing  _ = Nothing
+  (>>=) (Just x) f = f x
+  fail _ = Nothing
+
+instance Functor (Either e) where
+  fmap _ (Left e)  = Left e
+  fmap f (Right x) = Right (f x)
+
+instance Applicative (Either e) where
+  pure = Right
+  (Left e)  <*> _ = Left e
+  (Right f) <*> r = fmap f r
+
+instance Monad (Either e) where
+  (>>=) (Left e)  _ = Left e
+  (>>=) (Right x) f = f x
+
+-- Local polymorphic append, used by the list Applicative/Monad instances.
+-- Not exported: Prelude's `(++)` lives in Data.List, one layer up, and
+-- GHC.Base must not import from there.
+appendList :: [a] -> [a] -> [a]
+appendList []       ys = ys
+appendList (x : xs) ys = x : appendList xs ys
+
+instance Functor [] where
+  fmap _ []       = []
+  fmap f (x : xs) = f x : fmap f xs
+
+instance Applicative [] where
+  pure x = x : []
+  []       <*> _  = []
+  (f : fs) <*> xs = appendList (fmap f xs) (fs <*> xs)
+
+instance Monad [] where
+  (>>=) []       _ = []
+  (>>=) (x : xs) f = appendList (f x) (xs >>= f)
+  fail _ = []
+
+-- `IO` is the one monad the compiler still sequences structurally: a GRIN
+-- `Bind` *is* an IO bind, so a `do` block at `IO` lowers straight to it
+-- rather than through this dictionary (see `resolveDoMonadOps` in
+-- src/core/desugar.zig).  The instance still has to exist — it is what
+-- `>>=`, `>>`, `pure` and `return` resolve to when they are *named* at `IO`
+-- rather than written as `do` — and its methods are themselves written with
+-- `do`, so they lower to that same structural bind.
+-- Unifying the two paths is tracked in issue #941.
+instance Functor IO where
+  fmap f m = do
+    x <- m
+    primPureIO (f x)
+
+instance Applicative IO where
+  pure = primPureIO
+  mf <*> mx = do
+    f <- mf
+    fmap f mx
+
+instance Monad IO where
+  (>>=) m k = do
+    x <- m
+    k x
+  (>>) m n = do
+    _ <- m
+    n
 
 instance (Show a, Show b) => Show (Either a b) where
   show (Left x)  = appendStr "Left " (show x)

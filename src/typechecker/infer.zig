@@ -652,10 +652,14 @@ fn astTypeToHTypeWithScope(
             }
 
             const args = try elem_tys.toOwnedSlice(ctx.alloc);
-            // Arity 1 is the unit type (the parser hands a 1-tuple here);
-            // arities 2..max_tuple_arity map to their tuple constructor.
-            // Anything wider is not yet wired and falls back to a fresh meta.
-            const tuple_name: ?Name = if (args.len == 1)
+            // Arity 0 and 1 are both the unit type: the parser spells `()` as
+            // a zero-width tuple and `(t)` as a 1-tuple.  Leaving arity 0 as a
+            // fresh meta made every `IO ()` signature infer as `IO ?n`, which
+            // only showed up once a signature needed the `()` to be concrete
+            // (`when :: Monad m => Bool -> m () -> m ()`, #926).
+            // Arities 2..max_tuple_arity map to their tuple constructor;
+            // anything wider is not yet wired and falls back to a fresh meta.
+            const tuple_name: ?Name = if (args.len <= 1)
                 Known.Type.Unit
             else
                 Known.Con.tuple(args.len);
@@ -1047,6 +1051,11 @@ fn knownTypeByName(name: []const u8) ?HType {
     if (std.mem.eql(u8, name, "IO")) return HType{ .Con = .{ .name = Known.Type.IO, .args = &.{} } };
     if (std.mem.eql(u8, name, "Maybe")) return HType{ .Con = .{ .name = Known.Type.Maybe, .args = &.{} } };
     if (std.mem.eql(u8, name, "Either")) return HType{ .Con = .{ .name = Known.Type.Either, .args = &.{} } };
+    // The bare list type constructor, as written in a higher-kinded instance
+    // head (`instance Functor []`).  Without this it would fall through to the
+    // user-ADT lookup and get unique 0, so it would not unify with the
+    // `Known.Type.List` that `[a]` sugar produces (#926).
+    if (std.mem.eql(u8, name, "[]")) return HType{ .Con = .{ .name = Known.Type.List, .args = &.{} } };
     return null;
 }
 
@@ -1491,7 +1500,8 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
         // monad `m` constraint. Each statement type is `m a` for some inner type `a`.
         // The final result of the do-block is `m a` where `a` is the inner type
         // of the last statement.
-        .Do => |stmts| blk: {
+        .Do => |d| blk: {
+            const stmts = d.stmts;
             if (stmts.len == 0) break :blk try ctx.freshMeta();
 
             // Set up the monad type context for this do-block
@@ -1507,6 +1517,26 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
 
             try ctx.env.push();
             defer ctx.env.pop();
+
+            // Record the block's `Monad m` constraint, keyed by the
+            // renamer-minted per-block unique (#926).  The desugarer looks the
+            // solved evidence back up under the same key to decide how to
+            // lower the block: a `Monad IO` instance keeps the structural
+            // GRIN sequencing, anything else dispatches through the
+            // dictionary.  Guarded on `>>=` actually being a class method —
+            // boot modules with `NoImplicitPrelude` still use the wired-in
+            // do-notation names, which carry no scheme.
+            if (ctx.env.lookupScheme(d.bind_name.unique)) |bind_scheme| {
+                for (bind_scheme.constraints) |c| {
+                    if (c.class_name.unique.value != Known.Class.Monad.unique.value) continue;
+                    try ctx.wanted_constraints.append(ctx.alloc, .{ .Class = .{
+                        .class_name = c.class_name,
+                        .ty = monad_ty,
+                        .span = doEvidenceSpan(),
+                        .var_unique = d.evidence_unique,
+                    } });
+                }
+            }
 
             // Infer each statement, tracking the inner type `a` of the last statement
             var last_inner: *HType = try ctx.freshMeta();
@@ -1538,8 +1568,10 @@ pub fn infer(ctx: *InferCtx, expr: RExpr) std.mem.Allocator.Error!*HType {
                 break :blk ctx.freshMeta();
             }
             if (elems.len == 0) {
-                // Defensive: `()` is parsed as Unit, not a 0-tuple.
-                break :blk ctx.freshMeta();
+                // `()` — the parser spells the unit *expression* as a
+                // zero-width tuple, so give it the unit type rather than an
+                // unconstrained meta (#926: `pure ()` needs a real type).
+                break :blk ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.Unit, .args = &.{} } });
             }
 
             var elem_tys = std.ArrayListUnmanaged(HType).empty;
@@ -2847,21 +2879,34 @@ fn ioTy(inner: HType, alloc: std.mem.Allocator) std.mem.Allocator.Error!HType {
 /// See #176 for the correct generic approach.
 fn monadTy(ctx: *InferCtx, inner: *const HType) std.mem.Allocator.Error!*HType {
     if (ctx.monad_type) |m| {
-        // Use the current monad type - construct AppTy(m, inner)
-        // Don't copy m - use it directly so that solving it propagates
-        // Copy inner since different statements have different inner types
-        // The arg needs to be allocated on arena for proper mutation
-        const arg_copy = try ctx.alloc.create(HType);
-        arg_copy.* = inner.*;
+        // Use the current monad type — construct `AppTy(m, inner)`.
+        //
+        // Both components are shared by *pointer*, never copied.  A copy of
+        // `inner` would sever the metavar chain: unifying `IO Int` with
+        // `m a` would then bind the copy's `ref` and leave the statement's
+        // own type an unsolved meta, so a class constraint over it (`Show a`
+        // in `do { x <- act; print x }`) never resolves and the desugarer
+        // emits a dictionary-less, unsaturated method call (#926).  Callers
+        // already hand a distinct `inner` node per statement.
         return ctx.alloc_ty(HType{ .AppTy = .{
             .head = m,
-            .arg = arg_copy,
+            .arg = inner,
         } });
     } else {
         // Fallback to IO for backward compatibility (M1)
         const args = try ctx.alloc.dupe(HType, &.{ctx.conArgIndirection(@constCast(inner))});
         return ctx.alloc_ty(HType{ .Con = .{ .name = Known.Type.IO, .args = args } });
     }
+}
+
+/// Key span for a do-block's `Monad m` constraint.
+///
+/// The evidence key is `(var_unique, span, class_unique)`; a do-block has no
+/// source span of its own, so the renamer-minted `evidence_unique` carries the
+/// identity and the span is a fixed synthetic value.  `desugarExpr` must use
+/// the same one — see `doEvidenceSpan` in src/core/desugar.zig.
+pub fn doEvidenceSpan() SourceSpan {
+    return syntheticSpan();
 }
 
 /// Synthetic span for constraints generated during desugaring.

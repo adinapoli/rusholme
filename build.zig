@@ -156,6 +156,9 @@ pub fn build(b: *std.Build) void {
     mod.addAnonymousImport("data_ord_source", .{
         .root_source_file = b.path("lib/base/Data/Ord.hs"),
     });
+    mod.addAnonymousImport("control_monad_source", .{
+        .root_source_file = b.path("lib/base/Control/Monad.hs"),
+    });
 
     // Runtime module - for LLVM-based runtime tests
     const runtime_mod = b.addModule("runtime", .{
@@ -442,6 +445,15 @@ pub fn build(b: *std.Build) void {
     const data_ord_path_wf = b.addNamedWriteFiles("data_ord_path");
     const data_ord_path_file = data_ord_path_wf.add("path.txt", data_ord_path_option);
 
+    // Control.Monad source path.
+    const control_monad_path_option = b.option(
+        []const u8,
+        "control-monad-path",
+        "Path to lib/base/Control/Monad.hs",
+    ) orelse b.getInstallPath(.@"prefix", "lib/base/Control/Monad.hs");
+    const control_monad_path_wf = b.addNamedWriteFiles("control_monad_path");
+    const control_monad_path_file = control_monad_path_wf.add("path.txt", control_monad_path_option);
+
     // ── Default package database path ──────────────────────────────────────
     // Baked into the rhc binary via @embedFile and prepended to the user's
     // `--package-db` list at startup, so `rhc build` consults the pre-built
@@ -547,6 +559,9 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addAnonymousImport("data_ord_path", .{
         .root_source_file = data_ord_path_file,
     });
+    exe.root_module.addAnonymousImport("control_monad_path", .{
+        .root_source_file = control_monad_path_file,
+    });
     exe.root_module.addAnonymousImport("default_package_db", .{
         .root_source_file = default_pkg_db_file,
     });
@@ -573,6 +588,7 @@ pub fn build(b: *std.Build) void {
         b.addInstallFile(b.path("lib/base/Data/Char.hs"), "lib/base/Data/Char.hs"),
         b.addInstallFile(b.path("lib/base/Data/Tuple.hs"), "lib/base/Data/Tuple.hs"),
         b.addInstallFile(b.path("lib/base/Data/Ord.hs"), "lib/base/Data/Ord.hs"),
+        b.addInstallFile(b.path("lib/base/Control/Monad.hs"), "lib/base/Control/Monad.hs"),
     };
     for (boot_source_installs) |s| b.getInstallStep().dependOn(&s.step);
 
@@ -944,6 +960,9 @@ pub fn build(b: *std.Build) void {
     });
     repl_wasm.root_module.addAnonymousImport("data_ord_source", .{
         .root_source_file = b.path("lib/base/Data/Ord.hs"),
+    });
+    repl_wasm.root_module.addAnonymousImport("control_monad_source", .{
+        .root_source_file = b.path("lib/base/Control/Monad.hs"),
     });
     // Reactor mode: the REPL is a long-lived module with exported functions,
     // not a command that runs once and exits. In reactor mode the entry point

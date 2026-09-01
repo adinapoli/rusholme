@@ -255,8 +255,18 @@ const PrimOpMapping = struct {
         // Monad operations for IO (do-notation desugaring, issue #464)
         // In M1, >> and >>= are no-ops that return unit. The actual sequencing
         // is handled by the GRIN bind structure which evaluates actions in order.
-        if (std.mem.eql(u8, name.base, ">>")) return .{ .instruction = .{ .seq = {} } };
-        if (std.mem.eql(u8, name.base, ">>=")) return .{ .instruction = .{ .seq = {} } };
+        // Restrict this to the compiler's magical do-notation names: `Monad`
+        // class methods share the same base strings but are ordinary
+        // dictionary-dispatched functions (#926).
+        if (std.mem.eql(u8, name.base, ">>") and name.unique.value == naming_known.Fn.then.unique.value)
+            return .{ .instruction = .{ .seq = {} } };
+        if (std.mem.eql(u8, name.base, ">>=") and name.unique.value == naming_known.Fn.bind.unique.value)
+            return .{ .instruction = .{ .seq = {} } };
+
+        // `pure` / `return` at `IO`.  A GRIN Bind yields the value an action
+        // produced, so an `IO a` action *is* its `a` at the LLVM level and
+        // injecting a pure value into IO is the identity (#926).
+        if (std.mem.eql(u8, name.base, "primPureIO")) return .{ .instruction = .{ .identity = {} } };
 
         // Character ↔ Int conversions — identity at the LLVM level since
         // both Char and Int are represented as i64.
@@ -2251,6 +2261,15 @@ pub const GrinTranslator = struct {
             return null;
         }
 
+        // Intercept the GRIN-level `runIO` stub (unique 9997): perform a
+        // first-class IO action value by forcing its thunk (#926).  See
+        // `performAction` in src/grin/translate.zig — keep the two in sync.
+        if (std.mem.eql(u8, name.base, "runIO") and name.unique.value == 9997) {
+            if (args.len < 1) return null;
+            const raw = try self.translateValToLlvm(args[0]);
+            return self.forceOperandIfNeeded(raw, args[0]);
+        }
+
         // Intercept calls to the GRIN-level `apply` stub (unique 9998)
         // and route them to the LLVM-level __rhc_apply instead.
         if (std.mem.eql(u8, name.base, "apply") and name.unique.value == 9998) {
@@ -2604,6 +2623,15 @@ pub const GrinTranslator = struct {
 
     fn translateApp(self: *GrinTranslator, name: grin.Name, args: []const grin.Val) TranslationError!void {
         if (std.mem.eql(u8, name.base, "pure")) return;
+
+        // Intercept the GRIN-level `runIO` stub (unique 9997) — see above.
+        if (std.mem.eql(u8, name.base, "runIO") and name.unique.value == 9997) {
+            if (args.len >= 1) {
+                const raw = try self.translateValToLlvm(args[0]);
+                _ = self.forceOperandIfNeeded(raw, args[0]);
+            }
+            return;
+        }
 
         // Intercept calls to the GRIN-level `apply` stub (unique 9998).
         if (std.mem.eql(u8, name.base, "apply") and name.unique.value == 9998) {

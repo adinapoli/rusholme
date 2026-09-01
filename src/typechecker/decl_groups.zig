@@ -90,8 +90,8 @@ fn collectExprVarRefs(
             try collectExprVarRefs(i.then_expr.*, top_level, refs, alloc);
             try collectExprVarRefs(i.else_expr.*, top_level, refs, alloc);
         },
-        .Do => |stmts| {
-            for (stmts) |stmt| {
+        .Do => |d| {
+            for (d.stmts) |stmt| {
                 switch (stmt) {
                     .Generator => |g| try collectExprVarRefs(g.expr, top_level, refs, alloc),
                     .Qualifier => |e| try collectExprVarRefs(e, top_level, refs, alloc),

@@ -231,6 +231,44 @@ const TranslateCtx = struct {
     }
 };
 
+/// GRIN-level stub that *performs* a first-class IO action (#926).
+///
+/// An `IO a` written inline (`putStrLn "x"`) reaches the bind as a call and
+/// runs by being called.  An `IO a` that arrived as a *value* — an element of
+/// `sequence_`'s list, the `m` parameter of `instance Monad IO`'s `(>>=)` —
+/// reaches it as a suspended thunk, and returning that thunk would bind the
+/// continuation to the thunk instead of running it.  `runIO` forces it, which
+/// is what performing it means in GRIN: the thunk's body *is* the action.
+///
+/// The backend intercepts this name (see `grin_to_llvm.zig`); keep the two
+/// sites in sync, as with the `apply` stub.
+///
+/// Forcing *updates* the thunk, so an action value run twice performs its
+/// effect once.  Fixing that needs a repeatable representation for `IO a`.
+/// tracked in: https://github.com/adinapoli/rusholme/issues/939
+const run_io_name: GrinName = .{ .base = "runIO", .unique = .{ .value = 9997 } };
+
+/// Wrap an action expression so that a first-class action value is performed.
+///
+/// A translated action that is just `Return(v)` produced no effect on its own:
+/// `v` is the action, not its result.  Route it through `runIO`.  Anything
+/// else is already a computation (a call, a bind chain) and runs as-is.
+fn performAction(ctx: *TranslateCtx, action: *GrinExpr) std.mem.Allocator.Error!*GrinExpr {
+    const val = switch (action.*) {
+        .Return => |v| v,
+        else => return action,
+    };
+    switch (val) {
+        .Var => {},
+        else => return action,
+    }
+    const args = try ctx.alloc.alloc(GrinVal, 1);
+    args[0] = val;
+    const node = try ctx.alloc.create(GrinExpr);
+    node.* = .{ .App = .{ .name = run_io_name, .args = args } };
+    return node;
+}
+
 /// A pending bind for a complex argument sub-expression.
 /// Used by translateApp to sequence complex args before the outer App.
 const PendingBind = struct {
@@ -990,7 +1028,7 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
                 const lhs_core = args.items[1]; // first argument (a)
                 const rhs_core = args.items[0]; // second argument (b)
 
-                const lhs_grin = try translateExpr(ctx, lhs_core);
+                const lhs_grin = try performAction(ctx, try translateExpr(ctx, lhs_core));
                 const rhs_grin = try translateExpr(ctx, rhs_core);
 
                 const discard = try ctx.freshName("_seq");
@@ -1007,43 +1045,74 @@ fn translateApp(ctx: *TranslateCtx, app_expr: *const CoreExpr) anyerror!*GrinExp
                 const m_core = args.items[1]; // monadic action (m)
                 const f_core = args.items[0]; // continuation (f)
 
-                const m_grin = try translateExpr(ctx, m_core);
+                const m_grin = try performAction(ctx, try translateExpr(ctx, m_core));
 
-                // The continuation `f` must be a lambda-lifted function name
-                // (a Var) or a zero-arity call (App).  Lambda lifting turns
-                // all do-notation continuations (`\x -> body`) into named
-                // top-level functions.  If this fails, it indicates a bug in
-                // the lambda lifter — the continuation was not lifted.
                 const f_grin = try translateExpr(ctx, f_core);
-                const f_name = switch (f_grin.*) {
+                const bind_var = try ctx.freshName("bind_res");
+
+                // Fast path: lambda lifting turned the continuation
+                // (`\x -> body`) into a top-level unary function, so the
+                // continuation is a bare reference to it (or a zero-argument
+                // call).  Call it directly with the bound result.
+                const direct_name: ?GrinName = switch (f_grin.*) {
                     .Return => |ret| switch (ret) {
                         .Var => |name| name,
-                        else => {
-                            std.log.err(">>=: continuation resolved to Return({s}), expected Var " ++
-                                "(lambda lifting may have failed to lift a do-notation continuation)", .{@tagName(ret)});
-                            return error.CannotExtractValue;
-                        },
+                        else => null,
                     },
-                    .App => |app| app.name,
-                    else => {
-                        std.log.err(">>=: continuation is {s}, expected Return(Var) or App " ++
-                            "(lambda lifting may have failed to lift a do-notation continuation)", .{@tagName(f_grin.*)});
-                        return error.CannotExtractValue;
-                    },
+                    .App => |app| if (app.args.len == 0) app.name else null,
+                    else => null,
                 };
+                if (direct_name) |f_name| {
+                    if (ctx.getFunctionArity(f_name) == @as(u32, 1)) {
+                        // Heap-allocate the args slice: an inline
+                        // `&[_]GrinVal{...}` literal with runtime values lives
+                        // on the stack and dangles once this function returns.
+                        const cont_args = try ctx.alloc.alloc(GrinVal, 1);
+                        cont_args[0] = .{ .Var = bind_var };
+                        const app_cont = try ctx.alloc.create(GrinExpr);
+                        app_cont.* = .{ .App = .{
+                            .name = f_name,
+                            .args = cont_args,
+                        } };
 
-                const bind_var = try ctx.freshName("bind_res");
-                const app_cont = try ctx.alloc.create(GrinExpr);
-                app_cont.* = .{ .App = .{
-                    .name = f_name,
-                    .args = &[_]GrinVal{.{ .Var = bind_var }},
+                        const bind_expr = try ctx.alloc.create(GrinExpr);
+                        bind_expr.* = .{ .Bind = .{
+                            .lhs = m_grin,
+                            .pat = .{ .Var = bind_var },
+                            .rhs = app_cont,
+                        } };
+                        return bind_expr;
+                    }
+                }
+
+                // General path: the continuation is a closure — a lifted
+                // continuation that captured free variables comes through as
+                // the *partial* application `lifted_k captured…`, which is a
+                // Bind producing a P-tag node, not a callable name.  Evaluate
+                // it to a value and hand that value to GRIN's `apply`, the
+                // same machinery over-application already uses (#926).
+                const cont_var = try ctx.freshName("bind_cont");
+                const apply_args = try ctx.alloc.alloc(GrinVal, 2);
+                apply_args[0] = .{ .Var = cont_var };
+                apply_args[1] = .{ .Var = bind_var };
+                const apply_expr = try ctx.alloc.create(GrinExpr);
+                apply_expr.* = .{ .App = .{
+                    .name = .{ .base = "apply", .unique = .{ .value = 9998 } },
+                    .args = apply_args,
+                } };
+
+                const cont_bind = try ctx.alloc.create(GrinExpr);
+                cont_bind.* = .{ .Bind = .{
+                    .lhs = f_grin,
+                    .pat = .{ .Var = cont_var },
+                    .rhs = apply_expr,
                 } };
 
                 const bind_expr = try ctx.alloc.create(GrinExpr);
                 bind_expr.* = .{ .Bind = .{
                     .lhs = m_grin,
                     .pat = .{ .Var = bind_var },
-                    .rhs = app_cont,
+                    .rhs = cont_bind,
                 } };
                 return bind_expr;
             }
