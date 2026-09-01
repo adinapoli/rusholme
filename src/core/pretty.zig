@@ -83,7 +83,7 @@ pub fn CorePrinter(comptime WriterType: type) type {
 
         fn needsParens(ty: ast.CoreType) bool {
             return switch (ty) {
-                .FunTy, .ForAllTy => true,
+                .FunTy, .ForAllTy, .AppTy => true,
                 .TyCon => |tc| tc.args.len > 0,
                 .TyVar => false,
             };
@@ -101,6 +101,14 @@ pub fn CorePrinter(comptime WriterType: type) type {
                         try self.printType(arg);
                         if (parens) try self.writeByte(')');
                     }
+                },
+                .AppTy => |at| {
+                    try self.printType(at.head.*);
+                    try self.writeByte(' ');
+                    const parens = needsParens(at.arg.*);
+                    if (parens) try self.writeByte('(');
+                    try self.printType(at.arg.*);
+                    if (parens) try self.writeByte(')');
                 },
                 .FunTy => |f| {
                     const arg_parens = needsParens(f.arg.*);

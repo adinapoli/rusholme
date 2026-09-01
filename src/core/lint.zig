@@ -429,6 +429,10 @@ fn lintCoreType(env: *LintEnv, ty: CoreType, diags: *DiagnosticCollector) !void 
                 try lintCoreType(env, arg, diags);
             }
         },
+        .AppTy => |at| {
+            try lintCoreType(env, at.head.*, diags);
+            try lintCoreType(env, at.arg.*, diags);
+        },
         .FunTy => |f| {
             try lintCoreType(env, f.arg.*, diags);
             try lintCoreType(env, f.res.*, diags);
@@ -446,6 +450,10 @@ fn bindTypeVars(env: *LintEnv, ty: CoreType) !void {
         .TyVar => |name| try env.bindTyVar(name),
         .TyCon => |tc| {
             for (tc.args) |arg| try bindTypeVars(env, arg);
+        },
+        .AppTy => |at| {
+            try bindTypeVars(env, at.head.*);
+            try bindTypeVars(env, at.arg.*);
         },
         .FunTy => |f| {
             try bindTypeVars(env, f.arg.*);
@@ -492,6 +500,10 @@ fn typesEqual(t1: CoreType, t2: CoreType) bool {
                 if (!typesEqual(a1, a2)) return false;
             }
             return true;
+        },
+        .AppTy => |a1| {
+            const a2 = t2.AppTy;
+            return typesEqual(a1.head.*, a2.head.*) and typesEqual(a1.arg.*, a2.arg.*);
         },
         .FunTy => |f1| {
             const f2 = t2.FunTy;
@@ -608,7 +620,7 @@ const TypeFormatter = struct {
                     for (tc.args) |arg| {
                         try writer.writeByte(' ');
                         const needs_parens = switch (arg) {
-                            .FunTy, .ForAllTy => true,
+                            .FunTy, .ForAllTy, .AppTy => true,
                             .TyCon => |c| c.args.len > 0,
                             .TyVar => false,
                         };
@@ -618,9 +630,21 @@ const TypeFormatter = struct {
                     }
                 }
             },
+            .AppTy => |at| {
+                try formatTypeImpl(at.head.*, writer);
+                try writer.writeByte(' ');
+                const needs_parens = switch (at.arg.*) {
+                    .FunTy, .ForAllTy, .AppTy => true,
+                    .TyCon => |c| c.args.len > 0,
+                    .TyVar => false,
+                };
+                if (needs_parens) try writer.writeByte('(');
+                try formatTypeImpl(at.arg.*, writer);
+                if (needs_parens) try writer.writeByte(')');
+            },
             .FunTy => |f| {
                 const arg_needs_parens = switch (f.arg.*) {
-                    .FunTy, .ForAllTy => true,
+                    .FunTy, .ForAllTy, .AppTy => true,
                     else => false,
                 };
                 if (arg_needs_parens) try writer.writeByte('(');

@@ -44,6 +44,13 @@ pub const CoreType = union(enum) {
     /// A nullary constructor like `Int` has an empty `args` slice.
     TyCon: struct { name: Name, args: []const CoreType },
 
+    /// Type application whose head is not a known type constructor —
+    /// `f a` where `f` is a (rigid) type variable.  Higher-kinded class
+    /// methods such as `ctoL :: f a -> [a]` need this: encoding `f a` as
+    /// `TyCon f [a]` would claim that a type variable is a constructor,
+    /// which breaks instantiation across an interface-file boundary (#934).
+    AppTy: struct { head: *const CoreType, arg: *const CoreType },
+
     /// Function type (a -> b).
     FunTy: struct { arg: *const CoreType, res: *const CoreType },
 

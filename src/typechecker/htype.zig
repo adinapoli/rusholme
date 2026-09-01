@@ -329,23 +329,32 @@ pub const HType = union(enum) {
                         // A *rigid* type variable applied to arguments is a
                         // legitimate higher-kinded method type (`f a` in
                         // `class Container f where ctoL :: f a -> [a]`).
-                        // CoreType has no AppTy node, so keep the application
-                        // by reusing the rigid's name as the head of a TyCon —
-                        // dictionary layout/codegen only relies on field
-                        // positions, not on this being a real tycon (#925).
+                        // It maps to `CoreType.AppTy`: encoding it as
+                        // `TyCon f [a]` would claim the variable is a type
+                        // constructor, which survives codegen but breaks
+                        // instantiation once the type crosses a `.rhi`
+                        // boundary — the reader has no way to tell the head
+                        // apart from a real nullary tycon (#934).
                         // An *unsolved meta* head is still a compiler bug
                         // (e.g. an unresolved monad in do-notation).
                         switch (at.head.chase()) {
                             .Rigid => {
-                                const args = try alloc.alloc(CoreType, 1);
-                                args[0] = arg_core.*;
-                                break :blk CoreType{ .TyCon = .{ .name = tv, .args = args } };
+                                const head_ptr = try alloc.create(CoreType);
+                                head_ptr.* = CoreType{ .TyVar = tv };
+                                break :blk CoreType{ .AppTy = .{ .head = head_ptr, .arg = arg_core } };
                             },
                             else => std.debug.panic(
                                 "HType.toCore: unsolved monad type variable {s} — cannot apply to argument",
                                 .{tv.base},
                             ),
                         }
+                    },
+                    .AppTy => {
+                        // Nested application with a rigid head — `f a b`.
+                        // Keep peeling: the head is already a Core `AppTy`.
+                        const head_ptr = try alloc.create(CoreType);
+                        head_ptr.* = head_core;
+                        break :blk CoreType{ .AppTy = .{ .head = head_ptr, .arg = arg_core } };
                     },
                     else => {
                         std.debug.panic(
@@ -895,6 +904,61 @@ test "HType.toCore: Fun → FunTy" {
     try testing.expect(ct == .FunTy);
     try testing.expectEqualStrings("Int", ct.FunTy.arg.TyCon.name.base);
     try testing.expectEqualStrings("Bool", ct.FunTy.res.TyCon.name.base);
+}
+
+test "HType.toCore: rigid-headed AppTy → CoreType.AppTy (#934)" {
+    // `f a` with a rigid `f` is a type-variable application, not a tycon.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const f_ty = HType{ .Rigid = testName("f", 1) };
+    const a_ty = HType{ .Rigid = testName("a", 2) };
+    const ty = HType{ .AppTy = .{ .head = &f_ty, .arg = &a_ty } };
+
+    const ct = try ty.toCore(alloc);
+    try testing.expect(ct == .AppTy);
+    try testing.expect(ct.AppTy.head.* == .TyVar);
+    try testing.expectEqualStrings("f", ct.AppTy.head.TyVar.base);
+    try testing.expect(ct.AppTy.arg.* == .TyVar);
+    try testing.expectEqualStrings("a", ct.AppTy.arg.TyVar.base);
+}
+
+test "HType.toCore: nested rigid-headed AppTy → nested CoreType.AppTy (#934)" {
+    // `f a b` nests left-associatively: AppTy(AppTy(f, a), b).
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const f_ty = HType{ .Rigid = testName("f", 1) };
+    const a_ty = HType{ .Rigid = testName("a", 2) };
+    const b_ty = HType{ .Rigid = testName("b", 3) };
+    const inner = HType{ .AppTy = .{ .head = &f_ty, .arg = &a_ty } };
+    const ty = HType{ .AppTy = .{ .head = &inner, .arg = &b_ty } };
+
+    const ct = try ty.toCore(alloc);
+    try testing.expect(ct == .AppTy);
+    try testing.expectEqualStrings("b", ct.AppTy.arg.TyVar.base);
+    try testing.expect(ct.AppTy.head.* == .AppTy);
+    try testing.expectEqualStrings("f", ct.AppTy.head.AppTy.head.TyVar.base);
+    try testing.expectEqualStrings("a", ct.AppTy.head.AppTy.arg.TyVar.base);
+}
+
+test "HType.toCore: constructor-headed AppTy still flattens to TyCon" {
+    // `Maybe a` reaching `toCore` as an application must come out as the
+    // saturated constructor — only *rigid* heads become `AppTy`.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const maybe_ty = con0("Maybe", 1);
+    const a_ty = HType{ .Rigid = testName("a", 2) };
+    const ty = HType{ .AppTy = .{ .head = &maybe_ty, .arg = &a_ty } };
+
+    const ct = try ty.toCore(alloc);
+    try testing.expect(ct == .TyCon);
+    try testing.expectEqualStrings("Maybe", ct.TyCon.name.base);
+    try testing.expectEqual(@as(usize, 1), ct.TyCon.args.len);
 }
 
 test "HType.toCore: ForAll → ForAllTy" {
