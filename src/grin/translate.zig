@@ -237,15 +237,16 @@ const TranslateCtx = struct {
 /// runs by being called.  An `IO a` that arrived as a *value* — an element of
 /// `sequence_`'s list, the `m` parameter of `instance Monad IO`'s `(>>=)` —
 /// reaches it as a suspended thunk, and returning that thunk would bind the
-/// continuation to the thunk instead of running it.  `runIO` forces it, which
-/// is what performing it means in GRIN: the thunk's body *is* the action.
+/// continuation to the thunk instead of running it.  `runIO` evaluates it,
+/// which is what performing it means in GRIN: the thunk's body *is* the
+/// action.
 ///
-/// The backend intercepts this name (see `grin_to_llvm.zig`); keep the two
-/// sites in sync, as with the `apply` stub.
-///
-/// Forcing *updates* the thunk, so an action value run twice performs its
-/// effect once.  Fixing that needs a repeatable representation for `IO a`.
-/// tracked in: https://github.com/adinapoli/rusholme/issues/939
+/// The backend lowers this stub to `__rhc_perform` — an eval that never
+/// updates the thunk in place, so performing the same action value again
+/// re-enters its body and re-runs the effect (#939,
+/// docs/decisions/939-io-action-representation.md).  The backend intercepts
+/// this name (see `grin_to_llvm.zig`); keep the two sites in sync, as with
+/// the `apply` stub.
 const run_io_name: GrinName = .{ .base = "runIO", .unique = .{ .value = 9997 } };
 
 /// Wrap an action expression so that a first-class action value is performed.

@@ -296,6 +296,17 @@ test "e2e: e2e_926_control_monad (#926)" {
     try testE2e(std.testing.allocator, "e2e_926_control_monad");
 }
 
+test "e2e: e2e_939_io_action_repeat (#939)" {
+    try testE2e(std.testing.allocator, "e2e_939_io_action_repeat");
+}
+
+test "e2e: e2e_939_main_exit_status (#939)" {
+    // Pins native `main`'s exit status at 0 when its tail value is
+    // pointer-typed. The expected stdout is deliberately Rusholme's
+    // current, incomplete output — see the comment in the .hs file.
+    try testE2e(std.testing.allocator, "e2e_939_main_exit_status");
+}
+
 test "e2e: e2e_023_mutual_recursion (#566)" {
     try testE2e(std.testing.allocator, "e2e_023_mutual_recursion");
 }
@@ -482,6 +493,14 @@ test "e2e: --rts=immix PrimOp/GC integration (#327)" {
     // list `*Node` arguments stay alive across the safepoint. See
     // `docs/decisions/0327-primops-and-gc.md`.
     try testE2eImmix(std.testing.allocator, "e2e_327_primop_gc");
+}
+
+test "e2e: --rts=immix repeats IO action values (#939)" {
+    // A perform allocates a fresh result node per call and leaves the
+    // thunk un-updated, so its captured arguments stay reachable longer
+    // than a forced thunk's. The liveness shape differs from the force
+    // path, so lock the repeat semantics in under Immix too.
+    try testE2eImmix(std.testing.allocator, "e2e_939_io_action_repeat");
 }
 
 test "e2e: rhc build rejects unknown --rts backend (#776)" {
