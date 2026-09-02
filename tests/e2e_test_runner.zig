@@ -300,6 +300,13 @@ test "e2e: e2e_939_io_action_repeat (#939)" {
     try testE2e(std.testing.allocator, "e2e_939_io_action_repeat");
 }
 
+test "e2e: e2e_939_main_exit_status (#939)" {
+    // Pins native `main`'s exit status at 0 when its tail value is
+    // pointer-typed. The expected stdout is deliberately Rusholme's
+    // current, incomplete output — see the comment in the .hs file.
+    try testE2e(std.testing.allocator, "e2e_939_main_exit_status");
+}
+
 test "e2e: e2e_023_mutual_recursion (#566)" {
     try testE2e(std.testing.allocator, "e2e_023_mutual_recursion");
 }

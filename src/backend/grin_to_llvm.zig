@@ -534,6 +534,25 @@ const EvalKind = enum {
     }
 };
 
+/// Is this GRIN value in WHNF *by construction* — a literal, a bare tag, or
+/// a saturated constructor node?
+///
+/// Deliberately narrower than `valYieldsWhnf`, which also answers true for a
+/// `.Var` recorded in `whnf_vars`.  That cache is populated by memoising
+/// *forces* (a strict parameter forced at function entry, a pre-forced case
+/// scrutinee), so "already forced" is not the same claim as "not a suspended
+/// action".  A perform must not be skipped on the strength of a prior force:
+/// the force consumed the effect once and left `Ind → result` behind, so
+/// eliding the perform makes the effect vanish silently rather than run
+/// again.  Only construction-WHNF values are safe to skip.
+fn valIsWhnfByConstruction(val: grin.Val) bool {
+    return switch (val) {
+        .Lit, .ValTag => true,
+        .ConstTagNode => |ctn| ctn.tag.tag_type == .Con,
+        else => false,
+    };
+}
+
 // ── Inline alloc fast path (issue #798) ──────────────────────────────────
 //
 // Constants mirroring `src/rts/immix.zig`. Kept in sync with the RTS
@@ -4088,6 +4107,21 @@ pub const GrinTranslator = struct {
                         self.buildRetWithShadowRestore(llvm_val);
                         return;
                     }
+                } else if (is_native_main and is_ptr) {
+                    // `main` is declared to return i32, and a pointer-typed
+                    // tail value is an `IO ()` action (or its result) — never
+                    // a process status.  Returning it raw emitted `ret ptr`
+                    // inside `define i32 @main()`, which the LLVM verifier
+                    // rejects, and leaked the pointer's low bits as the exit
+                    // code: `do { act; act }` exited 24 instead of 0.
+                    //
+                    // `main :: IO ()` succeeds by definition, so 0 is the
+                    // answer.  That the tail action is not *performed* here
+                    // is a separate bug, deliberately not addressed by this
+                    // guard.
+                    // tracked in: https://github.com/adinapoli/rusholme/issues/943
+                    self.buildRetWithShadowRestore(c.LLVMConstInt(llvm.i32Type(), 0, 0));
+                    return;
                 } else if (!is_native_main) {
                     // Non-main, non-REPL functions return ptr.
                     // Force any F-tagged thunks to WHNF before returning
@@ -4476,13 +4510,24 @@ pub const GrinTranslator = struct {
     /// elide repeated *forces* (sound because forcing updates the thunk),
     /// while a perform of the same variable must emit a fresh call.
     fn performOperand(self: *GrinTranslator, raw: llvm.Value, val: grin.Val) llvm.Value {
-        if (self.valYieldsWhnf(val)) {
-            // Statically WHNF (literal, constructor, already-forced var):
-            // not a suspended action — nothing to run.  As in the force
-            // path, prefer the freshest recorded binding for the variable.
-            return self.freshestBinding(raw, val);
-        }
-        return self.callPerformIfNeeded(raw);
+        // WHNF by construction (literal, bare tag, saturated constructor):
+        // not a suspended action, so there is nothing to run.  Note this is
+        // `valIsWhnfByConstruction`, *not* `valYieldsWhnf` — see that
+        // function for why a previously forced variable must still be
+        // performed.
+        if (valIsWhnfByConstruction(val)) return raw;
+
+        // As in the force path, prefer the freshest recorded binding: the
+        // captured `raw` may predate a rebinding of the same variable.
+        const operand = self.freshestBinding(raw, val);
+
+        // `__rhc_perform` takes a pointer.  A variable bound to a raw `i64`
+        // is an unboxed worker value, not a node, so there is nothing to
+        // perform — and passing it would build a call with a mismatched
+        // argument type.
+        if (c.LLVMGetTypeKind(c.LLVMTypeOf(operand)) != c.LLVMPointerTypeKind) return operand;
+
+        return self.callPerformIfNeeded(operand);
     }
 
     fn callPerformIfNeeded(self: *GrinTranslator, val: llvm.Value) llvm.Value {
