@@ -159,16 +159,18 @@ pub fn unify(alloc: std.mem.Allocator, a: *HType, b: *HType) UnifyError!void {
                         try unify(alloc, @constCast(la), @constCast(ra));
                 },
                 .AppTy => |ra| {
-                    // Con(c, [arg]) ~ AppTy(?h, ?a)
-                    // Symmetric to the case in .AppTy branch
-                    if (lc.args.len != 1) return UnifyError.TypeMismatch;
+                    // Con(c, [x₁,…,xₙ]) ~ AppTy(?h, ?a)
+                    // The right-hand side is one argument applied to a head;
+                    // peel the *last* constructor argument and unify the head
+                    // with the partially-applied constructor `c x₁ … xₙ₋₁`.
+                    // This is required for higher-kinded instantiations such as
+                    // `f ~ Either e`, where `f a` is `Either e a` (arity 2).
+                    if (lc.args.len == 0) return UnifyError.TypeMismatch;
 
-                    // First, unify the arguments: arg ~ ?a
-                    const lhs_arg_ptr = @constCast(&lc.args[0]);
-                    try unify(alloc, lhs_arg_ptr, @constCast(ra.arg));
+                    const last = lc.args.len - 1;
+                    try unify(alloc, @constCast(&lc.args[last]), @constCast(ra.arg));
 
-                    // Bind the head: Con(c, []) ~ ?h
-                    const constructor = HType{ .Con = .{ .name = lc.name, .args = &.{} } };
+                    const constructor = HType{ .Con = .{ .name = lc.name, .args = lc.args[0..last] } };
                     const constructor_ptr = try alloc.create(HType);
                     constructor_ptr.* = constructor;
                     try unify(alloc, constructor_ptr, @constCast(ra.head));
@@ -192,17 +194,17 @@ pub fn unify(alloc: std.mem.Allocator, a: *HType, b: *HType) UnifyError!void {
                     try unify(alloc, @constCast(lat.arg), @constCast(rat.arg));
                 },
                 .Con => |rc| {
-                    // AppTy(?h, ?a) ~ Con(c, [arg])
-                    // This supports generic monad inference: AppTy(?0, ?1) unifies with IO ()
-                    // For M1, only single-argument constructors are handled (e.g. IO, Maybe, [])
-                    if (rc.args.len != 1) return UnifyError.TypeMismatch;
+                    // AppTy(?h, ?a) ~ Con(c, [x₁,…,xₙ])
+                    // Symmetric to the .Con-vs-.AppTy case above: peel the last
+                    // argument and unify the head with `c x₁ … xₙ₋₁`.  Handles
+                    // both unary constructors (`IO`, `Maybe`) and partially
+                    // applied higher-kinded heads (`Either e`).
+                    if (rc.args.len == 0) return UnifyError.TypeMismatch;
 
-                    // First, unify the arguments: ?a ~ arg
-                    try unify(alloc, @constCast(lat.arg), @constCast(&rc.args[0]));
+                    const last = rc.args.len - 1;
+                    try unify(alloc, @constCast(lat.arg), @constCast(&rc.args[last]));
 
-                    // After argument unification, bind the head to the constructor
-                    // ?h ~ Con(c, [])
-                    const constructor = HType{ .Con = .{ .name = rc.name, .args = &.{} } };
+                    const constructor = HType{ .Con = .{ .name = rc.name, .args = rc.args[0..last] } };
                     const constructor_ptr = try alloc.create(HType);
                     constructor_ptr.* = constructor;
                     try unify(alloc, @constCast(lat.head), constructor_ptr);

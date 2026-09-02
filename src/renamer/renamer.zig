@@ -52,6 +52,7 @@ const diag_mod = @import("../diagnostics/diagnostic.zig");
 const span_mod = @import("../diagnostics/span.zig");
 
 pub const Name = naming.Name;
+pub const Unique = naming.Unique;
 pub const UniqueSupply = naming.UniqueSupply;
 pub const Diagnostic = diag_mod.Diagnostic;
 pub const DiagnosticCollector = diag_mod.DiagnosticCollector;
@@ -397,7 +398,25 @@ pub const RExpr = union(enum) {
     Let: struct { binds: []const RDecl, body: *const RExpr },
     Case: struct { scrutinee: *const RExpr, alts: []const RAlt },
     If: struct { condition: *const RExpr, then_expr: *const RExpr, else_expr: *const RExpr },
-    Do: []const RStmt,
+    /// `do { … }` — kept as statements; the Core desugarer folds them into
+    /// `>>=`/`>>` applications.
+    ///
+    /// Carries the *resolved* `Monad` method names, the way the
+    /// arithmetic-sequence variants carry `fn_name`: when a Prelude is in
+    /// scope these are the `Monad` class methods, so the typechecker can
+    /// record a `Monad m` constraint and the desugarer can dispatch the
+    /// block through the solved dictionary.  Boot modules compiled with
+    /// `NoImplicitPrelude` fall back to the wired-in do-notation names,
+    /// which the backend sequences structurally.
+    ///
+    /// `evidence_unique` is a fresh per-block id: it keys this block's
+    /// `Monad m` evidence so two do-blocks in one module never collide.
+    Do: struct {
+        stmts: []const RStmt,
+        bind_name: Name,
+        then_name: Name,
+        evidence_unique: Unique,
+    },
     Tuple: []const RExpr,
     List: []const RExpr,
     /// Arithmetic sequences (Haskell 2010 §3.10)
@@ -1388,13 +1407,23 @@ fn renameExpr(expr: ast.Expr, env: *RenameEnv) RenameError!RExpr {
             } };
         },
         .Do => |stmts| blk: {
+            // Resolve the `Monad` methods in the *enclosing* scope, before
+            // the block's own generators shadow anything.
+            const bind_name = env.scope.lookup(">>=") orelse Known.Fn.bind;
+            const then_name = env.scope.lookup(">>") orelse Known.Fn.then;
+
             try env.scope.push();
             defer env.scope.pop();
             var rstmts = std.ArrayListUnmanaged(RStmt).empty;
             for (stmts) |stmt| {
                 try rstmts.append(env.alloc, try renameStmt(stmt, env));
             }
-            break :blk RExpr{ .Do = try rstmts.toOwnedSlice(env.alloc) };
+            break :blk RExpr{ .Do = .{
+                .stmts = try rstmts.toOwnedSlice(env.alloc),
+                .bind_name = bind_name,
+                .then_name = then_name,
+                .evidence_unique = env.freshName("do").unique,
+            } };
         },
         .Tuple => |elems| blk: {
             var relems = std.ArrayListUnmanaged(RExpr).empty;

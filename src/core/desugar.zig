@@ -1512,7 +1512,14 @@ fn desugarInstanceDecl(
 /// E.g., `Int` → "Int", `[a]` → "List", `(a, b)` → "Tuple2".
 fn instanceHeadName(alloc: std.mem.Allocator, ty: @import("../frontend/ast.zig").Type) std.mem.Allocator.Error![]const u8 {
     return switch (ty) {
-        .Con => |qname| try alloc.dupe(u8, qname.name),
+        // The bare list type constructor — `instance Functor []` — must
+        // spell its head the same way `[a]` does, or the two derivation
+        // paths mint different dictionary symbols for the same instance
+        // and the link fails (#926).
+        .Con => |qname| if (std.mem.eql(u8, qname.name, "[]"))
+            try alloc.dupe(u8, "List")
+        else
+            try alloc.dupe(u8, qname.name),
         .App => |parts| if (parts.len > 0) instanceHeadName(alloc, parts[0].*) else try alloc.dupe(u8, "Unknown"),
         .List => try alloc.dupe(u8, "List"),
         // Arity-qualified so distinct tuple widths get distinct dictionaries.
@@ -1888,6 +1895,111 @@ fn htypeHeadName(ty: htype_mod.HType) []const u8 {
         .Fun => "Fun",
         .ForAll => "ForAll",
     };
+}
+
+/// The `>>=` / `>>` expressions a `do` block sequences with.
+///
+/// Each is a fully-formed Core expression: for a dictionary-dispatched monad
+/// it is the class-method selector already applied to its `Monad` dictionary,
+/// so the caller only has to supply the action and the continuation.
+const DoMonadOps = struct {
+    bind: *const ast_mod.Expr,
+    then: *const ast_mod.Expr,
+};
+
+/// Key span for a do-block's `Monad m` evidence.  Must match
+/// `infer.doEvidenceSpan` — the block's identity lives in its
+/// `evidence_unique`, not in a span.
+fn doEvidenceSpan() SourceSpan {
+    return syntheticSpan();
+}
+
+/// Decide how a `do` block sequences and build its `>>=` / `>>` operators.
+///
+/// Two lowerings, chosen by the solved `Monad` dictionary (#926):
+///
+///   * **`IO`, or no dictionary at all** — emit the wired-in do-notation
+///     names (`Known.Fn.bind` / `Known.Fn.then`).  GRIN lowers those to a
+///     structural `Bind`, which *is* an IO bind in an imperative monadic IR;
+///     there is nothing for a dictionary to add.  The no-dictionary case
+///     covers boot modules compiled with `NoImplicitPrelude`, where `>>=` is
+///     not a class method yet.
+///   * **Anything else** — emit the `Monad` class methods applied to the
+///     solved dictionary, so `Maybe`, `Either e`, `[]` and user instances all
+///     work.
+///
+/// `IO`'s instance is a real one (`instance Monad IO` in `GHC.Base`); it is
+/// what a *named* `>>=` at `IO` resolves to.  Only the `do` lowering
+/// short-circuits it.
+/// tracked in: https://github.com/adinapoli/rusholme/issues/941
+fn resolveDoMonadOps(
+    ctx: *DesugarCtx,
+    bind_name: Name,
+    then_name: Name,
+    evidence_unique: naming_mod.Unique,
+) std.mem.Allocator.Error!DoMonadOps {
+    const alloc = ctx.alloc;
+    const dummy_ty = ast_mod.CoreType{ .TyVar = Name{ .base = "_t", .unique = .{ .value = 0 } } };
+
+    const structural = struct {
+        fn build(a: std.mem.Allocator, dt: ast_mod.CoreType) std.mem.Allocator.Error!DoMonadOps {
+            const b = try a.create(ast_mod.Expr);
+            b.* = .{ .Var = .{ .name = Known.Fn.bind, .ty = dt, .span = syntheticSpan() } };
+            const t = try a.create(ast_mod.Expr);
+            t.* = .{ .Var = .{ .name = Known.Fn.then, .ty = dt, .span = syntheticSpan() } };
+            return .{ .bind = b, .then = t };
+        }
+    }.build;
+
+    const bind_scheme = ctx.types.schemes.get(bind_name.unique) orelse
+        return structural(alloc, dummy_ty);
+    const then_scheme = ctx.types.schemes.get(then_name.unique) orelse
+        return structural(alloc, dummy_ty);
+
+    const evidences = try findEvidenceForVar(ctx, evidence_unique.value, doEvidenceSpan(), bind_scheme);
+    if (evidences.len != 1) return structural(alloc, dummy_ty);
+    const ev = evidences[0];
+
+    // `IO` keeps the structural lowering.
+    switch (ev.*) {
+        .instance => |inst| {
+            if (std.mem.eql(u8, htypeHeadName(inst.head_ty), "IO"))
+                return structural(alloc, dummy_ty);
+        },
+        else => {},
+    }
+
+    const bind_dict = try buildDictExpr(ctx, ev, doEvidenceSpan());
+    const then_dict = try buildDictExpr(ctx, ev, doEvidenceSpan());
+
+    return .{
+        .bind = try applyDict(ctx, bind_name, bind_scheme, bind_dict),
+        .then = try applyDict(ctx, then_name, then_scheme, then_dict),
+    };
+}
+
+/// Build `Var(method) dict` — a class-method selector saturated with its
+/// dictionary argument.
+fn applyDict(
+    ctx: *DesugarCtx,
+    method: Name,
+    scheme: env_mod.TyScheme,
+    dict: *const ast_mod.Expr,
+) std.mem.Allocator.Error!*const ast_mod.Expr {
+    const alloc = ctx.alloc;
+    const method_var = try alloc.create(ast_mod.Expr);
+    method_var.* = .{ .Var = .{
+        .name = method,
+        .ty = try schemeToCore(alloc, scheme),
+        .span = syntheticSpan(),
+    } };
+    const app = try alloc.create(ast_mod.Expr);
+    app.* = .{ .App = .{
+        .fn_expr = method_var,
+        .arg = dict,
+        .span = syntheticSpan(),
+    } };
+    return app;
 }
 
 /// Look up all solved evidence entries for a given variable use site.
@@ -2612,14 +2724,22 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
             // Build from right to left: the rightmost statement is the innermost body.
             const dummy_ty = ast_mod.CoreType{ .TyVar = Name{ .base = "_t", .unique = .{ .value = 0 } } };
 
+            // How this block sequences (#926).  `IO` keeps the wired-in
+            // do-notation names, which the GRIN translator lowers to a
+            // structural `Bind` — that *is* an IO bind in GRIN, so routing it
+            // through a dictionary would only obscure it.  Every other monad
+            // goes through the solved `Monad` dictionary, so `do` works for
+            // `Maybe`, `Either e`, `[]` and any user instance.
+            const monad_ops = try resolveDoMonadOps(ctx, expr.Do.bind_name, expr.Do.then_name, expr.Do.evidence_unique);
+
             // Start with the last statement as the initial body
             var body: *ast_mod.Expr = undefined;
-            var last_idx = expr.Do.len;
+            var last_idx = expr.Do.stmts.len;
 
             // First, find the rightmost qualifier or stmt to start
             while (last_idx > 0) {
                 last_idx -= 1;
-                const stmt = expr.Do[last_idx];
+                const stmt = expr.Do.stmts[last_idx];
                 if (stmt == .Qualifier or stmt == .Stmt) {
                     const expr_ptr = if (stmt == .Qualifier) stmt.Qualifier else stmt.Stmt;
                     body = try desugarExpr(ctx, expr_ptr);
@@ -2647,9 +2767,9 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                 }
             }
 
-            if (last_idx == 0 and expr.Do.len > 0) {
+            if (last_idx == 0 and expr.Do.stmts.len > 0) {
                 // Didn't find a starting point, handle first statement
-                const first_stmt = expr.Do[0];
+                const first_stmt = expr.Do.stmts[0];
                 if (first_stmt == .Qualifier) {
                     body = try desugarExpr(ctx, first_stmt.Qualifier);
                 } else if (first_stmt == .Stmt) {
@@ -2668,7 +2788,7 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
             // Process remaining statements from right to left
             while (last_idx > 0) {
                 last_idx -= 1;
-                const stmt = expr.Do[last_idx];
+                const stmt = expr.Do.stmts[last_idx];
 
                 switch (stmt) {
                     .Generator => |g| {
@@ -2703,12 +2823,7 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                         } };
 
                         // Build (>>=) application: ((>>=) m) lambda
-                        const bind_var = try alloc.create(ast_mod.Expr);
-                        bind_var.* = .{ .Var = .{
-                            .name = Known.Fn.bind,
-                            .ty = dummy_ty,
-                            .span = syntheticSpan(),
-                        } };
+                        const bind_var = monad_ops.bind;
 
                         const app1 = try alloc.create(ast_mod.Expr);
                         app1.* = .{ .App = .{
@@ -2731,12 +2846,7 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                         const m_expr = try desugarExpr(ctx, q);
 
                         // Build (>>) application: ((>>) m) body
-                        const then_var = try alloc.create(ast_mod.Expr);
-                        then_var.* = .{ .Var = .{
-                            .name = Known.Fn.then,
-                            .ty = dummy_ty,
-                            .span = syntheticSpan(),
-                        } };
+                        const then_var = monad_ops.then;
 
                         const app1 = try alloc.create(ast_mod.Expr);
                         app1.* = .{ .App = .{
@@ -2758,12 +2868,7 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
                         // Same as qualifier - treat as m >> body
                         const m_expr = try desugarExpr(ctx, s);
 
-                        const then_var = try alloc.create(ast_mod.Expr);
-                        then_var.* = .{ .Var = .{
-                            .name = Known.Fn.then,
-                            .ty = dummy_ty,
-                            .span = syntheticSpan(),
-                        } };
+                        const then_var = monad_ops.then;
 
                         const app1 = try alloc.create(ast_mod.Expr);
                         app1.* = .{ .App = .{
@@ -2906,6 +3011,18 @@ pub fn desugarExpr(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Allocator.
             // arity 0 is the Unit constructor and is parsed separately;
             // arities above `max_tuple_arity` are not yet wired.
             // See issue #572.
+            //
+            // `()` reaches here as a zero-width tuple (the parser has no
+            // separate Unit expression node), so map it onto the wired-in
+            // unit constructor.  `pure ()` / `return ()` depend on it (#926).
+            if (elems.len == 0) {
+                node.* = .{ .Var = .{
+                    .name = Name{ .base = "unit", .unique = Known.Con.Unit.unique },
+                    .ty = .{ .TyCon = .{ .name = Known.Type.Unit, .args = &.{} } },
+                    .span = syntheticSpan(),
+                } };
+                return node;
+            }
             const tuple_name = Known.Con.tuple(elems.len) orelse std.debug.panic(
                 "desugar: tuple of arity {} is not supported (only 2..{})",
                 .{ elems.len, Known.Con.max_tuple_arity },
@@ -4276,8 +4393,8 @@ fn registerExprBinders(ctx: *DesugarCtx, expr: renamer_mod.RExpr) std.mem.Alloca
             try registerExprBinders(ctx, i.then_expr.*);
             try registerExprBinders(ctx, i.else_expr.*);
         },
-        .Do => |stmts| {
-            for (stmts) |stmt| {
+        .Do => |d| {
+            for (d.stmts) |stmt| {
                 switch (stmt) {
                     .Generator => |g| {
                         try registerPatBindersRec(ctx, g.pat, dummy);

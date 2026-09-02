@@ -27,6 +27,9 @@ module Prelude
     , Bounded(..)
     , Enum(..)
     , Show(..), showString, showLitChar, showListWith, showListTail
+    , Functor(..)
+    , Applicative(..)
+    , Monad(..)
     , intToDigit
     , enumFrom, enumFromTo, enumFromThen, enumFromThenTo
     -- Data.Function

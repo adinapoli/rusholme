@@ -138,6 +138,10 @@ fn getDataOrdPath() []const u8 {
     return @embedFile("data_ord_path");
 }
 
+fn getControlMonadPath() []const u8 {
+    return @embedFile("control_monad_path");
+}
+
 /// Get the default package-database path baked in at compile time.
 /// Points at `zig-out/lib/rhc-store/` (or wherever
 /// `-Ddefault-package-db=<path>` was set at build time).  Populated by
@@ -186,6 +190,9 @@ const boot_modules = [_]BootModule{
     // matching GHC.  `comparing` deferred pending typechecker fix
     // (#842).
     .{ .module_name = "Data.Ord", .pathFn = getDataOrdPath },
+    // Control.Monad: mapM_/forM_/when/unless/foldM/sequence_/void (#926).
+    // Explicit import only, matching GHC.
+    .{ .module_name = "Control.Monad", .pathFn = getControlMonadPath },
     .{ .module_name = "Prelude", .pathFn = getPreludePath },
 };
 

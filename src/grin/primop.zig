@@ -434,6 +434,7 @@ pub const PrimOp = enum(u16) {
     ///
     /// Currently:
     ///   - `>>`, `>>=`   — monad-bind sequencing (#464)
+    ///   - `primPureIO`  — `pure`/`return` at `IO` (#926)
     ///   - `div#`, `mod#`, `quot#`, `rem#` — hash-suffixed integer aliases
     ///
     /// See `src/backend/grin_to_llvm.zig` `PrimOpMapping.lookup` for the
@@ -441,6 +442,9 @@ pub const PrimOp = enum(u16) {
     pub fn isBackendOnlyName(str: []const u8) bool {
         return std.mem.eql(u8, str, ">>") or
             std.mem.eql(u8, str, ">>=") or
+            // `pure`/`return` at IO — identity at the LLVM level, because an
+            // `IO a` action is represented by the `a` its GRIN Bind yields (#926).
+            std.mem.eql(u8, str, "primPureIO") or
             std.mem.eql(u8, str, "div#") or
             std.mem.eql(u8, str, "mod#") or
             std.mem.eql(u8, str, "quot#") or

@@ -26,6 +26,7 @@ module RHC.Prim
     , intToDouble, doubleToInt
     , primShowDouble
     , primPutChar, primPutStr, primPutStrLn
+    , primPureIO
     , primError
     , intToChar, charToInt
     ) where
@@ -103,6 +104,10 @@ foreign import prim "charToInt" charToInt    :: Char -> Int
 foreign import prim "putChar_"      primPutChar  :: Char -> IO ()
 foreign import prim "primPutStr"    primPutStr   :: [Char] -> IO ()
 foreign import prim "primPutStrLn"  primPutStrLn :: [Char] -> IO ()
+
+-- `pure` at `IO`.  An `IO a` action is represented by the value its GRIN
+-- Bind yields, so injecting a pure value into IO is the identity (#926).
+foreign import prim "primPureIO"    primPureIO   :: a -> IO a
 
 -- ── Diverging ────────────────────────────────────────────────────────
 

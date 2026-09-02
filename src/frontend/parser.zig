@@ -2564,7 +2564,17 @@ pub const Parser = struct {
                 return .{ .Paren = try self.allocNode(ast_mod.Type, first) };
             },
             .open_bracket => {
-                _ = try self.advance();
+                const open = try self.advance();
+                // `[]` on its own is the list *type constructor* (H2010
+                // §4.1.2), not a list of something.  It appears unsaturated
+                // in higher-kinded instance heads — `instance Functor []`.
+                if (try self.check(.close_bracket)) {
+                    _ = try self.advance();
+                    return .{ .Con = .{
+                        .name = "[]",
+                        .span = self.spanFrom(open.span),
+                    } };
+                }
                 const inner = try self.parseType();
                 _ = try self.expect(.close_bracket);
                 return .{ .List = try self.allocNode(ast_mod.Type, inner) };

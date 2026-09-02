@@ -280,6 +280,22 @@ test "e2e: e2e_925_hk_functor_show (#925)" {
     try testE2e(std.testing.allocator, "e2e_925_hk_functor_show");
 }
 
+test "e2e: e2e_926_monad_bind (#926)" {
+    try testE2e(std.testing.allocator, "e2e_926_monad_bind");
+}
+
+test "e2e: e2e_926_maybe_do (#926)" {
+    try testE2e(std.testing.allocator, "e2e_926_maybe_do");
+}
+
+test "e2e: e2e_926_monad_instances (#926)" {
+    try testE2e(std.testing.allocator, "e2e_926_monad_instances");
+}
+
+test "e2e: e2e_926_control_monad (#926)" {
+    try testE2e(std.testing.allocator, "e2e_926_control_monad");
+}
+
 test "e2e: e2e_023_mutual_recursion (#566)" {
     try testE2e(std.testing.allocator, "e2e_023_mutual_recursion");
 }
