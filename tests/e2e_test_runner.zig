@@ -296,6 +296,10 @@ test "e2e: e2e_926_control_monad (#926)" {
     try testE2e(std.testing.allocator, "e2e_926_control_monad");
 }
 
+test "e2e: e2e_939_io_action_repeat (#939)" {
+    try testE2e(std.testing.allocator, "e2e_939_io_action_repeat");
+}
+
 test "e2e: e2e_023_mutual_recursion (#566)" {
     try testE2e(std.testing.allocator, "e2e_023_mutual_recursion");
 }
