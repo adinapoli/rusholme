@@ -488,6 +488,14 @@ test "e2e: --rts=immix PrimOp/GC integration (#327)" {
     try testE2eImmix(std.testing.allocator, "e2e_327_primop_gc");
 }
 
+test "e2e: --rts=immix repeats IO action values (#939)" {
+    // A perform allocates a fresh result node per call and leaves the
+    // thunk un-updated, so its captured arguments stay reachable longer
+    // than a forced thunk's. The liveness shape differs from the force
+    // path, so lock the repeat semantics in under Immix too.
+    try testE2eImmix(std.testing.allocator, "e2e_939_io_action_repeat");
+}
+
 test "e2e: rhc build rejects unknown --rts backend (#776)" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;

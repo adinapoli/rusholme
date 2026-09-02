@@ -493,13 +493,46 @@ fn declareRtsAlloc(module: llvm.Module) llvm.Value {
     return c.LLVMAddFunction(module, name, fn_ty);
 }
 
+// ── Performing IO action values (issue #939) ─────────────────────────────
+//
+// An `IO a` value is a suspended computation like any other, so evaluating
+// one and performing one differ in the eval flavour the backend calls, not
+// in the representation.  See docs/decisions/939-io-action-representation.md.
+
 /// Is this the GRIN-level `runIO` stub (unique 9997) planted by
 /// `performAction` in src/grin/translate.zig?  Kept in sync with that site,
 /// as with the `apply` stub.  Lowered to `__rhc_perform` (eval without
-/// update) so performing the same action value is repeatable (#939).
+/// update) so performing the same action value is repeatable.
 fn isRunIOStub(name: grin.Name) bool {
     return std.mem.eql(u8, name.base, "runIO") and name.unique.value == 9997;
 }
+
+/// Which flavour of eval `emitEvalFunction` generates.  The symbol and the
+/// update discipline are two halves of one decision, so they travel
+/// together: a force that does not memoise would break call-by-need
+/// everywhere, and a perform that does would drop effects.
+const EvalKind = enum {
+    /// Call-by-need: overwrite the evaluated thunk with `Ind -> result`, so
+    /// a pure value is computed at most once.
+    force,
+    /// Call-by-effect: never update, so every call re-enters the body and
+    /// re-runs the effect.
+    perform,
+
+    fn symbol(self: EvalKind) [:0]const u8 {
+        return switch (self) {
+            .force => "__rhc_force",
+            .perform => "__rhc_perform",
+        };
+    }
+
+    fn memoises(self: EvalKind) bool {
+        return switch (self) {
+            .force => true,
+            .perform => false,
+        };
+    }
+};
 
 // ── Inline alloc fast path (issue #798) ──────────────────────────────────
 //
@@ -1311,16 +1344,16 @@ pub const GrinTranslator = struct {
         if (self.registry.fun_tags.count() > 0 or self.registry.partial_tags.count() > 0) {
             if (self.repl_entry_point == null) {
                 // Whole-program mode: emit both eval functions here.
-                try self.emitEvalFunction("__rhc_force", true);
-                try self.emitEvalFunction("__rhc_perform", false);
+                try self.emitEvalFunction(.force);
+                try self.emitEvalFunction(.perform);
             } else {
                 // REPL mode: declare both as external; the shared force
                 // module (emitted by JitEngine) provides the definitions.
                 const ptr_ty = ptrType();
                 var param_types = [_]llvm.Type{ptr_ty};
                 const fn_type = c.LLVMFunctionType(ptr_ty, &param_types, 1, 0);
-                _ = llvm.addFunction(self.module, "__rhc_force", fn_type);
-                _ = llvm.addFunction(self.module, "__rhc_perform", fn_type);
+                _ = llvm.addFunction(self.module, EvalKind.force.symbol(), fn_type);
+                _ = llvm.addFunction(self.module, EvalKind.perform.symbol(), fn_type);
             }
         }
 
@@ -1401,8 +1434,8 @@ pub const GrinTranslator = struct {
             const ptr_ty = ptrType();
             var param_types = [_]llvm.Type{ptr_ty};
             const fn_type = c.LLVMFunctionType(ptr_ty, &param_types, 1, 0);
-            _ = llvm.addFunction(mod, "__rhc_force", fn_type);
-            _ = llvm.addFunction(mod, "__rhc_perform", fn_type);
+            _ = llvm.addFunction(mod, EvalKind.force.symbol(), fn_type);
+            _ = llvm.addFunction(mod, EvalKind.perform.symbol(), fn_type);
         }
 
         // Declare __rhc_apply as external so that per-def modules that route
@@ -1441,11 +1474,14 @@ pub const GrinTranslator = struct {
         defer self.module = saved_module;
 
         if (self.registry.fun_tags.count() > 0 or self.registry.partial_tags.count() > 0) {
-            try self.emitEvalFunction("__rhc_force", true);
+            try self.emitEvalFunction(.force);
             // __rhc_perform rides along so per-def modules and REPL
             // expressions that perform IO action values can resolve it
-            // through the same shared module (#939).
-            try self.emitEvalFunction("__rhc_perform", false);
+            // through the same shared module (#939).  Not conditional on
+            // the program containing a `runIO` site: the IO `do`-lowering
+            // routes every bind through `performAction`, so anything that
+            // links `lib/base` calls it.
+            try self.emitEvalFunction(.perform);
         }
 
         // Emit __rhc_apply alongside __rhc_force so that per-def modules that
@@ -4119,29 +4155,37 @@ pub const GrinTranslator = struct {
     // The REPL path continues to use the inline `forceValueToWhnf` because
     // it needs cross-session tag accumulation via `extra_tag_defs`.
 
-    /// Emit an eval function (`symbol`) into the current module.
+    /// Emit an eval function into the current module.
     ///
-    /// `memoise` selects the update discipline (#939): `__rhc_force` passes
-    /// `true` and overwrites a forced thunk with `Ind → result` (call-by-need);
-    /// `__rhc_perform` passes `false` and re-enters the body on every call
-    /// (call-by-effect — performing the same action value twice must run its
-    /// effect twice).
+    /// `kind` selects both the symbol and the update discipline (#939):
+    /// `.force` overwrites an evaluated thunk with `Ind → result`
+    /// (call-by-need), `.perform` re-enters the body on every call
+    /// (call-by-effect — performing the same action value twice must run
+    /// its effect twice).
     ///
     /// Must be called after the tag table is fully populated (i.e. after
     /// `buildTagTable` and any `scanExprForTags` calls).  The function
     /// contains the same eval loop as `forceValueToWhnf` but as a real
     /// callable function rather than inlined IR.
-    fn emitEvalFunction(self: *GrinTranslator, symbol: []const u8, memoise: bool) TranslationError!void {
+    fn emitEvalFunction(self: *GrinTranslator, kind: EvalKind) TranslationError!void {
         const ptr_ty = ptrType();
         const i64_ty = llvm.i64Type();
         const header_ty = nodeHeaderType();
         const rts_load_fn = declareRtsLoadField(self.module);
         const rts_store_fn = declareRtsStoreField(self.module);
 
-        // fn <symbol>(ptr) -> ptr
+        // fn <symbol>(ptr) -> ptr.  Get-or-define, as with every other
+        // symbol helper here: adding a second function under a name the
+        // module already declares would silently rename the definition to
+        // `<symbol>.1` and leave callers bound to the empty declaration.
+        const symbol = kind.symbol();
         var param_types = [_]llvm.Type{ptr_ty};
         const fn_type = llvm.functionType(ptr_ty, &param_types, false);
-        const func = llvm.addFunction(self.module, symbol, fn_type);
+        const func = c.LLVMGetNamedFunction(self.module, symbol.ptr) orelse
+            llvm.addFunction(self.module, symbol, fn_type);
+        // One definition per module: a second call would append a second
+        // entry block to the same function.
+        std.debug.assert(c.LLVMCountBasicBlocks(func) == 0);
 
         // Save and restore builder/function state so translateDef is not
         // affected by our temporary positioning.
@@ -4271,10 +4315,10 @@ pub const GrinTranslator = struct {
             );
 
             // Memoize: overwrite thunk with Ind → result (call-by-need).
-            // `__rhc_perform` (memoise = false) skips the update: the thunk
-            // stays suspended, so performing the same action value again
-            // re-enters its body (#939).
-            if (memoise) {
+            // `.perform` skips the update: the thunk stays suspended, so
+            // performing the same action value again re-enters its body
+            // (#939).
+            if (kind.memoises()) {
                 const upd_tag_gep = c.LLVMBuildGEP2(self.builder, header_ty, phi, &tag_idx, 2, "upd_tag");
                 _ = c.LLVMBuildStore(self.builder, c.LLVMConstInt(i64_ty, 0x101, 0), upd_tag_gep);
                 const result_u64 = c.LLVMBuildPtrToInt(self.builder, result, i64_ty, "upd_u64");
@@ -4374,25 +4418,23 @@ pub const GrinTranslator = struct {
         self.buildRetWithShadowRestore(phi);
     }
 
-    /// Emit a call to `__rhc_force` if the module contains F-tags.
-    /// Returns the forced pointer value, or the original value unchanged
-    /// if no F-tags exist (i.e. `__rhc_force` was never emitted).
+    /// The freshest LLVM binding for an operand.  A value captured before
+    /// a later force rebound its variable still names the suspended thunk,
+    /// while `params` holds the forced replacement.  Only substitute when
+    /// the representations agree: a rebinding that changed type kind
+    /// (pointer vs. raw `i64`) is not a stand-in for the captured value.
+    fn freshestBinding(self: *GrinTranslator, raw: llvm.Value, val: grin.Val) llvm.Value {
+        if (val != .Var) return raw;
+        const cur = self.params.get(val.Var.unique.value) orelse return raw;
+        if (c.LLVMGetTypeKind(c.LLVMTypeOf(cur)) !=
+            c.LLVMGetTypeKind(c.LLVMTypeOf(raw))) return raw;
+        return cur;
+    }
+
     /// Force a translated operand unless its GRIN value is statically
     /// WHNF (strict-forced parameter, primop result, immediate).
     fn forceOperandIfNeeded(self: *GrinTranslator, raw: llvm.Value, val: grin.Val) llvm.Value {
-        if (self.valYieldsWhnf(val)) {
-            // The operand may have been captured before a later force
-            // rebound this variable (see below) — the recorded binding
-            // is the freshest (already-forced) value, the captured raw
-            // may still be the suspended thunk.
-            if (val == .Var) {
-                if (self.params.get(val.Var.unique.value)) |cur| {
-                    if (c.LLVMGetTypeKind(c.LLVMTypeOf(cur)) ==
-                        c.LLVMGetTypeKind(c.LLVMTypeOf(raw))) return cur;
-                }
-            }
-            return raw;
-        }
+        if (self.valYieldsWhnf(val)) return self.freshestBinding(raw, val);
         const forced = self.callForceIfNeeded(raw);
         // Variable operand: remember the forced value so later uses in
         // dominated code skip re-forcing (LLVM cannot CSE __rhc_force
@@ -4407,9 +4449,12 @@ pub const GrinTranslator = struct {
         return forced;
     }
 
+    /// Emit a call to `__rhc_force` if the module contains F-tags.
+    /// Returns the forced pointer value, or the original value unchanged
+    /// if no F-tags exist (i.e. `__rhc_force` was never emitted).
     fn callForceIfNeeded(self: *GrinTranslator, val: llvm.Value) llvm.Value {
         if (self.registry.fun_tags.count() == 0 and self.registry.partial_tags.count() == 0) return val;
-        if (c.LLVMGetNamedFunction(self.module, "__rhc_force") == null) return val;
+        if (c.LLVMGetNamedFunction(self.module, EvalKind.force.symbol().ptr) == null) return val;
         const guard = self.getOrDefineForceFastGuard();
         var args = [_]llvm.Value{val};
         return c.LLVMBuildCall2(
@@ -4435,20 +4480,25 @@ pub const GrinTranslator = struct {
             // Statically WHNF (literal, constructor, already-forced var):
             // not a suspended action — nothing to run.  As in the force
             // path, prefer the freshest recorded binding for the variable.
-            if (val == .Var) {
-                if (self.params.get(val.Var.unique.value)) |cur| {
-                    if (c.LLVMGetTypeKind(c.LLVMTypeOf(cur)) ==
-                        c.LLVMGetTypeKind(c.LLVMTypeOf(raw))) return cur;
-                }
-            }
-            return raw;
+            return self.freshestBinding(raw, val);
         }
         return self.callPerformIfNeeded(raw);
     }
 
     fn callPerformIfNeeded(self: *GrinTranslator, val: llvm.Value) llvm.Value {
+        // No F-tags and no P-tags means the module allocates no suspended
+        // nodes at all, so the operand is already WHNF and there is
+        // nothing to run — same reasoning as `callForceIfNeeded`.
         if (self.registry.fun_tags.count() == 0 and self.registry.partial_tags.count() == 0) return val;
-        const perform_fn = c.LLVMGetNamedFunction(self.module, "__rhc_perform") orelse return val;
+        // Otherwise the symbol must be there: reaching a `runIO` site is
+        // exactly the condition under which `__rhc_perform` is emitted or
+        // declared.  A missing symbol would silently *delete an effect*
+        // rather than yield a wrong value, so fail loudly instead.
+        const perform_fn = c.LLVMGetNamedFunction(self.module, EvalKind.perform.symbol().ptr) orelse
+            std.debug.panic(
+                "internal compiler error: {s} missing from the module at a runIO site (#939)",
+                .{EvalKind.perform.symbol()},
+            );
         var args = [_]llvm.Value{val};
         return c.LLVMBuildCall2(
             self.builder,

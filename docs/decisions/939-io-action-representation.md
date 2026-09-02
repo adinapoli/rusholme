@@ -1,7 +1,7 @@
 # Decision 939: Representation of First-Class `IO a` Values
 
 **Status:** Accepted
-**Date:** 2026-09-29
+**Date:** 2026-09-02
 **Issue:** #939
 
 ## Context
@@ -121,6 +121,7 @@ The calling-convention contract, extending `003-calling-convention.md`:
 
 - `src/grin/translate.zig` — `performAction`, `run_io_name` (perform sites)
 - `src/backend/grin_to_llvm.zig` — the `runIO` interception, `emitEvalFunction`
-- `docs/decisions/003-calling-convention.md` — the calling convention this extends
+- `docs/decisions/520-grin-eval-inline-vs-callable.md` — the decision that made
+  eval a callable function; this one gives it a second flavour
 - #926 (action values become first-class), #941 (do-notation will route
   through `instance Monad IO` once this lands), epic #845
