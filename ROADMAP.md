@@ -470,7 +470,7 @@
 | [#954](https://github.com/adinapoli/rusholme/issues/954) | `foldl'` is not strict — there is no `seq` primop and bang patterns are discarded (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#928](https://github.com/adinapoli/rusholme/issues/928) | :white_circle: |
 | [#958](https://github.com/adinapoli/rusholme/issues/958) | parser: a tuple whose first component is an infix application fails to parse (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :green_circle: |
 | [#962](https://github.com/adinapoli/rusholme/issues/962) | Instances are identified by line/column only, so instances in different modules collide (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#889](https://github.com/adinapoli/rusholme/issues/889) | :green_circle: |
-| [#961](https://github.com/adinapoli/rusholme/issues/961) | Parse errors are discarded by the multi-module parse phase, surfacing as misleading downstream errors | — | :white_circle: |
+| [#961](https://github.com/adinapoli/rusholme/issues/961) | Parse errors are discarded by the multi-module parse phase, surfacing as misleading downstream errors | — | :green_circle: |
 | [#964](https://github.com/adinapoli/rusholme/issues/964) | `__rhc_force` dispatch is a whole-program tag switch — per-force cost grows with library size (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#865](https://github.com/adinapoli/rusholme/issues/865) | :white_circle: |
 
 ### Epic [#515](https://github.com/adinapoli/rusholme/issues/515): Support Laziness (Call-by-Need Evaluation)
