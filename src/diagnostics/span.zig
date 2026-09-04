@@ -66,6 +66,21 @@ pub const SourceSpan = struct {
         };
     }
 
+    /// True when both spans begin at the same position — same file, line and
+    /// column.
+    ///
+    /// Declaration *identity* is often recovered by matching a span, e.g.
+    /// pairing an `InstanceDecl` with the `InstanceInfo` recorded for it.
+    /// The file has to be part of that comparison: uniques are per-module and
+    /// a line/column pair alone says nothing about which file it came from,
+    /// so two modules with an instance at the same position would otherwise
+    /// be indistinguishable (#962).
+    pub fn startsAt(self: SourceSpan, other: SourceSpan) bool {
+        return self.start.file_id == other.start.file_id and
+            self.start.line == other.start.line and
+            self.start.column == other.start.column;
+    }
+
     /// Merges two spans to create a span that covers both.
     /// Useful when combining spans from multiple tokens/AST nodes.
     pub fn merge(self: SourceSpan, other: SourceSpan) SourceSpan {
@@ -241,4 +256,27 @@ test "SourceSpan.contains position" {
     // Position in different file
     const different_file = SourcePos.init(2, 10, 10);
     try std.testing.expect(!span.contains(different_file));
+}
+
+test "SourceSpan.startsAt same position in the same file" {
+    const a = SourceSpan.init(SourcePos.init(1, 12, 1), SourcePos.init(1, 12, 20));
+    const b = SourceSpan.init(SourcePos.init(1, 12, 1), SourcePos.init(1, 14, 3));
+    // Only the start matters — the two spans may cover different extents.
+    try std.testing.expect(a.startsAt(b));
+    try std.testing.expect(b.startsAt(a));
+}
+
+test "SourceSpan.startsAt distinguishes files at the same line and column" {
+    // The case behind #962: two instances at line 12, column 1 of different
+    // modules must not be mistaken for one another.
+    const in_helper = SourceSpan.point(SourcePos.init(1, 12, 1));
+    const in_main = SourceSpan.point(SourcePos.init(2, 12, 1));
+    try std.testing.expect(!in_helper.startsAt(in_main));
+    try std.testing.expect(!in_main.startsAt(in_helper));
+}
+
+test "SourceSpan.startsAt distinguishes line and column" {
+    const base = SourceSpan.point(SourcePos.init(1, 12, 1));
+    try std.testing.expect(!base.startsAt(SourceSpan.point(SourcePos.init(1, 13, 1))));
+    try std.testing.expect(!base.startsAt(SourceSpan.point(SourcePos.init(1, 12, 2))));
 }

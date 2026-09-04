@@ -2297,8 +2297,7 @@ pub fn inferModule(
             .InstanceDecl => |id_decl| {
                 const instances = ctx.class_env.lookupInstances(id_decl.class_name.unique.value);
                 for (instances) |inst| {
-                    if (inst.span.start.line != id_decl.span.start.line or
-                        inst.span.start.column != id_decl.span.start.column) continue;
+                    if (!inst.span.startsAt(id_decl.span)) continue;
                     for (ctx.class_env.superclasses(id_decl.class_name.unique.value)) |sc_name| {
                         const head_ptr = try ctx.alloc_ty(inst.head);
                         try ctx.wanted_constraints.append(ctx.alloc, .{ .Class = .{
@@ -2566,9 +2565,7 @@ pub fn inferModule(
                 const instances = ctx.class_env.lookupInstances(id_decl.class_name.unique.value);
                 var inst_info: ?InstanceInfo = null;
                 for (instances) |inst| {
-                    if (inst.span.start.line == id_decl.span.start.line and
-                        inst.span.start.column == id_decl.span.start.column)
-                    {
+                    if (inst.span.startsAt(id_decl.span)) {
                         inst_info = inst;
                         break;
                     }
