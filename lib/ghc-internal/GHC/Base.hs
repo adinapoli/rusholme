@@ -531,6 +531,12 @@ instance Enum Ordering where
 
 class Show a where
   show :: a -> String
+  -- | How to render a *list* of this type.  Haskell 2010 §6.3.3 puts this
+  -- method on the class precisely so that `Show Char` can override it and
+  -- render `String` as a quoted literal rather than a list of characters;
+  -- `instance Show a => Show [a]` delegates here (#929).
+  showList :: [a] -> String
+  showList xs = showListBy (\x -> show x) xs
 
 -- ── Character conversion ────────────────────────────────────────────
 
@@ -563,6 +569,21 @@ showListTail (x:xs) = ',' : appendStr (show x) (showListTail xs)
 showListWith :: Show a => [a] -> String
 showListWith []     = "[]"
 showListWith (x:xs) = '[' : appendStr (show x) (showListTail xs)
+
+-- The `showList` default takes the element renderer as an argument rather
+-- than through a `Show a` constraint (GHC spells this `showList__`).  A
+-- class default body can reach the class's own methods through its
+-- dictionary parameter, so `show` is available there — but a *separately
+-- constrained* helper such as `showListWith` would need its own dictionary,
+-- which the default body has no way to supply.
+
+showListTailBy :: (a -> String) -> [a] -> String
+showListTailBy f []     = "]"
+showListTailBy f (x:xs) = ',' : appendStr (f x) (showListTailBy f xs)
+
+showListBy :: (a -> String) -> [a] -> String
+showListBy f []     = "[]"
+showListBy f (x:xs) = '[' : appendStr (f x) (showListTailBy f xs)
 
 -- ── Show helpers for tuples ─────────────────────────────────────────
 --
@@ -629,9 +650,11 @@ instance Show Ordering where
 
 instance Show Char where
   show c = '\'' : showLitChar c "'"
+  -- A list of characters is a String, so it renders as a quoted literal.
+  showList s = showString s
 
 instance Show a => Show [a] where
-  show xs = showListWith xs
+  show xs = showList xs
 
 instance Show a => Show (Maybe a) where
   show Nothing  = "Nothing"

@@ -1,0 +1,16 @@
+"hi"
+""
+"a\nb\t\"q\"\\z"
+"tab\there"
+'x'
+'\n'
+("hi","there")
+('a',True,1,"hi")
+["ab","cd"]
+[""]
+Just "hi"
+[Just "a",Nothing]
+[1,2,3]
+[[1],[2]]
+"ab"
+Wrapped "hi"

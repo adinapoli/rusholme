@@ -11,8 +11,9 @@ module Main where
 -- arity-qualified ("Tuple2", "Tuple3", …) on both paths, which also keeps
 -- distinct tuple widths in distinct dictionary slots.
 --
--- Note: no component here is a String. `show` on a `[Char]` still renders as
--- a character list rather than a quoted string, which is a separate gap.
+-- String components were originally left out of this test because `show` on a
+-- `[Char]` rendered a character list; #929 added `showList` to the class and
+-- they are covered here now.
 
 main :: IO ()
 main = do
@@ -28,3 +29,6 @@ main = do
   print (Just ((1 :: Int), (2 :: Int)))
   -- Distinct widths must not collide on a shared dictionary.
   putStrLn (show ((1 :: Int), (2 :: Int)) ++ " " ++ show ((1 :: Int), (2 :: Int), (3 :: Int)))
+  -- A String component renders quoted (#929).
+  print ("hi", (1 :: Int))
+  print ("a", 'b', "c\n", True, [(1 :: Int)])
