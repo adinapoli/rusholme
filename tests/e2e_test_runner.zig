@@ -552,3 +552,7 @@ test "e2e: rhc build rejects unknown -O level (#755)" {
     }
     try std.testing.expect(std.mem.indexOf(u8, result.stderr, "invalid optimisation level") != null);
 }
+
+test "e2e: e2e_958_infix_first_tuple (#958)" {
+    try testE2e(std.testing.allocator, "e2e_958_infix_first_tuple");
+}
