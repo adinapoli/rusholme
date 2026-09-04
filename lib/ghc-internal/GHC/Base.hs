@@ -766,7 +766,7 @@ instance (Show a, Show b) => Show (Either a b) where
   show (Right y) = appendStr "Right " (show y)
 
 -- Tuple instances, rendered GHC-style with no space after the comma.
--- Widths 6..15 are not yet provided — tracked separately.
+-- Widths 2..15 mirror what GHC's `base` provides.
 instance (Show a, Show b) => Show (a, b) where
   show (a, b) = showTupleWith (show a : show b : [])
 
@@ -778,3 +778,53 @@ instance (Show a, Show b, Show c, Show d) => Show (a, b, c, d) where
 
 instance (Show a, Show b, Show c, Show d, Show e) => Show (a, b, c, d, e) where
   show (a, b, c, d, e) = showTupleWith (show a : show b : show c : show d : show e : [])
+
+instance (Show a, Show b, Show c, Show d, Show e, Show f)
+      => Show (a, b, c, d, e, f) where
+  show (a, b, c, d, e, f) =
+      showTupleWith (show a : show b : show c : show d : show e : show f : [])
+
+instance (Show a, Show b, Show c, Show d, Show e, Show f, Show g)
+      => Show (a, b, c, d, e, f, g) where
+  show (a, b, c, d, e, f, g) =
+      showTupleWith (show a : show b : show c : show d : show e : show f : show g : [])
+
+instance (Show a, Show b, Show c, Show d, Show e, Show f, Show g, Show h)
+      => Show (a, b, c, d, e, f, g, h) where
+  show (a, b, c, d, e, f, g, h) =
+      showTupleWith (show a : show b : show c : show d : show e : show f : show g : show h : [])
+
+instance (Show a, Show b, Show c, Show d, Show e, Show f, Show g, Show h, Show i)
+      => Show (a, b, c, d, e, f, g, h, i) where
+  show (a, b, c, d, e, f, g, h, i) =
+      showTupleWith (show a : show b : show c : show d : show e : show f : show g : show h : show i : [])
+
+instance (Show a, Show b, Show c, Show d, Show e, Show f, Show g, Show h, Show i, Show j)
+      => Show (a, b, c, d, e, f, g, h, i, j) where
+  show (a, b, c, d, e, f, g, h, i, j) =
+      showTupleWith (show a : show b : show c : show d : show e : show f : show g : show h : show i : show j : [])
+
+instance (Show a, Show b, Show c, Show d, Show e, Show f, Show g, Show h, Show i, Show j, Show k)
+      => Show (a, b, c, d, e, f, g, h, i, j, k) where
+  show (a, b, c, d, e, f, g, h, i, j, k) =
+      showTupleWith (show a : show b : show c : show d : show e : show f : show g : show h : show i : show j : show k : [])
+
+instance (Show a, Show b, Show c, Show d, Show e, Show f, Show g, Show h, Show i, Show j, Show k, Show l)
+      => Show (a, b, c, d, e, f, g, h, i, j, k, l) where
+  show (a, b, c, d, e, f, g, h, i, j, k, l) =
+      showTupleWith (show a : show b : show c : show d : show e : show f : show g : show h : show i : show j : show k : show l : [])
+
+instance (Show a, Show b, Show c, Show d, Show e, Show f, Show g, Show h, Show i, Show j, Show k, Show l, Show m)
+      => Show (a, b, c, d, e, f, g, h, i, j, k, l, m) where
+  show (a, b, c, d, e, f, g, h, i, j, k, l, m) =
+      showTupleWith (show a : show b : show c : show d : show e : show f : show g : show h : show i : show j : show k : show l : show m : [])
+
+instance (Show a, Show b, Show c, Show d, Show e, Show f, Show g, Show h, Show i, Show j, Show k, Show l, Show m, Show n)
+      => Show (a, b, c, d, e, f, g, h, i, j, k, l, m, n) where
+  show (a, b, c, d, e, f, g, h, i, j, k, l, m, n) =
+      showTupleWith (show a : show b : show c : show d : show e : show f : show g : show h : show i : show j : show k : show l : show m : show n : [])
+
+instance (Show a, Show b, Show c, Show d, Show e, Show f, Show g, Show h, Show i, Show j, Show k, Show l, Show m, Show n, Show o)
+      => Show (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o) where
+  show (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o) =
+      showTupleWith (show a : show b : show c : show d : show e : show f : show g : show h : show i : show j : show k : show l : show m : show n : show o : [])
