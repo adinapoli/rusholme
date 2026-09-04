@@ -2763,6 +2763,21 @@ pub const Parser = struct {
         return func;
     }
 
+    /// Finish a parenthesised tuple expression whose first component has
+    /// already been parsed and whose next token is a comma.  Consumes the
+    /// remaining components and the closing paren.  A trailing comma is
+    /// tolerated, matching the surrounding parser's leniency.
+    fn finishTupleExpr(self: *Parser, first: ast_mod.Expr) ParseError!ast_mod.Expr {
+        var items: std.ArrayListUnmanaged(ast_mod.Expr) = .empty;
+        try items.append(self.allocator, first);
+        while (try self.match(.comma) != null) {
+            if (try self.check(.close_paren)) break;
+            try items.append(self.allocator, try self.parseExpr());
+        }
+        _ = try self.expect(.close_paren);
+        return .{ .Tuple = try items.toOwnedSlice(self.allocator) };
+    }
+
     fn parseAtomicExpr(self: *Parser) ParseError!ast_mod.Expr {
         return try self.tryParseAtomicExpr() orelse {
             const got = try self.peek();
@@ -2899,18 +2914,7 @@ pub const Parser = struct {
 
                 // Check for tuple: (a, b, c)
                 if (try self.check(.comma)) {
-                    var items: std.ArrayListUnmanaged(ast_mod.Expr) = .empty;
-                    try items.append(self.allocator, first);
-                    while (try self.match(.comma) != null) {
-                        if (try self.check(.close_paren)) {
-                            // Trailing comma
-                            break;
-                        }
-                        const item = try self.parseExpr();
-                        try items.append(self.allocator, item);
-                    }
-                    _ = try self.expect(.close_paren);
-                    return .{ .Tuple = try items.toOwnedSlice(self.allocator) };
+                    return try self.finishTupleExpr(first);
                 }
 
                 // Check for left operator section: (expr op)
@@ -2995,6 +2999,16 @@ pub const Parser = struct {
                             } };
                         }
                     }
+                }
+
+                // A tuple whose first component contains an operator only
+                // becomes visible here.  The comma check above runs against
+                // the *application* prefix, because parsing a full expression
+                // up front would swallow the operator of a left section
+                // `(x +)` — so `(a + b, c)` skips it and lands after
+                // `continueInfixExpr` instead (#958).
+                if (try self.check(.comma)) {
+                    return try self.finishTupleExpr(paren_result);
                 }
 
                 _ = try self.expect(.close_paren);
@@ -6004,4 +6018,87 @@ test "decl: multiple consecutive parenthesized constructor patterns" {
     try std.testing.expectEqual(@as(usize, 2), bind.equations[0].patterns.len);
     try std.testing.expect(bind.equations[0].patterns[0] == .Paren);
     try std.testing.expect(bind.equations[0].patterns[1] == .Paren);
+}
+
+// ── #958: tuples whose first component is an infix application ──────
+//
+// The comma check after `(` runs against the *application* prefix, because
+// parsing a full expression up front would swallow the operator of a left
+// section `(x +)`.  A tuple whose first component contains an operator is
+// therefore only recognisable once the infix expression is complete.
+
+test "expr: tuple whose first component is an infix application" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const expr = try parseTestExpr(&arena, "x = (1 + 2, 3)");
+    try std.testing.expect(expr == .Tuple);
+    try std.testing.expectEqual(2, expr.Tuple.len);
+    try std.testing.expect(expr.Tuple[0] == .InfixApp);
+    try std.testing.expect(expr.Tuple[1] == .Lit);
+}
+
+test "expr: tuple with infix applications in several components" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const expr = try parseTestExpr(&arena, "x = (a == b, c, d * e)");
+    try std.testing.expect(expr == .Tuple);
+    try std.testing.expectEqual(3, expr.Tuple.len);
+    try std.testing.expect(expr.Tuple[0] == .InfixApp);
+    try std.testing.expect(expr.Tuple[1] == .Var);
+    try std.testing.expect(expr.Tuple[2] == .InfixApp);
+}
+
+test "expr: tuple whose first component is a backtick application" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const expr = try parseTestExpr(&arena, "x = (n `div` 2, n)");
+    try std.testing.expect(expr == .Tuple);
+    try std.testing.expectEqual(2, expr.Tuple.len);
+    try std.testing.expect(expr.Tuple[0] == .InfixApp);
+}
+
+test "expr: infix-first tuple honours precedence in its components" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // (1 + 2 * 3, 4) — the first component must be 1 + (2 * 3), not (1 + 2) * 3.
+    const expr = try parseTestExpr(&arena, "x = (1 + 2 * 3, 4)");
+    try std.testing.expect(expr == .Tuple);
+    try std.testing.expectEqual(2, expr.Tuple.len);
+    const first = expr.Tuple[0];
+    try std.testing.expect(first == .InfixApp);
+    try std.testing.expectEqualStrings("+", first.InfixApp.op.name);
+    try std.testing.expect(first.InfixApp.right.* == .InfixApp);
+    try std.testing.expectEqualStrings("*", first.InfixApp.right.InfixApp.op.name);
+}
+
+test "expr: infix-first tuple tolerates a trailing comma" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const expr = try parseTestExpr(&arena, "x = (1 + 2, )");
+    try std.testing.expect(expr == .Tuple);
+    try std.testing.expectEqual(1, expr.Tuple.len);
+    try std.testing.expect(expr.Tuple[0] == .InfixApp);
+}
+
+test "expr: left section still parses as a section, not a tuple" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const expr = try parseTestExpr(&arena, "x = (1 +)");
+    try std.testing.expect(expr == .LeftSection);
+    try std.testing.expectEqualStrings("+", expr.LeftSection.op.name);
+}
+
+test "expr: right section still parses as a section, not a tuple" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const expr = try parseTestExpr(&arena, "x = (+ 1)");
+    try std.testing.expect(expr == .RightSection);
+    try std.testing.expectEqualStrings("+", expr.RightSection.op.name);
 }
