@@ -280,6 +280,10 @@ test "e2e: e2e_929_show_string (#929)" {
     try testE2e(std.testing.allocator, "e2e_929_show_string");
 }
 
+test "e2e: e2e_930_show_wide_tuple (#930)" {
+    try testE2e(std.testing.allocator, "e2e_930_show_wide_tuple");
+}
+
 test "e2e: e2e_925_hk_class_show (#925)" {
     try testE2e(std.testing.allocator, "e2e_925_hk_class_show");
 }
