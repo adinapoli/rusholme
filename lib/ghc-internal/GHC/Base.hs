@@ -21,7 +21,7 @@ module GHC.Base
     , not, (&&), (||), otherwise
     -- Arithmetic
     , div, mod
-    , max, min, even, odd
+    , even, odd
     -- Double ↔ Int conversions (numeric tower, #880)
     , intToDouble, doubleToInt
     -- Classes
@@ -275,16 +275,6 @@ div = primQuotInt
 mod :: Int -> Int -> Int
 mod = primRemInt
 
-max :: Int -> Int -> Int
-max x y = case x >= y of
-    True  -> x
-    False -> y
-
-min :: Int -> Int -> Int
-min x y = case x <= y of
-    True  -> x
-    False -> y
-
 even :: Int -> Bool
 even n = mod n 2 == 0
 
@@ -310,6 +300,11 @@ neBool False False = False
 class Eq a where
   (==) :: a -> a -> Bool
   (/=) :: a -> a -> Bool
+  -- Haskell 2010 6.3.1 makes these a mutual default pair, so an instance
+  -- need only define one of them.  Defining neither diverges, which is
+  -- what GHC does too.
+  (/=) x y = not ((==) x y)
+  (==) x y = not ((/=) x y)
 
 instance Eq Int where
   (==) = primEqInt
@@ -350,6 +345,35 @@ class Eq a => Ord a where
   (<=)    :: a -> a -> Bool
   (>)     :: a -> a -> Bool
   (>=)    :: a -> a -> Bool
+  max     :: a -> a -> a
+  min     :: a -> a -> a
+  -- Haskell 2010 6.3.2: an instance need only define `compare`, or only
+  -- `(<=)`, and the rest follow.  The comparison operators scrutinise the
+  -- `Ordering` rather than comparing it with `(==)`, so the defaults do not
+  -- drag in `Eq Ordering`.
+  compare x y = case x == y of
+      True  -> EQ
+      False -> case x <= y of
+          True  -> LT
+          False -> GT
+  (<) x y = case compare x y of
+      LT -> True
+      _  -> False
+  (<=) x y = case compare x y of
+      GT -> False
+      _  -> True
+  (>) x y = case compare x y of
+      GT -> True
+      _  -> False
+  (>=) x y = case compare x y of
+      LT -> False
+      _  -> True
+  max x y = case x <= y of
+      True  -> y
+      False -> x
+  min x y = case x <= y of
+      True  -> x
+      False -> y
 
 instance Ord Int where
   compare = compareInt

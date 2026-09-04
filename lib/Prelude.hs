@@ -13,7 +13,7 @@ module Prelude
     , String
     , not, (&&), (||), otherwise
     , div, mod
-    , max, min, even, odd
+    , even, odd
     , (==), (/=), (<), (>), (<=), (>=), compare
     , putChar, putStr, putStrLn
     , error
