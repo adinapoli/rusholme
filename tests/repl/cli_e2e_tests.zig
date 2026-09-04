@@ -94,11 +94,22 @@ fn runRepl(allocator: std.mem.Allocator, input: []const u8) !ReplResult {
 /// Spawn `rhc <args...>` (no interactive stdin) and return collected output
 /// after the process exits. Used for the non-interactive IR-dump subcommands.
 fn runRhc(allocator: std.mem.Allocator, args: []const []const u8) !ReplResult {
+    return runExe(allocator, "zig-out/bin/rhc", args);
+}
+
+/// Spawn a compiled program with no arguments and collect its output.
+fn runProgram(allocator: std.mem.Allocator, exe: []const u8) !ReplResult {
+    return runExe(allocator, exe, &.{});
+}
+
+/// Spawn `exe <args...>` with stdin closed and return collected output after
+/// the process exits.
+fn runExe(allocator: std.mem.Allocator, exe: []const u8, args: []const []const u8) !ReplResult {
     const io = testing.io;
 
     var argv: std.ArrayListUnmanaged([]const u8) = .empty;
     defer argv.deinit(allocator);
-    try argv.append(allocator, "zig-out/bin/rhc");
+    try argv.append(allocator, exe);
     try argv.appendSlice(allocator, args);
 
     var child = try process.spawn(io, .{
@@ -109,7 +120,7 @@ fn runRhc(allocator: std.mem.Allocator, args: []const []const u8) !ReplResult {
     });
     errdefer child.kill(io);
 
-    // The dump subcommands read no stdin; close it immediately so they never block.
+    // These commands read no stdin; close it immediately so they never block.
     child.stdin.?.close(io);
     child.stdin = null;
 
@@ -421,4 +432,39 @@ test "cli e2e: rhc grin resolves the full Prelude (show/++) — #867" {
 
     try testing.expectEqual(process.Child.Term{ .exited = 0 }, result.term);
     try expectContains(result.stdout, "GRIN Program");
+}
+
+// ── Multi-module builds ──────────────────────────────────────────────────
+
+test "cli e2e: two modules with an instance at the same line/column — #962" {
+    // Helper.hs and Main.hs both declare an `Ord` instance starting at line
+    // 12, column 1.  Instances were matched on line and column alone, so
+    // `Ord Foo`'s superclass slot took the evidence for `Eq (Wrap a)` — whose
+    // context is a dictionary parameter that does not exist in Main — and the
+    // link failed with `undefined reference to dict$Eq_0`.
+    //
+    // The single-file e2e harness cannot express this, so it lives here.
+    const dir = "tests/multi_module/mm001_instance_span";
+    const result = try runRhc(testing.allocator, &.{
+        "build",
+        dir ++ "/Helper.hs",
+        dir ++ "/Main.hs",
+        "-o",
+        "zig-out/mm001_instance_span",
+    });
+    defer result.deinit(testing.allocator);
+
+    if (result.term.exited != 0) {
+        std.debug.print(
+            "rhc build failed ({any})\nstdout: {s}\nstderr: {s}\n",
+            .{ result.term, result.stdout, result.stderr },
+        );
+        return error.TestUnexpectedResult;
+    }
+
+    const run = try runProgram(testing.allocator, "zig-out/mm001_instance_span");
+    defer run.deinit(testing.allocator);
+    try testing.expectEqual(process.Child.Term{ .exited = 0 }, run.term);
+    // Verified against ghc -O2.
+    try testing.expectEqualStrings("True\nFalse\nTrue\nGT\n", run.stdout);
 }

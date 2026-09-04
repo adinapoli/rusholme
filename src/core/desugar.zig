@@ -93,6 +93,11 @@ pub const DesugarCtx = struct {
     /// variable and the class.
     pub const EvidenceKey = struct {
         var_unique: u64,
+        /// The span's file, not just its line and column.  Uniques are
+        /// per-module and a line/column pair says nothing about which file it
+        /// came from, so without this a constraint in one module can
+        /// overwrite one at the same position in another (#962).
+        span_file_id: u32,
         span_start_line: u32,
         span_start_col: u32,
         class_unique: u64,
@@ -105,6 +110,7 @@ pub const DesugarCtx = struct {
             pub fn hash(_: @This(), key: EvidenceKey) u32 {
                 var h = std.hash.Wyhash.init(0);
                 h.update(std.mem.asBytes(&key.var_unique));
+                h.update(std.mem.asBytes(&key.span_file_id));
                 h.update(std.mem.asBytes(&key.span_start_line));
                 h.update(std.mem.asBytes(&key.span_start_col));
                 h.update(std.mem.asBytes(&key.class_unique));
@@ -112,6 +118,7 @@ pub const DesugarCtx = struct {
             }
             pub fn eql(_: @This(), a: EvidenceKey, b: EvidenceKey, _: usize) bool {
                 return a.var_unique == b.var_unique and
+                    a.span_file_id == b.span_file_id and
                     a.span_start_line == b.span_start_line and
                     a.span_start_col == b.span_start_col and
                     a.class_unique == b.class_unique;
@@ -1070,9 +1077,7 @@ fn findInstanceInfo(
 ) ?class_env_mod.InstanceInfo {
     const instances_for_class = ctx.types.class_env.lookupInstances(id_decl.class_name.unique.value);
     for (instances_for_class) |inst| {
-        if (inst.span.start.line == id_decl.span.start.line and
-            inst.span.start.column == id_decl.span.start.column)
-        {
+        if (inst.span.startsAt(id_decl.span)) {
             return inst;
         }
     }
@@ -1476,6 +1481,7 @@ fn desugarInstanceDecl(
     for (superclass_names, 0..) |sc_name, j| {
         const ev_key = DesugarCtx.EvidenceKey{
             .var_unique = id_decl.class_name.unique.value,
+            .span_file_id = id_decl.span.start.file_id,
             .span_start_line = id_decl.span.start.line,
             .span_start_col = id_decl.span.start.column,
             .class_unique = sc_name.unique.value,
@@ -1620,6 +1626,7 @@ fn buildEvidenceMap(ctx: *DesugarCtx) std.mem.Allocator.Error!void {
                 const vu = cc.var_unique orelse continue;
                 const key = DesugarCtx.EvidenceKey{
                     .var_unique = vu.value,
+                    .span_file_id = cc.span.start.file_id,
                     .span_start_line = cc.span.start.line,
                     .span_start_col = cc.span.start.column,
                     .class_unique = cc.class_name.unique.value,
@@ -2092,6 +2099,7 @@ fn findEvidenceForVar(
     for (scheme.constraints) |constraint| {
         const key = DesugarCtx.EvidenceKey{
             .var_unique = var_unique,
+            .span_file_id = span.start.file_id,
             .span_start_line = span.start.line,
             .span_start_col = span.start.column,
             .class_unique = constraint.class_name.unique.value,
