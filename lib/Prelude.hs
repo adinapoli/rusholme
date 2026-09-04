@@ -38,6 +38,7 @@ module Prelude
     , map, filter, (++), head, tail, null, length
     , foldr, foldl, concat, take, drop, reverse
     , sum, product, replicate
+    , maximum, minimum
     -- Data.Maybe
     , maybe, fromMaybe
     -- Data.Either

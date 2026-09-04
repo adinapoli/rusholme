@@ -70,3 +70,7 @@ test "prelude: p013_hof_prelude_arg (xfail #764)" {
 test "prelude: p014_bounded" {
     try testPrelude(std.testing.allocator, "p014_bounded");
 }
+
+test "prelude: p015_list_extras" {
+    try testPrelude(std.testing.allocator, "p015_list_extras");
+}
