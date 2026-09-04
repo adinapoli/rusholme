@@ -108,6 +108,21 @@ pub const CompileEnv = struct {
     /// full compilation need the same AST.
     parsed_modules: std.StringHashMapUnmanaged(ast_mod.Module),
 
+    /// Map: module name → diagnostics raised while parsing it.
+    ///
+    /// The up-front parse in `compileModuleGraph` runs over *every* candidate
+    /// module, including ones that never enter the build graph, so its
+    /// diagnostics cannot go straight into `diags` — a syntax error in an
+    /// unused module must not fail the build.  They are held here per module
+    /// and merged into `diags` when that module is actually compiled (#961).
+    ///
+    /// Without this, a parse error the parser recovered past was lost
+    /// entirely: the cached AST is what the rest of the pipeline uses, so
+    /// nothing ever re-parsed and nothing ever re-reported, and the user saw
+    /// only whatever downstream pass first tripped over the declaration that
+    /// went missing.
+    parse_diags: std.StringHashMapUnmanaged(DiagnosticCollector),
+
     /// Shared unique-ID supply across all modules in the session.
     ///
     /// Threading a single supply through all compilation units ensures that
@@ -166,6 +181,7 @@ pub const CompileEnv = struct {
             .ifaces = .{},
             .programs = .{},
             .parsed_modules = .{},
+            .parse_diags = .{},
             .u_supply = .{},
             .mv_supply = .{},
             .diags = DiagnosticCollector.init(),
@@ -180,6 +196,11 @@ pub const CompileEnv = struct {
         self.ifaces.deinit(self.alloc);
         self.programs.deinit(self.alloc);
         self.parsed_modules.deinit(self.alloc);
+        {
+            var pd_iter = self.parse_diags.valueIterator();
+            while (pd_iter.next()) |pd| pd.deinit(self.alloc);
+            self.parse_diags.deinit(self.alloc);
+        }
         self.diags.deinit(self.alloc);
         self.class_envs.deinit(self.alloc);
         self.dict_names_map.deinit(self.alloc);
@@ -754,19 +775,31 @@ pub fn compileProgram(
     }
 
     // ── Phase 1: Parse all modules once and cache ──────────────────────────
+    //
+    // This runs over every candidate module, including ones that never enter
+    // the build graph, so a module's parse diagnostics are kept per module in
+    // `env.parse_diags` rather than emitted here.  Phase 3 merges them into
+    // `env.diags` for the modules it actually compiles (#961).
     for (modules) |m| {
-        var dummy_diags = DiagnosticCollector.init();
-        defer dummy_diags.deinit(alloc);
+        var mod_diags = DiagnosticCollector.init();
 
         var lexer = lexer_mod.Lexer.init(alloc, m.source, m.file_id);
         var layout = layout_mod.LayoutProcessor.init(alloc, &lexer);
-        layout.setDiagnostics(&dummy_diags);
+        layout.setDiagnostics(&mod_diags);
 
-        var parser = parser_mod.Parser.init(alloc, &layout, &dummy_diags) catch continue;
-        const parsed_module = parser.parseModule() catch continue;
+        const parsed: ?ast_mod.Module = blk: {
+            var parser = parser_mod.Parser.init(alloc, &layout, &mod_diags) catch break :blk null;
+            break :blk parser.parseModule() catch null;
+        };
 
         const owned_name = try alloc.dupe(u8, m.module_name);
-        try env.parsed_modules.put(alloc, owned_name, parsed_module);
+        // Keep the diagnostics whether or not the parse produced an AST: a
+        // parse that failed outright is re-run by `compileSingle` against the
+        // real collector, but a parse the parser *recovered* past returns a
+        // usable AST that is then cached and never re-parsed, so this is the
+        // only copy of those errors.
+        try env.parse_diags.put(alloc, owned_name, mod_diags);
+        if (parsed) |pm| try env.parsed_modules.put(alloc, owned_name, pm);
     }
 
     // ── Phase 2: Build module graph from cached parses ─────────────────────
@@ -992,6 +1025,25 @@ pub fn compileProgram(
             try env.dict_names_map.put(alloc, owned_name, dict_names);
             pre_class_count = ce.classes.count();
             pre_dict_count = dict_names.count();
+        }
+
+        // This module is in the build graph, so its parse diagnostics are the
+        // user's problem now (#961).  A parse the parser recovered past
+        // returns a usable AST that Phase 1 cached and nothing re-parses, so
+        // these are the only copy — without this the error vanished and the
+        // user saw whatever downstream pass first tripped over the
+        // declaration that went missing.
+        if (env.parse_diags.getPtr(mod_name)) |pd| {
+            for (pd.diagnostics.items) |d| try env.diags.emit(alloc, d);
+            if (pd.hasErrors()) {
+                // Do not compile a module whose syntax we could not read:
+                // the recovered-over AST is missing declarations, and every
+                // resulting "not in scope" is noise on top of the real error.
+                pd.diagnostics.clearRetainingCapacity();
+                continue;
+            }
+            // Emitted once; do not repeat them if this module is revisited.
+            pd.diagnostics.clearRetainingCapacity();
         }
 
         // Always compile from source to produce the Core program.
@@ -2344,6 +2396,81 @@ test "preloadPackageDb: skips non-.rhi files and missing dirs" {
     defer env2.deinit();
     try preloadPackageDb(alloc, io, &env2, "/this/path/does/not/exist");
     try testing.expectEqual(@as(usize, 0), env2.ifaces.count());
+}
+
+test "compileProgram: a parse error in a compiled module is reported (#961)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const io = testing.io;
+
+    // `foo = 1 +` is a parse error the parser recovers past, dropping the
+    // declaration.  The up-front parse in Phase 1 used to collect into a
+    // discarded collector, and the cached AST is what the rest of the
+    // pipeline uses, so nothing re-parsed and nothing re-reported: the user
+    // saw only `variable not in scope: foo` from the *use* site.
+    const source =
+        \\{-# LANGUAGE NoImplicitPrelude #-}
+        \\module Main where
+        \\foo :: Char
+        \\foo = 'x' 'y' where
+        \\
+    ;
+    var r = try compileProgram(alloc, io, &.{.{
+        .module_name = "Main",
+        .source = source,
+        .file_id = 1,
+    }}, &.{});
+    defer r.env.deinit();
+
+    try testing.expect(r.result.had_errors);
+
+    var saw_parse_error = false;
+    for (r.env.diags.diagnostics.items) |d| {
+        if (d.code == .parse_error) saw_parse_error = true;
+    }
+    try testing.expect(saw_parse_error);
+}
+
+test "compileProgram: a parse error is attributed to the module it is in (#961)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const io = testing.io;
+
+    // Two modules, only the first malformed.  The diagnostics are held per
+    // module in Phase 1 and merged in Phase 3, so the error has to come back
+    // with the offending module's `file_id` — not the one that happened to be
+    // parsed last.
+    const broken_src =
+        \\{-# LANGUAGE NoImplicitPrelude #-}
+        \\module Broken where
+        \\broken :: Char
+        \\broken = 'x' 'y' where
+        \\
+    ;
+    const main_src =
+        \\{-# LANGUAGE NoImplicitPrelude #-}
+        \\module Main where
+        \\answer :: Char
+        \\answer = 'x'
+        \\
+    ;
+    var r = try compileProgram(alloc, io, &.{
+        .{ .module_name = "Broken", .source = broken_src, .file_id = 7 },
+        .{ .module_name = "Main", .source = main_src, .file_id = 9 },
+    }, &.{});
+    defer r.env.deinit();
+
+    try testing.expect(r.result.had_errors);
+
+    var saw = false;
+    for (r.env.diags.diagnostics.items) |d| {
+        if (d.code != .parse_error) continue;
+        saw = true;
+        try testing.expectEqual(@as(u32, 7), d.span.start.file_id);
+    }
+    try testing.expect(saw);
 }
 
 test "compileProgram: missing import emits module_not_found diagnostic" {
