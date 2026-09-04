@@ -74,3 +74,7 @@ test "prelude: p014_bounded" {
 test "prelude: p015_list_extras" {
     try testPrelude(std.testing.allocator, "p015_list_extras");
 }
+
+test "prelude: p016_eq_ord" {
+    try testPrelude(std.testing.allocator, "p016_eq_ord");
+}
