@@ -556,3 +556,7 @@ test "e2e: rhc build rejects unknown -O level (#755)" {
 test "e2e: e2e_958_infix_first_tuple (#958)" {
     try testE2e(std.testing.allocator, "e2e_958_infix_first_tuple");
 }
+
+test "e2e: e2e_952_eq_ord_instances (#951, #952)" {
+    try testE2e(std.testing.allocator, "e2e_952_eq_ord_instances");
+}

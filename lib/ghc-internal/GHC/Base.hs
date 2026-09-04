@@ -306,6 +306,16 @@ class Eq a where
   (/=) x y = not ((==) x y)
   (==) x y = not ((/=) x y)
 
+-- Conjunction over a list, used by the tuple `Eq` instances below the same
+-- way `showTupleWith` is used by the tuple `Show` instances: the components
+-- of a tuple have different types, so each instance compares its own fields
+-- and hands the results over.
+andAll :: [Bool] -> Bool
+andAll []     = True
+andAll (b:bs) = case b of
+    True  -> andAll bs
+    False -> False
+
 instance Eq Int where
   (==) = primEqInt
   (/=) = primNeInt
@@ -375,6 +385,17 @@ class Eq a => Ord a where
       True  -> x
       False -> y
 
+-- Lexicographic combination of per-component comparisons, used by the tuple
+-- `Ord` instances (see `andAll` above for the same shape on `Eq`).
+thenCompare :: Ordering -> Ordering -> Ordering
+thenCompare LT _ = LT
+thenCompare GT _ = GT
+thenCompare EQ o = o
+
+foldCompare :: [Ordering] -> Ordering
+foldCompare []     = EQ
+foldCompare (o:os) = thenCompare o (foldCompare os)
+
 instance Ord Int where
   compare = compareInt
   (<)  = primLtInt
@@ -417,6 +438,67 @@ instance Ord Double where
   (<=) = primLeDouble
   (>)  = primGtDouble
   (>=) = primGeDouble
+
+-- ── Eq / Ord for the standard containers (#952) ─────────────────────
+--
+-- Each instance defines only `compare` (or only `(==)`); everything else
+-- comes from the class defaults above.  Ordering is GHC's: lexicographic on
+-- lists, `Nothing < Just _`, `Left _ < Right _`.
+
+ordToInt :: Ordering -> Int
+ordToInt LT = 0
+ordToInt EQ = 1
+ordToInt GT = 2
+
+instance Eq Ordering where
+  (==) x y = primEqInt (ordToInt x) (ordToInt y)
+
+instance Ord Ordering where
+  compare x y = compareInt (ordToInt x) (ordToInt y)
+
+instance Ord Bool where
+  compare False False = EQ
+  compare False True  = LT
+  compare True  False = GT
+  compare True  True  = EQ
+
+instance Eq a => Eq [a] where
+  (==) []     []     = True
+  (==) (x:xs) (y:ys) = case x == y of
+      True  -> xs == ys
+      False -> False
+  (==) _      _      = False
+
+instance Ord a => Ord [a] where
+  compare []     []     = EQ
+  compare []     (_:_)  = LT
+  compare (_:_)  []     = GT
+  compare (x:xs) (y:ys) = case compare x y of
+      LT -> LT
+      GT -> GT
+      EQ -> compare xs ys
+
+instance Eq a => Eq (Maybe a) where
+  (==) Nothing  Nothing  = True
+  (==) (Just x) (Just y) = x == y
+  (==) _        _        = False
+
+instance Ord a => Ord (Maybe a) where
+  compare Nothing  Nothing  = EQ
+  compare Nothing  (Just _) = LT
+  compare (Just _) Nothing  = GT
+  compare (Just x) (Just y) = compare x y
+
+instance (Eq a, Eq b) => Eq (Either a b) where
+  (==) (Left x)  (Left y)  = x == y
+  (==) (Right x) (Right y) = x == y
+  (==) _         _         = False
+
+instance (Ord a, Ord b) => Ord (Either a b) where
+  compare (Left x)  (Left y)  = compare x y
+  compare (Left _)  (Right _) = LT
+  compare (Right _) (Left _)  = GT
+  compare (Right x) (Right y) = compare x y
 
 -- ========================================================================
 -- Bounded type class
@@ -788,6 +870,152 @@ instance Monad IO where
 instance (Show a, Show b) => Show (Either a b) where
   show (Left x)  = appendStr "Left " (show x)
   show (Right y) = appendStr "Right " (show y)
+
+-- ── Eq / Ord for tuples (#952) ──────────────────────────────────────
+--
+-- Componentwise, in the same style as the `Show` instances below: the
+-- components have different types, so each instance compares its own
+-- fields and hands the results to `andAll` / `foldCompare`.
+
+instance (Eq a, Eq b)
+      => Eq (a, b) where
+  (==) (a1, b1) (a2, b2) =
+      andAll ((a1 == a2) : (b1 == b2) : [])
+
+instance (Ord a, Ord b)
+      => Ord (a, b) where
+  compare (a1, b1) (a2, b2) =
+      foldCompare (compare a1 a2 : compare b1 b2 : [])
+
+instance (Eq a, Eq b, Eq c)
+      => Eq (a, b, c) where
+  (==) (a1, b1, c1) (a2, b2, c2) =
+      andAll ((a1 == a2) : (b1 == b2) : (c1 == c2) : [])
+
+instance (Ord a, Ord b, Ord c)
+      => Ord (a, b, c) where
+  compare (a1, b1, c1) (a2, b2, c2) =
+      foldCompare (compare a1 a2 : compare b1 b2 : compare c1 c2 : [])
+
+instance (Eq a, Eq b, Eq c, Eq d)
+      => Eq (a, b, c, d) where
+  (==) (a1, b1, c1, d1) (a2, b2, c2, d2) =
+      andAll ((a1 == a2) : (b1 == b2) : (c1 == c2) : (d1 == d2) : [])
+
+instance (Ord a, Ord b, Ord c, Ord d)
+      => Ord (a, b, c, d) where
+  compare (a1, b1, c1, d1) (a2, b2, c2, d2) =
+      foldCompare (compare a1 a2 : compare b1 b2 : compare c1 c2 : compare d1 d2 : [])
+
+instance (Eq a, Eq b, Eq c, Eq d, Eq e)
+      => Eq (a, b, c, d, e) where
+  (==) (a1, b1, c1, d1, e1) (a2, b2, c2, d2, e2) =
+      andAll ((a1 == a2) : (b1 == b2) : (c1 == c2) : (d1 == d2) : (e1 == e2) : [])
+
+instance (Ord a, Ord b, Ord c, Ord d, Ord e)
+      => Ord (a, b, c, d, e) where
+  compare (a1, b1, c1, d1, e1) (a2, b2, c2, d2, e2) =
+      foldCompare (compare a1 a2 : compare b1 b2 : compare c1 c2 : compare d1 d2 : compare e1 e2 : [])
+
+instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f)
+      => Eq (a, b, c, d, e, f) where
+  (==) (a1, b1, c1, d1, e1, f1) (a2, b2, c2, d2, e2, f2) =
+      andAll ((a1 == a2) : (b1 == b2) : (c1 == c2) : (d1 == d2) : (e1 == e2) : (f1 == f2) : [])
+
+instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f)
+      => Ord (a, b, c, d, e, f) where
+  compare (a1, b1, c1, d1, e1, f1) (a2, b2, c2, d2, e2, f2) =
+      foldCompare (compare a1 a2 : compare b1 b2 : compare c1 c2 : compare d1 d2 : compare e1 e2 : compare f1 f2 : [])
+
+instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g)
+      => Eq (a, b, c, d, e, f, g) where
+  (==) (a1, b1, c1, d1, e1, f1, g1) (a2, b2, c2, d2, e2, f2, g2) =
+      andAll ((a1 == a2) : (b1 == b2) : (c1 == c2) : (d1 == d2) : (e1 == e2) : (f1 == f2) : (g1 == g2) : [])
+
+instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f, Ord g)
+      => Ord (a, b, c, d, e, f, g) where
+  compare (a1, b1, c1, d1, e1, f1, g1) (a2, b2, c2, d2, e2, f2, g2) =
+      foldCompare (compare a1 a2 : compare b1 b2 : compare c1 c2 : compare d1 d2 : compare e1 e2 : compare f1 f2 : compare g1 g2 : [])
+
+instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g, Eq h)
+      => Eq (a, b, c, d, e, f, g, h) where
+  (==) (a1, b1, c1, d1, e1, f1, g1, h1) (a2, b2, c2, d2, e2, f2, g2, h2) =
+      andAll ((a1 == a2) : (b1 == b2) : (c1 == c2) : (d1 == d2) : (e1 == e2) : (f1 == f2) : (g1 == g2) : (h1 == h2) : [])
+
+instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f, Ord g, Ord h)
+      => Ord (a, b, c, d, e, f, g, h) where
+  compare (a1, b1, c1, d1, e1, f1, g1, h1) (a2, b2, c2, d2, e2, f2, g2, h2) =
+      foldCompare (compare a1 a2 : compare b1 b2 : compare c1 c2 : compare d1 d2 : compare e1 e2 : compare f1 f2 : compare g1 g2 : compare h1 h2 : [])
+
+instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g, Eq h, Eq i)
+      => Eq (a, b, c, d, e, f, g, h, i) where
+  (==) (a1, b1, c1, d1, e1, f1, g1, h1, i1) (a2, b2, c2, d2, e2, f2, g2, h2, i2) =
+      andAll ((a1 == a2) : (b1 == b2) : (c1 == c2) : (d1 == d2) : (e1 == e2) : (f1 == f2) : (g1 == g2) : (h1 == h2) : (i1 == i2) : [])
+
+instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f, Ord g, Ord h, Ord i)
+      => Ord (a, b, c, d, e, f, g, h, i) where
+  compare (a1, b1, c1, d1, e1, f1, g1, h1, i1) (a2, b2, c2, d2, e2, f2, g2, h2, i2) =
+      foldCompare (compare a1 a2 : compare b1 b2 : compare c1 c2 : compare d1 d2 : compare e1 e2 : compare f1 f2 : compare g1 g2 : compare h1 h2 : compare i1 i2 : [])
+
+instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g, Eq h, Eq i, Eq j)
+      => Eq (a, b, c, d, e, f, g, h, i, j) where
+  (==) (a1, b1, c1, d1, e1, f1, g1, h1, i1, j1) (a2, b2, c2, d2, e2, f2, g2, h2, i2, j2) =
+      andAll ((a1 == a2) : (b1 == b2) : (c1 == c2) : (d1 == d2) : (e1 == e2) : (f1 == f2) : (g1 == g2) : (h1 == h2) : (i1 == i2) : (j1 == j2) : [])
+
+instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f, Ord g, Ord h, Ord i, Ord j)
+      => Ord (a, b, c, d, e, f, g, h, i, j) where
+  compare (a1, b1, c1, d1, e1, f1, g1, h1, i1, j1) (a2, b2, c2, d2, e2, f2, g2, h2, i2, j2) =
+      foldCompare (compare a1 a2 : compare b1 b2 : compare c1 c2 : compare d1 d2 : compare e1 e2 : compare f1 f2 : compare g1 g2 : compare h1 h2 : compare i1 i2 : compare j1 j2 : [])
+
+instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g, Eq h, Eq i, Eq j, Eq k)
+      => Eq (a, b, c, d, e, f, g, h, i, j, k) where
+  (==) (a1, b1, c1, d1, e1, f1, g1, h1, i1, j1, k1) (a2, b2, c2, d2, e2, f2, g2, h2, i2, j2, k2) =
+      andAll ((a1 == a2) : (b1 == b2) : (c1 == c2) : (d1 == d2) : (e1 == e2) : (f1 == f2) : (g1 == g2) : (h1 == h2) : (i1 == i2) : (j1 == j2) : (k1 == k2) : [])
+
+instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f, Ord g, Ord h, Ord i, Ord j, Ord k)
+      => Ord (a, b, c, d, e, f, g, h, i, j, k) where
+  compare (a1, b1, c1, d1, e1, f1, g1, h1, i1, j1, k1) (a2, b2, c2, d2, e2, f2, g2, h2, i2, j2, k2) =
+      foldCompare (compare a1 a2 : compare b1 b2 : compare c1 c2 : compare d1 d2 : compare e1 e2 : compare f1 f2 : compare g1 g2 : compare h1 h2 : compare i1 i2 : compare j1 j2 : compare k1 k2 : [])
+
+instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g, Eq h, Eq i, Eq j, Eq k, Eq l)
+      => Eq (a, b, c, d, e, f, g, h, i, j, k, l) where
+  (==) (a1, b1, c1, d1, e1, f1, g1, h1, i1, j1, k1, l1) (a2, b2, c2, d2, e2, f2, g2, h2, i2, j2, k2, l2) =
+      andAll ((a1 == a2) : (b1 == b2) : (c1 == c2) : (d1 == d2) : (e1 == e2) : (f1 == f2) : (g1 == g2) : (h1 == h2) : (i1 == i2) : (j1 == j2) : (k1 == k2) : (l1 == l2) : [])
+
+instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f, Ord g, Ord h, Ord i, Ord j, Ord k, Ord l)
+      => Ord (a, b, c, d, e, f, g, h, i, j, k, l) where
+  compare (a1, b1, c1, d1, e1, f1, g1, h1, i1, j1, k1, l1) (a2, b2, c2, d2, e2, f2, g2, h2, i2, j2, k2, l2) =
+      foldCompare (compare a1 a2 : compare b1 b2 : compare c1 c2 : compare d1 d2 : compare e1 e2 : compare f1 f2 : compare g1 g2 : compare h1 h2 : compare i1 i2 : compare j1 j2 : compare k1 k2 : compare l1 l2 : [])
+
+instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g, Eq h, Eq i, Eq j, Eq k, Eq l, Eq m)
+      => Eq (a, b, c, d, e, f, g, h, i, j, k, l, m) where
+  (==) (a1, b1, c1, d1, e1, f1, g1, h1, i1, j1, k1, l1, m1) (a2, b2, c2, d2, e2, f2, g2, h2, i2, j2, k2, l2, m2) =
+      andAll ((a1 == a2) : (b1 == b2) : (c1 == c2) : (d1 == d2) : (e1 == e2) : (f1 == f2) : (g1 == g2) : (h1 == h2) : (i1 == i2) : (j1 == j2) : (k1 == k2) : (l1 == l2) : (m1 == m2) : [])
+
+instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f, Ord g, Ord h, Ord i, Ord j, Ord k, Ord l, Ord m)
+      => Ord (a, b, c, d, e, f, g, h, i, j, k, l, m) where
+  compare (a1, b1, c1, d1, e1, f1, g1, h1, i1, j1, k1, l1, m1) (a2, b2, c2, d2, e2, f2, g2, h2, i2, j2, k2, l2, m2) =
+      foldCompare (compare a1 a2 : compare b1 b2 : compare c1 c2 : compare d1 d2 : compare e1 e2 : compare f1 f2 : compare g1 g2 : compare h1 h2 : compare i1 i2 : compare j1 j2 : compare k1 k2 : compare l1 l2 : compare m1 m2 : [])
+
+instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g, Eq h, Eq i, Eq j, Eq k, Eq l, Eq m, Eq n)
+      => Eq (a, b, c, d, e, f, g, h, i, j, k, l, m, n) where
+  (==) (a1, b1, c1, d1, e1, f1, g1, h1, i1, j1, k1, l1, m1, n1) (a2, b2, c2, d2, e2, f2, g2, h2, i2, j2, k2, l2, m2, n2) =
+      andAll ((a1 == a2) : (b1 == b2) : (c1 == c2) : (d1 == d2) : (e1 == e2) : (f1 == f2) : (g1 == g2) : (h1 == h2) : (i1 == i2) : (j1 == j2) : (k1 == k2) : (l1 == l2) : (m1 == m2) : (n1 == n2) : [])
+
+instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f, Ord g, Ord h, Ord i, Ord j, Ord k, Ord l, Ord m, Ord n)
+      => Ord (a, b, c, d, e, f, g, h, i, j, k, l, m, n) where
+  compare (a1, b1, c1, d1, e1, f1, g1, h1, i1, j1, k1, l1, m1, n1) (a2, b2, c2, d2, e2, f2, g2, h2, i2, j2, k2, l2, m2, n2) =
+      foldCompare (compare a1 a2 : compare b1 b2 : compare c1 c2 : compare d1 d2 : compare e1 e2 : compare f1 f2 : compare g1 g2 : compare h1 h2 : compare i1 i2 : compare j1 j2 : compare k1 k2 : compare l1 l2 : compare m1 m2 : compare n1 n2 : [])
+
+instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g, Eq h, Eq i, Eq j, Eq k, Eq l, Eq m, Eq n, Eq o)
+      => Eq (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o) where
+  (==) (a1, b1, c1, d1, e1, f1, g1, h1, i1, j1, k1, l1, m1, n1, o1) (a2, b2, c2, d2, e2, f2, g2, h2, i2, j2, k2, l2, m2, n2, o2) =
+      andAll ((a1 == a2) : (b1 == b2) : (c1 == c2) : (d1 == d2) : (e1 == e2) : (f1 == f2) : (g1 == g2) : (h1 == h2) : (i1 == i2) : (j1 == j2) : (k1 == k2) : (l1 == l2) : (m1 == m2) : (n1 == n2) : (o1 == o2) : [])
+
+instance (Ord a, Ord b, Ord c, Ord d, Ord e, Ord f, Ord g, Ord h, Ord i, Ord j, Ord k, Ord l, Ord m, Ord n, Ord o)
+      => Ord (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o) where
+  compare (a1, b1, c1, d1, e1, f1, g1, h1, i1, j1, k1, l1, m1, n1, o1) (a2, b2, c2, d2, e2, f2, g2, h2, i2, j2, k2, l2, m2, n2, o2) =
+      foldCompare (compare a1 a2 : compare b1 b2 : compare c1 c2 : compare d1 d2 : compare e1 e2 : compare f1 f2 : compare g1 g2 : compare h1 h2 : compare i1 i2 : compare j1 j2 : compare k1 k2 : compare l1 l2 : compare m1 m2 : compare n1 n2 : compare o1 o2 : [])
 
 -- Tuple instances, rendered GHC-style with no space after the comma.
 -- Widths 2..15 mirror what GHC's `base` provides.
