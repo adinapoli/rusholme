@@ -1242,6 +1242,17 @@ fn desugarInstanceDecl(
             //
             // Then the dictionary constructor uses _inst$... as the field.
             //
+            // When the instance has a context, `dict$Class$Type` is not a
+            // dictionary value but a *function* from the context dictionaries
+            // to one (see the lambda wrapping at the end of this function), so
+            // the wrapper has to re-supply them before the default method can
+            // project a field out of it (#948):
+            //
+            //   _inst$C$m$W = \dctx -> \x -> default$C$m (dict$C$W dctx) x
+            //
+            // and the dictionary field becomes `_inst$C$m$W dctx`, applied to
+            // the enclosing instance's own context parameters.
+            //
             // Look up the name recorded in the ClassEnv during class desugaring
             // so that the reference matches the binding's unique (issue #660).
             // This is read from `MethodInfo.default_name`, which the ClassEnv
@@ -1261,7 +1272,25 @@ fn desugarInstanceDecl(
             // Count the method arity (excluding the dict param which we supply).
             const method_arity = countFunArity(method.ty);
 
-            // Build: _inst$Class$method$Type = \x0 -> ... -> default$... dict$... x0 ...
+            // Fresh binders for the instance context dictionaries, local to
+            // the wrapper.  The dictionary expression's own context
+            // parameters (`context_param_names`) are bound by lambdas that do
+            // not scope over this top-level wrapper, so the wrapper cannot
+            // reference them directly.
+            const dict_placeholder_ty = ast_mod.CoreType{ .TyCon = .{ .name = dict_con_name, .args = &.{} } };
+            var wrapper_ctx_binders = try alloc.alloc(ast_mod.Id, id_decl.context.len);
+            for (id_decl.context, 0..) |assertion, ci| {
+                wrapper_ctx_binders[ci] = .{
+                    .name = .{
+                        .base = try std.fmt.allocPrint(alloc, "dict${s}", .{assertion.class_name.base}),
+                        .unique = ctx.u_supply.fresh(),
+                    },
+                    .ty = try dictPlaceholderTy(alloc, assertion.class_name.base),
+                    .span = id_decl.span,
+                };
+            }
+
+            // Build: _inst$Class$method$Type = \d0 .. \x0 -> ... -> default$... (dict$... d0 ..) x0 ...
             var wrapper_body: *const ast_mod.Expr = blk_fn: {
                 // Start with: default$Class$method
                 var expr: *const ast_mod.Expr = blk_def: {
@@ -1273,13 +1302,27 @@ fn desugarInstanceDecl(
                     } };
                     break :blk_def e;
                 };
-                // Apply the instance dictionary: default$... dict$Class$Type
-                const dict_ref = try alloc.create(ast_mod.Expr);
-                dict_ref.* = .{ .Var = .{
-                    .name = dict_name,
-                    .ty = ast_mod.CoreType{ .TyCon = .{ .name = dict_con_name, .args = &.{} } },
-                    .span = id_decl.span,
-                } };
+                // The instance dictionary, saturated with its context.
+                var dict_ref: *const ast_mod.Expr = blk_dict: {
+                    const d = try alloc.create(ast_mod.Expr);
+                    d.* = .{ .Var = .{
+                        .name = dict_name,
+                        .ty = dict_placeholder_ty,
+                        .span = id_decl.span,
+                    } };
+                    break :blk_dict d;
+                };
+                for (wrapper_ctx_binders) |ctx_binder| {
+                    const arg = try alloc.create(ast_mod.Expr);
+                    arg.* = .{ .Var = ctx_binder };
+                    const app = try alloc.create(ast_mod.Expr);
+                    app.* = .{ .App = .{
+                        .fn_expr = dict_ref,
+                        .arg = arg,
+                        .span = id_decl.span,
+                    } };
+                    dict_ref = app;
+                }
                 const app_dict = try alloc.create(ast_mod.Expr);
                 app_dict.* = .{ .App = .{
                     .fn_expr = expr,
@@ -1325,7 +1368,7 @@ fn desugarInstanceDecl(
                 }
             }
 
-            // Wrap with lambdas: \eta0 -> \eta1 -> ... -> body
+            // Wrap with lambdas: \d0 -> ... -> \eta0 -> \eta1 -> ... -> body
             {
                 var k = method_arity;
                 while (k > 0) {
@@ -1333,6 +1376,17 @@ fn desugarInstanceDecl(
                     const lam = try alloc.create(ast_mod.Expr);
                     lam.* = .{ .Lam = .{
                         .binder = eta_binders[k],
+                        .body = wrapper_body,
+                        .span = id_decl.span,
+                    } };
+                    wrapper_body = lam;
+                }
+                var c = wrapper_ctx_binders.len;
+                while (c > 0) {
+                    c -= 1;
+                    const lam = try alloc.create(ast_mod.Expr);
+                    lam.* = .{ .Lam = .{
+                        .binder = wrapper_ctx_binders[c],
                         .body = wrapper_body,
                         .span = id_decl.span,
                     } };
@@ -1361,9 +1415,28 @@ fn desugarInstanceDecl(
                 .rhs = wrapper_body,
             } });
 
-            // Use the wrapper in the dictionary constructor.
-            const wrapper_ref = try alloc.create(ast_mod.Expr);
-            wrapper_ref.* = .{ .Var = wrapper_id };
+            // Use the wrapper in the dictionary constructor, supplying this
+            // instance's own context dictionaries.
+            var wrapper_ref: *const ast_mod.Expr = blk_ref: {
+                const w = try alloc.create(ast_mod.Expr);
+                w.* = .{ .Var = wrapper_id };
+                break :blk_ref w;
+            };
+            for (context_param_names, 0..) |ctx_param, ci| {
+                const arg = try alloc.create(ast_mod.Expr);
+                arg.* = .{ .Var = .{
+                    .name = ctx_param,
+                    .ty = try dictPlaceholderTy(alloc, id_decl.context[ci].class_name.base),
+                    .span = id_decl.span,
+                } };
+                const app = try alloc.create(ast_mod.Expr);
+                app.* = .{ .App = .{
+                    .fn_expr = wrapper_ref,
+                    .arg = arg,
+                    .span = id_decl.span,
+                } };
+                wrapper_ref = app;
+            }
             method_exprs[i] = wrapper_ref;
         } else {
             // Missing method with no default — emit diagnostic.
