@@ -175,6 +175,7 @@
 | [#415](https://github.com/adinapoli/rusholme/issues/415) | testing: add parse and GRIN output golden variants to test runner | [#63](https://github.com/adinapoli/rusholme/issues/63) | :green_circle: |
 | [#460](https://github.com/adinapoli/rusholme/issues/460) | e2e runner: capture and assert stderr output | [#64](https://github.com/adinapoli/rusholme/issues/64) | :green_circle: |
 | [#462](https://github.com/adinapoli/rusholme/issues/462) | Add M2 Prelude reminder for enabling e2e tests | [#64](https://github.com/adinapoli/rusholme/issues/64) | :white_circle: |
+| [#956](https://github.com/adinapoli/rusholme/issues/956) | Bench suite reports phantom double-digit regressions from unrelated boot-library growth | [#109](https://github.com/adinapoli/rusholme/issues/109) | :white_circle: |
 
 ### Epic [#106](https://github.com/adinapoli/rusholme/issues/106): Zero-Leak Compiler
 
@@ -460,7 +461,13 @@
 | [#944](https://github.com/adinapoli/rusholme/issues/944) | Action values returned from functions are consumed by the return-site force (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#939](https://github.com/adinapoli/rusholme/issues/939) | :white_circle: |
 | [#947](https://github.com/adinapoli/rusholme/issues/947) | Pure payload inside a multiply-performed IO action is recomputed on every perform (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#939](https://github.com/adinapoli/rusholme/issues/939) | :white_circle: |
 | [#927](https://github.com/adinapoli/rusholme/issues/927) | No `Show` instance for tuples — `print (x, y)` does not compile (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :green_circle: |
-| [#928](https://github.com/adinapoli/rusholme/issues/928) | Prelude/`Data.List` gaps: `maximum`, `minimum`, `sort`, `sortBy`, `nub`, `foldl'` (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :white_circle: |
+| [#928](https://github.com/adinapoli/rusholme/issues/928) | Prelude/`Data.List` gaps: `maximum`, `minimum`, `sort`, `sortBy`, `nub`, `foldl'` (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :yellow_circle: |
+| [#929](https://github.com/adinapoli/rusholme/issues/929) | `show` on a `String` renders a character list instead of a quoted string (`Show` needs `showList`) (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#948](https://github.com/adinapoli/rusholme/issues/948) | :yellow_circle: |
+| [#930](https://github.com/adinapoli/rusholme/issues/930) | `Show` instances for tuple widths 6..15 (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#927](https://github.com/adinapoli/rusholme/issues/927) | :yellow_circle: |
+| [#948](https://github.com/adinapoli/rusholme/issues/948) | Class default methods crash when reached through a context-carrying instance dictionary (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | — | :green_circle: |
+| [#951](https://github.com/adinapoli/rusholme/issues/951) | `Eq` and `Ord` have no default methods — every instance must define all of them (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#948](https://github.com/adinapoli/rusholme/issues/948) | :white_circle: |
+| [#952](https://github.com/adinapoli/rusholme/issues/952) | No `Eq`/`Ord` instances for lists, `Maybe`, `Either`, `Ordering` or tuples (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#951](https://github.com/adinapoli/rusholme/issues/951), [#948](https://github.com/adinapoli/rusholme/issues/948) | :white_circle: |
+| [#954](https://github.com/adinapoli/rusholme/issues/954) | `foldl'` is not strict — there is no `seq` primop and bang patterns are discarded (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#928](https://github.com/adinapoli/rusholme/issues/928) | :white_circle: |
 
 ### Epic [#515](https://github.com/adinapoli/rusholme/issues/515): Support Laziness (Call-by-Need Evaluation)
 
