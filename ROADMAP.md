@@ -474,7 +474,7 @@
 | [#962](https://github.com/adinapoli/rusholme/issues/962) | Instances are identified by line/column only, so instances in different modules collide (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#889](https://github.com/adinapoli/rusholme/issues/889) | :green_circle: |
 | [#961](https://github.com/adinapoli/rusholme/issues/961) | Parse errors are discarded by the multi-module parse phase, surfacing as misleading downstream errors | — | :green_circle: |
 | [#964](https://github.com/adinapoli/rusholme/issues/964) | `__rhc_force` dispatch is a whole-program tag switch — per-force cost grows with library size (epic [#845](https://github.com/adinapoli/rusholme/issues/845)) | [#865](https://github.com/adinapoli/rusholme/issues/865) | :white_circle: |
-| [#973](https://github.com/adinapoli/rusholme/issues/973) | Boot-module import order breaks the REPL: a `Data.List → Data.Char` edge makes `++` unknown (found while implementing [#970](https://github.com/adinapoli/rusholme/issues/970)) | [#970](https://github.com/adinapoli/rusholme/issues/970) | :white_circle: |
+| [#973](https://github.com/adinapoli/rusholme/issues/973) | REPL boot set omits Data.Char: a `Data.List → Data.Char` import silently drops the whole module (`++` unknown) (found while implementing [#970](https://github.com/adinapoli/rusholme/issues/970)) | [#970](https://github.com/adinapoli/rusholme/issues/970) | :white_circle: |
 
 ### Epic [#515](https://github.com/adinapoli/rusholme/issues/515): Support Laziness (Call-by-Need Evaluation)
 
