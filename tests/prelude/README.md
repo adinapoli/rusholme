@@ -33,3 +33,14 @@ update this table.
 | `error` | p012_error |
 | Prelude fn as HOF argument (regression) | p013_hof_prelude_arg (**xfail** — #764) |
 | `Bounded(..)` (`minBound`, `maxBound`) | p014_bounded (**xfail** — #765) |
+| `maximum`, `minimum`, `nub`, `sort`, `sortBy`, `foldl'` | p015_list_extras |
+| `Eq`/`Ord` class defaults and the container instances (lists, `Maybe`, `Ordering`, tuples) | p016_eq_ord |
+| `last`, `init`, `foldl1`, `foldr1`, `scanl`, `scanl1`, `scanr`, `scanr1` | p017_list_breadth |
+| `concatMap`, `and`, `or`, `any`, `all`, `iterate`, `repeat`, `cycle` | p017_list_breadth |
+| `splitAt`, `takeWhile`, `dropWhile`, `span`, `break`, `elem`, `notElem`, `lookup` | p017_list_breadth |
+| `zip`, `zip3`, `zipWith`, `zipWith3`, `unzip`, `unzip3` | p017_list_breadth |
+| `lines`, `words`, `unlines`, `unwords` | p017_list_breadth |
+| `until` | p017_list_breadth |
+| `gcd`, `lcm` | p017_list_breadth |
+| partiality: `last`/`init`/`foldl1`/`foldr1`/`cycle` on `[]` | p018_last_empty, p019_init_empty, p020_foldl1_empty, p021_foldr1_empty, p022_cycle_empty |
+| `gcd`/`lcm` zero-valued-argument identities (`gcd 0 0 = 0`, `lcm 0 0 = 0`) | p023_gcd_zero_zero |

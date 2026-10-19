@@ -560,3 +560,7 @@ test "e2e: e2e_958_infix_first_tuple (#958)" {
 test "e2e: e2e_952_eq_ord_instances (#951, #952)" {
     try testE2e(std.testing.allocator, "e2e_952_eq_ord_instances");
 }
+
+test "e2e: e2e_970_prelude_breadth (#970)" {
+    try testE2e(std.testing.allocator, "e2e_970_prelude_breadth");
+}

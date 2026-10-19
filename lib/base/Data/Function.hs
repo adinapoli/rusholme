@@ -10,6 +10,7 @@ module Data.Function
     , flip
     , (.)
     , ($)
+    , until
     ) where
 
 id :: a -> a
@@ -26,3 +27,14 @@ flip f x y = f y x
 
 ($) :: (a -> b) -> a -> b
 ($) f x = f x
+
+-- | Apply a function until the predicate holds.
+--
+-- Haskell 2010 puts this in the Prelude; it belongs here with the other
+-- combinators because it needs nothing but function application.  The
+-- wildcard alternative (rather than `False`) keeps the case trivially
+-- exhaustive: `otherwise` lives in GHC.Base, above this module.
+until :: (a -> Bool) -> (a -> a) -> a -> a
+until p f x = case p x of
+    True -> x
+    _    -> until p f (f x)
