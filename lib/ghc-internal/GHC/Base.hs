@@ -297,8 +297,10 @@ gcdWorker a b
     | b == 0    = a
     | otherwise = gcdWorker b (mod a b)
 
--- | Lowest common multiple, always non-negative.  Zero if either
--- argument is zero.
+-- | Lowest common multiple, zero if either argument is zero.
+--
+-- Non-negative except at the 63-bit wrap boundary (#813) — same caveat as
+-- `gcd`, since `absInt` wraps for `minBound`.
 --
 -- The division by `gcd x y` happens before the multiplication, matching
 -- the Report's definition: the result can be representable even when

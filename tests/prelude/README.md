@@ -43,4 +43,4 @@ update this table.
 | `until` | p017_list_breadth |
 | `gcd`, `lcm` | p017_list_breadth |
 | partiality: `last`/`init`/`foldl1`/`foldr1`/`cycle` on `[]` | p018_last_empty, p019_init_empty, p020_foldl1_empty, p021_foldr1_empty, p022_cycle_empty |
-| `gcd 0 0`/`lcm 0 y` zero-argument boundaries (`gcd 0 0 = 0`) | p023_gcd_zero_zero |
+| `gcd`/`lcm` zero-valued-argument identities (`gcd 0 0 = 0`, `lcm 0 0 = 0`) | p023_gcd_zero_zero |

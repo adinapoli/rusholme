@@ -441,9 +441,10 @@ linesSplit (l, (_:cs)) = l : lines cs
 -- | Split a string into whitespace-separated words.
 --
 -- The separator set is exactly the ASCII whitespace GHC's `words` splits
--- on.  It is a local copy of `Data.Char.isSpace` on purpose: Data.List
--- importing Data.Char reorders the boot modules and breaks the REPL's
--- tag table (#973).
+-- on.  It is a local copy of `Data.Char.isSpace` on purpose: the REPL's
+-- fixed boot set does not load Data.Char and its per-module compilation
+-- does not resolve imports, so a `Data.List` importing Data.Char fails to
+-- load and is silently dropped, taking `(++)` with it (#973).
 words :: String -> [String]
 words s = wordsAfterSpace (dropWhile isSpaceChar s)
 
