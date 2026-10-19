@@ -14,6 +14,7 @@ module Prelude
     , not, (&&), (||), otherwise
     , div, mod
     , even, odd
+    , gcd, lcm
     , (==), (/=), (<), (>), (<=), (>=), compare
     , putChar, putStr, putStrLn
     , error
@@ -33,10 +34,19 @@ module Prelude
     , intToDigit
     , enumFrom, enumFromTo, enumFromThen, enumFromThenTo
     -- Data.Function
-    , id, const, flip, (.), ($)
+    , id, const, flip, (.), ($), until
     -- Data.List
     , map, filter, (++), head, tail, null, length
-    , foldr, foldl, concat, take, drop, reverse
+    , last, init
+    , foldr, foldl, concat, concatMap, take, drop, reverse
+    , foldl1, foldr1
+    , scanl, scanl1, scanr, scanr1
+    , and, or, any, all
+    , iterate, repeat, cycle
+    , takeWhile, dropWhile, span, break, splitAt
+    , elem, notElem, lookup
+    , zip, zip3, zipWith, zipWith3, unzip, unzip3
+    , lines, words, unlines, unwords
     , sum, product, replicate
     , maximum, minimum
     -- Data.Maybe

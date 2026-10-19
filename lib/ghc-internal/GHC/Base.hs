@@ -22,6 +22,7 @@ module GHC.Base
     -- Arithmetic
     , div, mod
     , even, odd
+    , gcd, lcm
     -- Double ↔ Int conversions (numeric tower, #880)
     , intToDouble, doubleToInt
     -- Classes
@@ -274,6 +275,42 @@ div = primQuotInt
 
 mod :: Int -> Int -> Int
 mod = primRemInt
+
+-- | Greatest common divisor.
+--
+-- `gcd 0 0` is 0, matching GHC's `base`, which is the reference used by
+-- the differential tests.  (The Report's Prelude listing instead makes
+-- that case an error; GHC does not implement that sentence, and matching
+-- the reference keeps the whole batch byte-comparable against `ghc -O2`.)
+-- The result is non-negative except where `abs` itself overflows at the
+-- 63-bit tagged-Int boundary (#813).
+gcd :: Int -> Int -> Int
+gcd x y = gcdWorker (absInt x) (absInt y)
+
+absInt :: Int -> Int
+absInt n
+    | n < 0     = 0 - n
+    | otherwise = n
+
+gcdWorker :: Int -> Int -> Int
+gcdWorker a b
+    | b == 0    = a
+    | otherwise = gcdWorker b (mod a b)
+
+-- | Lowest common multiple, always non-negative.  Zero if either
+-- argument is zero.
+--
+-- The division by `gcd x y` happens before the multiplication, matching
+-- the Report's definition: the result can be representable even when
+-- `x * y` overflows (`lcm (4000000000000000000 :: Int) 2`).  `div` is the
+-- quotient (truncate-toward-zero) primop, and `gcd x y` divides `x`
+-- exactly, so the division is exact.  That truncating `div`/`mod` is a
+-- separate H2010 divergence, tracked in #972; full GHC-compatible `Int`
+-- overflow semantics are tracked in #813.
+lcm :: Int -> Int -> Int
+lcm x y
+    | x == 0 || y == 0 = 0
+    | otherwise        = absInt (div x (gcd x y) * y)
 
 even :: Int -> Bool
 even n = mod n 2 == 0

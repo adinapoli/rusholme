@@ -78,3 +78,31 @@ test "prelude: p015_list_extras" {
 test "prelude: p016_eq_ord" {
     try testPrelude(std.testing.allocator, "p016_eq_ord");
 }
+
+test "prelude: p017_list_breadth" {
+    try testPrelude(std.testing.allocator, "p017_list_breadth");
+}
+
+test "prelude: p018_last_empty" {
+    try testPrelude(std.testing.allocator, "p018_last_empty");
+}
+
+test "prelude: p019_init_empty" {
+    try testPrelude(std.testing.allocator, "p019_init_empty");
+}
+
+test "prelude: p020_foldl1_empty" {
+    try testPrelude(std.testing.allocator, "p020_foldl1_empty");
+}
+
+test "prelude: p021_foldr1_empty" {
+    try testPrelude(std.testing.allocator, "p021_foldr1_empty");
+}
+
+test "prelude: p022_cycle_empty" {
+    try testPrelude(std.testing.allocator, "p022_cycle_empty");
+}
+
+test "prelude: p023_gcd_zero_zero" {
+    try testPrelude(std.testing.allocator, "p023_gcd_zero_zero");
+}
